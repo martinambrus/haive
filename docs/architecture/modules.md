@@ -835,10 +835,15 @@ output-contract replacement or host role policy. A capable step must also declar
 `editsCodeOrTests: true`; boot rejects it otherwise (`fix-consumer-edits-code-required`).
 A fan-out step (`agentMining`) is not capable: repair evidence is captured only on the LLM
 phase, so the worker refuses a pin naming one rather than let it repair without snapshots.
-Every gate still refuses a pin that selects a fix target until target CLI parity and the
-existing reset/epoch protocol exist for it. The rest of what a capable target needs is in
-place and dormant: the fix router resolves a pinned target (see Fix loop),
-`loadFixLoopDiagnosis()` supplies its diagnosis, and repair evidence follows the capability.
+Every gate still refuses a pin that selects a fix target until the existing reset/epoch
+protocol exists for it. The rest of what a capable target needs is in place and dormant: the
+fix router resolves a pinned target (see Fix loop), `loadFixLoopDiagnosis()` supplies its
+diagnosis, repair evidence follows the capability, and the next-round CLI choice, the gates'
+provider options and the api display follow the target's own step id. Readers of 07's output
+or prompt still key on 07: the changed-file supplement (`reportedFiles`), `loadTaskSimilarSites`
+and the learned-guidance target (`GUIDANCE_TARGET`, `guidanceTargetStep`). Capability version 1
+declares no output shape for them to read, so each must be answered before a gate admits such
+a pin.
 
 The module-owned declaration participates in source-guarded upsert, no-op
 comparison and content hashing. A declaration with a selected fix

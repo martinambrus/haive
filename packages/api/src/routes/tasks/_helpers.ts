@@ -1,4 +1,10 @@
-import { executionContractSchema, pinnedTaskStepIds } from '@haive/shared/modularity';
+import {
+  ExecutionContractError,
+  FIX_LOOP_TARGET_STEP_ID,
+  executionContractSchema,
+  fixLoopTargetStepId,
+  pinnedTaskStepIds,
+} from '@haive/shared/modularity';
 import { stat } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { and, asc, desc, eq, inArray, isNotNull, isNull, or, sql, type SQL } from 'drizzle-orm';
@@ -232,6 +238,30 @@ async function loadTaskCliChoices(
   return out;
 }
 
+async function loadFixTargetStepIds(
+  db: ReturnType<typeof getDb>,
+  taskIds: string[],
+): Promise<Map<string, string>> {
+  const out = new Map<string, string>();
+  if (taskIds.length === 0) return out;
+  const rows = await db
+    .select({ id: schema.tasks.id, executionContract: schema.tasks.executionContract })
+    .from(schema.tasks)
+    .where(inArray(schema.tasks.id, taskIds));
+  for (const r of rows) {
+    try {
+      out.set(r.id, fixLoopTargetStepId(r.executionContract));
+    } catch (err) {
+      if (!(err instanceof ExecutionContractError)) throw err;
+      out.set(r.id, FIX_LOOP_TARGET_STEP_ID);
+    }
+  }
+  return out;
+}
+
+const hasRoundSlot = (byRole: Map<string, TaskCliChoice> | undefined): boolean =>
+  [...(byRole?.keys() ?? [])].some((role) => role.startsWith('fix:'));
+
 // loadTaskCliChoices keeps each role map newest first. Only the implementation's
 // exact fix round competes with the ordinary default slot; other roles stay independent.
 function taskCliSlot(
@@ -239,9 +269,9 @@ function taskCliSlot(
   stepId: string,
   role: string,
   round = 0,
+  fixTarget = FIX_LOOP_TARGET_STEP_ID,
 ): TaskCliChoice | undefined {
-  if (stepId !== '07-phase-2-implement' || role !== 'default' || round < 1)
-    return choices?.get(role);
+  if (stepId !== fixTarget || role !== 'default' || round < 1) return choices?.get(role);
   const roundRole = `fix:${round}:default`;
   const match = [...(choices ?? [])].find(([slot]) => slot === role || slot === roundRole);
   return match ? { ...match[1], roundChoice: match[0] === roundRole } : undefined;
@@ -328,9 +358,14 @@ export async function enrichStepsWithCliPreferences<T extends { stepId: string; 
       ? ((await loadTaskCliChoices(db, [taskId])).get(taskId) ??
         new Map<string, Map<string, TaskCliChoice>>())
       : new Map<string, Map<string, TaskCliChoice>>();
+  const fixTarget =
+    taskId !== null && steps.some((s) => hasRoundSlot(choicesByStep.get(s.stepId)))
+      ? ((await loadFixTargetStepIds(db, [taskId])).get(taskId) ?? FIX_LOOP_TARGET_STEP_ID)
+      : FIX_LOOP_TARGET_STEP_ID;
   const hasRoundChoice = steps.some(
     (s) =>
-      taskCliSlot(choicesByStep.get(s.stepId), s.stepId, 'default', s.round ?? round)?.roundChoice,
+      taskCliSlot(choicesByStep.get(s.stepId), s.stepId, 'default', s.round ?? round, fixTarget)
+        ?.roundChoice,
   );
   const ownedProviders = hasRoundChoice
     ? await db
@@ -354,13 +389,13 @@ export async function enrichStepsWithCliPreferences<T extends { stepId: string; 
     const honor = (role: string, value: string | null): string | null =>
       !ignoreSaved || touchedRoles?.has(role) ? value : null;
     const provider = (role: string, saved: string | null): string | null => {
-      const choice = taskCliSlot(choices, s.stepId, role, s.round ?? round);
+      const choice = taskCliSlot(choices, s.stepId, role, s.round ?? round, fixTarget);
       return choice ? choice.cliProviderId : honor(role, saved);
     };
     // A cleared slot has no effort, including one whose chosen provider was deleted since:
     // SET NULL clears the provider and leaves the effort that went with it.
     const effort = (role: string, saved: string | null): string | null => {
-      const choice = taskCliSlot(choices, s.stepId, role, s.round ?? round);
+      const choice = taskCliSlot(choices, s.stepId, role, s.round ?? round, fixTarget);
       if (choice) return choice.cliProviderId ? choice.effortLevel : null;
       return honor(role, saved);
     };
@@ -369,7 +404,7 @@ export async function enrichStepsWithCliPreferences<T extends { stepId: string; 
       preferredCliProviderId: provider('default', byStep.get(s.stepId) ?? null),
       preferredEffortLevel: effort('default', byStepEffort.get(s.stepId) ?? null),
       ...(unavailableRoundChoice(
-        taskCliSlot(choices, s.stepId, 'default', s.round ?? round),
+        taskCliSlot(choices, s.stepId, 'default', s.round ?? round, fixTarget),
         ownedProviders,
       )
         ? { roundCliUnavailable: true as const }
@@ -460,13 +495,26 @@ export async function resolveCurrentStepCliProviderIds(
     tasks.map((t) => t.id),
   );
 
+  const fixTargets = await loadFixTargetStepIds(
+    db,
+    tasks
+      .filter((t) => t.currentStepId && hasRoundSlot(choices.get(t.id)?.get(t.currentStepId)))
+      .map((t) => t.id),
+  );
+
   for (const task of tasks) {
     const stepId = task.currentStepId;
     const touchedRoles = stepId ? touched.get(task.id)?.get(stepId) : undefined;
     const stepChoices = stepId ? choices.get(task.id)?.get(stepId) : undefined;
     if (
       unavailableRoundChoice(
-        taskCliSlot(stepChoices, stepId ?? '', 'default', task.currentRound),
+        taskCliSlot(
+          stepChoices,
+          stepId ?? '',
+          'default',
+          task.currentRound,
+          fixTargets.get(task.id) ?? FIX_LOOP_TARGET_STEP_ID,
+        ),
         providerRows,
       )
     ) {
@@ -476,7 +524,13 @@ export async function resolveCurrentStepCliProviderIds(
     const honor = (role: string, value: string | null): string | null =>
       !task.ignoreSavedStepClis || touchedRoles?.has(role) ? value : null;
     const slot = (role: string, saved: string | null): string | null => {
-      const choice = taskCliSlot(stepChoices, stepId ?? '', role, task.currentRound);
+      const choice = taskCliSlot(
+        stepChoices,
+        stepId ?? '',
+        role,
+        task.currentRound,
+        fixTargets.get(task.id) ?? FIX_LOOP_TARGET_STEP_ID,
+      );
       return choice ? choice.cliProviderId : honor(role, saved);
     };
     const usable = (id: string | null): string | null => (id && listed.has(id) ? id : null);

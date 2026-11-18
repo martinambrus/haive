@@ -55,6 +55,7 @@ function database(
         },
       },
       cliProviders: { findFirst: async () => fresh },
+      tasks: { findFirst: async () => ({ executionContract: null }) },
       userStepCliPreferences: {
         findFirst: async () => ({ cliProviderId: original.id, effortLevel: 'low' }),
       },
