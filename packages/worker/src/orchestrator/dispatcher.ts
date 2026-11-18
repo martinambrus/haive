@@ -1,4 +1,5 @@
 import { lspProviderIdentity } from '../lsp/composed-evidence.js';
+import { COMPOSED_LSP_VERIFIED_PROVIDER_NAMES } from '@haive/shared/composed-lsp-provider-lock';
 import { resolveTaskFacets } from '@haive/shared/global-kb';
 import { withTaskScratchWorkspace } from '../repo/scratch-workspace.js';
 import {
@@ -708,6 +709,20 @@ export function* dispatchCandidates(
   }
 }
 
+/** The providers a contract 2 task may launch: those holding an effective composed image, or,
+ *  before the first build makes any image effective, the lock's verified providers, so the
+ *  environment steps that build that image (and their AI repair) can still run. */
+function composedLspAllowedSet(
+  providers: readonly CliProviderRecord[],
+  composedIds: readonly string[] | null | undefined,
+): Set<string> | null {
+  if (!composedIds) return null;
+  if (composedIds.length > 0) return new Set(composedIds);
+  return new Set(
+    providers.filter((p) => COMPOSED_LSP_VERIFIED_PROVIDER_NAMES.includes(p.name)).map((p) => p.id),
+  );
+}
+
 export function resolveDispatch(req: DispatchRequest): DispatchPlan {
   const off = disabledProvider(req.providers, req.preferredProviderId ?? null);
   if (off) {
@@ -715,7 +730,7 @@ export function resolveDispatch(req: DispatchRequest): DispatchPlan {
       `the selected cli provider "${providerLabel(off)}" is disabled; enable it again or choose another CLI for this step`,
     );
   }
-  const composedSet = req.composedLspProviderIds ? new Set(req.composedLspProviderIds) : null;
+  const composedSet = composedLspAllowedSet(req.providers, req.composedLspProviderIds);
   const preferredId = req.preferredProviderId ?? null;
   if (composedSet && preferredId && !composedSet.has(preferredId)) {
     const chosen = req.providers.find((p) => p.id === preferredId);

@@ -1024,13 +1024,14 @@ the decision with a closed reason: `run_list`, `providers`, or none when adopted
 Provider lock. A task whose template is contract 2 can launch only a provider that holds a
 retained effective composed image. A switch is refused with 409 `composed_lsp_provider_locked` on
 the step-CLI choice route and the summary CLI route, and a fix-round choice is refused with
-`FixRoundCliLocked`, whose message the escalation gate shows (its option list still offers every
-eligible provider). `@haive/shared/composed-lsp-provider-lock` allows exactly one enabled
+`FixRoundCliLocked`, whose message the escalation gate shows; the gate offers only providers the
+lock accepts. `@haive/shared/composed-lsp-provider-lock` allows exactly one enabled
 `claude-code` provider. The dispatcher refuses the rest of the way: `composedLspProviderIds` holds
-the providers with an effective reference, a preferred provider outside it, or an empty set,
-returns a skip plan with a named reason, and with no preference the choice floats only inside the
-set, so no capability gap falls through to another CLI. A prior or verifying reference does not
-count. Work is refused, never moved to another CLI, and LSP is never dropped silently.
+the providers with an effective reference, a preferred provider outside it returns a skip plan
+with a named reason, and with no preference the choice floats only inside the set, so no capability
+gap falls through to another CLI. A prior or verifying reference does not count. Before the first
+build makes any reference effective, the set is the lock's verified providers, so the environment
+steps that build the image, and their AI repair, can run; LSP readiness stays false until then. Work is refused, never moved to another CLI, and LSP is never dropped silently.
 
 Rollback. Set `COMPOSED_LSP_NEW_ENVIRONMENT_ADOPTION` to false: new environments stop adopting,
 while templates already at 2 keep being carried, generated and read, so running tasks are

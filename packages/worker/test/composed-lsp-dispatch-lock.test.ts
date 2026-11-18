@@ -117,10 +117,35 @@ describe('resolveDispatch with a composed LSP provider set', () => {
     expect(locked.providerId).toBeNull();
   });
 
-  it.each([A.id, null])('an empty set skips (preferred %s)', (preferred) => {
+  it.each([A.id, null])(
+    'before any image is effective, launches only the verified provider (preferred %s)',
+    (preferred) => {
+      const plan = resolveDispatch({
+        ...base,
+        providers: [A, B, C],
+        preferredProviderId: preferred,
+        composedLspProviderIds: [],
+      });
+      expect(plan.mode).toBe('cli');
+      expect(plan.providerId).toBe(A.id);
+    },
+  );
+
+  it('before any image is effective, refuses an unverified preferred provider', () => {
     const plan = resolveDispatch({
       ...base,
-      preferredProviderId: preferred,
+      preferredProviderId: B.id,
+      composedLspProviderIds: [],
+    });
+    expect(plan.mode).toBe('skip');
+    expect(plan.providerId).toBeNull();
+  });
+
+  it('before any image is effective, skips when no verified provider exists', () => {
+    const plan = resolveDispatch({
+      ...base,
+      providers: [B, C],
+      preferredProviderId: null,
       composedLspProviderIds: [],
     });
     expect(plan.mode).toBe('skip');
@@ -201,10 +226,15 @@ describe('resolveTaskDispatch on a contract 2 task', () => {
     expect(plan.providerId).toBe(A.id);
   });
 
-  it('refuses every provider when no refs are retained', async () => {
+  it('before the first image, launches only the verified provider', async () => {
     vi.spyOn(configService, 'getBoolean').mockResolvedValue(false);
     const { db } = fakeDb(2, {});
-    for (const id of [A.id, B.id, null]) expect((await dispatch(db, id)).mode).toBe('skip');
+    expect((await dispatch(db, B.id)).mode).toBe('skip');
+    for (const id of [A.id, null]) {
+      const plan = await dispatch(db, id);
+      expect(plan.mode).toBe('cli');
+      expect(plan.providerId).toBe(A.id);
+    }
   });
 
   it('adds no template read to the per-provider composed readiness reads', async () => {
