@@ -3,8 +3,10 @@ import { schema, type Database } from '@haive/database';
 import { createFakeDb } from '@haive/database/testing';
 import { phase2ImplementStep } from '../src/step-engine/steps/workflow/07-phase-2-implement.js';
 import {
+  FixRoundCliLocked,
   FixRoundCliUnavailable,
   fixRoundCliRole,
+  fixRoundRefusalBody,
   recordFixRoundCliChoice,
 } from '../src/step-engine/steps/workflow/_fix-round-cli.js';
 
@@ -66,6 +68,23 @@ describe('next fix round CLI on a composed-LSP task', () => {
     const fake = setup(2);
     await expect(record(fake, CODEX)).rejects.toBeInstanceOf(FixRoundCliUnavailable);
     expect(fake.rows(schema.taskStepCliChoices)).toEqual([]);
+  });
+
+  it('names the lock, not a missing provider, in the refusal the gate shows', async () => {
+    const fake = setup(2);
+    const refusal = await record(fake, CODEX).catch((err: unknown) => err);
+    expect(refusal).toBeInstanceOf(FixRoundCliLocked);
+    expect(refusal).toBeInstanceOf(FixRoundCliUnavailable);
+    expect(fixRoundRefusalBody(refusal as FixRoundCliUnavailable)).toBe(
+      (refusal as FixRoundCliUnavailable).message,
+    );
+    expect(fixRoundRefusalBody(refusal as FixRoundCliUnavailable)).toMatch(/composed image/);
+  });
+
+  it('keeps the generic copy for any other refusal (legacy parity pin)', () => {
+    expect(fixRoundRefusalBody(new FixRoundCliUnavailable('The CLI went away.'))).toBe(
+      'The selected CLI is no longer available for the next fix round. Choose another CLI or keep the same CLI, then submit again.',
+    );
   });
 
   it('records the verified provider under contract 2', async () => {

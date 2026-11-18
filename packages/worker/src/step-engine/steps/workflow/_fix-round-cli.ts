@@ -24,6 +24,17 @@ export {
 
 export class FixRoundCliUnavailable extends Error {}
 
+/** A fix-round pick refused because the task is composed-LSP locked; its message is the lock's reason. */
+export class FixRoundCliLocked extends FixRoundCliUnavailable {}
+
+const FIX_ROUND_UNAVAILABLE_BODY =
+  'The selected CLI is no longer available for the next fix round. Choose another CLI or keep the same CLI, then submit again.';
+
+/** The gate re-park text for a refused pick: the lock's own reason, else the generic sentence. */
+export function fixRoundRefusalBody(err: FixRoundCliUnavailable): string {
+  return err instanceof FixRoundCliLocked ? err.message : FIX_ROUND_UNAVAILABLE_BODY;
+}
+
 /** Use the real dispatcher's capability and command-build checks, with one candidate so
  * an incompatible explicit pick cannot accidentally pass by falling back to another CLI.
  * requiresCli is deliberately irrelevant: 07 has an optional CLI phase and sets it false. */
@@ -131,7 +142,7 @@ export async function recordFixRoundCliChoice(
       `Next fix round CLI "${provider.label}" cannot run ${target.metadata.id}; choose another CLI.`,
     );
   const lock = await checkTaskComposedLspProvider(db, { userId, taskId, providerId: provider.id });
-  if (lock && !lock.ok) throw new FixRoundCliUnavailable(lock.message);
+  if (lock && !lock.ok) throw new FixRoundCliLocked(lock.message);
   await db
     .insert(schema.taskStepCliChoices)
     .values({

@@ -205,6 +205,7 @@ import {
   FIX_ROUND_CLI_FIELD,
   FixRoundCliUnavailable,
   fixRoundCliField,
+  fixRoundRefusalBody,
   recordFixRoundCliChoice,
 } from '../step-engine/steps/workflow/_fix-round-cli.js';
 import { getCliExecQueue } from './cli-exec-queue.js';
@@ -3034,7 +3035,7 @@ export async function resolveFixLoopGate(
               infoSections: [
                 {
                   title,
-                  body: 'The selected CLI is no longer available for the next fix round. Choose another CLI or keep the same CLI, then submit again.',
+                  body: fixRoundRefusalBody(err),
                   defaultOpen: true,
                 },
                 ...(form.infoSections ?? []).filter((s) => s.title !== title),
