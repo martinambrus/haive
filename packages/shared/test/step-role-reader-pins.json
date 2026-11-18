@@ -2352,14 +2352,6 @@
     "reason": "Creator provider guidance derives eligible role ids from the host registry; grants no host control policy."
   },
   {
-    "file": "packages/api/src/routes/tasks/_helpers.ts",
-    "symbol": "taskCliSlot",
-    "context": "ExclamationEqualsEqualsToken",
-    "value": "07-phase-2-implement",
-    "count": 1,
-    "reason": "Physical admission, retry or projection identity; summary roles do not redirect control."
-  },
-  {
     "file": "packages/shared/src/step-engine/core-data-ports.ts",
     "symbol": "SPEC_INPUTS",
     "context": "[ '06-run-config', '06b-sprint-planning', '07-phase-2-implement', '07a-code-simplify', '07b-phase-4-validate', '08a-browser-verify', '08b-test-management', STEP_ROLES.codeReview, STEP_ROLES.codeAudit, '08d-adversarial-qa', '08e-insights-triage', '11f-plan-reconcile', ].map",
@@ -4710,6 +4702,22 @@
     "value": "@role-alias:FIX_LOOP_TARGET_STEP_ID",
     "count": 1,
     "reason": "Shared physical fix-loop routing identity used by both guarded composition and the worker; never a data-role producer selection."
+  },
+  {
+    "file": "packages/shared/src/modularity/execution-contract.ts",
+    "symbol": "fixLoopTargetStepId",
+    "context": "QuestionQuestionToken",
+    "value": "@role-alias:FIX_LOOP_TARGET_STEP_ID",
+    "count": 1,
+    "reason": "Physical fix-loop routing identity: the step that repairs a round, 07 unless the task's execution contract pins a capable module step; never a data-role producer selection."
+  },
+  {
+    "file": "packages/shared/src/modularity/execution-contract.ts",
+    "symbol": "fixLoopTargetStepId",
+    "context": "ReturnStatement",
+    "value": "@role-alias:FIX_LOOP_TARGET_STEP_ID",
+    "count": 1,
+    "reason": "Physical fix-loop routing identity: the step that repairs a round, 07 unless the task's execution contract pins a capable module step; never a data-role producer selection."
   },
   {
     "file": "packages/shared/src/modularity/execution-contract.ts",
