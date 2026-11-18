@@ -5,7 +5,7 @@ import { decideComposedLspProviderLock } from '@haive/shared/composed-lsp-provid
 import { taskRunListStepIds } from './final-verification.js';
 
 /** Rollback switch: false stops NEW environments adopting contract 2 only; a stored 2 keeps being carried and read. */
-export const COMPOSED_LSP_NEW_ENVIRONMENT_ADOPTION = false;
+export const COMPOSED_LSP_NEW_ENVIRONMENT_ADOPTION = true;
 
 /** The language-server keys the composed installation can serve. */
 export const COMPOSED_LSP_ADOPTABLE_KEYS: readonly string[] = [

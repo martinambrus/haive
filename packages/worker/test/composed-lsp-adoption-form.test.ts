@@ -15,8 +15,7 @@ import {
 } from '../src/step-engine/steps/env-replicate/01-declare-deps.js';
 import type { StepContext } from '../src/step-engine/step-definition.js';
 
-// Adoption is switched off in the product until a composed build gets the repository build
-// context; these controls pin the writer as it behaves when the switch is on.
+// These controls pin the writer with the switch on, independent of its shipped value.
 vi.mock('../src/lsp/composed-adoption.js', async (original) => ({
   ...(await original<object>()),
   COMPOSED_LSP_NEW_ENVIRONMENT_ADOPTION: true,
