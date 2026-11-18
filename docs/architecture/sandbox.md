@@ -1031,7 +1031,7 @@ the providers with an effective reference, a preferred provider outside it retur
 with a named reason, and with no preference the choice floats only inside the set, so no capability
 gap falls through to another CLI. A prior or verifying reference does not count. Before the first
 build makes any reference effective, the set is the lock's verified providers, so the environment
-steps that build the image, and their AI repair, can run; LSP readiness stays false until then. Work is refused, never moved to another CLI, and LSP is never dropped silently.
+steps that build the image, and their AI repair, can run; LSP readiness stays false until then. A launch follows the same rule: until some provider holds an effective reference the task's CLI launch uses the provider sandbox image, as a legacy task does before its environment is built; once one exists, a changed input, a vanished image, an unverified provider or a changed provider is refused. Work is refused, never moved to another CLI, and LSP is never dropped silently.
 
 Rollback. Set `COMPOSED_LSP_NEW_ENVIRONMENT_ADOPTION` to false: new environments stop adopting,
 while templates already at 2 keep being carried, generated and read, so running tasks are
