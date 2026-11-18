@@ -31,6 +31,7 @@ const PICKED_CLI = '00000000-0000-4000-8000-0000000000b3';
 
 function setup() {
   const fake = createFakeDb({
+    tasks: schema.tasks,
     cliProviders: schema.cliProviders,
     taskStepCliChoices: schema.taskStepCliChoices,
     taskStepCliTouched: schema.taskStepCliTouched,

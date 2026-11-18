@@ -259,6 +259,58 @@ describe('provider disable impact', () => {
     });
   });
 
+  describe('a round override on a custom fix target', () => {
+    const custom = 'module.fix-demo.repair';
+    const legacy = '07-phase-2-implement';
+    const pinned = {
+      version: 1,
+      guardedSpans: [],
+      fixTarget: { stepId: custom, capabilityVersion: 1 },
+    };
+    const seed = (contract: unknown, rowStep: string, other: string) => {
+      for (const stepId of [custom, legacy])
+        fake.insert(schema.stepCatalog, {
+          stepId,
+          title: stepId,
+          workflowType: 'test',
+          stepIndex: 0,
+          dispatchesStepCli: true,
+          providerSensitive: false,
+          composable: false,
+        });
+      fake.insert(schema.cliProviders, { id: other, userId: h.userId, enabled: true });
+      const id = task({
+        currentStepId: custom,
+        currentRound: 2,
+        cliProviderId: other,
+        runListSnapshot: [custom, legacy],
+        executionContract: contract,
+      });
+      fake.insert(schema.taskStepCliChoices, {
+        taskId: id,
+        stepId: rowStep,
+        role: 'fix:2:default',
+        cliProviderId: providerId,
+        updatedAt: new Date(1),
+      });
+    };
+
+    it('counts the override on the pinned target', async () => {
+      seed(pinned, custom, randomUUID());
+      expect(await (await read()).json()).toEqual({ taskCount: 1, stepCount: 1 });
+    });
+
+    it('does not count an override on a module step of a task without a pin', async () => {
+      seed(null, custom, randomUUID());
+      expect(await (await read()).json()).toEqual({ taskCount: 0, stepCount: 0 });
+    });
+
+    it('does not count an override that sits on the legacy step of a pinned task', async () => {
+      seed(pinned, legacy, randomUUID());
+      expect(await (await read()).json()).toEqual({ taskCount: 0, stepCount: 0 });
+    });
+  });
+
   it('counts a pending run_app task whose CLI steps belong to other workflows', async () => {
     fake.insert(schema.stepCatalog, {
       stepId: '01-declare-deps',
