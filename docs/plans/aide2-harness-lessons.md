@@ -316,9 +316,12 @@ constant), keeps the parity neighborhood and child fields, and states the cross-
 trade-off. Omission defaults to parity; its prompt snapshot was captured on the parent revision.
 Zero-token synthetic checks pass, including 250 children, a 200-deep chain and exclusion of a group with
 more than 500 children. The three original #397 snapshots (7,983, 4,106 and 1,044 nodes) have not been
-recovered in this environment, so their arm comparison is still outstanding. No live wave has
-run, no model tokens have been used, and D1 remains open. The live waves must use separate
-repository/plan copies.
+recovered in this environment, so their arm comparison is still outstanding. One live wave per arm
+ran on 2026-11-17 on separate copies of a 279-node plan (12 agents each, Claude Code Haiku Low):
+role-sized cut the median cache write from 24,409 to 14,215 tokens, but returned no order on 3 of
+the 12 parents (the root among them) where parity ordered all 12, and the step reported 5
+disagreements against parity's 3. The whole wave cost USD 0.08 for parity and 0.06 for role-sized.
+D1 is decided on these numbers (see Decided).
 
 ### P2. Tell the fixer what the same check said last round (prompt only)
 
@@ -514,7 +517,6 @@ field comparison by P0's stamp is enough. Rollback: tooling only.
 
 ## Open decisions
 
-- **D1.** P1: keep parity (96k) or adopt the role-sized arm, decided by P1's measurement.
 - **D3.** P3's automatic half, once a stable defect identity exists (08b's failing test ids are one
   candidate, unmeasured): whether to add an opt-in that switches the CLI on a repeat of the SAME
   defect.
@@ -524,6 +526,9 @@ field comparison by P0's stamp is enough. Rollback: tooling only.
 
 ## Decided
 
+- **D1 (the owner, 2026-11-18).** P1 keeps the parity arm. The role-sized arm saves little in
+  money, leaves parents unordered and disagrees more often; the person's spot check of the parents
+  where the arms differ was not needed for that call.
 - **D2 (the owner, 2026-11-14).** One plan-chat conversation per node across tasks, as today.
   The cap keeps the answered turn plus the newest earlier turns that fit and states how many
   were dropped.
