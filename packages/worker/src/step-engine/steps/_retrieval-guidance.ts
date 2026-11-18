@@ -4,6 +4,16 @@ import {
   TEMPLATE_PERSONA_MARKER_PATTERN,
 } from '@haive/shared/modularity';
 
+/** The cold-start tail of the LSP-bearing grounding step, shared by both LSP arms so they cannot
+ *  drift. MEASURED: a language server starts on first use and indexes the repository before it can
+ *  answer, so three parallel first calls all returned "server is starting" or nothing within 0.64 s,
+ *  and one had its cursor on leading whitespace. Haive cannot wait on that server, since each CLI
+ *  session spawns its own, so the guidance is the fix. Names no CLI and no tool. */
+const LSP_COLD_START_GUIDANCE = [
+  '   LSP starts on first use and indexes the repo first: send LSP calls one at a time, cursor on the symbol itself.',
+  '   An empty first answer or "server is starting" does not mean "no definition": wait a few seconds and retry.',
+] as const;
+
 /** Shared retrieval guidance spliced into the workflow prompt builders (discovery,
  *  spec-quality, spec-audit, resolve-warnings, dag-execute, implement, ...).
  *
@@ -57,6 +67,7 @@ const RETRIEVAL_GUIDANCE_WITH_LSP = [
   '   disk: LSP (when available) for go-to-definition / find-references / hover types, and grep /',
   '   ripgrep for exact usage sweeps. A rag_search snippet is a lead, never the source of truth.',
   '   Text search means a Grep tool where the run has one, else `grep` / `rg` through the shell.',
+  ...LSP_COLD_START_GUIDANCE,
   '3. On a rag_search miss, go straight to LSP + grep (and read the relevant',
   `   \`${KB_DIR}/\` files directly if rag is unavailable). A miss is an index gap,`,
   '   not a reason to stop searching.',
@@ -96,6 +107,7 @@ function retrievalGuidanceWithoutRag(supportsLsp: boolean): string[] {
       ? '   names, use LSP for go-to-definition / find-references / hover types, and widen from the hits.'
       : '   names and widen from the hits.',
     '   Text search means a Grep tool where the run has one, else `grep` / `rg` through the shell.',
+    ...(supportsLsp ? LSP_COLD_START_GUIDANCE : []),
     '2. GROUND every lead against the CURRENT code on disk — open the files the search returned;',
     '   never work from a name alone.',
     `3. Read \`${KB_DIR}/\` directly for the project's documented conventions. It is a set of files`,
