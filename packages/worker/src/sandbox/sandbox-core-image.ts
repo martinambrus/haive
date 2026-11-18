@@ -1,10 +1,10 @@
 import { createHash } from 'node:crypto';
 import { readdirSync, readFileSync } from 'node:fs';
-import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 import { logger } from '@haive/shared';
 import { defaultDockerRunner, type DockerRunner } from './docker-runner.js';
 import { SANDBOX_CORE_IMAGE } from './image-composer.js';
+import { sandboxImageContextDir } from './sandbox-image-context.js';
 
 const log = logger.child({ module: 'sandbox-core-image' });
 
@@ -18,13 +18,6 @@ const BUILD_TIMEOUT_MS = 20 * 60 * 1000;
  *  from a stored message and pick a retry strategy. Nothing branches on this one: it is a
  *  precondition failure with a single manual remedy, so it needs words, not a class. */
 export const SANDBOX_CORE_IMAGE_HEADLINE = 'Sandbox base image could not be built';
-
-/** Build context for SANDBOX_CORE_IMAGE, resolved the way ddev-runner resolves its own. */
-function contextDir(): string {
-  if (process.env.SANDBOX_CORE_CONTEXT) return process.env.SANDBOX_CORE_CONTEXT;
-  const here = path.dirname(fileURLToPath(import.meta.url));
-  return path.resolve(here, '..', '..', 'sandbox-image');
-}
 
 /** Only forwarded when the operator actually pinned them, so an unset environment builds
  *  exactly what the Dockerfile's own ARG defaults produce — which is byte-for-byte what
@@ -48,10 +41,10 @@ export const CORE_IDENTITY_LABEL = 'haive.core-identity';
  *  and the build args an operator pinned. A build stamps it on the image (CORE_IDENTITY_LABEL)
  *  and every per-CLI Dockerfile carries it (image-cache.ts), so a changed definition, a release
  *  moving a pin or an edited Dockerfile, rebuilds the base and moves the per-CLI tags built on
- *  it. Read on every call: the context is two small files, and a cached value would keep a
+ *  it. Read on every call: the context is a few small files, and a cached value would keep a
  *  Dockerfile edit from taking effect until the worker restarted. */
 export function sandboxCoreIdentity(): string {
-  const dir = contextDir();
+  const dir = sandboxImageContextDir();
   const files = readdirSync(dir, { recursive: true, withFileTypes: true })
     .filter((entry) => entry.isFile())
     .map((entry) => path.relative(dir, path.join(entry.parentPath, entry.name)))
@@ -80,7 +73,7 @@ async function ensureUnlocked(runner: DockerRunner): Promise<void> {
   const built = current.labels?.[CORE_IDENTITY_LABEL];
   if (current.exists && built === identity) return;
 
-  const dir = contextDir();
+  const dir = sandboxImageContextDir();
   log.info(
     { image: SANDBOX_CORE_IMAGE, dir, identity, built: built ?? null },
     current.exists

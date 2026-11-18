@@ -28,6 +28,7 @@ on:
       - 'packages/worker/sandbox-image/**'
       - 'packages/worker/src/cli-versions/codegen.ts'
       - 'packages/worker/src/sandbox/image-composer.ts'
+      - 'packages/worker/src/sandbox/git-mcp-pin.ts'
       - 'packages/worker/scripts/check-cli-arch.ts'
       - 'install/**'
       - 'scripts/test/install-channel.test.mjs'

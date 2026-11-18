@@ -491,7 +491,6 @@ export function mcpSurfacePrompt(
   const userNames = surface
     ? reachableUserServerNames(
         surface,
-        // `registriesReachable` deliberately left unset — see emittedDefaultServerNames.
         emittedDefaultServerNames({
           hasRepo: opts.noRepo !== true,
           hasWorktree: opts.hasWorktree === true,

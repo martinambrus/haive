@@ -46,7 +46,6 @@ describe('toolProfile: none', () => {
       'none',
       false,
       true,
-      null,
     );
     expect(res).toEqual({ files: [], extraArgs: [] });
   });
@@ -78,7 +77,6 @@ describe('toolProfile: none clears a volume-backed surface', () => {
       'none',
       false,
       true,
-      null,
     );
 
   beforeEach(() => vi.clearAllMocks());

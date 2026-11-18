@@ -24,6 +24,7 @@ vi.mock('../src/sandbox/docker-runner.js', async (importOriginal) => {
     defaultDockerRunner: {
       ...actual.defaultDockerRunner,
       volumeExists: async () => true,
+      inspect: async () => ({ exists: false, imageId: null }),
       run: async (opts: DockerRunOpts) => {
         helper.runs += 1;
         return (
@@ -95,7 +96,6 @@ const resolve = (provider: 'codex' | 'gemini', forRun?: typeof run) =>
     'full',
     false,
     true,
-    null,
     forRun,
   );
 

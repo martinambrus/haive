@@ -19,6 +19,7 @@ import {
   type SandboxImageComposition,
 } from './image-composer.js';
 import { defaultDockerRunner, type DockerRunner } from './docker-runner.js';
+import { writeGitMcpContext } from './git-mcp-pin.js';
 import { ensureSandboxCoreImage } from './sandbox-core-image.js';
 import { withImageTagLock } from './image-tag-lock.js';
 import { resolveComposedLspInstallContract } from './lsp-install-contract.js';
@@ -300,6 +301,7 @@ async function buildComposedImage(
   try {
     await mkdir(buildDir, { recursive: true });
     await writeFile(dockerfilePath, composition.dockerfileBody, 'utf8');
+    writeGitMcpContext(buildDir);
     const result = await runner.build({
       contextDir: buildDir,
       dockerfilePath,

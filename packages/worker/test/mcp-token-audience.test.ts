@@ -59,7 +59,6 @@ describe('the task tokens the worker mints for the MCP surface', () => {
               profile,
               false,
               true,
-              null,
               { invocationId, taskStepId: 'step-1', timeoutMs: 60_000 },
             ),
           ),
@@ -99,7 +98,6 @@ describe('the task tokens the worker mints for the MCP surface', () => {
         'rag_only',
         false,
         true,
-        null,
         { invocationId: 'sequential-run', taskStepId: 'step-1', timeoutMs },
       );
       const token = files.find((f) => f.containerPath === '/haive/haive-rag.token')!.content;
@@ -144,7 +142,6 @@ describe('the task tokens the worker mints for the MCP surface', () => {
       'full',
       false,
       true,
-      null,
     );
     const config = files.find((f) => f.containerPath === '/haive/mcp.json');
     const servers = (

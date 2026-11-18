@@ -6,6 +6,7 @@ import {
   type CliProviderName,
 } from '@haive/shared';
 import { buildProviderInstallLines } from '../cli-versions/codegen.js';
+import { buildGitMcpLayer } from './git-mcp-pin.js';
 import { buildLspLayer } from './lsp-layer.js';
 import { resolveComposedLspInstallContract } from './lsp-install-contract.js';
 
@@ -99,14 +100,18 @@ export function composeSandboxImage(input: ComposeInput): SandboxImageCompositio
   const parts: string[] = [base];
   // Haive-required runtime tools that the user CLI session relies on,
   // independent of the env-template's project deps. Currently: `uv`/`uvx`
-  // for spawning the `mcp-server-git` MCP server claude-code wires up at
-  // startup. The env-template ships `apt-get` (debian/ubuntu) most of the
-  // time but doesn't know about haive-side MCP requirements; the
-  // sandbox-core base (haive-cli-sandbox) installs `uv` from apk but only
-  // applies when there is no env-template. Inject the install here so
-  // composed images built on top of env-templates get it too.
+  // for agents and repositories that use them. The env-template ships
+  // `apt-get` (debian/ubuntu) most of the time but doesn't know about
+  // haive-side requirements; the sandbox-core base (haive-cli-sandbox)
+  // installs `uv` from apk but only applies when there is no env-template.
+  // Inject the install here so composed images built on top of
+  // env-templates get it too.
   const rtkVersion = input.rtkVersion || DEFAULT_RTK_VERSION;
   parts.push(buildHaiveRuntimeToolsLayer(rtkVersion));
+  // The git MCP server is baked rather than fetched per run. It goes right after the runtime
+  // layer because its installer needs that layer's curl, runs as root before any later USER
+  // switch, and the layer's context digest moves the tag whenever the lock is bumped.
+  parts.push(buildGitMcpLayer());
   // Selected servers supply Node/npm before a provider's npm installer needs them.
   // Even an empty selection has a distinct install owner. Recipe/selection bytes
   // below supply the rest of this identity without changing any legacy body.
@@ -148,8 +153,7 @@ function resolveBase(envTemplateDockerfile: string | null): string {
 
 /** Idempotent install layer for the haive-side runtime tools the CLI session
  *  needs but that the env-template won't necessarily ship. Currently:
- *   - `uv`/`uvx`: spawning the `mcp-server-git` MCP server claude-code wires
- *     up at startup.
+ *   - `uv`/`uvx`: for agents and repositories that use them.
  *   - `ripgrep`/`rg`: gemini's GrepTool falls back to a slower built-in
  *     scanner when `rg` is absent and emits a "Ripgrep is not available.
  *     Falling back to GrepTool" line on every search.

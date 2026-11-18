@@ -715,17 +715,6 @@ describe('emittedDefaultServerNames', () => {
   it('wires nothing without a repository', () => {
     expect(emittedDefaultServerNames({ ...base, hasRepo: false }).size).toBe(0);
   });
-
-  it('drops git when the registries are unreachable, since uvx must download an interpreter', () => {
-    expect([...emittedDefaultServerNames({ ...base, registriesReachable: false })]).toEqual([
-      'filesystem',
-    ]);
-  });
-
-  it('keeps git when the caller cannot know the egress, which under-reports rather than over-reports', () => {
-    // The prompt is built at dispatch, before the invocation's egress is resolved.
-    expect([...emittedDefaultServerNames(base)].sort()).toEqual(['filesystem', 'git']);
-  });
 });
 
 describe('HAIVE_MCP_SERVER_NAMES', () => {

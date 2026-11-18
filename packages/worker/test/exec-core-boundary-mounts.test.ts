@@ -61,7 +61,6 @@ vi.mock('../src/queues/cli-exec/resolvers.js', () => ({
   resolveAuthMounts: async () => [],
   resolveMcpExtraFiles: stubs.mcp,
   resolveEffectiveEgressDomains: () => [],
-  networkPolicyReachesPackageRegistries: () => false,
   createStepStatusUpdater: () => undefined,
   tryJsonParse: (raw: string) => {
     try {
@@ -368,7 +367,7 @@ describe('committed snapshot execution admission', () => {
       );
       expect(stubs.ensureRepoMountWritable).not.toHaveBeenCalled();
       expect(stubs.mcp.mock.calls[0]?.[5]).toBe('rag_only');
-      expect(stubs.mcp.mock.calls[0]?.[10]).toBe('snapshot');
+      expect(stubs.mcp.mock.calls[0]?.[9]).toBe('snapshot');
       expect(stubs.runInSandbox).toHaveBeenCalled();
       for (const [, options] of stubs.runInSandbox.mock.calls) {
         expect(options.extraMounts).toContainEqual(repoMount);

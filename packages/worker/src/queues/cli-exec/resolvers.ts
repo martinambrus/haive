@@ -27,7 +27,12 @@ import {
   type TaskJobPayload,
   volumeName,
 } from '@haive/shared';
-import type { DockerVolumeMount } from '../../sandbox/docker-runner.js';
+import {
+  defaultDockerRunner,
+  type DockerRunner,
+  type DockerVolumeMount,
+} from '../../sandbox/docker-runner.js';
+import { imageCarriesGitMcp } from '../../sandbox/git-mcp-pin.js';
 import {
   SANDBOX_WORKDIR,
   SANDBOX_USER_HOME,
@@ -247,22 +252,6 @@ async function clearVolumeBackedMcp(
   }
 }
 
-/** Whether this invocation can reach the package registries its MCP servers are fetched from.
- *
- *  `uvx` has no warm cache to fall back on the way `npx` does — the sandbox image ships no
- *  Python at all, so `mcp-server-git` downloads a managed interpreter (GitHub) as well as the
- *  package (PyPI) on every run. Under a restricted per-task egress none of that is reachable,
- *  the server fails to start, and exec-core then discards a run that was otherwise fine —
- *  MEASURED, an anchored kb_author enrich with `egress: none` failed all three attempts with
- *  `MCP server failed to start: filesystem, git`.
- *
- *  Only a per-task egress override can narrow this: every provider row ships `mode: 'full'`,
- *  so nothing that works today changes. Declining to declare a server that cannot start is the
- *  same rule the gates below already follow. */
-export function networkPolicyReachesPackageRegistries(policy: CliNetworkPolicy | null): boolean {
-  return !policy || policy.mode === 'full';
-}
-
 const RUN_TOKEN_GRACE_SECONDS = 15 * 60;
 
 /** A run's token outlives its timeout by a grace; a run with no timeout keeps the default lifetime of a task token. */
@@ -409,13 +398,11 @@ export async function resolveMcpExtraFiles(
    *  Required for the same reason as `hasWorktree` — a default would let a new call site
    *  silently re-advertise a server that cannot work. */
   hasRepo: boolean,
-  /** The invocation's effective egress. Required, like the two flags above: a default would let
-   *  a new call site declare a server the sandbox cannot fetch. */
-  networkPolicy: CliNetworkPolicy | null,
   /** The run these files are for; only a prompt step's own run names custom tools, and its invocation row may carry integrations. */
   run?: CustomRun,
   workspaceKind?: 'snapshot' | 'scratch' | 'repository' | 'worktree' | 'none',
   selectedProvider?: CliProviderRecord,
+  runner: DockerRunner = defaultDockerRunner,
 ): Promise<McpResolution> {
   const empty: McpResolution = { files: [], extraArgs: [] };
   if (profile === 'none') {
@@ -470,8 +457,15 @@ export async function resolveMcpExtraFiles(
     hasRepo,
     hasWorktree,
     ragOnly,
-    registriesReachable: networkPolicyReachesPackageRegistries(networkPolicy),
   });
+
+  const gitDeclared =
+    emittedDefaults.has('git') && (await imageCarriesGitMcp(sandboxImage, runner));
+  if (emittedDefaults.has('git') && !gitDeclared)
+    log.warn(
+      { image: sandboxImage },
+      'sandbox image carries no baked git MCP server, so it is not declared',
+    );
 
   const servers = buildDefaultMcpServers({
     repoPath: sandboxWorkdir,
@@ -484,9 +478,8 @@ export async function resolveMcpExtraFiles(
     // gitdir does not exist in any container.
     //
     // MEASURED before this: `"git":"failed"` in the init event of every worktree invocation,
-    // with the server reporting `is not a valid Git repository`. uvx itself is fine. The cost
-    // was a permanently failing entry every agent sees, plus a uvx fetch of 33 packages per
-    // cold sandbox.
+    // with the server reporting `is not a valid Git repository`. The server itself started
+    // fine. The cost was a permanently failing entry every agent sees.
     //
     // Keyed on the SAME predicate as the mask, which is the point: gitfile-mask.ts already
     // requires that a prompt cannot claim this boundary for the repo root while a masked
@@ -510,7 +503,7 @@ export async function resolveMcpExtraFiles(
     // this alone would point `mcp-server-git` at the empty scratch workspace and reproduce
     // exactly the `"git":"failed"` / `is not a valid Git repository` entry the gate above
     // exists to prevent.
-    includeGit: emittedDefaults.has('git'),
+    includeGit: gitDeclared,
     // `filesystem` survives a rag-only run because grounding on disk is still the job. A
     // REPO-LESS run is the one case where that argument runs out: its workspace is an empty
     // scratch directory, so the server would announce eleven tools over nothing. Declaring it

@@ -19,7 +19,7 @@ function runs(dockerfile: string) {
   return dockerfile
     .replace(/\\\n/g, '\n')
     .split(/\n(?=\S)/)
-    .filter((s) => s.startsWith('RUN '))
+    .filter((s) => s.startsWith('RUN ') && !s.includes('install-git-mcp.sh'))
     .map((s) => s.slice(4));
 }
 function native(server: string) {

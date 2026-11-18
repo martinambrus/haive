@@ -11,7 +11,8 @@ import {
 } from '../sandbox/mcp-config.js';
 import { internalApiUrl } from '../sandbox/mcp-surface.js';
 import { resolveCliAuthMounts } from '../sandbox/cli-auth-volume.js';
-import type { DockerVolumeMount } from '../sandbox/docker-runner.js';
+import { defaultDockerRunner, type DockerVolumeMount } from '../sandbox/docker-runner.js';
+import { imageCarriesGitMcp } from '../sandbox/git-mcp-pin.js';
 import { resolveSandboxImageTag } from '../queues/cli-exec-queue.js';
 import { SANDBOX_USER, SANDBOX_USER_HOME, SANDBOX_WORKDIR } from '../sandbox/sandbox-runner.js';
 import {
@@ -432,7 +433,17 @@ export async function ensureShellContainer(
 
   // Best-effort MCP injection: if it fails, the user can still use the
   // shell — only CLI commands that need MCP would be affected.
-  await writeMcpConfigInto(docker, containerName, provider.name, mcpServers).catch((err) => {
+  // An image built before the git MCP layer existed has no server tree; declaring it there only
+  // shows the user a failed server. The inspect is skipped when no git server is offered.
+  const hasGit = mcpServers.some((s) => s.name === 'git');
+  const gitDeclared = !hasGit || (await imageCarriesGitMcp(imageTag, defaultDockerRunner));
+  if (!gitDeclared)
+    log.warn(
+      { containerName, imageTag },
+      'sandbox image carries no baked git MCP server, so it is not declared',
+    );
+  const servers = gitDeclared ? mcpServers : mcpServers.filter((s) => s.name !== 'git');
+  await writeMcpConfigInto(docker, containerName, provider.name, servers).catch((err) => {
     log.warn({ err, containerName }, 'failed to write mcp config into shell container');
   });
 

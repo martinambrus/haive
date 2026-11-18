@@ -28,7 +28,6 @@ describe('snapshot MCP file set', () => {
       'full',
       false,
       true,
-      null,
       undefined,
       'snapshot',
     );
