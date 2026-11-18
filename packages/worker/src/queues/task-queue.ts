@@ -201,7 +201,7 @@ import {
   HUMAN_REJECT_SOURCES,
 } from '../step-engine/steps/workflow/_fix-loop.js';
 import {
-  eligibleFixRoundProviders,
+  fixRoundOptionProviders,
   FIX_ROUND_CLI_FIELD,
   FixRoundCliUnavailable,
   fixRoundCliField,
@@ -2608,8 +2608,10 @@ export async function handleResult(
         if (osc.tripped && osc.conflictingDiagnoses) {
           const cliOptions = {
             round: nextRound,
-            providers: eligibleFixRoundProviders(
+            providers: await fixRoundOptionProviders(
+              db,
               ctx.userId,
+              ctx.taskId,
               await loadProviders(db, ctx.userId),
               stepRegistry.get(FIX_LOOP_TARGET_STEP_ID),
             ),
@@ -2688,8 +2690,10 @@ export async function handleResult(
         // the user accepts or aborts.
         const cliOptions = {
           round: nextRound,
-          providers: eligibleFixRoundProviders(
+          providers: await fixRoundOptionProviders(
+            db,
             ctx.userId,
+            ctx.taskId,
             await loadProviders(db, ctx.userId),
             stepRegistry.get(FIX_LOOP_TARGET_STEP_ID),
           ),
@@ -3018,8 +3022,10 @@ export async function resolveFixLoopGate(
           const title = 'CLI choice could not be applied';
           const field = fixRoundCliField({
             round: targetRound,
-            providers: eligibleFixRoundProviders(
+            providers: await fixRoundOptionProviders(
+              tx,
               ctx.userId,
+              ctx.taskId,
               await loadProviders(tx, ctx.userId),
               target,
             ),

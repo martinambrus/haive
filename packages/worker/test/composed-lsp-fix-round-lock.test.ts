@@ -1,11 +1,13 @@
 import { describe, expect, it } from 'vitest';
 import { schema, type Database } from '@haive/database';
 import { createFakeDb } from '@haive/database/testing';
+import type { CliProviderRecord } from '../src/cli-adapters/types.js';
 import { phase2ImplementStep } from '../src/step-engine/steps/workflow/07-phase-2-implement.js';
 import {
   FixRoundCliLocked,
   FixRoundCliUnavailable,
   fixRoundCliRole,
+  fixRoundOptionProviders,
   fixRoundRefusalBody,
   recordFixRoundCliChoice,
 } from '../src/step-engine/steps/workflow/_fix-round-cli.js';
@@ -99,5 +101,22 @@ describe('next fix round CLI on a composed-LSP task', () => {
     const fake = setup(1);
     await record(fake, CODEX);
     expect(fake.rows(schema.taskStepCliChoices)).toMatchObject([{ cliProviderId: CODEX }]);
+  });
+
+  it('offers the gate only the providers the lock accepts', async () => {
+    const options = async (contract: number) => {
+      const fake = setup(contract);
+      const providers = fake.rows(schema.cliProviders) as unknown as CliProviderRecord[];
+      const offered = await fixRoundOptionProviders(
+        fake.db as unknown as Database,
+        USER,
+        TASK,
+        providers,
+        phase2ImplementStep,
+      );
+      return offered.map((p) => p.id).sort();
+    };
+    expect(await options(2)).toEqual([CLAUDE]);
+    expect(await options(1)).toEqual([CLAUDE, CODEX].sort());
   });
 });

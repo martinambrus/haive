@@ -67,6 +67,28 @@ export function eligibleFixRoundProviders(
   });
 }
 
+/** The fix-round gate's options: eligible providers the task's composed-LSP lock also
+ * accepts, so the gate never offers a CLI that `recordFixRoundCliChoice` would refuse. */
+export async function fixRoundOptionProviders(
+  db: Pick<Database, 'query'>,
+  userId: string,
+  taskId: string,
+  providers: CliProviderRecord[],
+  target: StepDefinition | undefined,
+): Promise<CliProviderRecord[]> {
+  const eligible = eligibleFixRoundProviders(userId, providers, target);
+  const allowed: CliProviderRecord[] = [];
+  for (const provider of eligible) {
+    const lock = await checkTaskComposedLspProvider(db, {
+      userId,
+      taskId,
+      providerId: provider.id,
+    });
+    if (!lock || lock.ok) allowed.push(provider);
+  }
+  return allowed;
+}
+
 async function loadRoundProvider(
   db: Pick<Database, 'query'>,
   userId: string,
