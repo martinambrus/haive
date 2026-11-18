@@ -997,6 +997,13 @@ template that exists keeps what it stores (absent stays absent, 1 stays 1, 2 sta
 task's form says, and a stored value that is not absent, 1 or 2 is refused before any write.
 Replacing an absent/1 template with 2 is a separate, explicit action that 01 does not perform.
 
+The switch is OFF for now. The composed build runs the environment's Dockerfile in a build
+context that holds only that Dockerfile, so an environment body that copies project files
+(the generated `COPY composer.json composer.lock ./` when dependencies are preinstalled) fails
+there with "not found". MEASURED on a live PHP environment: `03-build-image` built, then
+`04-verify-environment` failed its first composed build. Adoption returns once the composed build
+no longer needs the repository's files.
+
 A new environment gets 2 when every condition holds. They are checked cheapest first, and a failed
 one reads nothing further:
 

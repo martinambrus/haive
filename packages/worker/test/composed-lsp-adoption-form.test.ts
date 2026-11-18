@@ -15,6 +15,13 @@ import {
 } from '../src/step-engine/steps/env-replicate/01-declare-deps.js';
 import type { StepContext } from '../src/step-engine/step-definition.js';
 
+// Adoption is switched off in the product until a composed build gets the repository build
+// context; these controls pin the writer as it behaves when the switch is on.
+vi.mock('../src/lsp/composed-adoption.js', async (original) => ({
+  ...(await original<object>()),
+  COMPOSED_LSP_NEW_ENVIRONMENT_ADOPTION: true,
+}));
+
 // Detect, form and reuse reconciliation for the composed-LSP opt-out. Controls whose title says
 // "legacy parity pin" are expected to pass on code without the writer.
 
