@@ -102,6 +102,7 @@ describe('compiled module step SDK consumer', () => {
 
   it('calls host services including typed role reads through the compiled public-only fixture', async () => {
     const host = {
+      loadFixLoopDiagnosis: vi.fn(async () => null),
       loadRoleOutput: vi.fn(async () => ({
         state: 'absent' as const,
         role: 'haive.spec.checked',

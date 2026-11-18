@@ -122,3 +122,13 @@ export const contractedAudit = {
     return { audited: true, findings: [{ severity: 'low', issue: 'observation' }], coverage: null };
   },
 } satisfies StepDefinition<unknown, CodeAuditOutput>;
+
+// A fix consumer reads the task-bound request the host recorded for its round and fences it itself.
+export async function readFixRequest(ctx: import('@haive/shared/step').StepContext) {
+  const host = ctx.host;
+  if (!host) throw new Error('This module requires step host services.');
+  const read: import('@haive/shared/step').FixLoopRead | null = await host.loadFixLoopDiagnosis();
+  if (!read) return null;
+  const repeat: import('@haive/shared/step').FixLoopRepeat | null = read.repeat;
+  return { diagnosis: read.diagnosis, guidance: read.guidance, repeat, prior: read.prior };
+}

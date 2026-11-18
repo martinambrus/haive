@@ -50,8 +50,9 @@ export interface StepContext {
   cliProviderId: string | null;
   /** Round this step row belongs to (0 = original pass). Bumped by BOTH loops — the fix
    *  loop (loop_back) and the revise loop's forward fork (a human gate-1 spec reject) — so
-   *  `round > 0` does NOT mean "fix re-run". To branch into fix mode, ask isFixRound /
-   *  loadFixLoopDiagnosis, which key on the recorded request for this round. */
+   *  `round > 0` does NOT mean "fix re-run". A pinned fix consumer branches into fix mode
+   *  with host.loadFixLoopDiagnosis(), which is non-null only when a request is recorded
+   *  for this round. */
   round: number;
   /** The task epoch this pass runs under; unset where no pass is fenced on one. */
   epoch?: number | null;
@@ -843,7 +844,32 @@ export type ReviewDiff =
       reason: string;
       scope: import('./review-types.js').ImplementationFileSet;
     };
+/** A repeat of the same failing check across consecutive fix rounds. `report` is raw text. */
+export interface FixLoopRepeat {
+  sourceStepId: string;
+  round: number;
+  previousRound: number;
+  report: string;
+  personMarked: boolean;
+}
+
+/** The fix request recorded for the calling step row's round. Text is unfenced: fence it at
+ *  prompt-build time, since detect output is persisted and replayed. */
+export interface FixLoopRead {
+  round: number;
+  diagnosis: string;
+  humanSourced: boolean;
+  marked: boolean;
+  guidance: string;
+  prior: string;
+  repeat: FixLoopRepeat | null;
+  honored: string;
+}
+
 export interface StepHostServices {
+  /** Task-bound, no arguments. Null unless a fix request is recorded for this row's round.
+   *  Only the task's pinned fix consumer may call it. Read it in detect. */
+  loadFixLoopDiagnosis(): Promise<FixLoopRead | null>;
   /** Task-wide historical inventory; no worktree required. Picks are selections, not repairs. */
   loadUnactedInsights(
     options?: import('./review-types.js').InsightLoadOptions,

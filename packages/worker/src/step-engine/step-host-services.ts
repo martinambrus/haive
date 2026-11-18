@@ -15,6 +15,9 @@ import { loadPreviousStepOutput } from './steps/onboarding/_helpers.js';
 import { collectImplementationFiles } from './steps/workflow/_impl-changes.js';
 import { loadTaskWorktreeDecision, decidedWorktreePath } from '../repo/task-worktree.js';
 import { checkHostCancellation, hostCall } from './host-call.js';
+import { stepRegistry, type StepRegistry } from './registry.js';
+import { pinnedFixTarget, resolvePinnedFixConsumer } from './fix-consumer.js';
+import { loadFixLoopRead } from './steps/workflow/_fix-loop.js';
 import { readReviewDiff } from './review-diff.js';
 import { loadUnactedInsights, validateInsightLimit } from './steps/workflow/_insight-loader.js';
 
@@ -25,7 +28,10 @@ export class StepHostBindingError extends Error {
   }
 }
 
-export function createStepHostServices(context: StepContext): StepHostServices {
+export function createStepHostServices(
+  context: StepContext,
+  registry: Pick<StepRegistry, 'get'> = stepRegistry,
+): StepHostServices {
   // Capture identity: mutating a consumer's context cannot retarget these capabilities.
   const ctx = { ...context };
   let boundWorktree: string | undefined;
@@ -47,10 +53,10 @@ export function createStepHostServices(context: StepContext): StepHostServices {
       task.currentRound < ctx.round
     )
       throw new StepHostBindingError('Task step or round does not match the context.');
-    return task;
+    return { task, step };
   }
   async function bind(requestedPath?: string): Promise<{ resolved: string; held?: FileHandle }> {
-    const task = await verifyIdentity();
+    const { task } = await verifyIdentity();
     const decision = await loadTaskWorktreeDecision(ctx.db, {
       taskId: ctx.taskId,
       columnBranch: task.worktreeBranch,
@@ -90,6 +96,19 @@ export function createStepHostServices(context: StepContext): StepHostServices {
     }
   }
   return {
+    loadFixLoopDiagnosis() {
+      return hostCall(ctx, async () => {
+        const { task, step } = await verifyIdentity();
+        const target = pinnedFixTarget(task.executionContract);
+        if (
+          !target ||
+          target.stepId !== step.stepId ||
+          !resolvePinnedFixConsumer(target, registry).ok
+        )
+          throw new StepHostBindingError('Step is not the pinned fix consumer of this task.');
+        return loadFixLoopRead(ctx);
+      });
+    },
     loadRoleOutput(input) {
       return hostCall(ctx, async () => {
         await verifyIdentity();
