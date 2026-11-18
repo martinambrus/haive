@@ -174,6 +174,7 @@ import {
   openPendingStep,
   updateOwnedStep,
 } from './step-ownership.js';
+import { isPinnedFixRepair } from './fix-consumer.js';
 import { isFixLoopSuppressed } from './steps/workflow/_fix-loop.js';
 import { resolveCuratedSummary } from './_step-summary.js';
 import { promptCarriesPastedPersona, templatePersonaIds } from './steps/_retrieval-guidance.js';
@@ -829,7 +830,8 @@ async function resolveLlmPhase(
     if (
       ['07-phase-2-implement', '08b-test-management', '07b-phase-4-validate'].includes(
         stepDef.metadata.id,
-      )
+      ) ||
+      stepDef.fixConsumer !== undefined
     )
       await finishFixTestCapture(db, invocation.id);
 
@@ -1349,7 +1351,8 @@ async function resolveLlmPhase(
       (stepDef.metadata.id === '07-phase-2-implement' &&
         !!(detected as { fixContext?: unknown } | null)?.fixContext) ||
       (stepDef.metadata.id === '08b-test-management' && upcomingIteration > 0) ||
-      (stepDef.metadata.id === '07b-phase-4-validate' && role === 'fixer');
+      (stepDef.metadata.id === '07b-phase-4-validate' && role === 'fixer') ||
+      (stepDef.fixConsumer !== undefined && (await isPinnedFixRepair(ctx, stepDef)));
     if (repairPass)
       await beginFixTestCapture(db, {
         invocationId: invRow.id,

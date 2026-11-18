@@ -1,4 +1,8 @@
 import { parseExecutionContract, parseStepId } from '@haive/shared/modularity';
+import { eq } from 'drizzle-orm';
+import { schema } from '@haive/database';
+import type { StepContext } from '@haive/shared/step';
+import { isFixRound } from './steps/workflow/_fix-loop.js';
 import type { StepDefinition } from './step-definition.js';
 import type { StepRegistry } from './registry.js';
 
@@ -23,4 +27,16 @@ export function resolvePinnedFixConsumer(
   if (!def?.fixConsumer || def.fixConsumer.version !== target.capabilityVersion)
     return { ok: false };
   return { ok: true, def };
+}
+
+export async function isPinnedFixRepair(ctx: StepContext, def: StepDefinition): Promise<boolean> {
+  if (def.fixConsumer === undefined) return false;
+  const row = await ctx.db.query.tasks.findFirst({
+    where: eq(schema.tasks.id, ctx.taskId),
+    columns: { executionContract: true },
+  });
+  const target = pinnedFixTarget(row?.executionContract);
+  if (target?.stepId !== def.metadata.id || target.capabilityVersion !== def.fixConsumer.version)
+    return false;
+  return isFixRound(ctx);
 }
