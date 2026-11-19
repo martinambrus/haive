@@ -36,7 +36,7 @@ import {
   renderProjectState,
   type ProjectRender,
 } from '@haive/shared/project-state';
-import { worktreeCleanupStep } from './12-worktree-cleanup.js';
+import { branchOutcomeParts, worktreeCleanupStep } from './12-worktree-cleanup.js';
 import * as gitPush from '../../../repo/git-push.js';
 import {
   haltFailed,
@@ -584,6 +584,46 @@ async function mergeThenApply(
   return { merge, applyOut, state: h.getState() };
 }
 
+describe('12 branch outcome sentence', () => {
+  const base = {
+    action: 'merge_remove',
+    branchName: 'feature/x',
+    deleteRequested: true,
+    branchDeleted: true,
+    issueBranchesDeleted: 0,
+  };
+
+  it('a deleted branch is reported once, with no refusal beside it', () => {
+    expect(branchOutcomeParts(base)).toEqual(['deleted branch feature/x']);
+  });
+
+  it('a refused delete is reported even when issue branches were deleted', () => {
+    expect(branchOutcomeParts({ ...base, branchDeleted: false, issueBranchesDeleted: 2 })).toEqual([
+      'branch feature/x NOT deleted (git refused; see worker log)',
+      'deleted 2 merged DAG issue branch(es)',
+    ]);
+  });
+
+  it('deleted issue branches follow the deleted task branch', () => {
+    expect(branchOutcomeParts({ ...base, issueBranchesDeleted: 1 })).toEqual([
+      'deleted branch feature/x',
+      'deleted 1 merged DAG issue branch(es)',
+    ]);
+  });
+
+  it('a merge without a requested delete names how to delete the branch', () => {
+    expect(branchOutcomeParts({ ...base, deleteRequested: false, branchDeleted: false })).toEqual([
+      'kept branch feature/x (delete it in the repository terminal: git branch -d feature/x)',
+    ]);
+  });
+
+  it('remove-only keeps the branch', () => {
+    expect(branchOutcomeParts({ ...base, action: 'remove_only', branchDeleted: false })).toEqual([
+      'kept branch feature/x',
+    ]);
+  });
+});
+
 describe('12 merge phase + apply (real git)', () => {
   it('same-branch clean merge: phase merges, apply removes the worktree + safe-deletes', async () => {
     const { parent, wt } = await setupWorktree();
@@ -597,6 +637,8 @@ describe('12 merge phase + apply (real git)', () => {
       expect(applyOut?.merged).toBe(true);
       expect(applyOut?.removed).toBe(true);
       expect(applyOut?.branchDeleted).toBe(true);
+      expect(applyOut?.message).toContain('deleted branch feature/x');
+      expect(applyOut?.message).not.toContain('NOT deleted');
       expect(await gitCode(parent, ['show', 'main:feature.txt'])).toBe(0);
       expect(await gitCode(parent, ['rev-parse', '--verify', 'refs/heads/feature/x'])).not.toBe(0);
     } finally {

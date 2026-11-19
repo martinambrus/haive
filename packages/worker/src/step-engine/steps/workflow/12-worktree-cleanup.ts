@@ -149,6 +149,32 @@ async function noteHaiveFiles(
   await warnStep(ctx, await projectionRevertNotes(ctx.db, ctx.taskId));
 }
 
+/** What the step card says about the task's branches: one sentence for the task branch,
+ *  then the DAG issue branches. The two are independent, so neither may hide the other. */
+export function branchOutcomeParts(o: {
+  action: string;
+  branchName: string | null | undefined;
+  deleteRequested: boolean;
+  branchDeleted: boolean;
+  issueBranchesDeleted: number;
+}): string[] {
+  const parts: string[] = [];
+  if (o.branchDeleted) parts.push(`deleted branch ${o.branchName}`);
+  else if (o.action === 'remove_only') parts.push(`kept branch ${o.branchName}`);
+  // A requested delete that git refused must not read as a silent success.
+  else if (o.deleteRequested && o.branchName)
+    parts.push(`branch ${o.branchName} NOT deleted (git refused; see worker log)`);
+  // Merged but the delete was declined. The worktree (and its terminal) is gone, so
+  // name the only remaining path to that branch on the step card itself.
+  else if (o.action === 'merge_remove' && o.branchName)
+    parts.push(
+      `kept branch ${o.branchName} (delete it in the repository terminal: git branch -d ${o.branchName})`,
+    );
+  if (o.issueBranchesDeleted > 0)
+    parts.push(`deleted ${o.issueBranchesDeleted} merged DAG issue branch(es)`);
+  return parts;
+}
+
 export const worktreeCleanupStep: StepDefinition<WorktreeCleanupDetect, WorktreeCleanupApply> = {
   metadata: {
     id: '12-worktree-cleanup',
@@ -802,19 +828,15 @@ export const worktreeCleanupStep: StepDefinition<WorktreeCleanupDetect, Worktree
       );
     if (squashSkipReason) parts.push(squashSkipReason);
     parts.push(`removed worktree ${d.worktreePath}`);
-    if (branchDeleted) parts.push(`deleted branch ${d.branchName}`);
-    if (issueBranchesDeleted > 0)
-      parts.push(`deleted ${issueBranchesDeleted} merged DAG issue branch(es)`);
-    else if (action === 'remove_only') parts.push(`kept branch ${d.branchName}`);
-    // A requested delete that git refused must not read as a silent success.
-    else if (values.deleteBranch && d.branchName)
-      parts.push(`branch ${d.branchName} NOT deleted (git refused; see worker log)`);
-    // Merged but the delete was declined. The worktree (and its terminal) is gone, so
-    // name the only remaining path to that branch on the step card itself.
-    else if (action === 'merge_remove' && d.branchName)
-      parts.push(
-        `kept branch ${d.branchName} (delete it in the repository terminal: git branch -d ${d.branchName})`,
-      );
+    parts.push(
+      ...branchOutcomeParts({
+        action,
+        branchName: d.branchName,
+        deleteRequested: !!values.deleteBranch,
+        branchDeleted,
+        issueBranchesDeleted,
+      }),
+    );
 
     ctx.logger.info({ action, merged, branchDeleted }, 'worktree cleanup complete');
     return {
