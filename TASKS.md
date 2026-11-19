@@ -689,6 +689,17 @@ All PRE-EXISTING. Paths are under `packages/`. Check each against the shared usa
 5. The providers page loads one usage-auth request per claude row (`web/src/app/(app)/cli-providers/page.tsx` ~:138-155): 41 requests on the dev install.
 6. THIRD-PARTY (needs approval before any work): the vendor's refresh semantics are unverified ("single-use" is only a comment at `shared/src/cli-providers/claude-oauth.ts:48`), and the usage endpoint is undocumented (`worker/src/usage-window/fetchers/index.ts` ~:37-41).
 
+### T723 · FNF[claude-login-set] · Claude login set leftovers (+4)
+
+status: open · kind: fix · found: #1282 build and review 2026-11-19 · priority: P4
+
+Paths are under `packages/`. Items 2 to 4 are PRE-EXISTING; item 1 is PRE-EXISTING for the clicked row and reaches the whole set since #1282.
+
+1. A sign-out deletes the login tokens of the set even when a credential volume could not be removed, while the status reset is skipped for that case (`worker/src/queues/cli-exec/handlers.ts` `handleSignOutJob`: the token delete runs before the `failed.length === 0` gate). The rows then keep their old status with no token until the sign-out is repeated. Fix direction: gate the delete like the reset, or reset the status too; decide with the retry path in view.
+2. The own-lock branch of `saveCliLoginSecret` takes the auth lock on the scope it read before locking and never re-reads it (`api/src/lib/cli-login-secret.ts` ~:17-39). Production passes `authLockHeld = true`, so only tests reach it.
+3. No control covers the auth lock being lost inside the sign-out transaction; the refused-update control covers the rollback only.
+4. `api/test/cli-login-banner-secrets.test.ts` (2365 lines) builds a database fake by hand that must follow every query shape of `saveCliLoginSecret`: #1282 broke 417 of its tests until the fake was updated. Move its database-shaped cases to the PostgreSQL-gated files, or derive the fake from the query builder.
+
 ### T721 · The Claude usage grant reaches sandbox environments
 
 status: open (items 2-9; item 1 done #1281) · kind: security · found: login-set design (T720) 2026-11-19 · priority: P3 (was P1 until #1281)
@@ -707,7 +718,7 @@ status: open (items 2-9; item 1 done #1281) · kind: security · found: login-se
 
 ### T720 · A Claude login reaches one provider row, its sign-out resets them all
 
-status: open, in work since 2026-11-19 (owner decided) · kind: design · found: #1280 review 2026-11-19 · priority: P2
+status: open, in work since 2026-11-19 (owner decided); login and sign-out for the whole set in review #1282, then joining rows and set-wide manual writes, then the usage connection · kind: design · found: #1280 review 2026-11-19 · priority: P2
 
 A `claude-code` subscription login is a token saved on the one provider row it was made on (`api/src/lib/cli-login-secret.ts` `saveCliLoginSecret`), and each run reads the token of its own row (`worker/src/secrets/provider-secrets.ts`). A sign-out through one row deletes that row's token (`worker/src/queues/cli-exec/handlers.ts` ~:1436-1449) but resets `auth_status` on every row sharing the auth volume (~:1451-1472). The other rows keep their own tokens, which may still work, and read `unknown`.
 
