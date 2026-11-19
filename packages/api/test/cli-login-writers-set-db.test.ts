@@ -64,7 +64,7 @@ vi.mock('../src/queues.js', () => ({
 vi.mock('../src/redis.js', () => ({ getRedis: () => ({ eval: async () => '' }) }));
 vi.mock('../src/lib/cli-auth-write.js', async (original) => ({
   ...(await original<any>()),
-  CLI_AUTH_JOIN_WAIT_MS: 60,
+  CLI_AUTH_JOIN_WAIT_MS: 250,
 }));
 import { CLI_EXEC_JOB_NAMES, configService, envelopeDecrypt, secretsService } from '@haive/shared';
 import { upsertProviderSecret } from '@haive/shared';
@@ -131,14 +131,37 @@ describe.skipIf(!url)(
       const [s] = (await secretRows([id])).filter((r) => r.secretName === name);
       return s && envelopeDecrypt(s, KEK);
     };
-    const outside = async (keys: Key[]) => {
-      const pids = keys.map((k) => rows[k].id);
-      return {
-        providers: await Promise.all(pids.map(provider)),
-        secrets: await secretRows(pids),
-        audits: (await audits(db)).filter((a) => pids.includes(a.targetId!)),
-      };
+    const snapshot = async (pids: string[]) => ({
+      providers: await Promise.all(pids.map(provider)),
+      secrets: await secretRows(pids),
+      audits: (await audits(db)).filter((a) => pids.includes(a.targetId!)),
+    });
+    const outside = (keys: Key[]) => snapshot(keys.map((k) => rows[k].id));
+    /** A second codex row in F's set; F and G each hold their own login token. */
+    const seedCodexSet = async () => {
+      const [g] = await db
+        .insert(schema.cliProviders)
+        .values({
+          userId: U,
+          name: 'codex',
+          authMode: 'subscription',
+          isolateAuth: false,
+          label: 'G',
+          authLastCheckedAt: PAST,
+        })
+        .returning();
+      for (const id of [rows.F.id, g!.id])
+        await upsertProviderSecret(db, {
+          providerId: id,
+          name: TOKEN,
+          value: rnd(),
+          masterKek: KEK,
+          onExisting: 'overwrite',
+        });
+      return g!;
     };
+    const setRowsFor = async (pids: string[]) =>
+      (await byAction(SET_ACTION)).filter((a) => pids.includes(a.targetId!));
     const health = (p: Row) => [p.authStatus, p.authMessage, p.authLastCheckedAt?.getTime()];
     const others = async (pids: string[]) =>
       (await secretRows(pids)).filter((s) => s.secretName !== TOKEN);
@@ -380,9 +403,10 @@ describe.skipIf(!url)(
       expect(await others([rows.A.id, rows.B.id])).toEqual(keep);
       await expectEvents(DELETE_ACTION, 'manual', rows.A.id, [rows.B.id], 2);
       expect(await outside(['C', 'D', 'E', 'F'])).toEqual(before);
-      const events = (await audits(db)).length;
+      const mine = async () => (await audits(db)).filter((a) => a.actorUserId === U).length;
+      const events = await mine();
       expect((await del('A', TOKEN)).status).toBe(404);
-      expect((await audits(db)).length).toBe(events);
+      expect(await mine()).toBe(events);
     });
 
     it('deletes through a row that no longer has the token when a sibling still does', async () => {
@@ -540,6 +564,7 @@ describe.skipIf(!url)(
       it.each([
         ['a pasted token', () => post('A', TOKEN, rnd())],
         ['a created row', () => call('POST', '', createBody(rnd()))],
+        ['a token delete', () => del('A', TOKEN)],
       ])('%s changes nothing when a sibling audit insert is refused', async (_name, run) => {
         const before = await world();
         const drop = await refuseSiblingAudit();
@@ -558,6 +583,7 @@ describe.skipIf(!url)(
         ['a pasted token', 4, () => post('A', TOKEN, rnd())],
         ['a settings save', 5, () => patch('A', { envVars: { KEEP: 'yes', [TOKEN]: rnd() } })],
         ['a created row', 3, () => call('POST', '', createBody(rnd()))],
+        ['a token delete', 2, () => del('A', TOKEN)],
       ];
       it.each(paths)(
         '%s is refused and changes nothing at every check',
@@ -580,6 +606,7 @@ describe.skipIf(!url)(
             );
             expect(await world(), `check ${k}`).toEqual(before);
             expect(await byAction(SET_ACTION), `check ${k}`).toEqual([]);
+            expect(await byAction(DELETE_ACTION), `check ${k}`).toEqual([]);
           }
         },
       );
@@ -603,6 +630,82 @@ describe.skipIf(!url)(
       expect(await secretRows([other!.id])).toEqual([]);
       expect(await provider(other!.id)).toEqual(before);
       expect((await byAction(SET_ACTION)).map((e) => e.targetId)).toEqual([rows.F.id]);
+    });
+
+    describe('when the set holds another CLI row with its own token', () => {
+      it('a settings save on a codex row types the token for that row only', async () => {
+        const g = await seedCodexSet();
+        const beforeG = await snapshot([g.id]);
+        const token = rnd();
+        const res = await patch('F', { envVars: { [TOKEN]: token } });
+        expect(res.status).toBe(200);
+        expect((await plain(rows.F.id, TOKEN)) === token).toBe(true);
+        expect(await snapshot([g.id])).toEqual(beforeG);
+        expect((await setRowsFor([rows.F.id])).length).toBe(1);
+        expect(await setRowsFor([g.id])).toEqual([]);
+      });
+
+      it('a created codex row types the token for that row only', async () => {
+        const g = await seedCodexSet();
+        const before = await snapshot([rows.F.id, g.id]);
+        const token = rnd();
+        const body = createBody(token, { name: 'codex' });
+        const res = await call('POST', '', body);
+        expect(res.status).toBe(201);
+        const created = await findNew(body.label);
+        expect((await plain(created.id, TOKEN)) === token).toBe(true);
+        expect(await snapshot([rows.F.id, g.id])).toEqual(before);
+        expect(await setRowsFor([rows.F.id, g.id])).toEqual([]);
+      });
+
+      it('a token delete on a codex row removes only that row token', async () => {
+        const g = await seedCodexSet();
+        const beforeG = await snapshot([g.id]);
+        expect((await del('F', TOKEN)).status).toBe(200);
+        expect(await plain(rows.F.id, TOKEN)).toBeUndefined();
+        expect(await snapshot([g.id])).toEqual(beforeG);
+        expect(await plain(g.id, TOKEN)).toBeDefined();
+      });
+
+      it('a token delete on a Claude row leaves the codex token alone', async () => {
+        const g = await seedCodexSet();
+        const before = await snapshot([rows.F.id, g.id]);
+        expect((await del('A', TOKEN)).status).toBe(200);
+        expect(await plain(rows.F.id, TOKEN)).toBeDefined();
+        expect(await snapshot([rows.F.id, g.id])).toEqual(before);
+      });
+    });
+
+    describe('when a created Claude row uses an API key', () => {
+      it('writes its own set while the subscription set is locked', async () => {
+        const before = await outside(['A', 'B', 'C', 'E', 'F']);
+        const token = rnd();
+        const body = createBody(token, { authMode: 'api_key' });
+        const release = await holdSet();
+        let res: Response;
+        try {
+          res = await call('POST', '', body);
+        } finally {
+          await release();
+        }
+        expect(res.status).toBe(201);
+        await expectWritten(token, ['D', (await findNew(body.label)).id]);
+        expect(await outside(['A', 'B', 'C', 'E', 'F'])).toEqual(before);
+      });
+
+      it('is refused as busy after the wait limit while its own set is locked', async () => {
+        const before = await world();
+        const release = await tryCliAuthLock(db, authState.cliAuthScope(rows.D));
+        expect(release).not.toBeNull();
+        try {
+          const res = await call('POST', '', createBody(rnd(), { authMode: 'api_key' }));
+          expect(res.status).toBe(409);
+          expect(((await res.json()) as { code?: string }).code).toBe('cli_auth_busy');
+        } finally {
+          await release!();
+        }
+        expect(await world()).toEqual(before);
+      });
     });
 
     it('an isolated created row takes no lock and is not refused while the set is held', async () => {
