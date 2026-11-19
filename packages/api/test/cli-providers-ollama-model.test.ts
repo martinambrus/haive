@@ -111,7 +111,7 @@ describe('saving an ollama provider without a model', () => {
 
   it('still saves a provider of another CLI without a model', async () => {
     setup();
-    const res = await post({ name: 'claude-code', authMode: 'subscription' });
+    const res = await post({ name: 'claude-code', authMode: 'subscription', isolateAuth: true });
     expect(res.status).toBe(201);
   });
 

@@ -18,6 +18,9 @@ const h = vi.hoisted(() => ({
   log: vi.fn(),
   loseAt: undefined as number | undefined,
   checks: 0,
+  afterLock: undefined as (() => Promise<void>) | undefined,
+  joinWaitMs: 0,
+  attempts: 0,
 }));
 vi.mock('@haive/database', async (original) => {
   const real = await original<any>();
@@ -25,6 +28,13 @@ vi.mock('@haive/database', async (original) => {
     ...real,
     tryCliAuthLock: async (...args: any[]) => {
       const lock = await real.tryCliAuthLock(...args);
+      // Counted once the try has an answer: each try opens its own connection before it asks.
+      h.attempts += 1;
+      if (lock && h.afterLock) {
+        const hook = h.afterLock;
+        h.afterLock = undefined;
+        await hook();
+      }
       if (!lock || typeof h.loseAt !== 'number') return lock;
       return Object.assign(() => lock(), lock, {
         assertHeld: async () => {
@@ -65,7 +75,10 @@ vi.mock('../src/redis.js', () => ({ getRedis: () => ({ eval: async () => '' }) }
 vi.mock('../src/lib/cli-auth-write.js', async (original) => ({
   ...(await original<any>()),
   // Elapsed waiting is tested with fake timers in cli-auth-write.test.ts.
-  CLI_AUTH_JOIN_WAIT_MS: 0,
+  // Here a control sets the wait it needs; otherwise there is none.
+  get CLI_AUTH_JOIN_WAIT_MS() {
+    return h.joinWaitMs;
+  },
 }));
 import { CLI_EXEC_JOB_NAMES, configService, envelopeDecrypt, secretsService } from '@haive/shared';
 import { lockLoginSet, upsertProviderSecret } from '@haive/shared';
@@ -225,6 +238,79 @@ describe.skipIf(!url)(
       for (const spy of [h.insert, h.log])
         for (const e of events) expect(spy.mock.calls.map((c) => c[0])).toContainEqual(shape(e));
     };
+    const STAMP_NEW = '2024-06-07 08:09:10.123457';
+    const STAMP_OLD = '2023-01-02 03:04:05.654321';
+    const stampText = async (id: string) => {
+      const [r] = await db.execute<{ t: string | null }>(
+        sql`select auth_last_checked_at::text as t from cli_providers where id = ${id}`,
+      );
+      return r!.t;
+    };
+    /** A and B hold different logins, `newest` the newest token and the other an older one. */
+    const differ = async (newest: 'A' | 'B') => {
+      const older = newest === 'A' ? 'B' : 'A';
+      for (const [key, status, message, stamp, at] of [
+        [newest, 'ok', 'newest member', STAMP_NEW, new Date('2024-01-01T00:00:00Z')],
+        [older, 'auth_expired', 'older member', STAMP_OLD, PAST],
+      ] as const) {
+        await db
+          .update(schema.cliProviders)
+          .set({
+            authStatus: status,
+            authMessage: message,
+            authLastCheckedAt: sql`${stamp}::timestamp`,
+            authGeneration: randomUUID(),
+          })
+          .where(eq(schema.cliProviders.id, rows[key].id));
+        await db
+          .update(schema.cliProviderSecrets)
+          .set({ updatedAt: at })
+          .where(
+            and(
+              eq(schema.cliProviderSecrets.providerId, rows[key].id),
+              eq(schema.cliProviderSecrets.secretName, TOKEN),
+            ),
+          );
+        rows[key] = await provider(rows[key].id);
+      }
+    };
+    const joinEvents = async () =>
+      (await byAction(SET_ACTION)).filter((a) => (a.metadata as any)?.source === 'join');
+    /** `id` holds the token, status, message, stamp (as text) and generation of member `from`, and one join event says so. */
+    const expectJoined = async (id: string, from: 'A' | 'B', setSize: number) => {
+      const p = await provider(id);
+      const src = rows[from];
+      const token = await plain(id, TOKEN);
+      expect(token).toBeDefined();
+      expect(token === (await plain(src.id, TOKEN))).toBe(true);
+      expect(token === (await plain(rows[from === 'A' ? 'B' : 'A'].id, TOKEN))).toBe(false);
+      expect([p.authStatus, p.authMessage, p.authGeneration]).toEqual([
+        src.authStatus,
+        src.authMessage,
+        src.authGeneration,
+      ]);
+      const stamp = await stampText(id);
+      expect(stamp).not.toBeNull();
+      expect(stamp).toBe(await stampText(src.id));
+      const metadata = { source: 'join', secretName: TOKEN, viaProviderId: src.id, setSize };
+      expect((await byAction(SET_ACTION)).filter((a) => a.targetId === id)).toHaveLength(1);
+      expect((await joinEvents()).map((a) => [a.targetId, a.metadata])).toEqual([[id, metadata]]);
+      const event = {
+        actorUserId: U,
+        action: SET_ACTION,
+        targetType: 'cli_provider',
+        targetId: id,
+        metadata,
+      };
+      for (const spy of [h.insert, h.log])
+        expect(spy.mock.calls.map((c) => c[0])).toContainEqual(event);
+    };
+    const cloneOf = (key: Key) => call('POST', `/${rows[key].id}/clone`);
+    const cloneMetadata = async () =>
+      (await byAction('cli_provider.clone'))[0]!.metadata as {
+        secretCount: number;
+        secretNames: string[];
+      };
     const trigger = async (table: string, when: string, body: string, ret = 'NEW') => {
       const fn = `writers_set_${rnd()}`;
       await db.execute(
@@ -252,8 +338,14 @@ describe.skipIf(!url)(
         'BEFORE INSERT',
         `IF NEW.target_id = '${rows.B.id}'::uuid THEN RAISE EXCEPTION 'audit insert refused'; END IF;`,
       );
-    const holdSet = async () => {
-      const release = await tryCliAuthLock(db, authState.cliAuthScope(rows.A));
+    const refuseJoinAudit = () =>
+      trigger(
+        'audit_events',
+        'BEFORE INSERT',
+        `IF NEW.action = '${SET_ACTION}' AND NEW.metadata ->> 'source' = 'join' THEN RAISE EXCEPTION 'audit insert refused'; END IF;`,
+      );
+    const holdSet = async (key: Key = 'A') => {
+      const release = await tryCliAuthLock(db, authState.cliAuthScope(rows[key]));
       expect(release).not.toBeNull();
       return release!;
     };
@@ -281,7 +373,10 @@ describe.skipIf(!url)(
     });
     const setup = async () => {
       h.loseAt = undefined;
+      h.afterLock = undefined;
       h.checks = 0;
+      h.joinWaitMs = 0;
+      h.attempts = 0;
       h.insert.mockClear();
       h.log.mockClear();
       h.poll.mockReset().mockResolvedValue(undefined);
@@ -335,6 +430,9 @@ describe.skipIf(!url)(
     };
     afterEach(async () => {
       h.loseAt = undefined;
+      h.afterLock = undefined;
+      h.joinWaitMs = 0;
+      h.attempts = 0;
       await teardown();
       vi.restoreAllMocks();
     });
@@ -508,7 +606,7 @@ describe.skipIf(!url)(
       expect(await outside(['C', 'D', 'E', 'F'])).toEqual(before);
     });
 
-    it('writes only an isolated created row, and takes no lock without a typed token', async () => {
+    it('writes only an isolated created row, and takes no lock for it without a typed token', async () => {
       const before = await outside(['A', 'B', 'C', 'D', 'E', 'F']);
       const token = rnd();
       const body = createBody(token, { isolateAuth: true });
@@ -518,11 +616,329 @@ describe.skipIf(!url)(
       expect(await outside(['A', 'B', 'C', 'D', 'E', 'F'])).toEqual(before);
       const release = await holdSet();
       try {
-        expect((await call('POST', '', createBody(null))).status).toBe(201);
+        expect((await call('POST', '', createBody(null, { isolateAuth: true }))).status).toBe(201);
       } finally {
         await release();
       }
       expect(await outside(['A', 'B', 'C', 'D', 'E', 'F'])).toEqual(before);
+    });
+
+    describe('a row that joins a login set receives the login of the set', () => {
+      it.each(['A', 'B'] as const)(
+        'a created row without a typed token takes the login of the member with the newest token (%s)',
+        async (newest) => {
+          await differ(newest);
+          const before = await outside(['A', 'B', 'C', 'D', 'E', 'F']);
+          const body = createBody(null);
+          const res = await call('POST', '', body);
+          expect(res.status).toBe(201);
+          const created = await findNew(body.label);
+          await expectJoined(created.id, newest, 3);
+          expect((await byAction(SET_ACTION)).length).toBe(1);
+          expect(await outside(['A', 'B', 'C', 'D', 'E', 'F'])).toEqual(before);
+        },
+      );
+
+      it('a created row takes an unset check stamp from a member that was never checked', async () => {
+        await differ('B');
+        await db
+          .update(schema.cliProviders)
+          .set({ authLastCheckedAt: null })
+          .where(eq(schema.cliProviders.id, rows.B.id));
+        const body = createBody(null);
+        expect((await call('POST', '', body)).status).toBe(201);
+        const created = await findNew(body.label);
+        expect((await plain(created.id, TOKEN)) === (await plain(rows.B.id, TOKEN))).toBe(true);
+        expect([created.authStatus, created.authMessage]).toEqual(['ok', 'newest member']);
+        expect(await stampText(created.id)).toBeNull();
+      });
+
+      it('a created row copies a status that is not ok', async () => {
+        await differ('B');
+        await db
+          .update(schema.cliProviders)
+          .set({ authStatus: 'auth_denied', authMessage: 'access denied' })
+          .where(eq(schema.cliProviders.id, rows.B.id));
+        rows.B = await provider(rows.B.id);
+        const body = createBody(null);
+        expect((await call('POST', '', body)).status).toBe(201);
+        const created = await findNew(body.label);
+        expect([created.authStatus, created.authMessage]).toEqual(['auth_denied', 'access denied']);
+        await expectJoined(created.id, 'B', 3);
+      });
+
+      it('a created API-key row is not seeded and takes no lock', async () => {
+        const before = await outside(['A', 'B', 'C', 'D', 'E', 'F']);
+        const body = createBody(null, { authMode: 'api_key' });
+        const release = await holdSet('D');
+        let res: Response;
+        try {
+          res = await call('POST', '', body);
+        } finally {
+          await release();
+        }
+        expect(res.status).toBe(201);
+        const created = await findNew(body.label);
+        expect(await plain(created.id, TOKEN)).toBeUndefined();
+        expect(await byAction(SET_ACTION)).toEqual([]);
+        expect(await outside(['A', 'B', 'C', 'D', 'E', 'F'])).toEqual(before);
+      });
+
+      it('a created row keeps its defaults when no member of the set holds a token', async () => {
+        await dropToken('A');
+        await dropToken('B');
+        const before = await outside(['A', 'B', 'C', 'D', 'E', 'F']);
+        const body = createBody(null);
+        expect((await call('POST', '', body)).status).toBe(201);
+        const created = await findNew(body.label);
+        expect(await plain(created.id, TOKEN)).toBeUndefined();
+        expect([created.authStatus, created.authMessage, created.authLastCheckedAt]).toEqual([
+          'unknown',
+          null,
+          null,
+        ]);
+        expect(await byAction(SET_ACTION)).toEqual([]);
+        expect(await outside(['A', 'B', 'C', 'D', 'E', 'F'])).toEqual(before);
+      });
+
+      it('a created row with a typed token is not seeded from the set', async () => {
+        await differ('B');
+        const token = rnd();
+        const body = createBody(token);
+        expect((await call('POST', '', body)).status).toBe(201);
+        const created = await findNew(body.label);
+        expect(await joinEvents()).toEqual([]);
+        await expectWritten(token, ['A', 'B', created.id]);
+      });
+
+      it('a clone of the older member joins the set and takes the login of the newest member', async () => {
+        await differ('B');
+        const before = await outside(['A', 'B', 'C', 'D', 'E', 'F']);
+        const res = await cloneOf('A');
+        expect(res.status).toBe(201);
+        const id = ((await res.json()) as { provider: { id: string } }).provider.id;
+        await expectJoined(id, 'B', 3);
+        for (const name of [USAGE, 'ANTHROPIC_AUTH_TOKEN'])
+          expect((await plain(id, name)) === (await plain(rows.A.id, name)), name).toBe(true);
+        expect(await cloneMetadata()).toEqual({
+          sourceProviderId: rows.A.id,
+          secretCount: 2,
+          secretNames: ['ANTHROPIC_AUTH_TOKEN', USAGE],
+        });
+        expect((await byAction(SET_ACTION)).length).toBe(1);
+        expect(await outside(['A', 'B', 'C', 'D', 'E', 'F'])).toEqual(before);
+      });
+
+      it('a clone of a row with a legacy environment token takes the login of the set instead', async () => {
+        await differ('B');
+        await dropToken('A');
+        await db
+          .update(schema.cliProviders)
+          .set({ envVars: { KEEP: 'yes', [TOKEN]: rnd() } })
+          .where(eq(schema.cliProviders.id, rows.A.id));
+        rows.A = await provider(rows.A.id);
+        const res = await cloneOf('A');
+        expect(res.status).toBe(201);
+        const id = ((await res.json()) as { provider: { id: string } }).provider.id;
+        const token = await plain(id, TOKEN);
+        expect(token === (await plain(rows.B.id, TOKEN))).toBe(true);
+        expect((await cloneMetadata()).secretNames).not.toContain(TOKEN);
+        expect((await joinEvents()).map((a) => a.targetId)).toEqual([id]);
+      });
+
+      it('a clone of an isolated subscription row copies no token and takes no lock', async () => {
+        const before = await outside(['A', 'B', 'D', 'E', 'F']);
+        const releases = [await holdSet(), await holdSet('C')];
+        let res: Response;
+        try {
+          res = await cloneOf('C');
+        } finally {
+          for (const release of releases) await release();
+        }
+        expect(res.status).toBe(201);
+        const id = ((await res.json()) as { provider: { id: string } }).provider.id;
+        expect(await plain(id, TOKEN)).toBeUndefined();
+        for (const name of [USAGE, 'ANTHROPIC_AUTH_TOKEN'])
+          expect((await plain(id, name)) === (await plain(rows.C.id, name)), name).toBe(true);
+        expect((await cloneMetadata()).secretNames).toEqual(['ANTHROPIC_AUTH_TOKEN', USAGE]);
+        expect(await byAction(SET_ACTION)).toEqual([]);
+        expect(await outside(['A', 'B', 'D', 'E', 'F'])).toEqual(before);
+      });
+
+      it('a clone of an isolated row with a legacy environment token gets no token', async () => {
+        await db
+          .update(schema.cliProviders)
+          .set({ envVars: { KEEP: 'yes', [TOKEN]: rnd() } })
+          .where(eq(schema.cliProviders.id, rows.C.id));
+        const res = await cloneOf('C');
+        expect(res.status).toBe(201);
+        const id = ((await res.json()) as { provider: { id: string } }).provider.id;
+        expect(await plain(id, TOKEN)).toBeUndefined();
+        expect((await cloneMetadata()).secretNames).not.toContain(TOKEN);
+        expect(await byAction(SET_ACTION)).toEqual([]);
+      });
+
+      it('a clone of an API-key row copies every secret as before', async () => {
+        const res = await cloneOf('D');
+        expect(res.status).toBe(201);
+        const id = ((await res.json()) as { provider: { id: string } }).provider.id;
+        for (const name of NAMES)
+          expect((await plain(id, name)) === (await plain(rows.D.id, name)), name).toBe(true);
+        expect((await cloneMetadata()).secretNames).toEqual([...NAMES].sort());
+        expect(await byAction(SET_ACTION)).toEqual([]);
+      });
+
+      it.each([
+        ['an isolated row un-isolated', 'C', { isolateAuth: false }],
+        ['an API-key row set to subscription', 'D', { authMode: 'subscription' }],
+      ] as [string, Key, object][])(
+        'a settings save of %s replaces its token and state with those of the set',
+        async (_name, key, change) => {
+          await differ('B');
+          const own = await plain(rows[key].id, TOKEN);
+          const rest = (['A', 'B', 'C', 'D', 'E', 'F'] as Key[]).filter((k) => k !== key);
+          const before = await outside(rest);
+          expect((await patch(key, change)).status).toBe(200);
+          await expectJoined(rows[key].id, 'B', 3);
+          expect((await plain(rows[key].id, TOKEN)) === own).toBe(false);
+          expect((await byAction(SET_ACTION)).length).toBe(1);
+          expect(await outside(rest)).toEqual(before);
+        },
+      );
+
+      it.each([
+        ['an isolated row un-isolated', 'C', { isolateAuth: false }],
+        ['an API-key row set to subscription', 'D', { authMode: 'subscription' }],
+      ] as [string, Key, object][])(
+        'a settings save of %s that types a token is not seeded from the set',
+        async (_name, key, change) => {
+          await differ('B');
+          const token = rnd();
+          expect((await patch(key, { ...change, envVars: { [TOKEN]: token } })).status).toBe(200);
+          expect(await joinEvents()).toEqual([]);
+          await expectWritten(token, ['A', 'B', rows[key].id]);
+        },
+      );
+
+      it.each([
+        ['an isolated row un-isolated', 'C', { isolateAuth: false }],
+        ['an API-key row set to subscription', 'D', { authMode: 'subscription' }],
+      ] as [string, Key, object][])(
+        'a settings save of %s keeps its own login when the set has none',
+        async (_name, key, change) => {
+          await dropToken('A');
+          await dropToken('B');
+          const own = await plain(rows[key].id, TOKEN);
+          expect((await patch(key, change)).status).toBe(200);
+          const p = await provider(rows[key].id);
+          expect([p.authStatus, p.authMessage, p.authGeneration]).toEqual([
+            rows[key].authStatus,
+            rows[key].authMessage,
+            rows[key].authGeneration,
+          ]);
+          expect((await plain(rows[key].id, TOKEN)) === own).toBe(true);
+          expect(await byAction(SET_ACTION)).toEqual([]);
+        },
+      );
+
+      it('a settings save that moves a row to API-key mode is not seeded from the API-key set', async () => {
+        await differ('B');
+        const own = await plain(rows.A.id, TOKEN);
+        const rest = ['B', 'C', 'D', 'E', 'F'] as Key[];
+        const before = await outside(rest);
+        expect((await patch('A', { authMode: 'api_key' })).status).toBe(200);
+        expect(await joinEvents()).toEqual([]);
+        expect((await plain(rows.A.id, TOKEN)) === own).toBe(true);
+        const p = await provider(rows.A.id);
+        expect([p.authStatus, p.authMessage, p.authGeneration]).toEqual([
+          rows.A.authStatus,
+          rows.A.authMessage,
+          rows.A.authGeneration,
+        ]);
+        expect(await outside(rest)).toEqual(before);
+      });
+
+      it('a settings save that keeps a row in its set does not seed it', async () => {
+        await differ('B');
+        const own = await plain(rows.A.id, TOKEN);
+        const label = `kept-${rnd()}`;
+        const res = await patch('A', { label, authMode: 'subscription', isolateAuth: false });
+        expect(res.status).toBe(200);
+        expect(await joinEvents()).toEqual([]);
+        expect((await plain(rows.A.id, TOKEN)) === own).toBe(true);
+        const p = await provider(rows.A.id);
+        expect(p.label).toBe(label);
+        expect([p.authStatus, p.authMessage, p.authGeneration]).toEqual([
+          rows.A.authStatus,
+          rows.A.authMessage,
+          rows.A.authGeneration,
+        ]);
+      });
+
+      it.each([
+        ['a created row', () => call('POST', '', createBody(null))],
+        ['a cloned row', () => cloneOf('A')],
+      ])('%s is refused as busy while the set is locked and changes nothing', async (_n, run) => {
+        const before = await world();
+        const release = await holdSet();
+        try {
+          const res = await run();
+          expect(res.status).toBe(409);
+          expect(((await res.json()) as { code?: string }).code).toBe('cli_auth_busy');
+        } finally {
+          await release();
+        }
+        expect(await world()).toEqual(before);
+      });
+
+      it.each([
+        ['a created row', () => call('POST', '', createBody(null))],
+        ['a cloned row', () => cloneOf('A')],
+      ])('%s waits for the set lock and joins once it is released', async (_n, run) => {
+        await differ('B');
+        h.joinWaitMs = 5000;
+        const release = await holdSet();
+        let pending: Response | Promise<Response>;
+        try {
+          h.attempts = 0;
+          pending = run();
+          // A try that has come back was refused by the held lock, so the request is now waiting.
+          const deadline = Date.now() + 5000;
+          while (h.attempts < 1) {
+            if (Date.now() > deadline)
+              throw new Error('the held lock did not refuse the request within 5000 ms');
+            await new Promise((resolve) => setTimeout(resolve, 20));
+          }
+        } finally {
+          await release();
+        }
+        const res = await pending;
+        expect(res.status).toBe(201);
+        const id = ((await res.json()) as { provider: { id: string } }).provider.id;
+        await expectJoined(id, 'B', 3);
+      });
+
+      it('a settings save is refused when its scope changed between the read and the lock', async () => {
+        await differ('B');
+        const before = await world();
+        h.afterLock = async () => {
+          await db
+            .update(schema.cliProviders)
+            .set({ isolateAuth: false })
+            .where(eq(schema.cliProviders.id, rows.C.id));
+        };
+        const res = await patch('C', { isolateAuth: false });
+        expect(res.status).toBe(409);
+        expect(((await res.json()) as { code?: string }).code).toBe('cli_auth_busy');
+        expect(h.afterLock).toBeUndefined();
+        const now = await world();
+        const other = (p: Row) => p.id !== rows.C.id;
+        expect(now.providers.filter(other)).toEqual(before.providers.filter(other));
+        expect(now.secrets).toEqual(before.secrets);
+        expect(now.audits).toEqual(before.audits);
+        expect(await joinEvents()).toEqual([]);
+        expect(h.log).not.toHaveBeenCalled();
+      });
     });
 
     describe('when a write for another row of the set fails', () => {
@@ -536,6 +952,22 @@ describe.skipIf(!url)(
       ])('%s changes nothing when a sibling secret write is refused', async (_name, run) => {
         const before = await world();
         const drop = await refuseSecretWrites();
+        try {
+          expect((await run()).status).toBeGreaterThanOrEqual(400);
+        } finally {
+          await drop();
+        }
+        expect(await world()).toEqual(before);
+        expect(h.log).not.toHaveBeenCalled();
+      });
+
+      it.each([
+        ['a created row', () => call('POST', '', createBody(null))],
+        ['a cloned row', () => cloneOf('A')],
+        ['a settings save that joins a set', () => patch('C', { isolateAuth: false })],
+      ])('%s changes nothing when the audit insert of its join is refused', async (_name, run) => {
+        const before = await world();
+        const drop = await refuseJoinAudit();
         try {
           expect((await run()).status).toBeGreaterThanOrEqual(400);
         } finally {
@@ -585,6 +1017,9 @@ describe.skipIf(!url)(
         ['a settings save', 5, () => patch('A', { envVars: { KEEP: 'yes', [TOKEN]: rnd() } })],
         ['a created row', 3, () => call('POST', '', createBody(rnd()))],
         ['a token delete', 2, () => del('A', TOKEN)],
+        ['a created row without a token', 2, () => call('POST', '', createBody(null))],
+        ['a cloned row', 2, () => cloneOf('A')],
+        ['a settings save that joins a set', 8, () => patch('C', { isolateAuth: false })],
       ];
       it.each(paths)(
         '%s is refused and changes nothing at every check',
@@ -906,6 +1341,86 @@ describe.skipIf(!url)(
           await expectWritten(token, [ids.R1, ids.R2, ids.R3]);
           expect(await plain(ids.X, TOKEN)).toBeUndefined();
           expect((await provider(ids.X)).authGeneration).toBe(before.authGeneration);
+        });
+      });
+
+      /** R1 holds the oldest token, R2 the newest; R3 is the row that joins or is cloned. */
+      const dateTokens = async (ids: Record<string, string>) => {
+        for (const [key, at] of [
+          ['R1', PAST],
+          ['R2', new Date('2024-01-01T00:00:00Z')],
+        ] as const)
+          await db
+            .update(schema.cliProviderSecrets)
+            .set({ updatedAt: at })
+            .where(
+              and(
+                eq(schema.cliProviderSecrets.providerId, ids[key]!),
+                eq(schema.cliProviderSecrets.secretName, TOKEN),
+              ),
+            );
+      };
+      const expectSeededFrom = async (id: string, from: string) => {
+        const token = await plain(id, TOKEN);
+        expect(token).toBeDefined();
+        expect(token === (await plain(from, TOKEN))).toBe(true);
+        const [p, src] = await Promise.all([provider(id), provider(from)]);
+        expect([p.authStatus, p.authMessage, p.authGeneration]).toEqual([
+          src.authStatus,
+          src.authMessage,
+          src.authGeneration,
+        ]);
+        expect(await stampText(id)).toBe(await stampText(from));
+      };
+
+      it('a created row without a token holds none of the set before the lock', async () => {
+        const { W, ids } = await seedW();
+        await finish(W, async () => {
+          await dateTokens(ids);
+          const body = createBody(null);
+          const { held, res } = await besideHolder(ids.R1, [ids.R2, ids.R3], () =>
+            call('POST', '', body),
+          );
+          expect(held).toEqual([]);
+          expect(res.status).toBe(201);
+          const created = await db.query.cliProviders.findFirst({
+            where: and(
+              eq(schema.cliProviders.userId, W),
+              eq(schema.cliProviders.label, body.label),
+            ),
+          });
+          await expectSeededFrom(created!.id, ids.R2);
+        });
+      });
+
+      it('a clone of a member holds none of the set before the lock', async () => {
+        const { W, ids } = await seedW();
+        await finish(W, async () => {
+          await dateTokens(ids);
+          const { held, res } = await besideHolder(ids.R1, [ids.R2, ids.R3], () =>
+            call('POST', `/${ids.R3}/clone`),
+          );
+          expect(held).toEqual([]);
+          expect(res.status).toBe(201);
+          const cloneId = ((await res.json()) as { provider: { id: string } }).provider.id;
+          await expectSeededFrom(cloneId, ids.R2);
+        });
+      });
+
+      it('a settings save that joins through the highest id holds none of the set before the lock', async () => {
+        const { W, ids } = await seedW();
+        await finish(W, async () => {
+          await dateTokens(ids);
+          await db
+            .update(schema.cliProviders)
+            .set({ isolateAuth: true })
+            .where(eq(schema.cliProviders.id, ids.R3));
+          const { held, res } = await besideHolder(ids.R1, [ids.R2, ids.R3], () =>
+            call('PATCH', `/${ids.R3}`, { isolateAuth: false }),
+          );
+          expect(held).toEqual([]);
+          expect(res.status).toBe(200);
+          await expectSeededFrom(ids.R3, ids.R2);
         });
       });
 
