@@ -2490,9 +2490,9 @@ Owner decision 2026-11-12: item 1: boot refuses to generate a new key when encry
 35. From #1141 review, low, PRE-EXISTING: `GET /admin/users` returns name, git name and git email for every row; only orphan rows need them.
 36. From #1142 reviews, low: the users page scrolls back to the hash row after every action reload; maintenance rows with a null owner link to the list without a highlight; maintenance and audit unreadable labels show no visible short id; the auth-throttle Redis test covers only the account bucket for `recover`/`reset`.
 
-### T590 · FNF[cli-auth-lock-followups] · CLI auth lock and sign-out follow-ups (+31)
+### T590 · FNF[cli-auth-lock-followups] · CLI auth lock and sign-out follow-ups (+33)
 
-status: open (lows 20, 22, 24, 25, 26, 29, 30-31; item 2 accepted) · kind: fix · found: #1061 reviews 2026-11-10 · priority: P3
+status: open (lows 20, 22, 24, 25, 26, 29, 30-33; item 2 accepted) · kind: fix · found: #1061 reviews 2026-11-10 · priority: P3
 DECIDED by the owner 2026-11-11: all remaining groups approved (lock correctness 4, 6, 7, 15; sign-out flow 8, 9, 10, 14, 18; web UI 16, 17; tests and minor 11, 12, 13). Item 2 stays accepted and documented. Overnight run authorized.
 
 1. DONE #1062. `DELETE /:providerId/usage-auth` and `DELETE /:providerId/secrets/:secretName` (api cli-providers.ts ~:1165-1230) take no auth lock, so a usage refresh that read the secret before the delete can write it back. PRE-EXISTING, moderate. Fix: take the lock (`withCliAuthLock`) like the writers.
@@ -2526,6 +2526,8 @@ DECIDED by the owner 2026-11-11: all remaining groups approved (lock correctness
 29. The superseded-job return runs before the resumed scope compare (handlers.ts). PRE-EXISTING ordering, minor. Also: one over-long line in docs/architecture/sandbox.md (sign-out section).
 30. Sync-back reads the scope from its caller rather than re-reading it under the lock (worker sandbox/task-auth-volume.ts). PRE-EXISTING, minor (found #1089 review).
 31. Two stale code comments left by #1089 (move-secret-env.ts copy phase, cli-auth-lock.ts wait helper). Cosmetic.
+32. A login or a Test writes `auth_status` only on the row it ran on (worker cli-exec/handlers.ts ~:755-772), while a sign-out resets every row sharing the auth volume (~:1451-1472). After a sign-out and a login through one row, its siblings stay `unknown` in the database (seen: 40 of 41 `claude-code` rows). The providers pages now read the shared status (#1280); the stored rows and the usage route's per-row `ok` check (api usage-window.ts ~:117) still do not. PRE-EXISTING, minor. Fix direction: write an `ok` probe to the rows sharing the volume, with the auth generation fences reviewed.
+33. Sign out is offered only on a row whose own stored status is `ok` (web cli-providers/page.tsx `showSignOut`), though any row sharing the auth volume signs the same login out; siblings of the logged-in row offer neither Sign out nor Log in. PRE-EXISTING, cosmetic. Fix: read `storedLoginStatus`, or fix item 32.
 
 ### T592 · FNF[fs-park-recovery] · park recovery runs only where fs-safe writes; legacy truncated parks (+1)
 
