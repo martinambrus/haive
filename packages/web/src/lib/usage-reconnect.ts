@@ -77,7 +77,8 @@ export function storedLoginStatus(row: LoginRow, rows: readonly LoginRow[]): Cli
  *  `storedLoginStatus`). Reading only the Test result left the button missing after a
  *  sign-out, which clears that result and writes `unknown` to the row, until the user ran
  *  Test to rediscover what the row already said. An api_key row's `unknown` says nothing
- *  about a login, so the row alone never offers it there. */
+ *  about a login, so the row alone never offers it there. A dead usage token offers it only
+ *  for a CLI whose usage a login repairs. */
 export function cliLoginOffered(input: {
   name: CliProviderName;
   authMode: CliAuthMode;
@@ -86,7 +87,9 @@ export function cliLoginOffered(input: {
   usageTokenDead: boolean;
 }): boolean {
   if (!CLI_LOGIN_PROVIDERS.includes(input.name)) return false;
-  if (input.usageTokenDead) return true;
+  // A dead usage token is itself the evidence, but only where a login is what repairs it:
+  // claude-code's meters run on a separate usage-OAuth token with its own Reconnect.
+  if (input.usageTokenDead && usageReconnectFix(input.name) === 'cli-login') return true;
   const status =
     input.testStatus ?? (input.authMode === 'subscription' ? input.rowStatus : undefined);
   return status != null && LOGIN_RECOVERABLE.includes(status);

@@ -111,6 +111,11 @@ describe('cliLoginOffered', () => {
   it('offers it for a dead usage token whatever the status', () => {
     expect(cliLoginOffered({ ...base, rowStatus: 'ok', usageTokenDead: true })).toBe(true);
   });
+  it('does not offer it for a dead usage token that a login does not repair', () => {
+    expect(
+      cliLoginOffered({ ...base, name: 'claude-code', rowStatus: 'ok', usageTokenDead: true }),
+    ).toBe(false);
+  });
   it('never offers it for a provider with no interactive login', () => {
     expect(cliLoginOffered({ ...base, name: 'gemini', rowStatus: 'unknown' })).toBe(false);
   });
