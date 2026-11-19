@@ -7,7 +7,7 @@ import {
   secretsService,
 } from '@haive/shared';
 import { schema, type Database } from '@haive/database';
-import { resolveProviderSecrets } from '../secrets/provider-secrets.js';
+import { readProviderSecret } from '../secrets/provider-secrets.js';
 import { defaultDockerRunner, type DockerRunner } from '../sandbox/docker-runner.js';
 import { shellQuote } from '../sandbox/shell-quote.js';
 
@@ -21,8 +21,7 @@ export async function readProviderSecretToken(
   providerId: string,
   secretName: string,
 ): Promise<string | null> {
-  const secrets = await resolveProviderSecrets(db, providerId);
-  return secrets[secretName] ?? null;
+  return readProviderSecret(db, providerId, secretName);
 }
 
 /** Upsert a cli_provider_secret (envelope-encrypted). The usage poller calls this to

@@ -1,3 +1,4 @@
+import { randomBytes } from 'node:crypto';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Database } from '@haive/database';
 import { encryptCliLoginCandidate, envelopeEncrypt, type CliProbeJobPayload } from '@haive/shared';
@@ -175,5 +176,27 @@ describe('login candidate queue consumer and sandbox credential boundary', () =>
     expect(h.factory.mock.calls[0]?.[7]?.length > 0).toBe(true);
     const auth = h.spawn.mock.calls[1]?.[0];
     expect(auth.env.CLAUDE_CODE_OAUTH_TOKEN === OLD).toBe(true);
+  });
+
+  it('keeps the usage grant out of every spawn env of a stored-token probe', async () => {
+    const grant = randomBytes(16).toString('hex');
+    const stored = randomBytes(16).toString('hex');
+    h.readSecrets.mockResolvedValue([
+      { secretName: 'CLAUDE_CODE_OAUTH_TOKEN', ...envelopeEncrypt(stored, KEK) },
+      { secretName: 'CLAUDE_USAGE_OAUTH', ...envelopeEncrypt(grant, KEK) },
+    ]);
+    h.spawn.mockImplementation(async () => ({
+      exitCode: 0,
+      stdout: 'fixture version',
+      stderr: '',
+    }));
+    await handleProbeJob(db, { providerId: PROVIDER, userId: USER, targetMode: 'cli' });
+    expect(h.spawn.mock.calls.length > 0).toBe(true);
+    for (const [spec] of h.spawn.mock.calls) {
+      expect(Object.keys(spec.env ?? {}).includes('CLAUDE_USAGE_OAUTH')).toBe(false);
+      expect(Object.values(spec.env ?? {}).includes(grant)).toBe(false);
+    }
+    const auth = h.spawn.mock.calls[1]?.[0];
+    expect(auth.env.CLAUDE_CODE_OAUTH_TOKEN === stored).toBe(true);
   });
 });

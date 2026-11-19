@@ -6,7 +6,7 @@ import { randomBytes } from 'node:crypto';
 import { DrizzleQueryError } from 'drizzle-orm/errors';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Database } from '@haive/database';
-import type { CliExecJobPayload } from '@haive/shared';
+import { envelopeEncrypt, secretsService, type CliExecJobPayload } from '@haive/shared';
 
 const stubs = vi.hoisted(() => ({
   scoreHouseRules: vi.fn((..._args: unknown[]): Promise<void> | undefined => undefined),
@@ -107,6 +107,8 @@ function fakeDb(opts: {
   finalized?: boolean;
   /** The task the job's one read of the run returns with it. */
   task?: { status: string; deadAt: Date | null };
+  /** Rows the provider-secrets read returns. */
+  providerSecrets?: unknown[];
 }) {
   const writes: Write[] = [];
   let txSeq = 0;
@@ -123,6 +125,7 @@ function fakeDb(opts: {
         }),
       },
       tasks: { findFirst: async () => ({ status: 'running' }) },
+      cliProviderSecrets: { findMany: async () => opts.providerSecrets ?? [] },
     },
     update: (table: unknown) => ({
       set: (set: Record<string, unknown>) => ({
@@ -195,6 +198,30 @@ beforeEach(() => {
 });
 
 describe('a cli run start', () => {
+  it('keeps the usage grant out of the secrets a run is executed with', async () => {
+    const kek = 'ab'.repeat(32);
+    const token = randomBytes(16).toString('hex');
+    const grant = randomBytes(16).toString('hex');
+    const kekSpy = vi.spyOn(secretsService, 'getMasterKek').mockResolvedValue(kek);
+    try {
+      const { db } = fakeDb({
+        providerSecrets: [
+          { secretName: 'CLAUDE_CODE_OAUTH_TOKEN', ...envelopeEncrypt(token, kek) },
+          { secretName: 'CLAUDE_USAGE_OAUTH', ...envelopeEncrypt(grant, kek) },
+        ],
+      });
+      stubs.executeByKind.mockResolvedValue(ok);
+      await handleCliExecJob(db, { ...base, kind: 'cli', cliProviderId: 'provider-1' });
+      expect(stubs.executeByKind).toHaveBeenCalledOnce();
+      const secrets = stubs.executeByKind.mock.calls[0]?.[3] as Record<string, string>;
+      expect(Object.keys(secrets).includes('CLAUDE_USAGE_OAUTH')).toBe(false);
+      expect(Object.values(secrets).includes(grant)).toBe(false);
+      expect(secrets.CLAUDE_CODE_OAUTH_TOKEN === token).toBe(true);
+    } finally {
+      kekSpy.mockRestore();
+    }
+  });
+
   it('returns request evidence only in memory, keeping persisted columns unchanged', async () => {
     const { db, writes } = fakeDb({});
     const requestUsage = {
