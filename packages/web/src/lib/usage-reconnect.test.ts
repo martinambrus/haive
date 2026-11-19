@@ -153,6 +153,13 @@ describe('storedLoginStatus', () => {
     const rows = [row('a', 'ok', signedOutAt), row('b', 'auth_expired', loggedInAt)];
     expect(storedLoginStatus(rows[1]!, rows)).toBe('auth_expired');
   });
+  it('keeps a claude-code row to itself: its login is a token saved on that one row', () => {
+    const rows = [
+      row('a', 'ok', loggedInAt, { name: 'claude-code' }),
+      row('b', 'unknown', signedOutAt, { name: 'claude-code' }),
+    ];
+    expect(storedLoginStatus(rows[1]!, rows)).toBe('unknown');
+  });
   it('ignores a sibling that does not share the auth volume', () => {
     const own = row('b', 'unknown', signedOutAt);
     expect(storedLoginStatus(own, [row('a', 'ok', loggedInAt, { isolateAuth: true })])).toBe(

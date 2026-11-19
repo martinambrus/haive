@@ -49,15 +49,22 @@ function checkedAt(row: LoginRow): number {
   return Number.isNaN(at) ? 0 : at;
 }
 
+/** CLIs whose subscription login is a token saved on the row it was made on, not a file in
+ *  the auth volume that rows share. A login through one such row logs no other row in. This
+ *  is the web's copy of the worker's rule: its sign-out deletes the login token of the one
+ *  row it ran on, and each run reads the token of its own row. */
+const ROW_LOGIN_PROVIDERS: readonly CliProviderName[] = ['claude-code'];
+
 /** A row's stored auth status as its login really stands, for `cliLoginOffered`.
  *
- *  Rows that are not isolated share one auth volume per user, CLI and auth mode. A sign-out
- *  resets every one of them, but a login or a Test writes only the row it ran on, so after
- *  logging in through one row its siblings still say `unknown` about a login that works. A
- *  sibling that checked ok after this row was last written is the newer word on that shared
- *  login. An isolated row speaks for itself. */
+ *  For most CLIs the login is a file in an auth volume, and rows that are not isolated share
+ *  one volume per user, CLI and auth mode. A sign-out resets every one of them, but a login
+ *  or a Test writes only the row it ran on, so after logging in through one row its siblings
+ *  still say `unknown` about a login that works. A sibling that checked ok after this row
+ *  was last written is the newer word on that shared login. An isolated row, and a row of a
+ *  CLI that keeps its login on the row, speaks for itself. */
 export function storedLoginStatus(row: LoginRow, rows: readonly LoginRow[]): CliAuthStatus {
-  if (row.isolateAuth) return row.authStatus;
+  if (row.isolateAuth || ROW_LOGIN_PROVIDERS.includes(row.name)) return row.authStatus;
   const own = checkedAt(row);
   const newerOk = rows.some(
     (other) =>
