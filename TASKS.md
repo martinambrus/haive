@@ -709,6 +709,12 @@ Paths are under `packages/`. Items 2 to 4 are PRE-EXISTING; item 1 is PRE-EXISTI
 12. The same shape in the grok credential refresh (`worker/src/usage-window/credential-refresh.ts` ~:167-181): on `invalid_grant` one autocommit UPDATE marks every row sharing the volume, in scan order. Lock those rows in id order first.
 13. A task insert that names both `cliProviderId` and `summaryCliProviderId` (`api/src/routes/tasks/index.ts` ~:751-760, `database/src/schema/tasks.ts` ~:156-160) takes its two foreign-key share locks in constraint order, not id order, so it can deadlock with a holder of `FOR UPDATE` on provider rows in id order (the image job, `lockLoginSet`). Direction: those id-ordered lockers change no key and delete no row, so `FOR NO KEY UPDATE` would stop them conflicting with child-row inserts at all; check first that nothing relies on them blocking a concurrent secret insert. Rare (two share locks microseconds apart), and the loser gets a deadlock error and can retry.
 
+### T724 · Step 11 review cannot keep one learning the recorder plans to delete
+
+status: open · kind: design · found: agent-memory pilot pair 2 (the treatment task's step 11) 2026-11-19 · priority: P4
+
+PRE-EXISTING, by design today. The step-11 learning review offers `writeFiles` (every planned op or none), the KB and skill sync switches, and an instruction. A planned insert or update can be vetoed alone by emptying its staged draft in the inline editor. A planned delete cannot: a delete op gets no `editPath` (`packages/worker/src/step-engine/steps/workflow/11-phase-8-learning.ts` `learningOpsToDiffFiles` ~:1103, pinned by `11-phase-8-learning.test.ts` ~:528-529). A reviewer who wants to keep one learning the recorder calls stale must reject every op or spend a re-roll through the instruction. Seen on a real run: the recorder planned 2 new, 2 updated and 1 removed learning, and the removal could only be refused by rejecting all five. Needs a decision: a per-op keep for deletes (for example a staged tombstone the reviewer can clear) or a per-op checklist for every op. Interacts with the deletion identity records (#1202) and the replay rules in T672.
+
 ### T721 · The Claude usage grant reaches sandbox environments
 
 status: open (items 2-9; item 1 done #1281) · kind: security · found: login-set design (T720) 2026-11-19 · priority: P3 (was P1 until #1281)
