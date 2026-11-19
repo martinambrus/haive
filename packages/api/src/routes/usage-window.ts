@@ -85,6 +85,7 @@ async function credentialRepairedAt(
     db
       .select({
         id: schema.cliProviders.id,
+        name: schema.cliProviders.name,
         authStatus: schema.cliProviders.authStatus,
         authLastCheckedAt: schema.cliProviders.authLastCheckedAt,
       })
@@ -114,7 +115,9 @@ async function credentialRepairedAt(
     const current = out[id];
     if (!current || at.getTime() > current.getTime()) out[id] = at;
   };
-  for (const p of probes) if (p.authStatus === 'ok') keepLatest(p.id, p.authLastCheckedAt);
+  // A claude-code login is not a usage repair; its set-wide ok must not clear needs_reconnect.
+  for (const p of probes)
+    if (p.authStatus === 'ok' && p.name !== 'claude-code') keepLatest(p.id, p.authLastCheckedAt);
   for (const s of secrets) keepLatest(s.providerId, s.updatedAt);
   return out;
 }

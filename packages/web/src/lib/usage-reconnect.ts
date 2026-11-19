@@ -49,10 +49,11 @@ function checkedAt(row: LoginRow): number {
   return Number.isNaN(at) ? 0 : at;
 }
 
-/** CLIs whose subscription login is a token saved on the row it was made on, not a file in
- *  the auth volume that rows share. A login through one such row logs no other row in. This
- *  is the web's copy of the worker's rule: its sign-out deletes the login token of the one
- *  row it ran on, and each run reads the token of its own row. */
+/** CLIs whose subscription login is a token stored on each row, not a file in the auth volume
+ *  that rows share. A login writes the token to every row that shares the login (same user,
+ *  CLI and auth mode, not isolated) and a sign-out deletes it from every such row, so those
+ *  rows agree; each run still reads the token of its own row. A row's own stored status is
+ *  therefore the word to read: nothing is borrowed from a sibling. */
 const ROW_LOGIN_PROVIDERS: readonly CliProviderName[] = ['claude-code'];
 
 /** A row's stored auth status as its login really stands, for `cliLoginOffered`.

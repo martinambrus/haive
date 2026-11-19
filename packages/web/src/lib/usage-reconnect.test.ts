@@ -153,7 +153,7 @@ describe('storedLoginStatus', () => {
     const rows = [row('a', 'ok', signedOutAt), row('b', 'auth_expired', loggedInAt)];
     expect(storedLoginStatus(rows[1]!, rows)).toBe('auth_expired');
   });
-  it('keeps a claude-code row to itself: its login is a token saved on that one row', () => {
+  it("does not borrow a sibling's ok for a claude-code row: a login writes every row that shares it", () => {
     const rows = [
       row('a', 'ok', loggedInAt, { name: 'claude-code' }),
       row('b', 'unknown', signedOutAt, { name: 'claude-code' }),

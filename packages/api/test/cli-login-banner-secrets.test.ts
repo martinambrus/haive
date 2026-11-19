@@ -160,7 +160,25 @@ beforeEach(() => {
         h.audits.push(ev);
       },
     }),
-    select: () => ({ from: () => ({ where: () => ({ for: async () => [{ envVars: {} }] }) }) }),
+    select: () => {
+      const chain: Record<string, unknown> = {
+        then: (resolve: (rows: unknown[]) => unknown, reject: (e: unknown) => unknown) =>
+          Promise.resolve([
+            {
+              id: PROVIDER,
+              userId: 'user',
+              name: providerName,
+              authMode: 'subscription',
+              isolateAuth: false,
+            },
+          ]).then(resolve, reject),
+        for: async () => [{ id: PROVIDER, envVars: {} }],
+      };
+      chain.from = () => chain;
+      chain.where = () => chain;
+      chain.orderBy = () => chain;
+      return chain;
+    },
     query: {
       users: { findFirst: async () => ({ id: 'user', status: 'active', tokenVersion: 0 }) },
       cliProviders: {

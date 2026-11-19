@@ -378,15 +378,18 @@ Antigravity record `cli_provider.login` with source `volume` before their post-l
 probe. The CLI has already written the credential into its volume: a failed probe,
 closed dialog or refused audit cannot undo it, so the row is deliberately best-effort.
 Metadata never includes credentials, output, codes or environment values.
-Claude-family captured tokens already record `cli_provider.secret.set` atomically
-with encrypted-secret promotion; those keep their strict write.
+Claude-family captured tokens record `cli_provider.secret.set` atomically with
+encrypted-secret promotion, one strict event per row written and targeting that row (metadata
+`source`, `secretName`, `viaProviderId`, `setSize`), so a login through one row leaves an event for
+each row of its set; those keep their strict write.
 
 **CLI sign-out requires its request row before enqueue.** The API commits
 `cli_provider.sign_out` before adding the sign-out job, with no transaction open
 during the enqueue; an audit refusal queues nothing, and a rejected or id-less
 enqueue deletes that one row by id (a failed delete is logged). The pino line
 follows a successful enqueue. The worker retains ownership of credential-volume and
-Claude login-secret removal and adds no audit writer.
+Claude login-secret removal and adds no audit writer, so the login tokens it deletes on the other
+rows of the clicked row's set leave no event of their own.
 
 **CLI provider security edits require their own row.** Create records
 `cli_provider.create` in its insert transaction, listing the security fields the
