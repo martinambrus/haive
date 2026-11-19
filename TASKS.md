@@ -676,6 +676,31 @@ status: open · kind: docs · found: guarded span prerequisites docs (#1268) · 
 
 `docs/architecture/task-types.md` (~:780 heading "Pinned execution declarations (P6; admission only)", ~:786, ~:851) and `docs/architecture/worker-restarts.md` (~:766) name an internal plan phase ("P6") in product text. Replace with the behaviour and the PR number (#1222). Docs-only; ride with the next change touching either file.
 
+### T722 · FNF[claude-usage-connection] · Claude usage connection leftovers (+6)
+
+status: open · kind: fix · found: login-set design (T720) 2026-11-19 · priority: P4
+
+All PRE-EXISTING. Paths are under `packages/`. Check each against the shared usage connection (T720) when that lands: one refresher per set may close items 3 and 5.
+
+1. The manual secret POST accepts any string as the usage grant, and the generic secret DELETE leaves the usage snapshot behind (`api/src/routes/cli-providers.ts` ~:1141-1190, ~:1396-1416).
+2. Starting a usage connection checks only the CLI name, and the poller polls an api-key claude row that holds a grant (`cli-providers.ts` ~:1207-1230, `worker/src/queues/usage-poll-queue.ts` ~:539-551).
+3. A refresh error other than `invalid_grant` goes on with the stale token, and a crash between the refresh response and the secret write loses the rotated token (`usage-poll-queue.ts` ~:212-224, ~:249-258).
+4. A snapshot that is not `ok` keeps its preserved windows, which feed the allowance arm, while the recovery probe's verdict needs an `ok` snapshot (`worker/src/queues/task-queue.ts` ~:2017-2036, `usage-poll-queue.ts` ~:679-686, `allowance-watch.ts` ~:58-62, ~:103-109).
+5. The providers page loads one usage-auth request per claude row (`web/src/app/(app)/cli-providers/page.tsx` ~:138-155): 41 requests on the dev install.
+6. THIRD-PARTY (needs approval before any work): the vendor's refresh semantics are unverified ("single-use" is only a comment at `shared/src/cli-providers/claude-oauth.ts:48`), and the usage endpoint is undocumented (`worker/src/usage-window/fetchers/index.ts` ~:37-41).
+
+### T721 · The Claude usage grant reaches sandbox environments
+
+status: open, in work since 2026-11-19 · kind: security · found: login-set design (T720) 2026-11-19 · priority: P1
+
+`resolveProviderSecrets` returns every secret of a provider row (`worker/src/secrets/provider-secrets.ts:5-22`). The run path merges them into the container environment (`worker/src/queues/cli-exec/handlers.ts` ~:350-354, `exec-core.ts:732`, `sandbox/docker-runner.ts:474-475`), and so do the probe, the terminal and the image checks. A claude-code row with a usage connection therefore hands `CLAUDE_USAGE_OAUTH`, an OAuth refresh token whose scope includes `org:create_api_key` (`shared/src/cli-providers/claude-oauth.ts:35`), to every sandbox run, where repository code can read it. Only the worker's usage poller needs it. PRE-EXISTING, confirmed by reading the code; not observed in a live container.
+
+1. Keep worker-only secrets out of every container environment, at one seam (in work, first PR).
+2. Ask for less: check whether the authorize endpoint accepts `user:profile` alone, the one scope the usage endpoint enforces. Needs a live Connect by the owner.
+3. Disconnect and sign-out delete the stored grant but never revoke it at the vendor (`api/src/routes/cli-providers.ts` ~:1346-1382, `handlers.ts` ~:1436-1448).
+4. After item 1 is deployed, reconnect usage once, so a grant a sandbox could read is replaced. A refresh rotates the token, which should retire the old one; the vendor's behaviour is unverified.
+5. Same seam: an api-key claude row that still stores a login token injects it too (`provider-secrets.ts:5-22`, `worker/src/cli-adapters/base-adapter.ts` ~:127-137). Decide which credential such a row should carry.
+
 ### T720 · A Claude login reaches one provider row, its sign-out resets them all
 
 status: open, in work since 2026-11-19 (owner decided) · kind: design · found: #1280 review 2026-11-19 · priority: P2
@@ -2502,9 +2527,9 @@ Owner decision 2026-11-12: item 1: boot refuses to generate a new key when encry
 35. From #1141 review, low, PRE-EXISTING: `GET /admin/users` returns name, git name and git email for every row; only orphan rows need them.
 36. From #1142 reviews, low: the users page scrolls back to the hash row after every action reload; maintenance rows with a null owner link to the list without a highlight; maintenance and audit unreadable labels show no visible short id; the auth-throttle Redis test covers only the account bucket for `recover`/`reset`.
 
-### T590 · FNF[cli-auth-lock-followups] · CLI auth lock and sign-out follow-ups (+33)
+### T590 · FNF[cli-auth-lock-followups] · CLI auth lock and sign-out follow-ups (+38)
 
-status: open (lows 20, 22, 24, 25, 26, 29, 30-33; item 2 accepted) · kind: fix · found: #1061 reviews 2026-11-10 · priority: P3
+status: open (lows 20, 22, 24, 25, 26, 29, 30-38; item 2 accepted) · kind: fix · found: #1061 reviews 2026-11-10 · priority: P3
 DECIDED by the owner 2026-11-11: all remaining groups approved (lock correctness 4, 6, 7, 15; sign-out flow 8, 9, 10, 14, 18; web UI 16, 17; tests and minor 11, 12, 13). Item 2 stays accepted and documented. Overnight run authorized.
 
 1. DONE #1062. `DELETE /:providerId/usage-auth` and `DELETE /:providerId/secrets/:secretName` (api cli-providers.ts ~:1165-1230) take no auth lock, so a usage refresh that read the secret before the delete can write it back. PRE-EXISTING, moderate. Fix: take the lock (`withCliAuthLock`) like the writers.
@@ -2540,6 +2565,11 @@ DECIDED by the owner 2026-11-11: all remaining groups approved (lock correctness
 31. Two stale code comments left by #1089 (move-secret-env.ts copy phase, cli-auth-lock.ts wait helper). Cosmetic.
 32. For a CLI whose login is a file in the shared auth volume (codex, amp, antigravity, grok), a login or a Test writes `auth_status` only on the row it ran on (worker cli-exec/handlers.ts ~:755-772), while a sign-out resets every row sharing the volume (~:1451-1472). Rows the login never ran on stay `unknown` in the database though the shared login works (seen: 5 never-checked `codex` rows beside 11 `ok` ones). The providers pages now read the shared status (#1280); the stored rows and the usage route's per-row `ok` check (api usage-window.ts ~:117) still do not. PRE-EXISTING, minor. Fix direction: write an `ok` probe to the rows sharing the volume, with the auth generation fences reviewed. `claude-code` is different, see T720.
 33. Sign out is offered only on a row whose own stored status is `ok` (web cli-providers/page.tsx `showSignOut`), though for a volume-login CLI any row sharing the auth volume signs the same login out; siblings of the logged-in row offer neither Sign out nor Log in. PRE-EXISTING, cosmetic. Fix: read `storedLoginStatus`, or fix item 32.
+34. A sign-out whose volume removal failed has already deleted the login token but skips the status reset, and nothing retries it (worker cli-exec/handlers.ts ~:1436-1451, ~:1477): the row reads `ok` with no token until the sign-out is run again. PRE-EXISTING, minor. The shared Claude login (T720) widens the token delete to every row of the set, so the gap then covers the set.
+35. `assertUserAuthReady` flips `ok` to `unknown` with a plain update by id: no auth lock, no compare on the generation or check stamp, and a millisecond JS date as the stamp (worker cli-exec/resolvers.ts ~:1123-1131). A login that lands between its read and its write is overwritten. PRE-EXISTING, minor.
+36. The sharing predicate keeps two more copies after T720 folds the SQL ones into one helper: the web's display copy (web lib/usage-reconnect.ts `storedLoginStatus`) and the grok grouping (worker usage-window/credential-refresh.ts ~:100-113). PRE-EXISTING, duplication.
+37. A volume login's audit trail is best-effort and writes one row event for a generation advance that covers the whole set (api routes/cli-login-banner.ts ~:1388-1401). PRE-EXISTING, minor.
+38. The grok credential refresh writes its set-wide status without a compare-and-set (worker usage-window/credential-refresh.ts ~:167-181), and a comment on the providers page says the probe already wrote the status when the login's candidate probe writes none (web cli-providers/page.tsx ~:128-132, worker handlers.ts ~:754). PRE-EXISTING, minor and cosmetic.
 
 ### T592 · FNF[fs-park-recovery] · park recovery runs only where fs-safe writes; legacy truncated parks (+1)
 
