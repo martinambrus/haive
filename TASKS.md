@@ -676,6 +676,21 @@ status: open · kind: docs · found: guarded span prerequisites docs (#1268) · 
 
 `docs/architecture/task-types.md` (~:780 heading "Pinned execution declarations (P6; admission only)", ~:786, ~:851) and `docs/architecture/worker-restarts.md` (~:766) name an internal plan phase ("P6") in product text. Replace with the behaviour and the PR number (#1222). Docs-only; ride with the next change touching either file.
 
+### T720 · A Claude login reaches one provider row, its sign-out resets them all
+
+status: open (OWNER DECISION needed) · kind: design · found: #1280 review 2026-11-19 · priority: P3
+
+A `claude-code` subscription login is a token saved on the one provider row it was made on (`api/src/lib/cli-login-secret.ts` `saveCliLoginSecret`), and each run reads the token of its own row (`worker/src/secrets/provider-secrets.ts`). A sign-out through one row deletes that row's token (`worker/src/queues/cli-exec/handlers.ts` ~:1436-1449) but resets `auth_status` on every row sharing the auth volume (~:1451-1472). The other rows keep their own tokens, which may still work, and read `unknown`.
+
+Seen on the dev install: one sign-out left 40 `claude-code` rows `unknown`, each still holding a token saved between 2026-06-29 and 2026-10-16; the login that followed reached one row. So an account switch needs a login on every row, and a row that was not logged in again keeps running on the token of the earlier account. The providers pages offer **Log in** on each such row (#1280); nothing says the rows are on different accounts.
+
+Decide one:
+
+1. One Claude login per user: a login saves the token for every row that shares the auth volume, and a sign-out deletes it for all of them. Matches the other CLIs, where rows share one login.
+2. Per-row logins stay: the sign-out resets only its own row, and the page shows which rows hold which login (for example the token's age).
+
+Either way the sign-out's token delete and its status reset must cover the same rows. T590 items 32 and 33 are the same gap for the volume-login CLIs.
+
 ### T719 · FNF[env-template-lifecycle] · environment template lifecycle leftovers (+8)
 
 status: open · kind: fix · found: legacy template replacement design (T709) 2026-11-19 · priority: P4
@@ -2526,8 +2541,8 @@ DECIDED by the owner 2026-11-11: all remaining groups approved (lock correctness
 29. The superseded-job return runs before the resumed scope compare (handlers.ts). PRE-EXISTING ordering, minor. Also: one over-long line in docs/architecture/sandbox.md (sign-out section).
 30. Sync-back reads the scope from its caller rather than re-reading it under the lock (worker sandbox/task-auth-volume.ts). PRE-EXISTING, minor (found #1089 review).
 31. Two stale code comments left by #1089 (move-secret-env.ts copy phase, cli-auth-lock.ts wait helper). Cosmetic.
-32. A login or a Test writes `auth_status` only on the row it ran on (worker cli-exec/handlers.ts ~:755-772), while a sign-out resets every row sharing the auth volume (~:1451-1472). After a sign-out and a login through one row, its siblings stay `unknown` in the database (seen: 40 of 41 `claude-code` rows). The providers pages now read the shared status (#1280); the stored rows and the usage route's per-row `ok` check (api usage-window.ts ~:117) still do not. PRE-EXISTING, minor. Fix direction: write an `ok` probe to the rows sharing the volume, with the auth generation fences reviewed.
-33. Sign out is offered only on a row whose own stored status is `ok` (web cli-providers/page.tsx `showSignOut`), though any row sharing the auth volume signs the same login out; siblings of the logged-in row offer neither Sign out nor Log in. PRE-EXISTING, cosmetic. Fix: read `storedLoginStatus`, or fix item 32.
+32. For a CLI whose login is a file in the shared auth volume (codex, amp, antigravity, grok), a login or a Test writes `auth_status` only on the row it ran on (worker cli-exec/handlers.ts ~:755-772), while a sign-out resets every row sharing the volume (~:1451-1472). Rows the login never ran on stay `unknown` in the database though the shared login works (seen: 5 never-checked `codex` rows beside 11 `ok` ones). The providers pages now read the shared status (#1280); the stored rows and the usage route's per-row `ok` check (api usage-window.ts ~:117) still do not. PRE-EXISTING, minor. Fix direction: write an `ok` probe to the rows sharing the volume, with the auth generation fences reviewed. `claude-code` is different, see T720.
+33. Sign out is offered only on a row whose own stored status is `ok` (web cli-providers/page.tsx `showSignOut`), though for a volume-login CLI any row sharing the auth volume signs the same login out; siblings of the logged-in row offer neither Sign out nor Log in. PRE-EXISTING, cosmetic. Fix: read `storedLoginStatus`, or fix item 32.
 
 ### T592 · FNF[fs-park-recovery] · park recovery runs only where fs-safe writes; legacy truncated parks (+1)
 
