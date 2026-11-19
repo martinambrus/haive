@@ -719,13 +719,32 @@ therefore supersedes a sign-out queued from any row of the set. The sign-out job
 token of every row of the set and, when no volume failed, resets their status, in one transaction that
 reads the set once, so a row that joined while the volumes were being removed is deleted and reset
 with the rest; it still deletes the usage token on the clicked row only. Its supersede check reads the
-clicked row's generation alone, and the other credential writes (a manual login-secret POST, a PATCH
-that moves one, the usage reconnect) still advance only their own row, so one made on a sibling
-between the click and the run does not supersede it and that token goes with the set's.
+clicked row's generation alone, which is enough because the api writers of a login token all write the
+whole set (a clone copies its source's token onto the new row and the boot copy of legacy environment
+values writes the row it finds; neither advances the others). A manual login-secret POST, a settings
+save that types the token and a create that types it do so in one transaction under the set's lock (`writeLoginTokenToSet`, `api/src/lib/cli-login-secret.ts`):
+the transaction's first lock on any provider row is `lockLoginSet` over every row it will touch, the clicked
+row included, in id order: no row lock, row update or secret write for a member may come before it (a new
+secret row takes a share lock on its provider row). The image job (`markProvidersReady`) locks provider rows
+in id order without the auth lock, so a writer that held one row while it waited for a lower id could
+deadlock with it; a create inserts its own row first, which is invisible to other transactions until commit.
+The clicked or created row keeps the write and audit event it always had, each sibling gets the token and its
+own strict `cli_provider.secret.set` event (`source` `manual` or `environment`, `viaProviderId`, `setSize`),
+and every row written gets one new `auth_generation`. A write made on a sibling between the click and the run
+therefore supersedes the sign-out, and the new token survives on every row. A settings save locks and writes
+the set the row has after its own update plus the clicked row, so a row that stops being isolated is locked
+with its new set. The manual DELETE of the token removes it from every row of the set
+that holds it (404 only when none does), records `cli_provider.secret.delete` on each row it removed it
+from, and advances no generation or status, so it cannot supersede a sign-out. The usage reconnect, a
+manual POST of the usage token and every other secret stay per row, as does the usage token a sign-out
+deletes; a reconnect advances its own row's generation, so it can only supersede a sign-out clicked on
+that same row. Unlike a login, the paste, typed-token and delete writers leave `auth_status`,
+`auth_message` and the check stamp alone, and none of them strips a plaintext copy of the token from a
+sibling's `envVars` (a secret overrides the environment at run time).
 `credentialRepairedAt` skips claude-code rows, since a login's `ok` is not a repair of the usage
 connection. A row nobody has logged in or signed out through since this rule began keeps its own token
-and status; the first login or sign-out through any row of its set overwrites (login) or deletes
-(sign-out) the stored login of every row in it. Switching to another account goes through Sign out
+and status; the first login, pasted or typed token, sign-out or manual delete through any row of its set
+overwrites (login, paste, typed token) or deletes (sign-out, delete) the stored login of every row in it. Switching to another account goes through Sign out
 first: a login alone does not change what a usage connection meters.
 
 ## CLI sign-out and newer logins
@@ -738,9 +757,11 @@ wait minutes, so a login completed in between must survive it. Two pieces do tha
   `cli_provider.login` audit), the Claude OAuth save (`saveCliLoginSecret`, same transaction as the
   secret), a manual secret POST or a PATCH that moves a login secret, the usage reconnect, and the
   boot copy of secret-like env. A shared-volume login advances every row sharing that volume
-  (`advanceVolumeLoginGeneration`, `@haive/shared/cli-auth-state`), and the Claude OAuth save advances
-  every row of its set with one new value. An abandoned attempt, a usage
-  refresh, a grok refresh and a task's sync-back never advance it. The sign-out job carries the
+  (`advanceVolumeLoginGeneration`, `@haive/shared/cli-auth-state`); the Claude OAuth save and every
+  other writer of the login token (a manual POST, a settings save or a create that types it) advance
+  every row they write with one new value, while a write of the usage token and the boot copy advance
+  their own row only. An abandoned attempt, a usage
+  refresh, a grok refresh, a task's sync-back and the delete of a login token never advance it. The sign-out job carries the
   value read at request time and, when the row's value differs, removes nothing and returns
   `{ ok: true, superseded: true }`; the poll route reports it as `done` and the page says the user
   signed in again. A job queued without the field (older release) deletes as before.
@@ -761,7 +782,11 @@ wait minutes, so a login completed in between must survive it. Two pieces do tha
   origin, auth and ownership checks still refuse before any accept, and the modal keys its sentence
   on the code. Api writers, and the deletes of a login secret (DELETE `usage-auth` and
   `secrets/:name`), answer 409 `cli_auth_busy` when it is held; a delete never advances the
-  generation, so it cannot supersede a pending sign-out. The sign-out job defers itself (`deferJob`,
+  generation, so it cannot supersede a pending sign-out. A create that types the login token for a
+  claude-code row that is not isolated waits for the lock at most `CLI_AUTH_JOIN_WAIT_MS` (10 s,
+  `api/src/lib/cli-auth-write.ts`; a usage snapshot write holds it for the length of a few queries, a
+  token refresh up to its 15 s request deadline, a sign-out up to 31 s per volume it removes, a login
+  dialog for minutes) before the same 409, and any other create takes no lock. The sign-out job defers itself (`deferJob`,
   2 s doubling to 15 s) and fails after `CLI_SIGN_OUT_AUTH_WAIT_MS` (30 minutes, counted from
   enqueue) with a sentence saying nothing was removed. That deadline covers only a job that never
   started: before its first removal the job records `signOutStarted` and the scope it removes

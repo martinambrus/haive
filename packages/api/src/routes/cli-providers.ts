@@ -24,6 +24,7 @@ import {
   parseModelfile,
   OLLAMA_MODEL_NOT_ALLOWED_MESSAGE,
   isRunnableCliVersion,
+  lockLoginSet,
   logger,
   normalizeCliArgsArray,
   resolveDefaultCliProvider,
@@ -66,7 +67,18 @@ import {
 import { getCliExecQueue, getUsagePollQueue } from '../queues.js';
 import { enqueueCliVersionRefresh } from '../lib/cli-version-refresh.js';
 import { loadPollableJob } from '../lib/cli-job-poll.js';
-import { isSignOutSecret, withCliAuthLocks, withCliAuthWrite } from '../lib/cli-auth-write.js';
+import {
+  CLI_AUTH_JOIN_WAIT_MS,
+  isSignOutSecret,
+  withCliAuthLocks,
+  withCliAuthWrite,
+} from '../lib/cli-auth-write.js';
+import {
+  deleteLoginTokenFromSet,
+  isSetLoginSecret,
+  writeLoginTokenToSet,
+} from '../lib/cli-login-secret.js';
+import { cliAuthSetWhere } from '@haive/shared/cli-auth-state';
 import { providerDisableImpact } from '../lib/provider-disable-impact.js';
 
 function secretAuditMetadata(names: Iterable<string>): {
@@ -455,77 +467,115 @@ cliProviderRoutes.post('/', requireNewWorkAllowed, async (c) => {
   await assertOllamaSaveAllowed(c.get('userRole'), candidate);
   const provisioningModel = shouldProvisionOllamaModel(candidate);
   let secretEvent: AuditEvent | undefined;
-  const inserted = await db.transaction(async (tx) => {
-    await admitNewWork(tx);
-    const rows = await tx
-      .insert(schema.cliProviders)
-      .values({
-        userId,
-        name: body.name,
-        label: body.label,
-        executablePath: body.executablePath?.trim() || null,
-        wrapperPath: body.wrapperPath?.trim() || null,
-        wrapperContent: body.wrapperContent?.length ? body.wrapperContent : null,
-        envVars: split?.envVars ?? null,
-        cliArgs: body.cliArgs ? normalizeCliArgsArray(body.cliArgs) : null,
-        supportsSubagents: meta.supportsSubagents,
-        networkPolicy: body.networkPolicy ?? { mode: 'full', domains: [], ips: [] },
-        egressDomains: body.egressDomains ?? [],
-        authMode: body.authMode,
-        cliVersion: resolvedVersion,
-        effortLevel: resolveEffortLevelForSave(body.name, body.effortLevel ?? null),
-        model,
-        modelfile: body.modelfile?.trim() || null,
-        sandboxDockerfileExtra: body.sandboxDockerfileExtra?.length
-          ? body.sandboxDockerfileExtra
-          : null,
-        enabled: body.enabled ?? true,
-        isolateAuth: body.isolateAuth ?? false,
-        disableThinking: body.disableThinking ?? false,
-        rulesContent: body.rulesContent ?? DEFAULT_AGENT_RULES,
-        sandboxImageBuildStatus: 'building',
-        ...(provisioningModel ? { modelProvisionStatus: 'provisioning' } : {}),
-      })
-      .returning();
-    const fields: string[] = PROVIDER_SECURITY_FIELDS.filter((field) => body[field] !== undefined);
-    const envNames = Object.keys(split?.envVars ?? {}).sort();
-    if (envNames.length) fields.push('envVars');
-    const event: AuditEvent = {
-      actorUserId: userId,
-      action: 'cli_provider.create',
-      targetType: 'cli_provider',
-      targetId: rows[0]!.id,
-      metadata: { fields, ...(envNames.length ? { envNames } : {}) },
-    };
-    await insertAuditEvent(tx, event);
-    for (const [name, value] of Object.entries(split?.secrets ?? {})) {
-      await upsertProviderSecret(tx, {
-        providerId: rows[0]!.id,
-        name,
-        value,
-        masterKek: await secretsService.getMasterKek(),
-        onExisting: 'overwrite',
-      });
-    }
-    if (Object.keys(split?.secrets ?? {}).length > 0) {
-      secretEvent = {
-        actorUserId: userId,
-        action: 'cli_provider.secret.set',
-        targetType: 'cli_provider',
-        targetId: rows[0]!.id,
-        metadata: {
-          source: 'environment',
-          ...secretAuditMetadata(Object.keys(split?.secrets ?? {})),
+  let setEvents: AuditEvent[] = [];
+  const joinsSet =
+    body.name === 'claude-code' &&
+    !!split?.secrets.CLAUDE_CODE_OAUTH_TOKEN &&
+    !(body.isolateAuth ?? false);
+  const lockScopes = joinsSet
+    ? [
+        {
+          id: randomUUID(),
+          userId,
+          name: body.name,
+          authMode: body.authMode,
+          isolateAuth: false,
         },
-      };
-      await insertAuditEvent(tx, secretEvent);
-    }
-    return { rows, event };
-  });
+      ]
+    : [];
+  const inserted = await withCliAuthLocks(
+    db,
+    lockScopes,
+    (assertHeld) =>
+      db.transaction(async (tx) => {
+        await admitNewWork(tx);
+        const rows = await tx
+          .insert(schema.cliProviders)
+          .values({
+            userId,
+            name: body.name,
+            label: body.label,
+            executablePath: body.executablePath?.trim() || null,
+            wrapperPath: body.wrapperPath?.trim() || null,
+            wrapperContent: body.wrapperContent?.length ? body.wrapperContent : null,
+            envVars: split?.envVars ?? null,
+            cliArgs: body.cliArgs ? normalizeCliArgsArray(body.cliArgs) : null,
+            supportsSubagents: meta.supportsSubagents,
+            networkPolicy: body.networkPolicy ?? { mode: 'full', domains: [], ips: [] },
+            egressDomains: body.egressDomains ?? [],
+            authMode: body.authMode,
+            cliVersion: resolvedVersion,
+            effortLevel: resolveEffortLevelForSave(body.name, body.effortLevel ?? null),
+            model,
+            modelfile: body.modelfile?.trim() || null,
+            sandboxDockerfileExtra: body.sandboxDockerfileExtra?.length
+              ? body.sandboxDockerfileExtra
+              : null,
+            enabled: body.enabled ?? true,
+            isolateAuth: body.isolateAuth ?? false,
+            disableThinking: body.disableThinking ?? false,
+            rulesContent: body.rulesContent ?? DEFAULT_AGENT_RULES,
+            sandboxImageBuildStatus: 'building',
+            ...(provisioningModel ? { modelProvisionStatus: 'provisioning' } : {}),
+          })
+          .returning();
+        // First lock on an existing provider row; the new row is invisible until commit.
+        const members = joinsSet ? await lockLoginSet(tx, rows[0]!) : [];
+        const fields: string[] = PROVIDER_SECURITY_FIELDS.filter(
+          (field) => body[field] !== undefined,
+        );
+        const envNames = Object.keys(split?.envVars ?? {}).sort();
+        if (envNames.length) fields.push('envVars');
+        const event: AuditEvent = {
+          actorUserId: userId,
+          action: 'cli_provider.create',
+          targetType: 'cli_provider',
+          targetId: rows[0]!.id,
+          metadata: { fields, ...(envNames.length ? { envNames } : {}) },
+        };
+        await insertAuditEvent(tx, event);
+        for (const [name, value] of Object.entries(split?.secrets ?? {})) {
+          await upsertProviderSecret(tx, {
+            providerId: rows[0]!.id,
+            name,
+            value,
+            masterKek: await secretsService.getMasterKek(),
+            onExisting: 'overwrite',
+          });
+        }
+        if (Object.keys(split?.secrets ?? {}).length > 0) {
+          secretEvent = {
+            actorUserId: userId,
+            action: 'cli_provider.secret.set',
+            targetType: 'cli_provider',
+            targetId: rows[0]!.id,
+            metadata: {
+              source: 'environment',
+              ...secretAuditMetadata(Object.keys(split?.secrets ?? {})),
+            },
+          };
+          await insertAuditEvent(tx, secretEvent);
+        }
+        if (joinsSet) {
+          setEvents = await writeLoginTokenToSet(tx, {
+            userId,
+            viaId: rows[0]!.id,
+            members,
+            source: 'environment',
+            value: split!.secrets.CLAUDE_CODE_OAUTH_TOKEN!,
+            masterKek: await secretsService.getMasterKek(),
+            assertHeld,
+          });
+        }
+        return { rows, event };
+      }),
+    { waitMs: CLI_AUTH_JOIN_WAIT_MS },
+  );
 
   const created = inserted.rows[0]!;
   logAuditEvent(inserted.event);
   if (secretEvent) logAuditEvent(secretEvent);
+  for (const e of setEvents) logAuditEvent(e);
   await enqueueBuildForProvider(created.id, userId);
   if (provisioningModel) await enqueueOllamaProvisionForProvider(created.id, userId);
   return c.json(
@@ -683,21 +733,23 @@ cliProviderRoutes.patch('/:id', async (c) => {
   const authSettingsChanged =
     (body.authMode !== undefined && body.authMode !== existing.authMode) ||
     (body.isolateAuth !== undefined && body.isolateAuth !== existing.isolateAuth);
+  const afterSave = {
+    ...existing,
+    authMode: body.authMode ?? existing.authMode,
+    isolateAuth: body.isolateAuth ?? existing.isolateAuth,
+  };
+  const spreadsToken = existing.name === 'claude-code' && !!split?.secrets.CLAUDE_CODE_OAUTH_TOKEN;
   const authProviders = authSettingsChanged
-    ? [
-        existing,
-        {
-          ...existing,
-          authMode: body.authMode ?? existing.authMode,
-          isolateAuth: body.isolateAuth ?? existing.isolateAuth,
-        },
-      ]
+    ? [existing, afterSave]
     : authSecretNames.length
       ? [existing]
       : [];
+  let setEvents: AuditEvent[] = [];
   const updated = await withCliAuthLocks(db, authProviders, (assertHeld) =>
     db.transaction(async (tx) => {
       if (startsJob) await admitNewWork(tx);
+      // First lock on any provider row.
+      const members = spreadsToken ? await lockLoginSet(tx, afterSave, id) : [];
       const [current] = await tx
         .select()
         .from(schema.cliProviders)
@@ -773,6 +825,17 @@ cliProviderRoutes.patch('/:id', async (c) => {
       }
       if (secretEvent) await insertAuditEvent(tx, secretEvent);
       await assertHeld();
+      if (spreadsToken) {
+        setEvents = await writeLoginTokenToSet(tx, {
+          userId,
+          viaId: id,
+          members,
+          source: 'environment',
+          value: split!.secrets.CLAUDE_CODE_OAUTH_TOKEN!,
+          masterKek: await secretsService.getMasterKek(),
+          assertHeld,
+        });
+      }
       return { rows, event };
     }),
   );
@@ -780,6 +843,7 @@ cliProviderRoutes.patch('/:id', async (c) => {
   if (body.enabled === false) await closeProviderShells(userId, id);
   if (updated.event) logAuditEvent(updated.event);
   if (secretEvent) logAuditEvent(secretEvent);
+  for (const e of setEvents) logAuditEvent(e);
 
   if (provisioningModel) await enqueueOllamaProvisionForProvider(id, userId);
   const modelStatusOverride = provisioningModel
@@ -932,9 +996,23 @@ cliProviderRoutes.post('/:id/sign-out', async (c) => {
   const db = getDb();
   const provider = await db.query.cliProviders.findFirst({
     where: and(eq(schema.cliProviders.id, id), eq(schema.cliProviders.userId, userId)),
-    columns: { id: true, authGeneration: true },
+    columns: {
+      id: true,
+      authGeneration: true,
+      userId: true,
+      name: true,
+      authMode: true,
+      isolateAuth: true,
+    },
   });
   if (!provider) throw new HttpError(404, 'CLI provider not found');
+  const setIds = (
+    await db
+      .select({ id: schema.cliProviders.id })
+      .from(schema.cliProviders)
+      .where(cliAuthSetWhere(provider))
+      .orderBy(schema.cliProviders.id)
+  ).map((r) => r.id);
 
   const payload: CliSignOutJobPayload = {
     providerId: provider.id,
@@ -947,6 +1025,7 @@ cliProviderRoutes.post('/:id/sign-out', async (c) => {
     action: 'cli_provider.sign_out',
     targetType: 'cli_provider',
     targetId: provider.id,
+    metadata: { setSize: setIds.length, setIds: setIds.slice(0, 50) },
   };
   const auditId = randomUUID();
   await db.transaction((tx) => insertAuditEvent(tx, event, { id: auditId }));
@@ -1160,8 +1239,12 @@ cliProviderRoutes.post('/:providerId/secrets', async (c) => {
     metadata: { source: 'manual', secretName: body.secretName },
   };
   const masterKek = await secretsService.getMasterKek();
+  const setWide = isSetLoginSecret(provider.name, body.secretName);
+  let setEvents: AuditEvent[] = [];
   const secret = await withCliAuthWrite(db, provider, [body.secretName], (assertHeld) =>
     db.transaction(async (tx) => {
+      // First lock on any provider row.
+      const members = setWide ? await lockLoginSet(tx, provider) : [];
       await insertAuditEvent(tx, event);
       await assertHeld();
       const secret = await upsertProviderSecret(tx, {
@@ -1171,7 +1254,17 @@ cliProviderRoutes.post('/:providerId/secrets', async (c) => {
         masterKek,
         onExisting: 'overwrite',
       });
-      if (isSignOutSecret(body.secretName)) {
+      if (setWide) {
+        setEvents = await writeLoginTokenToSet(tx, {
+          userId,
+          viaId: providerId,
+          members,
+          source: 'manual',
+          value: body.value,
+          masterKek,
+          assertHeld,
+        });
+      } else if (isSignOutSecret(body.secretName)) {
         await tx
           .update(schema.cliProviders)
           .set({ authGeneration: randomUUID() })
@@ -1182,6 +1275,7 @@ cliProviderRoutes.post('/:providerId/secrets', async (c) => {
     }),
   );
   logAuditEvent(event);
+  for (const e of setEvents) logAuditEvent(e);
   return existing ? c.json({ secret }) : c.json({ secret }, 201);
 });
 
@@ -1395,23 +1489,39 @@ cliProviderRoutes.delete('/:providerId/secrets/:secretName', async (c) => {
     targetId: providerId,
     metadata: { source: 'manual', secretName },
   };
-  await withCliAuthWrite(db, provider, [secretName], (assertHeld) =>
+  const events = await withCliAuthWrite(db, provider, [secretName], (assertHeld) =>
     db.transaction(async (tx) => {
       await assertHeld();
-      const result = await tx
-        .delete(schema.cliProviderSecrets)
-        .where(
-          and(
-            eq(schema.cliProviderSecrets.providerId, providerId),
-            eq(schema.cliProviderSecrets.secretName, secretName),
-          ),
-        )
-        .returning({ id: schema.cliProviderSecrets.id });
-      if (result.length === 0) throw new HttpError(404, 'Secret not found');
-      await insertAuditEvent(tx, event);
+      const out: AuditEvent[] = [];
+      if (isSetLoginSecret(provider.name, secretName)) {
+        const { deletedIds, setSize } = await deleteLoginTokenFromSet(tx, provider);
+        if (deletedIds.length === 0) throw new HttpError(404, 'Secret not found');
+        if (deletedIds.includes(providerId)) out.push(event);
+        for (const targetId of deletedIds.filter((id) => id !== providerId)) {
+          out.push({
+            ...event,
+            targetId,
+            metadata: { source: 'manual', secretName, viaProviderId: providerId, setSize },
+          });
+        }
+      } else {
+        const result = await tx
+          .delete(schema.cliProviderSecrets)
+          .where(
+            and(
+              eq(schema.cliProviderSecrets.providerId, providerId),
+              eq(schema.cliProviderSecrets.secretName, secretName),
+            ),
+          )
+          .returning({ id: schema.cliProviderSecrets.id });
+        if (result.length === 0) throw new HttpError(404, 'Secret not found');
+        out.push(event);
+      }
+      for (const e of out) await insertAuditEvent(tx, e);
       await assertHeld();
+      return out;
     }),
   );
-  logAuditEvent(event);
+  for (const e of events) logAuditEvent(e);
   return c.json({ ok: true });
 });

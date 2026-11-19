@@ -1,4 +1,4 @@
-import { cliAuthScope } from '@haive/shared/cli-auth-state';
+import { cliAuthScope, type CliAuthProvider } from '@haive/shared/cli-auth-state';
 import { randomUUID } from 'node:crypto';
 import { and, eq, inArray, sql } from 'drizzle-orm';
 import { schema, tryCliAuthLock, type Database } from '@haive/database';
@@ -110,4 +110,82 @@ export async function saveCliLoginSecret(
     await assertActive();
   });
   for (const event of events) logAuditEvent(event);
+}
+
+export const isSetLoginSecret = (providerName: string, secretName: string): boolean =>
+  providerName === 'claude-code' && secretName === 'CLAUDE_CODE_OAUTH_TOKEN';
+
+/** Copies the token to the other rows of `members`, which the caller locked with `lockLoginSet` before
+ * writing anything for the request; the caller writes the clicked row's own secret after that lock. */
+export async function writeLoginTokenToSet(
+  tx: Parameters<Parameters<Database['transaction']>[0]>[0],
+  opts: {
+    userId: string;
+    viaId: string;
+    members: { id: string }[];
+    source: 'manual' | 'environment';
+    value: string;
+    masterKek: string;
+    assertHeld: () => Promise<void>;
+  },
+): Promise<AuditEvent[]> {
+  const { userId, viaId, members, source, value, masterKek, assertHeld } = opts;
+  if (!members.some((m) => m.id === viaId)) throw new Error('Provider not found');
+  const events: AuditEvent[] = [];
+  for (const member of members) {
+    if (member.id === viaId) continue;
+    const event: AuditEvent = {
+      actorUserId: userId,
+      action: 'cli_provider.secret.set',
+      targetType: 'cli_provider',
+      targetId: member.id,
+      metadata: {
+        source,
+        secretName: 'CLAUDE_CODE_OAUTH_TOKEN',
+        viaProviderId: viaId,
+        setSize: members.length,
+      },
+    };
+    await insertAuditEvent(tx, event);
+    events.push(event);
+    await assertHeld();
+    await upsertProviderSecret(tx, {
+      providerId: member.id,
+      name: 'CLAUDE_CODE_OAUTH_TOKEN',
+      value,
+      masterKek,
+      onExisting: 'overwrite',
+    });
+  }
+  // One new generation for the whole set supersedes a sign-out queued through any row.
+  await tx
+    .update(schema.cliProviders)
+    .set({ authGeneration: randomUUID() })
+    .where(
+      inArray(
+        schema.cliProviders.id,
+        members.map((m) => m.id),
+      ),
+    );
+  await assertHeld();
+  return events;
+}
+
+/** Removes the token from every row of the set; never touches generation or status. */
+export async function deleteLoginTokenFromSet(
+  tx: Parameters<Parameters<Database['transaction']>[0]>[0],
+  via: CliAuthProvider,
+): Promise<{ deletedIds: string[]; setSize: number }> {
+  const members = await lockLoginSet(tx, via);
+  const ids = members.map((m) => m.id);
+  const deleted = await tx
+    .delete(schema.cliProviderSecrets)
+    .where(
+      and(
+        inArray(schema.cliProviderSecrets.providerId, ids),
+        eq(schema.cliProviderSecrets.secretName, 'CLAUDE_CODE_OAUTH_TOKEN'),
+      ),
+    )
+    .returning({ providerId: schema.cliProviderSecrets.providerId });
+  return { deletedIds: deleted.map((d) => d.providerId), setSize: members.length };
 }

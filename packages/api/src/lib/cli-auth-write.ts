@@ -34,16 +34,25 @@ export async function withCliAuthWrite<T>(
   });
 }
 
+/** A token refresh by the usage poller and a sign-out hold the lock for seconds, a login for minutes. */
+export const CLI_AUTH_JOIN_WAIT_MS = 10_000;
+
 /** Lock both sides of a settings change before opening its transaction. */
 export async function withCliAuthLocks<T>(
   db: Database,
   providers: CliAuthProvider[],
   write: (assertHeld: () => Promise<void>) => Promise<T>,
+  options: { waitMs?: number } = {},
 ): Promise<T> {
   const releases: CliAuthLock[] = [];
   try {
     for (const scope of [...new Set(providers.map(cliAuthScope))].sort()) {
-      const release = await tryCliAuthLock(db, scope);
+      const deadline = Date.now() + (options.waitMs ?? 0);
+      let release = await tryCliAuthLock(db, scope);
+      while (!release && Date.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, Math.min(500, deadline - Date.now())));
+        release = await tryCliAuthLock(db, scope);
+      }
       if (!release) {
         throw new HttpError(
           409,

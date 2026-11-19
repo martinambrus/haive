@@ -1,9 +1,14 @@
-import { randomBytes } from 'node:crypto';
+import { randomBytes, randomUUID } from 'node:crypto';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { asc, eq, inArray, sql } from 'drizzle-orm';
 import { createDatabase, schema } from '@haive/database';
 import { cliAuthScope } from '@haive/shared/cli-auth-state';
-import { resolveCliAuthUserVolumeName, secretsService, upsertProviderSecret } from '@haive/shared';
+import {
+  envelopeDecrypt,
+  resolveCliAuthUserVolumeName,
+  secretsService,
+  upsertProviderSecret,
+} from '@haive/shared';
 import { handleSignOutJob } from '../src/queues/cli-exec/handlers.js';
 import type { DockerRunner } from '../src/sandbox/docker-runner.js';
 
@@ -277,5 +282,44 @@ describe.skipIf(!url)('a Claude sign-out covers every row of its credential set'
     }
     expect(await names(rows.A.id)).toContain('CLAUDE_CODE_OAUTH_TOKEN');
     expect(await names(rows.B.id)).toContain('CLAUDE_CODE_OAUTH_TOKEN');
+  });
+
+  it('does nothing when a sibling write gave the set a newer login than the request saw', async () => {
+    const fresh = rnd();
+    const generation = randomUUID();
+    for (const key of ['A', 'B'] as const) {
+      await upsertProviderSecret(db, {
+        providerId: rows[key].id,
+        name: 'CLAUDE_CODE_OAUTH_TOKEN',
+        value: fresh,
+        masterKek: KEK,
+        onExisting: 'overwrite',
+      });
+    }
+    await db
+      .update(schema.cliProviders)
+      .set({ authGeneration: generation })
+      .where(inArray(schema.cliProviders.id, [rows.A.id, rows.B.id]));
+    const statuses = (await outside(['A', 'B'])).providers.map((p) => [
+      p.authStatus,
+      p.authMessage,
+    ]);
+    const { volumes, runner } = fakeRunner(rows.A);
+    const result = await handleSignOutJob(
+      db,
+      { ...payload(rows.A), authGeneration: rows.A.authGeneration },
+      runner,
+    );
+    expect(result).toMatchObject({ ok: true, superseded: true });
+    expect(volumes.size).toBe(2);
+    for (const key of ['A', 'B'] as const) {
+      const [s] = (await secretRows([rows[key].id])).filter(
+        (r) => r.secretName === 'CLAUDE_CODE_OAUTH_TOKEN',
+      );
+      expect(s && envelopeDecrypt(s, KEK) === fresh, key).toBe(true);
+    }
+    const after = (await outside(['A', 'B'])).providers;
+    expect(after.map((p) => [p.authStatus, p.authMessage])).toEqual(statuses);
+    expect(after.map((p) => p.authGeneration)).toEqual([generation, generation]);
   });
 });

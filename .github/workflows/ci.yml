@@ -383,9 +383,9 @@ jobs:
   postgres-gated:
     name: Postgres-gated tests
     runs-on: ubuntu-latest
-    # 165 rows × the measured 10 s model + 120 s setup = 1770 s green.
-    # 42 minutes covers 1.5 × row time (2475 s); 44 includes setup and 870 s over green.
-    timeout-minutes: 44
+    # 169 rows × the measured 10 s model + 120 s setup = 1810 s green.
+    # 43 minutes covers 1.5 × row time (2535 s); 45 includes setup and 890 s over green.
+    timeout-minutes: 45
     services:
       postgres:
         image: postgres:18-alpine
@@ -487,7 +487,7 @@ jobs:
       # Setup, including module builds, ends at migrate; a failed setup never runs the list.
       - name: Postgres-gated tests
         if: ${{ !cancelled() && steps.migrate.conclusion == 'success' }}
-        timeout-minutes: 42
+        timeout-minutes: 43
         env:
           PG_CONTAINER: ${{ job.services.postgres.id }}
           PGVECTOR_CONTAINER: ${{ job.services.pgvector.id }}
@@ -674,6 +674,7 @@ jobs:
           worker test/cli-sign-out-db.test.ts CLI_SIGN_OUT_TEST_URL cli_secrets_audit_test_signout pg
           worker test/cli-sign-out-set-db.test.ts CLI_SIGN_OUT_TEST_URL cli_secrets_audit_test_signout_set pg
           api test/cli-login-set-db.test.ts CLI_SECRETS_AUDIT_TEST_URL cli_secrets_audit_test_login_set pg
+          api test/cli-login-writers-set-db.test.ts CLI_SECRETS_AUDIT_TEST_URL cli_secrets_audit_test_login_writers pg
           api test/usage-window-claude-login-db.test.ts CLI_SECRETS_AUDIT_TEST_URL cli_secrets_audit_test_usage_window pg
           api test/account-security-audit-db.test.ts ACCOUNT_SECURITY_AUDIT_TEST_URL account_security_audit_test pg
           api test/login-audit-db.test.ts LOGIN_AUDIT_TEST_URL login_audit_test pg
