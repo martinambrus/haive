@@ -678,18 +678,15 @@ status: open · kind: docs · found: guarded span prerequisites docs (#1268) · 
 
 ### T720 · A Claude login reaches one provider row, its sign-out resets them all
 
-status: open (OWNER DECISION needed) · kind: design · found: #1280 review 2026-11-19 · priority: P3
+status: open, in work since 2026-11-19 (owner decided) · kind: design · found: #1280 review 2026-11-19 · priority: P2
 
 A `claude-code` subscription login is a token saved on the one provider row it was made on (`api/src/lib/cli-login-secret.ts` `saveCliLoginSecret`), and each run reads the token of its own row (`worker/src/secrets/provider-secrets.ts`). A sign-out through one row deletes that row's token (`worker/src/queues/cli-exec/handlers.ts` ~:1436-1449) but resets `auth_status` on every row sharing the auth volume (~:1451-1472). The other rows keep their own tokens, which may still work, and read `unknown`.
 
 Seen on the dev install: one sign-out left 40 `claude-code` rows `unknown`, each still holding a token saved between 2026-06-29 and 2026-10-16; the login that followed reached one row. So an account switch needs a login on every row, and a row that was not logged in again keeps running on the token of the earlier account. The providers pages offer **Log in** on each such row (#1280); nothing says the rows are on different accounts.
 
-Decide one:
+OWNER DECISION 2026-11-19: one Claude login per user. A login saves the token for every row that shares the auth volume, and a sign-out removes it for all of them. A row with **Isolate auth from other claude-code providers** ticked keeps its own login, apart from the rest. The sign-out's token delete and its status reset must cover the same rows.
 
-1. One Claude login per user: a login saves the token for every row that shares the auth volume, and a sign-out deletes it for all of them. Matches the other CLIs, where rows share one login.
-2. Per-row logins stay: the sign-out resets only its own row, and the page shows which rows hold which login (for example the token's age).
-
-Either way the sign-out's token delete and its status reset must cover the same rows. T590 items 32 and 33 are the same gap for the volume-login CLIs.
+Open with it: whether the usage connection (`CLAUDE_USAGE_OAUTH`, refreshed per row by the usage poller) is shared the same way. T590 items 32 and 33 are the same gap for the volume-login CLIs.
 
 ### T719 · FNF[env-template-lifecycle] · environment template lifecycle leftovers (+8)
 
