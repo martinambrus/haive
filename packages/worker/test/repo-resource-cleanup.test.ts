@@ -100,6 +100,19 @@ describe('repository resource cleanup', () => {
     expect(fake.rows(schema.envTemplates)).toHaveLength(0);
   });
 
+  it('keeps a captured template that a task outside the repository still links', async () => {
+    const fake = createFakeDb({ tasks: schema.tasks, envTemplates: schema.envTemplates });
+    fake.insert(schema.envTemplates, { id: TEMPLATE, imageTag: 'haive-env:current' });
+    fake.insert(schema.tasks, {
+      id: '00000000-0000-4000-8000-0000000000d9',
+      envTemplateId: TEMPLATE,
+    });
+    h.db = fake.db;
+    await cleanup({ envImageTags: { [TEMPLATE]: 'haive-env:abc' } });
+    expect(h.removed).toEqual([]);
+    expect(fake.rows(schema.envTemplates)).toHaveLength(1);
+  });
+
   describe('its repo_cleanups row', () => {
     const ROW = '00000000-0000-4000-8000-0000000000e1';
     const OTHER = '00000000-0000-4000-8000-0000000000e2';

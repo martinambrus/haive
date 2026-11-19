@@ -3595,8 +3595,16 @@ repoRoutes.delete('/:id', async (c) => {
       .select({ id: schema.tasks.id, envTemplateId: schema.tasks.envTemplateId })
       .from(schema.tasks)
       .where(and(eq(schema.tasks.repositoryId, id), eq(schema.tasks.userId, userId)));
+    // Also the repository's own templates that no task links: repository_id goes NULL on delete.
+    const ownTemplates = await tx
+      .select({ id: schema.envTemplates.id })
+      .from(schema.envTemplates)
+      .where(and(eq(schema.envTemplates.repositoryId, id), eq(schema.envTemplates.userId, userId)));
     envTemplateIds = Array.from(
-      new Set(capturedTasks.map((t) => t.envTemplateId).filter((x): x is string => x !== null)),
+      new Set([
+        ...capturedTasks.map((t) => t.envTemplateId).filter((x): x is string => x !== null),
+        ...ownTemplates.map((t) => t.id),
+      ]),
     );
     if (envTemplateIds.length > 0) {
       const templates = await tx
