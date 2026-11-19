@@ -24,6 +24,7 @@ import {
   parseModelfile,
   OLLAMA_MODEL_NOT_ALLOWED_MESSAGE,
   isRunnableCliVersion,
+  lockLoginSet,
   logger,
   normalizeCliArgsArray,
   resolveDefaultCliProvider,
@@ -518,6 +519,8 @@ cliProviderRoutes.post('/', requireNewWorkAllowed, async (c) => {
             ...(provisioningModel ? { modelProvisionStatus: 'provisioning' } : {}),
           })
           .returning();
+        // First lock on an existing provider row; the new row is invisible until commit.
+        const members = joinsSet ? await lockLoginSet(tx, rows[0]!) : [];
         const fields: string[] = PROVIDER_SECURITY_FIELDS.filter(
           (field) => body[field] !== undefined,
         );
@@ -556,7 +559,8 @@ cliProviderRoutes.post('/', requireNewWorkAllowed, async (c) => {
         if (joinsSet) {
           setEvents = await writeLoginTokenToSet(tx, {
             userId,
-            via: rows[0]!,
+            viaId: rows[0]!.id,
+            members,
             source: 'environment',
             value: split!.secrets.CLAUDE_CODE_OAUTH_TOKEN!,
             masterKek: await secretsService.getMasterKek(),
@@ -729,15 +733,14 @@ cliProviderRoutes.patch('/:id', async (c) => {
   const authSettingsChanged =
     (body.authMode !== undefined && body.authMode !== existing.authMode) ||
     (body.isolateAuth !== undefined && body.isolateAuth !== existing.isolateAuth);
+  const afterSave = {
+    ...existing,
+    authMode: body.authMode ?? existing.authMode,
+    isolateAuth: body.isolateAuth ?? existing.isolateAuth,
+  };
+  const spreadsToken = existing.name === 'claude-code' && !!split?.secrets.CLAUDE_CODE_OAUTH_TOKEN;
   const authProviders = authSettingsChanged
-    ? [
-        existing,
-        {
-          ...existing,
-          authMode: body.authMode ?? existing.authMode,
-          isolateAuth: body.isolateAuth ?? existing.isolateAuth,
-        },
-      ]
+    ? [existing, afterSave]
     : authSecretNames.length
       ? [existing]
       : [];
@@ -745,6 +748,8 @@ cliProviderRoutes.patch('/:id', async (c) => {
   const updated = await withCliAuthLocks(db, authProviders, (assertHeld) =>
     db.transaction(async (tx) => {
       if (startsJob) await admitNewWork(tx);
+      // First lock on any provider row.
+      const members = spreadsToken ? await lockLoginSet(tx, afterSave, id) : [];
       const [current] = await tx
         .select()
         .from(schema.cliProviders)
@@ -820,13 +825,13 @@ cliProviderRoutes.patch('/:id', async (c) => {
       }
       if (secretEvent) await insertAuditEvent(tx, secretEvent);
       await assertHeld();
-      const typedToken = split?.secrets.CLAUDE_CODE_OAUTH_TOKEN;
-      if (existing.name === 'claude-code' && typedToken) {
+      if (spreadsToken) {
         setEvents = await writeLoginTokenToSet(tx, {
           userId,
-          via: rows[0]!,
+          viaId: id,
+          members,
           source: 'environment',
-          value: typedToken,
+          value: split!.secrets.CLAUDE_CODE_OAUTH_TOKEN!,
           masterKek: await secretsService.getMasterKek(),
           assertHeld,
         });
@@ -1238,6 +1243,8 @@ cliProviderRoutes.post('/:providerId/secrets', async (c) => {
   let setEvents: AuditEvent[] = [];
   const secret = await withCliAuthWrite(db, provider, [body.secretName], (assertHeld) =>
     db.transaction(async (tx) => {
+      // First lock on any provider row.
+      const members = setWide ? await lockLoginSet(tx, provider) : [];
       await insertAuditEvent(tx, event);
       await assertHeld();
       const secret = await upsertProviderSecret(tx, {
@@ -1250,7 +1257,8 @@ cliProviderRoutes.post('/:providerId/secrets', async (c) => {
       if (setWide) {
         setEvents = await writeLoginTokenToSet(tx, {
           userId,
-          via: provider,
+          viaId: providerId,
+          members,
           source: 'manual',
           value: body.value,
           masterKek,

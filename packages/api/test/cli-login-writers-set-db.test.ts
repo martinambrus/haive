@@ -1,8 +1,8 @@
-import { randomBytes } from 'node:crypto';
+import { randomBytes, randomUUID } from 'node:crypto';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { and, asc, eq, inArray, sql } from 'drizzle-orm';
 import { Hono } from 'hono';
-import { tryCliAuthLock } from '@haive/database';
+import { isLockNotAvailable, tryCliAuthLock } from '@haive/database';
 import * as authState from '@haive/shared/cli-auth-state';
 import { audits, cleanActor, createDatabase, KEK, makeActor, schema } from './security-audit-db.js';
 
@@ -64,11 +64,12 @@ vi.mock('../src/queues.js', () => ({
 vi.mock('../src/redis.js', () => ({ getRedis: () => ({ eval: async () => '' }) }));
 vi.mock('../src/lib/cli-auth-write.js', async (original) => ({
   ...(await original<any>()),
-  CLI_AUTH_JOIN_WAIT_MS: 250,
+  // Elapsed waiting is tested with fake timers in cli-auth-write.test.ts.
+  CLI_AUTH_JOIN_WAIT_MS: 0,
 }));
 import { CLI_EXEC_JOB_NAMES, configService, envelopeDecrypt, secretsService } from '@haive/shared';
-import { upsertProviderSecret } from '@haive/shared';
-import * as authWrite from '../src/lib/cli-auth-write.js';
+import { lockLoginSet, upsertProviderSecret } from '@haive/shared';
+import { writeLoginTokenToSet } from '../src/lib/cli-login-secret.js';
 import { cliProviderRoutes } from '../src/routes/cli-providers.js';
 import { errorHandler } from '../src/middleware/error-handler.js';
 import type { AppEnv } from '../src/context.js';
@@ -693,7 +694,7 @@ describe.skipIf(!url)(
         expect(await outside(['A', 'B', 'C', 'E', 'F'])).toEqual(before);
       });
 
-      it('is refused as busy after the wait limit while its own set is locked', async () => {
+      it('is refused as busy while its own set is locked', async () => {
         const before = await world();
         const release = await tryCliAuthLock(db, authState.cliAuthScope(rows.D));
         expect(release).not.toBeNull();
@@ -742,7 +743,7 @@ describe.skipIf(!url)(
         expect(await world()).toEqual(before);
       });
 
-      it('a created row with a typed token is refused as busy after the wait limit', async () => {
+      it('a created row with a typed token is refused as busy while the set is locked', async () => {
         const before = await world();
         const release = await holdSet();
         try {
@@ -754,50 +755,191 @@ describe.skipIf(!url)(
         }
         expect(await world()).toEqual(before);
       });
+    });
 
-      it('a created row with a typed token waits for a holder that releases in time', async () => {
-        const token = rnd();
-        const body = createBody(token);
-        const release = await holdSet();
-        const timer = setTimeout(() => void release(), 20);
-        let res: Response;
-        try {
-          res = await call('POST', '', body);
-        } finally {
-          clearTimeout(timer);
-          await release();
-        }
-        expect(res.status).toBe(201);
-        await expectWritten(token, ['A', 'B', (await findNew(body.label)).id]);
+    describe('the set lock comes first, beside an id-ordered lock holder', () => {
+      // Rows share a prefix and differ in the last digits: X < R1 < R2 < R3. The image job locks provider rows in id
+      // order without the auth lock, so a writer holding one row while it waits for a lower id could deadlock with it.
+      let peer: ReturnType<typeof createDatabase>;
+      beforeAll(() => {
+        peer = createDatabase(url!);
+      });
+      afterAll(async () => {
+        await peer.$client.end({ timeout: 5 });
       });
 
-      it('the lock helper waits up to its limit and then refuses as busy', async () => {
-        const lock = authWrite.withCliAuthLocks as any;
-        const release = await holdSet();
-        const timer = setTimeout(() => void release(), 100);
-        try {
-          await expect(lock(db, [rows.A], async () => 'ok', { waitMs: 400 })).resolves.toBe('ok');
-        } finally {
-          clearTimeout(timer);
-          await release();
+      const seedW = async () => {
+        const W = (await makeActor(db)).id;
+        const base = randomUUID().slice(0, -4);
+        const ids = { X: `${base}0001`, R1: `${base}0002`, R2: `${base}0003`, R3: `${base}0004` };
+        // Insert order differs from id order, so a lock query without ORDER BY would take R3 first.
+        for (const key of ['R3', 'R1', 'X', 'R2'] as const)
+          await db.insert(schema.cliProviders).values({
+            id: ids[key],
+            userId: W,
+            name: 'claude-code',
+            authMode: 'subscription',
+            isolateAuth: key === 'X',
+            label: key,
+            authLastCheckedAt: PAST,
+          });
+        for (const key of ['R1', 'R2'] as const)
+          await upsertProviderSecret(db, {
+            providerId: ids[key],
+            name: TOKEN,
+            value: rnd(),
+            masterKek: KEK,
+            onExisting: 'overwrite',
+          });
+        h.actor = W;
+        return { W, ids };
+      };
+
+      const backendPid = async (tx: { execute: typeof db.execute }) => {
+        const [row] = await tx.execute<{ pid: number }>(sql`select pg_backend_pid() as pid`);
+        return row!.pid;
+      };
+
+      /** Whether some backend waits for a lock the backend `pid` holds. */
+      const blockedBy = async (pid: number) => {
+        const [row] = await db.execute<{ blocked: boolean }>(sql`
+          select exists (
+            select 1 from pg_stat_activity
+            where wait_event_type = 'Lock' and ${pid}::int = any (pg_blocking_pids(pid))
+          ) as blocked`);
+        return row?.blocked === true;
+      };
+
+      // A wait on database state, the exception the testing guide allows; the deadline is kept small.
+      const waitUntil = async (condition: () => Promise<boolean>) => {
+        const deadline = Date.now() + 5000;
+        while (!(await condition())) {
+          if (Date.now() > deadline)
+            throw new Error('no backend was blocked by the peer within 5000 ms');
+          await new Promise((resolve) => setTimeout(resolve, 20));
         }
-        const held = await holdSet();
+      };
+
+      /** The rows of `ids` that someone holds right now. FOR UPDATE, since only it conflicts with a KEY SHARE. */
+      const rowsHeld = async (ids: string[]) => {
+        const held: string[] = [];
+        for (const id of ids)
+          await db
+            .transaction((tx) =>
+              tx.execute(sql`select id from cli_providers where id = ${id} for update nowait`),
+            )
+            .catch((error: unknown) => {
+              if (!isLockNotAvailable(error)) throw error;
+              held.push(id);
+            });
+        return held;
+      };
+
+      /** Starts `run` while a second connection holds `heldId`, and reports the rows of `probeIds` the request
+       *  holds while it waits for the peer. The peer is always released. */
+      const besideHolder = async (
+        heldId: string,
+        probeIds: string[],
+        run: () => Response | Promise<Response>,
+      ) => {
+        let holds!: () => void;
+        const holding = new Promise<void>((resolve) => (holds = resolve));
+        let release!: () => void;
+        const released = new Promise<void>((resolve) => (release = resolve));
+        let pid = 0;
+        const peerRun = peer.transaction(async (tx) => {
+          pid = await backendPid(tx);
+          await tx.execute(sql`select id from cli_providers where id = ${heldId} for update`);
+          holds();
+          await released;
+        });
+        await Promise.race([holding, peerRun]);
+        let response: Promise<Response> | undefined;
+        let held: string[] = [];
         try {
-          await expect(lock(db, [rows.A], async () => 'ok', { waitMs: 100 })).rejects.toMatchObject(
-            {
-              status: 409,
-              code: 'cli_auth_busy',
-            },
+          response = Promise.resolve(run());
+          await waitUntil(() => blockedBy(pid));
+          held = await rowsHeld(probeIds);
+        } finally {
+          release();
+          await peerRun;
+          await response?.catch(() => undefined);
+        }
+        return { held, res: await response! };
+      };
+
+      const finish = async (W: string, body: () => Promise<void>) => {
+        try {
+          await body();
+        } finally {
+          h.actor = U;
+          await cleanActor(db, W);
+        }
+      };
+
+      it('a settings save typing the token through a later row holds none of the set before the lock', async () => {
+        const { W, ids } = await seedW();
+        await finish(W, async () => {
+          const before = await provider(ids.X);
+          const token = rnd();
+          const { held, res } = await besideHolder(ids.R1, [ids.R2, ids.R3], () =>
+            call('PATCH', `/${ids.R3}`, { envVars: { [TOKEN]: token } }),
           );
-        } finally {
-          await held();
-        }
+          expect(held).toEqual([]);
+          expect(res.status).toBe(200);
+          await expectWritten(token, [ids.R1, ids.R2, ids.R3]);
+          expect(await plain(ids.X, TOKEN)).toBeUndefined();
+          expect((await provider(ids.X)).authGeneration).toBe(before.authGeneration);
+        });
       });
 
-      it('the production wait limit is ten seconds', async () => {
-        const real = await vi.importActual<any>('../src/lib/cli-auth-write.js');
-        expect(real.CLI_AUTH_JOIN_WAIT_MS).toBe(10_000);
+      it('a manual token write through a row without one holds none of the set before the lock', async () => {
+        const { W, ids } = await seedW();
+        await finish(W, async () => {
+          const before = await provider(ids.X);
+          const token = rnd();
+          const { held, res } = await besideHolder(ids.R1, [ids.R2, ids.R3], () =>
+            call('POST', `/${ids.R3}/secrets`, { secretName: TOKEN, value: token }),
+          );
+          expect(held).toEqual([]);
+          expect(res.status).toBe(201);
+          await expectWritten(token, [ids.R1, ids.R2, ids.R3]);
+          expect(await plain(ids.X, TOKEN)).toBeUndefined();
+          expect((await provider(ids.X)).authGeneration).toBe(before.authGeneration);
+        });
       });
+
+      it('a settings save that un-isolates a row locks that row with its new set', async () => {
+        const { W, ids } = await seedW();
+        await finish(W, async () => {
+          const token = rnd();
+          const { held, res } = await besideHolder(ids.X, [ids.R1, ids.R2, ids.R3], () =>
+            call('PATCH', `/${ids.X}`, { isolateAuth: false, envVars: { [TOKEN]: token } }),
+          );
+          expect(held).toEqual([]);
+          expect(res.status).toBe(200);
+          await expectWritten(token, [ids.X, ids.R1, ids.R2, ids.R3]);
+        });
+      });
+    });
+
+    it('refuses locked rows that do not include the clicked row and writes nothing', async () => {
+      const before = await world();
+      await expect(
+        db.transaction(async (tx) => {
+          const members = await lockLoginSet(tx, rows.A);
+          await writeLoginTokenToSet(tx, {
+            userId: U,
+            viaId: rows.C.id,
+            members,
+            source: 'manual',
+            value: rnd(),
+            masterKek: KEK,
+            assertHeld: async () => {},
+          });
+        }),
+      ).rejects.toThrow('Provider not found');
+      expect(await world()).toEqual(before);
     });
 
     describe('a sign-out request', () => {

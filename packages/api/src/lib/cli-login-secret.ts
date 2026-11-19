@@ -115,24 +115,25 @@ export async function saveCliLoginSecret(
 export const isSetLoginSecret = (providerName: string, secretName: string): boolean =>
   providerName === 'claude-code' && secretName === 'CLAUDE_CODE_OAUTH_TOKEN';
 
-/** Call after writing the token to `via`, under the set's auth lock: copies it to the other rows. */
+/** Copies the token to the other rows of `members`, which the caller locked with `lockLoginSet` before
+ * writing anything for the request; the caller writes the clicked row's own secret after that lock. */
 export async function writeLoginTokenToSet(
   tx: Parameters<Parameters<Database['transaction']>[0]>[0],
   opts: {
     userId: string;
-    via: CliAuthProvider;
+    viaId: string;
+    members: { id: string }[];
     source: 'manual' | 'environment';
     value: string;
     masterKek: string;
     assertHeld: () => Promise<void>;
   },
 ): Promise<AuditEvent[]> {
-  const { userId, via, source, value, masterKek, assertHeld } = opts;
-  const members = await lockLoginSet(tx, via);
-  if (!members.some((m) => m.id === via.id)) throw new Error('Provider not found');
+  const { userId, viaId, members, source, value, masterKek, assertHeld } = opts;
+  if (!members.some((m) => m.id === viaId)) throw new Error('Provider not found');
   const events: AuditEvent[] = [];
   for (const member of members) {
-    if (member.id === via.id) continue;
+    if (member.id === viaId) continue;
     const event: AuditEvent = {
       actorUserId: userId,
       action: 'cli_provider.secret.set',
@@ -141,7 +142,7 @@ export async function writeLoginTokenToSet(
       metadata: {
         source,
         secretName: 'CLAUDE_CODE_OAUTH_TOKEN',
-        viaProviderId: via.id,
+        viaProviderId: viaId,
         setSize: members.length,
       },
     };
