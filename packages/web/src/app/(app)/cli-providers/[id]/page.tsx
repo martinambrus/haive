@@ -3,12 +3,18 @@
 import { useEffect, useState } from 'react';
 import { useParams } from 'next/navigation';
 import Link from 'next/link';
-import { api, type CliProvider, type CliProviderCatalogEntry } from '@/lib/api-client';
+import {
+  api,
+  type CliAuthStatus,
+  type CliProvider,
+  type CliProviderCatalogEntry,
+} from '@/lib/api-client';
 import { Card, CardDescription, CardHeader, CardTitle, FormError } from '@/components/ui';
 import { CliProviderForm } from '@/components/cli-provider-form';
 import { CliProviderTest } from '@/components/cli-provider-test';
 import { ClaudeUsageAuth } from '@/components/claude-usage-auth';
 import { usePageTitle } from '@/lib/use-page-title';
+import { storedLoginStatus } from '@/lib/usage-reconnect';
 
 export default function EditCliProviderPage() {
   const params = useParams<{ id: string }>();
@@ -21,15 +27,20 @@ export default function EditCliProviderPage() {
   /** This provider's usage token is dead. Reveals the Log in button below without a Test
    *  first, so the `#cli-login` deep-link the reconnect prompts use lands on a live control. */
   const [needsUsageReconnect, setNeedsUsageReconnect] = useState(false);
+  /** The row's stored auth status as its login stands across the rows sharing its auth
+   *  volume. Decides Log in below until a Test result replaces it. */
+  const [storedAuthStatus, setStoredAuthStatus] = useState<CliAuthStatus | null>(null);
   usePageTitle(provider ? provider.label : 'CLI Provider');
 
   useEffect(() => {
     Promise.all([
       api.get<{ provider: CliProvider }>(`/cli-providers/${id}`),
       api.get<{ providers: CliProviderCatalogEntry[] }>('/cli-providers/catalog'),
+      api.get<{ providers: CliProvider[] }>('/cli-providers'),
     ])
-      .then(([providerData, catalogData]) => {
+      .then(([providerData, catalogData, listData]) => {
         setProvider(providerData.provider);
+        setStoredAuthStatus(storedLoginStatus(providerData.provider, listData.providers));
         const found = catalogData.providers.find((p) => p.name === providerData.provider.name);
         setMeta(found ?? null);
       })
@@ -110,7 +121,7 @@ export default function EditCliProviderPage() {
           providerLabel={provider.label}
           blockMessage={testBlockMessage}
           needsUsageReconnect={needsUsageReconnect}
-          rowAuthStatus={provider.authStatus}
+          rowAuthStatus={storedAuthStatus}
           rowAuthMode={provider.authMode}
           onLoginCompleted={() => setSecretsReloadNonce((n) => n + 1)}
         />

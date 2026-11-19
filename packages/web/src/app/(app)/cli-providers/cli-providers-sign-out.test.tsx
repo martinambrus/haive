@@ -119,3 +119,44 @@ it('offers Log in after a completed sign-out without running Test first', async 
   expect(buttons(view.tree(), /^sign out$/i)).toHaveLength(0);
   expect(vi.getTimerCount()).toBe(0);
 });
+
+it('does not offer Log in on a row whose shared login a sibling checked ok since', async () => {
+  vi.useFakeTimers();
+  const shared = { name: 'codex', enabled: true, authMode: 'subscription', isolateAuth: false };
+  h.get.mockImplementation(async (path: string) => {
+    if (path === '/cli-providers')
+      return {
+        providers: [
+          {
+            ...shared,
+            id: 'a',
+            userId: 'u',
+            label: 'Codex A',
+            authStatus: 'ok',
+            authLastCheckedAt: '2026-01-02T10:00:39.000Z',
+            envVars: {},
+            cliArgs: [],
+          },
+          {
+            ...shared,
+            id: 'b',
+            userId: 'u',
+            label: 'Codex B',
+            authStatus: 'unknown',
+            authLastCheckedAt: '2026-01-02T10:00:00.000Z',
+            envVars: {},
+            cliArgs: [],
+          },
+        ],
+      };
+    if (path === '/cli-providers/catalog') return { providers: [] };
+    if (path === '/usage-window') return { snapshots: [] };
+    return { status: 'pending', state: 'waiting' };
+  });
+  const view = createRenderer(() => createElement(CliProvidersPage));
+  await vi.advanceTimersByTimeAsync(0);
+  view.draw();
+  // Row A logged the shared volume in after the sign-out that left row B at `unknown`.
+  expect(buttons(view.tree(), /^sign out$/i)).toHaveLength(1);
+  expect(buttons(view.tree(), /^log in$/i)).toHaveLength(0);
+});

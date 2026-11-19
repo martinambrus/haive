@@ -7,7 +7,7 @@
  *  providers list — cannot drift apart, the same reason `step-banners.ts` exists.
  */
 
-import type { CliAuthMode, CliAuthStatus, CliProviderName } from '@/lib/api-client';
+import type { CliAuthMode, CliAuthStatus, CliProvider, CliProviderName } from '@/lib/api-client';
 
 export type UsageReconnectFix = 'usage-oauth' | 'cli-login' | 'api-token';
 
@@ -38,11 +38,46 @@ const LOGIN_RECOVERABLE: readonly CliAuthStatus[] = [
   'timeout',
 ];
 
+/** What the Log in decision reads of a provider row. */
+type LoginRow = Pick<
+  CliProvider,
+  'id' | 'userId' | 'name' | 'authMode' | 'isolateAuth' | 'authStatus' | 'authLastCheckedAt'
+>;
+
+function checkedAt(row: LoginRow): number {
+  const at = row.authLastCheckedAt ? Date.parse(row.authLastCheckedAt) : Number.NaN;
+  return Number.isNaN(at) ? 0 : at;
+}
+
+/** A row's stored auth status as its login really stands, for `cliLoginOffered`.
+ *
+ *  Rows that are not isolated share one auth volume per user, CLI and auth mode. A sign-out
+ *  resets every one of them, but a login or a Test writes only the row it ran on, so after
+ *  logging in through one row its siblings still say `unknown` about a login that works. A
+ *  sibling that checked ok after this row was last written is the newer word on that shared
+ *  login. An isolated row speaks for itself. */
+export function storedLoginStatus(row: LoginRow, rows: readonly LoginRow[]): CliAuthStatus {
+  if (row.isolateAuth) return row.authStatus;
+  const own = checkedAt(row);
+  const newerOk = rows.some(
+    (other) =>
+      other.id !== row.id &&
+      !other.isolateAuth &&
+      other.userId === row.userId &&
+      other.name === row.name &&
+      other.authMode === row.authMode &&
+      other.authStatus === 'ok' &&
+      checkedAt(other) > own,
+  );
+  return newerOk ? 'ok' : row.authStatus;
+}
+
 /** Whether a provider's surfaces offer Log in. A fresh Test result wins when there is one;
- *  without it a subscription row's stored status decides. Reading only the Test result left
- *  the button missing after a sign-out, which clears that result and writes `unknown` to the
- *  row, until the user ran Test to rediscover what the row already said. An api_key row's
- *  `unknown` says nothing about a login, so the row alone never offers it there. */
+ *  without it a subscription row's stored status decides (pass it through
+ *  `storedLoginStatus`). Reading only the Test result left the button missing after a
+ *  sign-out, which clears that result and writes `unknown` to the row, until the user ran
+ *  Test to rediscover what the row already said. An api_key row's `unknown` says nothing
+ *  about a login, so the row alone never offers it there. */
 export function cliLoginOffered(input: {
   name: CliProviderName;
   authMode: CliAuthMode;

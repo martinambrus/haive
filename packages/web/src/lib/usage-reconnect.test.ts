@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import {
   cliLoginOffered,
+  storedLoginStatus,
   usageReconnectFix,
   usageReconnectHref,
   usageReconnectHint,
@@ -112,5 +113,53 @@ describe('cliLoginOffered', () => {
   });
   it('never offers it for a provider with no interactive login', () => {
     expect(cliLoginOffered({ ...base, name: 'gemini', rowStatus: 'unknown' })).toBe(false);
+  });
+});
+
+describe('storedLoginStatus', () => {
+  const row = (
+    id: string,
+    authStatus: 'ok' | 'unknown' | 'auth_expired',
+    authLastCheckedAt: string | null,
+    extra: { isolateAuth?: boolean; name?: 'codex' | 'claude-code'; userId?: string } = {},
+  ) => ({
+    id,
+    userId: extra.userId ?? 'u',
+    name: extra.name ?? ('codex' as const),
+    authMode: 'subscription' as const,
+    isolateAuth: extra.isolateAuth ?? false,
+    authStatus,
+    authLastCheckedAt,
+  });
+  const signedOutAt = '2026-01-02T10:00:00.000Z';
+  const loggedInAt = '2026-01-02T10:00:39.000Z';
+
+  it('keeps unknown while every row sharing the login was signed out together', () => {
+    const rows = [row('a', 'unknown', signedOutAt), row('b', 'unknown', signedOutAt)];
+    expect(storedLoginStatus(rows[0]!, rows)).toBe('unknown');
+    expect(storedLoginStatus(rows[1]!, rows)).toBe('unknown');
+  });
+  it('reads ok once a sibling on the shared login checked ok after the sign-out', () => {
+    const rows = [row('a', 'ok', loggedInAt), row('b', 'unknown', signedOutAt)];
+    expect(storedLoginStatus(rows[1]!, rows)).toBe('ok');
+    expect(storedLoginStatus(row('c', 'unknown', null), rows)).toBe('ok');
+  });
+  it('keeps a row that saw the login fail after the sibling last checked ok', () => {
+    const rows = [row('a', 'ok', signedOutAt), row('b', 'auth_expired', loggedInAt)];
+    expect(storedLoginStatus(rows[1]!, rows)).toBe('auth_expired');
+  });
+  it('ignores a sibling that does not share the auth volume', () => {
+    const own = row('b', 'unknown', signedOutAt);
+    expect(storedLoginStatus(own, [row('a', 'ok', loggedInAt, { isolateAuth: true })])).toBe(
+      'unknown',
+    );
+    expect(storedLoginStatus(own, [row('a', 'ok', loggedInAt, { name: 'claude-code' })])).toBe(
+      'unknown',
+    );
+    expect(storedLoginStatus(own, [row('a', 'ok', loggedInAt, { userId: 'other' })])).toBe(
+      'unknown',
+    );
+    const isolated = row('b', 'unknown', signedOutAt, { isolateAuth: true });
+    expect(storedLoginStatus(isolated, [row('a', 'ok', loggedInAt)])).toBe('unknown');
   });
 });

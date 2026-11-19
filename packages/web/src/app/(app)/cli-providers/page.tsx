@@ -42,6 +42,7 @@ import { usePageTitle } from '@/lib/use-page-title';
 import {
   CLI_LOGIN_PROVIDERS,
   cliLoginOffered,
+  storedLoginStatus,
   usageReconnectFix,
   usageReconnectHint,
 } from '@/lib/usage-reconnect';
@@ -510,7 +511,7 @@ export default function CliProvidersPage() {
                     name: p.name,
                     authMode: p.authMode,
                     testStatus: cliAuthStatus,
-                    rowStatus: p.authStatus,
+                    rowStatus: storedLoginStatus(p, providers),
                     usageTokenDead: loginRepairsUsage,
                   });
                   const showSignOut = CLI_LOGIN_PROVIDERS.includes(p.name) && p.authStatus === 'ok';
