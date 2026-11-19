@@ -691,15 +691,19 @@ All PRE-EXISTING. Paths are under `packages/`. Check each against the shared usa
 
 ### T721 · The Claude usage grant reaches sandbox environments
 
-status: open, in work since 2026-11-19 · kind: security · found: login-set design (T720) 2026-11-19 · priority: P1
+status: open (items 2-9; item 1 done #1281) · kind: security · found: login-set design (T720) 2026-11-19 · priority: P3 (was P1 until #1281)
 
-`resolveProviderSecrets` returns every secret of a provider row (`worker/src/secrets/provider-secrets.ts:5-22`). The run path merges them into the container environment (`worker/src/queues/cli-exec/handlers.ts` ~:350-354, `exec-core.ts:732`, `sandbox/docker-runner.ts:474-475`), and so do the probe, the terminal and the image checks. A claude-code row with a usage connection therefore hands `CLAUDE_USAGE_OAUTH`, an OAuth refresh token whose scope includes `org:create_api_key` (`shared/src/cli-providers/claude-oauth.ts:35`), to every sandbox run, where repository code can read it. Only the worker's usage poller needs it. PRE-EXISTING, confirmed by reading the code; not observed in a live container.
+`resolveProviderSecrets` returns every secret of a provider row (`worker/src/secrets/provider-secrets.ts:5-22`). The run path merges them into the container environment (`worker/src/queues/cli-exec/handlers.ts` ~:350-354, `exec-core.ts:732`, `sandbox/docker-runner.ts:474-475`), and so do the probe, the terminal and the image checks. A claude-code row with a usage connection therefore hands `CLAUDE_USAGE_OAUTH`, an OAuth refresh token whose scope includes `org:create_api_key` (`shared/src/cli-providers/claude-oauth.ts:35`), to every sandbox run, where repository code can read it. Only the worker's usage poller needs it. PRE-EXISTING. Live proof on the dev install 2026-11-19, names only: before the fix the env resolver returned `CLAUDE_CODE_OAUTH_TOKEN` and `CLAUDE_USAGE_OAUTH` for the run row; after it, `CLAUDE_CODE_OAUTH_TOKEN` alone, and the poller's by-name read still returned the grant.
 
-1. Keep worker-only secrets out of every container environment, at one seam (in work, first PR).
+1. DONE #1281 (132d5dfc3, deployed 2026-11-19 10:00Z): `resolveProviderSecrets`, the one resolver every env builder uses, skips the names in `WORKER_ONLY_SECRET_NAMES`; the poller reads its grant by name through `readProviderSecret`.
 2. Ask for less: check whether the authorize endpoint accepts `user:profile` alone, the one scope the usage endpoint enforces. Needs a live Connect by the owner.
 3. Disconnect and sign-out delete the stored grant but never revoke it at the vendor (`api/src/routes/cli-providers.ts` ~:1346-1382, `handlers.ts` ~:1436-1448).
-4. After item 1 is deployed, reconnect usage once, so a grant a sandbox could read is replaced. A refresh rotates the token, which should retire the old one; the vendor's behaviour is unverified.
+4. OWNER: reconnect usage once now that item 1 is deployed, so a grant a sandbox could read is replaced. A refresh rotates the token, which should retire the old one; the vendor's behaviour is unverified.
 5. Same seam: an api-key claude row that still stores a login token injects it too (`provider-secrets.ts:5-22`, `worker/src/cli-adapters/base-adapter.ts` ~:127-137). Decide which credential such a row should carry.
+6. `WORKER_ONLY_SECRET_NAMES` is a hand-kept list: nothing ties it to the `oauthRefresh` entry in `worker/src/usage-window/fetchers/index.ts:53`, and no test pins that `provider-secrets.ts` is the only place in the worker that decrypts `cli_provider_secrets`. A new worker-only secret, or a second decrypt site, would pass the rule by silently.
+7. `ClaudeOauthError` embeds up to 200 characters of the token endpoint's error body (`shared/src/cli-providers/claude-oauth.ts:130`, `:163`). The text reaches the Connect HTTP 400 (`api/src/routes/cli-providers.ts` ~:1277-1280) and the poller's warn log (`worker/src/queues/usage-poll-queue.ts` ~:253-256). Whether that body can echo a token is unverified. PRE-EXISTING.
+8. A hand-typed `envVars` entry named `CLAUDE_USAGE_OAUTH` is not secret-like by name (`shared/src/schemas/cli-providers.ts:98`), stays plaintext and reaches containers. No Haive writer puts the real grant there. PRE-EXISTING, low.
+9. `isAuthSecret` (`worker/src/secrets/move-secret-env.ts:11-12`) names the usage secret, which can never reach it; that half is dead. PRE-EXISTING, cosmetic.
 
 ### T720 · A Claude login reaches one provider row, its sign-out resets them all
 
