@@ -686,7 +686,7 @@ Seen on the dev install: one sign-out left 40 `claude-code` rows `unknown`, each
 
 OWNER DECISION 2026-11-19: one Claude login per user. A login saves the token for every row that shares the auth volume, and a sign-out removes it for all of them. A row with **Isolate auth from other claude-code providers** ticked keeps its own login, apart from the rest. The sign-out's token delete and its status reset must cover the same rows.
 
-Open with it: whether the usage connection (`CLAUDE_USAGE_OAUTH`, refreshed per row by the usage poller) is shared the same way. T590 items 32 and 33 are the same gap for the volume-login CLIs.
+OWNER DECISION 2026-11-19: the usage connection (`CLAUDE_USAGE_OAUTH`, refreshed per row by the usage poller) is shared the same way, as its own PR after the login PR. T590 items 32 and 33 are the same gap for the volume-login CLIs.
 
 ### T719 · FNF[env-template-lifecycle] · environment template lifecycle leftovers (+8)
 
