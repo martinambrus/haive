@@ -381,15 +381,21 @@ Metadata never includes credentials, output, codes or environment values.
 Claude-family captured tokens record `cli_provider.secret.set` atomically with
 encrypted-secret promotion, one strict event per row written and targeting that row (metadata
 `source`, `secretName`, `viaProviderId`, `setSize`), so a login through one row leaves an event for
-each row of its set; those keep their strict write.
+each row of its set; those keep their strict write. The other writers of that token do the same in
+their own transaction: a manual login-secret POST and a token typed on create or in a settings save
+(source `manual` or `environment`) record the event on every other row of the set, and a manual delete
+of it records `cli_provider.secret.delete` on every row it removed the token from (the clicked row's
+event as before, the others adding `viaProviderId` and `setSize`). All follow commit.
 
 **CLI sign-out requires its request row before enqueue.** The API commits
 `cli_provider.sign_out` before adding the sign-out job, with no transaction open
 during the enqueue; an audit refusal queues nothing, and a rejected or id-less
 enqueue deletes that one row by id (a failed delete is logged). The pino line
 follows a successful enqueue. The worker retains ownership of credential-volume and
-Claude login-secret removal and adds no audit writer, so the login tokens it deletes on the other
-rows of the clicked row's set leave no event of their own.
+Claude login-secret removal and adds no audit writer, so the request row names the rows of the clicked
+row's set as the request read them: metadata `setSize` (their true count) and `setIds` (their ids in
+ascending order, at most 50, ids only), beside the clicked row it targets. The job reads the set again
+when it runs, so the list is the request's view, not a record of what was deleted.
 
 **CLI provider security edits require their own row.** Create records
 `cli_provider.create` in its insert transaction, listing the security fields the
@@ -401,8 +407,8 @@ empty value count as equal. The current provider is read under its
 `FOR NO KEY UPDATE` row lock, and the update and required audit commit together. Metadata lists changed fields and environment names
 (including removals), never their values or wrapper/Dockerfile content.
 Secret environment writes keep their existing strict `cli_provider.secret.set`
-row in that same transaction. Both logs follow commit; unchanged settings
-add no update row.
+row in that same transaction; a typed Claude login token adds one such row for every other row of
+its set. Both logs follow commit; unchanged settings add no update row.
 
 ## Administrator SMTP mail
 

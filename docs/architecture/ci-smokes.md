@@ -40,15 +40,15 @@ now models each split job with those historical numbers and explicit setup allow
 - `smokes`: 907 + 62 = 969 s modelled green. Its 32-minute limit (1920 s) leaves 951 s over that model and covers
   the largest check's entire 900 s limit plus modelled green (1869 s), so later checks still have room after a hang.
   The extra 62 s conservatively allows moving module preparation from the old gated step into this job's setup.
-- `postgres-gated`: 120 s setup/module allowance + 10 s per row = 1770 s at 165 rows. MEASURED 2026-11-12 on
+- `postgres-gated`: 120 s setup/module allowance + 10 s per row = 1810 s at 169 rows. MEASURED 2026-11-12 on
   ubuntu-latest: the gated step took 1222 s for 134 rows on main and 1423 s for 143 rows, about 10 s per row, so the
-  older 7.5 s figure undercounted. Its 44-minute limit (2640 s) leaves 870 s over modelled green and covers the
-  42-minute gated step limit plus setup (2640 s). The 120 s allowance rounds up the historical 62 s setup maximum to
+  older 7.5 s figure undercounted. Its 45-minute limit (2700 s) leaves 890 s over modelled green and covers the
+  43-minute gated step limit plus setup (2700 s). The 120 s allowance rounds up the historical 62 s setup maximum to
   include module preparation.
 - Both jobs retain at least 600 s over modelled green, stay within twice that model and leave room for a check's
   whole time limit plus the rest of a green run. The gated step also retains at least 1.5 times its modelled row time:
-  its 42 minutes holds 168 rows and fails the pin at 169 (raised from 40 when the guarded-span
-  controls brought the list to 165 rows); the job's 600 s margin lasts through 192 rows.
+  its 43 minutes holds 172 rows and fails the pin at 173 (raised from 40 when the guarded-span
+  controls brought the list to 165 rows, and again for the 169th); the job's 600 s margin lasts through 198 rows.
   The five new controls ran in 6.4 to 18.8 s each locally including Vitest startup, 11.5 s on average, close to the
   modelled 10 s; this does not remeasure the complete CI job. The historical 10 s per-row model is retained; verify the next green CI run.
   Measure again before raising a limit when those pins fail.
