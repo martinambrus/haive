@@ -71,3 +71,92 @@ it('aborts sign-out polling when the providers page unmounts', async () => {
   expect(h.get.mock.calls.filter(([path]) => path.includes('/sign-out/'))).toHaveLength(1);
   expect(vi.getTimerCount()).toBe(0);
 });
+
+it('offers Log in after a completed sign-out without running Test first', async () => {
+  vi.useFakeTimers();
+  vi.stubGlobal('confirm', () => true);
+  let authStatus = 'ok';
+  h.post.mockResolvedValue({ jobId: '7' });
+  h.get.mockImplementation(async (path: string) => {
+    if (path === '/cli-providers')
+      return {
+        providers: [
+          {
+            id: 'p',
+            name: 'codex',
+            label: 'Codex',
+            enabled: true,
+            authMode: 'subscription',
+            authStatus,
+            envVars: {},
+            cliArgs: [],
+          },
+        ],
+      };
+    if (path === '/cli-providers/catalog') return { providers: [] };
+    if (path === '/usage-window') return { snapshots: [] };
+    if (path.includes('/sign-out/')) {
+      // The worker resets the row to 'unknown' when it removes the auth volume.
+      authStatus = 'unknown';
+      return {
+        status: 'done',
+        result: { ok: true, removed: ['haive_cli_auth_codex'], failed: [] },
+      };
+    }
+    return { status: 'pending', state: 'waiting' };
+  });
+  const view = createRenderer(() => createElement(CliProvidersPage));
+  await vi.advanceTimersByTimeAsync(0);
+  view.draw();
+  expect(buttons(view.tree(), /^sign out$/i)).toHaveLength(1);
+  expect(buttons(view.tree(), /^log in$/i)).toHaveLength(0);
+  fire.click(buttons(view.tree(), /^sign out$/i)[0]!);
+  // The job answers done on its first poll, so no poll delay is armed: flushing the pending
+  // promises is enough for the sign-out to finish and the page to reload the row.
+  await vi.advanceTimersByTimeAsync(0);
+  view.draw();
+  expect(buttons(view.tree(), /^log in$/i)).toHaveLength(1);
+  expect(buttons(view.tree(), /^sign out$/i)).toHaveLength(0);
+  expect(vi.getTimerCount()).toBe(0);
+});
+
+it('does not offer Log in on a row whose shared login a sibling checked ok since', async () => {
+  vi.useFakeTimers();
+  const shared = { name: 'codex', enabled: true, authMode: 'subscription', isolateAuth: false };
+  h.get.mockImplementation(async (path: string) => {
+    if (path === '/cli-providers')
+      return {
+        providers: [
+          {
+            ...shared,
+            id: 'a',
+            userId: 'u',
+            label: 'Codex A',
+            authStatus: 'ok',
+            authLastCheckedAt: '2026-01-02T10:00:39.000Z',
+            envVars: {},
+            cliArgs: [],
+          },
+          {
+            ...shared,
+            id: 'b',
+            userId: 'u',
+            label: 'Codex B',
+            authStatus: 'unknown',
+            authLastCheckedAt: '2026-01-02T10:00:00.000Z',
+            envVars: {},
+            cliArgs: [],
+          },
+        ],
+      };
+    if (path === '/cli-providers/catalog') return { providers: [] };
+    if (path === '/usage-window') return { snapshots: [] };
+    return { status: 'pending', state: 'waiting' };
+  });
+  const view = createRenderer(() => createElement(CliProvidersPage));
+  await vi.advanceTimersByTimeAsync(0);
+  view.draw();
+  // Row A logged the shared volume in after the sign-out that left row B at `unknown`.
+  expect(buttons(view.tree(), /^sign out$/i)).toHaveLength(1);
+  expect(buttons(view.tree(), /^log in$/i)).toHaveLength(0);
+});

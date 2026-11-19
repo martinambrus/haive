@@ -1,5 +1,11 @@
 import { describe, it, expect } from 'vitest';
-import { usageReconnectFix, usageReconnectHref, usageReconnectHint } from './usage-reconnect';
+import {
+  cliLoginOffered,
+  storedLoginStatus,
+  usageReconnectFix,
+  usageReconnectHref,
+  usageReconnectHint,
+} from './usage-reconnect';
 
 describe('usageReconnectFix', () => {
   it('sends claude-code to its usage-OAuth, not to its CLI login', () => {
@@ -67,5 +73,105 @@ describe('usageReconnectHint', () => {
 
   it('falls back to a generic subject when the provider has no label', () => {
     expect(usageReconnectHint(null, 'codex')).toMatch(/^This CLI /);
+  });
+});
+
+describe('cliLoginOffered', () => {
+  const base = {
+    name: 'codex' as const,
+    authMode: 'subscription' as const,
+    testStatus: undefined,
+    rowStatus: undefined,
+    usageTokenDead: false,
+  };
+  it('offers Log in from the row alone after a sign-out wrote unknown', () => {
+    expect(cliLoginOffered({ ...base, rowStatus: 'unknown' })).toBe(true);
+    expect(cliLoginOffered({ ...base, rowStatus: 'auth_expired' })).toBe(true);
+  });
+  it('does not offer it for a logged-in row or one with no status', () => {
+    expect(cliLoginOffered({ ...base, rowStatus: 'ok' })).toBe(false);
+    expect(cliLoginOffered({ ...base, rowStatus: null })).toBe(false);
+    expect(cliLoginOffered({ ...base, rowStatus: 'rate_limited' })).toBe(false);
+  });
+  it('lets a fresh Test result win over the stored row', () => {
+    expect(cliLoginOffered({ ...base, rowStatus: 'unknown', testStatus: 'ok' })).toBe(false);
+    expect(cliLoginOffered({ ...base, rowStatus: 'ok', testStatus: 'auth_expired' })).toBe(true);
+  });
+  it('never offers it from an api_key row alone, but a Test result still can', () => {
+    expect(cliLoginOffered({ ...base, authMode: 'api_key', rowStatus: 'unknown' })).toBe(false);
+    expect(
+      cliLoginOffered({
+        ...base,
+        authMode: 'api_key',
+        rowStatus: 'unknown',
+        testStatus: 'auth_expired',
+      }),
+    ).toBe(true);
+  });
+  it('offers it for a dead usage token whatever the status', () => {
+    expect(cliLoginOffered({ ...base, rowStatus: 'ok', usageTokenDead: true })).toBe(true);
+  });
+  it('does not offer it for a dead usage token that a login does not repair', () => {
+    expect(
+      cliLoginOffered({ ...base, name: 'claude-code', rowStatus: 'ok', usageTokenDead: true }),
+    ).toBe(false);
+  });
+  it('never offers it for a provider with no interactive login', () => {
+    expect(cliLoginOffered({ ...base, name: 'gemini', rowStatus: 'unknown' })).toBe(false);
+  });
+});
+
+describe('storedLoginStatus', () => {
+  const row = (
+    id: string,
+    authStatus: 'ok' | 'unknown' | 'auth_expired',
+    authLastCheckedAt: string | null,
+    extra: { isolateAuth?: boolean; name?: 'codex' | 'claude-code'; userId?: string } = {},
+  ) => ({
+    id,
+    userId: extra.userId ?? 'u',
+    name: extra.name ?? ('codex' as const),
+    authMode: 'subscription' as const,
+    isolateAuth: extra.isolateAuth ?? false,
+    authStatus,
+    authLastCheckedAt,
+  });
+  const signedOutAt = '2026-01-02T10:00:00.000Z';
+  const loggedInAt = '2026-01-02T10:00:39.000Z';
+
+  it('keeps unknown while every row sharing the login was signed out together', () => {
+    const rows = [row('a', 'unknown', signedOutAt), row('b', 'unknown', signedOutAt)];
+    expect(storedLoginStatus(rows[0]!, rows)).toBe('unknown');
+    expect(storedLoginStatus(rows[1]!, rows)).toBe('unknown');
+  });
+  it('reads ok once a sibling on the shared login checked ok after the sign-out', () => {
+    const rows = [row('a', 'ok', loggedInAt), row('b', 'unknown', signedOutAt)];
+    expect(storedLoginStatus(rows[1]!, rows)).toBe('ok');
+    expect(storedLoginStatus(row('c', 'unknown', null), rows)).toBe('ok');
+  });
+  it('keeps a row that saw the login fail after the sibling last checked ok', () => {
+    const rows = [row('a', 'ok', signedOutAt), row('b', 'auth_expired', loggedInAt)];
+    expect(storedLoginStatus(rows[1]!, rows)).toBe('auth_expired');
+  });
+  it('keeps a claude-code row to itself: its login is a token saved on that one row', () => {
+    const rows = [
+      row('a', 'ok', loggedInAt, { name: 'claude-code' }),
+      row('b', 'unknown', signedOutAt, { name: 'claude-code' }),
+    ];
+    expect(storedLoginStatus(rows[1]!, rows)).toBe('unknown');
+  });
+  it('ignores a sibling that does not share the auth volume', () => {
+    const own = row('b', 'unknown', signedOutAt);
+    expect(storedLoginStatus(own, [row('a', 'ok', loggedInAt, { isolateAuth: true })])).toBe(
+      'unknown',
+    );
+    expect(storedLoginStatus(own, [row('a', 'ok', loggedInAt, { name: 'claude-code' })])).toBe(
+      'unknown',
+    );
+    expect(storedLoginStatus(own, [row('a', 'ok', loggedInAt, { userId: 'other' })])).toBe(
+      'unknown',
+    );
+    const isolated = row('b', 'unknown', signedOutAt, { isolateAuth: true });
+    expect(storedLoginStatus(isolated, [row('a', 'ok', loggedInAt)])).toBe('unknown');
   });
 });

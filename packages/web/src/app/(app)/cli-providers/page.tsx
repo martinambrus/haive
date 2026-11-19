@@ -39,7 +39,13 @@ import { cliUpgradeLatest, groupUpgradable } from '@/components/cli-upgrade-sele
 import { runCliProbe, runCliSignOut, signOutSummary, type QueuedJobPhase } from '@/lib/cli-jobs';
 import { useCliLogin } from '@/lib/use-cli-login';
 import { usePageTitle } from '@/lib/use-page-title';
-import { CLI_LOGIN_PROVIDERS, usageReconnectFix, usageReconnectHint } from '@/lib/usage-reconnect';
+import {
+  CLI_LOGIN_PROVIDERS,
+  cliLoginOffered,
+  storedLoginStatus,
+  usageReconnectFix,
+  usageReconnectHint,
+} from '@/lib/usage-reconnect';
 
 const LOGIN_RECOVERABLE: CliAuthStatus[] = [
   'auth_expired',
@@ -501,10 +507,13 @@ export default function CliProvidersPage() {
                   // Reconnect button below, so `claude login` would fix nothing there.
                   const loginRepairsUsage =
                     needsReconnect[p.id] === true && usageReconnectFix(p.name) === 'cli-login';
-                  const showLogin =
-                    CLI_LOGIN_PROVIDERS.includes(p.name) &&
-                    ((cliAuthStatus !== undefined && LOGIN_RECOVERABLE.includes(cliAuthStatus)) ||
-                      loginRepairsUsage);
+                  const showLogin = cliLoginOffered({
+                    name: p.name,
+                    authMode: p.authMode,
+                    testStatus: cliAuthStatus,
+                    rowStatus: storedLoginStatus(p, providers),
+                    usageTokenDead: loginRepairsUsage,
+                  });
                   const showSignOut = CLI_LOGIN_PROVIDERS.includes(p.name) && p.authStatus === 'ok';
                   const signOutState = signOutStates[p.id];
                   const usageState = usageStates[p.id];

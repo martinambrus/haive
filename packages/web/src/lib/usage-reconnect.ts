@@ -7,7 +7,7 @@
  *  providers list — cannot drift apart, the same reason `step-banners.ts` exists.
  */
 
-import type { CliProviderName } from '@/lib/api-client';
+import type { CliAuthMode, CliAuthStatus, CliProvider, CliProviderName } from '@/lib/api-client';
 
 export type UsageReconnectFix = 'usage-oauth' | 'cli-login' | 'api-token';
 
@@ -27,6 +27,80 @@ export const CLI_LOGIN_PROVIDERS: CliProviderName[] = [
   // happened here. Keep the two lists moving together.
   'grok',
 ];
+
+/** Auth states a fresh interactive login repairs. `unknown` is what a sign-out writes to the
+ *  row (and what a never-tested row holds): nobody is logged in, so Log in is the next step. */
+const LOGIN_RECOVERABLE: readonly CliAuthStatus[] = [
+  'unknown',
+  'auth_expired',
+  'auth_denied',
+  'unknown_error',
+  'timeout',
+];
+
+/** What the Log in decision reads of a provider row. */
+type LoginRow = Pick<
+  CliProvider,
+  'id' | 'userId' | 'name' | 'authMode' | 'isolateAuth' | 'authStatus' | 'authLastCheckedAt'
+>;
+
+function checkedAt(row: LoginRow): number {
+  const at = row.authLastCheckedAt ? Date.parse(row.authLastCheckedAt) : Number.NaN;
+  return Number.isNaN(at) ? 0 : at;
+}
+
+/** CLIs whose subscription login is a token saved on the row it was made on, not a file in
+ *  the auth volume that rows share. A login through one such row logs no other row in. This
+ *  is the web's copy of the worker's rule: its sign-out deletes the login token of the one
+ *  row it ran on, and each run reads the token of its own row. */
+const ROW_LOGIN_PROVIDERS: readonly CliProviderName[] = ['claude-code'];
+
+/** A row's stored auth status as its login really stands, for `cliLoginOffered`.
+ *
+ *  For most CLIs the login is a file in an auth volume, and rows that are not isolated share
+ *  one volume per user, CLI and auth mode. A sign-out resets every one of them, but a login
+ *  or a Test writes only the row it ran on, so after logging in through one row its siblings
+ *  still say `unknown` about a login that works. A sibling that checked ok after this row
+ *  was last written is the newer word on that shared login. An isolated row, and a row of a
+ *  CLI that keeps its login on the row, speaks for itself. */
+export function storedLoginStatus(row: LoginRow, rows: readonly LoginRow[]): CliAuthStatus {
+  if (row.isolateAuth || ROW_LOGIN_PROVIDERS.includes(row.name)) return row.authStatus;
+  const own = checkedAt(row);
+  const newerOk = rows.some(
+    (other) =>
+      other.id !== row.id &&
+      !other.isolateAuth &&
+      other.userId === row.userId &&
+      other.name === row.name &&
+      other.authMode === row.authMode &&
+      other.authStatus === 'ok' &&
+      checkedAt(other) > own,
+  );
+  return newerOk ? 'ok' : row.authStatus;
+}
+
+/** Whether a provider's surfaces offer Log in. A fresh Test result wins when there is one;
+ *  without it a subscription row's stored status decides (pass it through
+ *  `storedLoginStatus`). Reading only the Test result left the button missing after a
+ *  sign-out, which clears that result and writes `unknown` to the row, until the user ran
+ *  Test to rediscover what the row already said. An api_key row's `unknown` says nothing
+ *  about a login, so the row alone never offers it there. A dead usage token offers it only
+ *  for a CLI whose usage a login repairs. */
+export function cliLoginOffered(input: {
+  name: CliProviderName;
+  authMode: CliAuthMode;
+  testStatus: CliAuthStatus | undefined;
+  rowStatus: CliAuthStatus | null | undefined;
+  usageTokenDead: boolean;
+}): boolean {
+  if (!CLI_LOGIN_PROVIDERS.includes(input.name)) return false;
+  // A dead usage token is itself the evidence, but only where a login is what repairs it:
+  // claude-code's meters run on a separate usage-OAuth token with its own Reconnect.
+  if (input.usageTokenDead && usageReconnectFix(input.name) === 'cli-login') return true;
+  const status =
+    input.testStatus ?? (input.authMode === 'subscription' ? input.rowStatus : undefined);
+  return status != null && LOGIN_RECOVERABLE.includes(status);
+}
 
 /** claude-code first even though it is also a CLI-login provider: its usage meters run on a
  *  separately-minted usage-OAuth token, so re-running `claude login` would not touch the
