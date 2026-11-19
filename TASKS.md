@@ -718,7 +718,7 @@ status: open (items 2-9; item 1 done #1281) · kind: security · found: login-se
 
 ### T720 · A Claude login reaches one provider row, its sign-out resets them all
 
-status: open, in work since 2026-11-19 (owner decided); login and sign-out for the whole set in review #1282, then joining rows and set-wide manual writes, then the usage connection · kind: design · found: #1280 review 2026-11-19 · priority: P2
+status: open, in work since 2026-11-19 (owner decided); login and sign-out for the whole set merged #1282 (3a7b57ac1, deploy pending together with the next part), then joining rows and set-wide manual writes (in build), then the usage connection · kind: design · found: #1280 review 2026-11-19 · priority: P2
 
 A `claude-code` subscription login is a token saved on the one provider row it was made on (`api/src/lib/cli-login-secret.ts` `saveCliLoginSecret`), and each run reads the token of its own row (`worker/src/secrets/provider-secrets.ts`). A sign-out through one row deletes that row's token (`worker/src/queues/cli-exec/handlers.ts` ~:1436-1449) but resets `auth_status` on every row sharing the auth volume (~:1451-1472). The other rows keep their own tokens, which may still work, and read `unknown`.
 
