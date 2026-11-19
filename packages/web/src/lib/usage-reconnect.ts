@@ -7,7 +7,7 @@
  *  providers list — cannot drift apart, the same reason `step-banners.ts` exists.
  */
 
-import type { CliProviderName } from '@/lib/api-client';
+import type { CliAuthMode, CliAuthStatus, CliProviderName } from '@/lib/api-client';
 
 export type UsageReconnectFix = 'usage-oauth' | 'cli-login' | 'api-token';
 
@@ -27,6 +27,35 @@ export const CLI_LOGIN_PROVIDERS: CliProviderName[] = [
   // happened here. Keep the two lists moving together.
   'grok',
 ];
+
+/** Auth states a fresh interactive login repairs. `unknown` is what a sign-out writes to the
+ *  row (and what a never-tested row holds): nobody is logged in, so Log in is the next step. */
+const LOGIN_RECOVERABLE: readonly CliAuthStatus[] = [
+  'unknown',
+  'auth_expired',
+  'auth_denied',
+  'unknown_error',
+  'timeout',
+];
+
+/** Whether a provider's surfaces offer Log in. A fresh Test result wins when there is one;
+ *  without it a subscription row's stored status decides. Reading only the Test result left
+ *  the button missing after a sign-out, which clears that result and writes `unknown` to the
+ *  row, until the user ran Test to rediscover what the row already said. An api_key row's
+ *  `unknown` says nothing about a login, so the row alone never offers it there. */
+export function cliLoginOffered(input: {
+  name: CliProviderName;
+  authMode: CliAuthMode;
+  testStatus: CliAuthStatus | undefined;
+  rowStatus: CliAuthStatus | null | undefined;
+  usageTokenDead: boolean;
+}): boolean {
+  if (!CLI_LOGIN_PROVIDERS.includes(input.name)) return false;
+  if (input.usageTokenDead) return true;
+  const status =
+    input.testStatus ?? (input.authMode === 'subscription' ? input.rowStatus : undefined);
+  return status != null && LOGIN_RECOVERABLE.includes(status);
+}
 
 /** claude-code first even though it is also a CLI-login provider: its usage meters run on a
  *  separately-minted usage-OAuth token, so re-running `claude login` would not touch the

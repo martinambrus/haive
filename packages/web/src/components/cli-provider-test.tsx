@@ -2,6 +2,7 @@
 
 import { useState } from 'react';
 import {
+  type CliAuthMode,
   type CliAuthStatus,
   type CliProbePathResult,
   type CliProbeResult,
@@ -10,7 +11,7 @@ import {
 import { Badge, Button, FormError } from '@/components/ui';
 import { runCliProbe, type QueuedJobPhase } from '@/lib/cli-jobs';
 import { useCliLogin } from '@/lib/use-cli-login';
-import { CLI_LOGIN_PROVIDERS } from '@/lib/usage-reconnect';
+import { CLI_LOGIN_PROVIDERS, cliLoginOffered } from '@/lib/usage-reconnect';
 
 interface CliProviderTestProps {
   providerId: string;
@@ -21,6 +22,10 @@ interface CliProviderTestProps {
    *  rejected token is already the evidence a Test would go and fetch — and this is where the
    *  reconnect prompts deep-link to, so the button has to be here when they arrive. */
   needsUsageReconnect?: boolean;
+  /** The provider row's stored auth status. Decides Log in until a Test result replaces it. */
+  rowAuthStatus?: CliAuthStatus | null;
+  /** Only a subscription row's stored status can offer Log in; see `cliLoginOffered`. */
+  rowAuthMode: CliAuthMode;
   // Fired after a successful interactive CLI login wrote a new encrypted
   // secret. Parent uses this to re-fetch the sibling form's secret list.
   onLoginCompleted?: () => void;
@@ -57,6 +62,8 @@ export function CliProviderTest({
   providerLabel,
   blockMessage,
   needsUsageReconnect,
+  rowAuthStatus,
+  rowAuthMode,
   onLoginCompleted,
 }: CliProviderTestProps) {
   const [testing, setTesting] = useState(false);
@@ -102,10 +109,13 @@ export function CliProviderTest({
   }
 
   const cliAuthStatus = result?.cli?.authStatus;
-  const showLogin =
-    CLI_LOGIN_PROVIDERS.includes(providerName) &&
-    ((cliAuthStatus !== undefined && LOGIN_RECOVERABLE.includes(cliAuthStatus)) ||
-      needsUsageReconnect === true);
+  const showLogin = cliLoginOffered({
+    name: providerName,
+    authMode: rowAuthMode,
+    testStatus: cliAuthStatus,
+    rowStatus: rowAuthStatus,
+    usageTokenDead: needsUsageReconnect === true,
+  });
 
   return (
     <div className="flex flex-col gap-4">

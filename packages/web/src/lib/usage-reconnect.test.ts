@@ -1,5 +1,10 @@
 import { describe, it, expect } from 'vitest';
-import { usageReconnectFix, usageReconnectHref, usageReconnectHint } from './usage-reconnect';
+import {
+  cliLoginOffered,
+  usageReconnectFix,
+  usageReconnectHref,
+  usageReconnectHint,
+} from './usage-reconnect';
 
 describe('usageReconnectFix', () => {
   it('sends claude-code to its usage-OAuth, not to its CLI login', () => {
@@ -67,5 +72,45 @@ describe('usageReconnectHint', () => {
 
   it('falls back to a generic subject when the provider has no label', () => {
     expect(usageReconnectHint(null, 'codex')).toMatch(/^This CLI /);
+  });
+});
+
+describe('cliLoginOffered', () => {
+  const base = {
+    name: 'codex' as const,
+    authMode: 'subscription' as const,
+    testStatus: undefined,
+    rowStatus: undefined,
+    usageTokenDead: false,
+  };
+  it('offers Log in from the row alone after a sign-out wrote unknown', () => {
+    expect(cliLoginOffered({ ...base, rowStatus: 'unknown' })).toBe(true);
+    expect(cliLoginOffered({ ...base, rowStatus: 'auth_expired' })).toBe(true);
+  });
+  it('does not offer it for a logged-in row or one with no status', () => {
+    expect(cliLoginOffered({ ...base, rowStatus: 'ok' })).toBe(false);
+    expect(cliLoginOffered({ ...base, rowStatus: null })).toBe(false);
+    expect(cliLoginOffered({ ...base, rowStatus: 'rate_limited' })).toBe(false);
+  });
+  it('lets a fresh Test result win over the stored row', () => {
+    expect(cliLoginOffered({ ...base, rowStatus: 'unknown', testStatus: 'ok' })).toBe(false);
+    expect(cliLoginOffered({ ...base, rowStatus: 'ok', testStatus: 'auth_expired' })).toBe(true);
+  });
+  it('never offers it from an api_key row alone, but a Test result still can', () => {
+    expect(cliLoginOffered({ ...base, authMode: 'api_key', rowStatus: 'unknown' })).toBe(false);
+    expect(
+      cliLoginOffered({
+        ...base,
+        authMode: 'api_key',
+        rowStatus: 'unknown',
+        testStatus: 'auth_expired',
+      }),
+    ).toBe(true);
+  });
+  it('offers it for a dead usage token whatever the status', () => {
+    expect(cliLoginOffered({ ...base, rowStatus: 'ok', usageTokenDead: true })).toBe(true);
+  });
+  it('never offers it for a provider with no interactive login', () => {
+    expect(cliLoginOffered({ ...base, name: 'gemini', rowStatus: 'unknown' })).toBe(false);
   });
 });

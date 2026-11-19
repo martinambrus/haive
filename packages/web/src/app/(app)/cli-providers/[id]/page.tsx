@@ -110,6 +110,8 @@ export default function EditCliProviderPage() {
           providerLabel={provider.label}
           blockMessage={testBlockMessage}
           needsUsageReconnect={needsUsageReconnect}
+          rowAuthStatus={provider.authStatus}
+          rowAuthMode={provider.authMode}
           onLoginCompleted={() => setSecretsReloadNonce((n) => n + 1)}
         />
       </Card>
