@@ -437,3 +437,72 @@ describe('advanceStep prior-task form-value reuse', () => {
     expect(state.taskStepRow.formValues).toEqual({ name: 'Gate', color: 'red' });
   });
 });
+
+// Human-only form fields: a key a step lists is never replayed from a prior completed task.
+describe('advanceStep reuse of human-only form fields', () => {
+  const SECRET_FORM: FormSchema = {
+    title: 'Deps',
+    fields: [
+      { type: 'text', id: 'name', label: 'Name', required: true },
+      { type: 'checkbox', id: 'secretTick', label: 'Secret' },
+    ],
+  };
+  const prior = { name: 'Acme', secretTick: true };
+
+  it('B7 does not replay a human-only key and keeps the others', async () => {
+    const state = freshState({ priorFormValues: prior });
+    const step = {
+      ...reuseFormStep({ form: SECRET_FORM }),
+      humanOnlyFormFields: ['secretTick'],
+    } as StepDefinition;
+    expect((await advanceStep(runParams(state, step))).status).toBe('done');
+    const values = state.taskStepRow.formValues as Record<string, unknown>;
+    expect(values.name).toBe('Acme');
+    expect(values.secretTick).not.toBe(true);
+  });
+
+  it('B7 reconcile receives the reused values without the human-only key', async () => {
+    const reconcile = {
+      calls: [] as { detected: unknown; reused: FormValues }[],
+      result: { name: 'Acme' } as FormValues,
+    };
+    const state = freshState({ priorFormValues: prior });
+    const step = {
+      ...reuseFormStep({ form: SECRET_FORM, reconcile }),
+      humanOnlyFormFields: ['secretTick'],
+    } as StepDefinition;
+    await advanceStep(runParams(state, step));
+    expect(reconcile.calls).toHaveLength(1);
+    expect(reconcile.calls[0]?.reused).toEqual({ name: 'Acme' });
+  });
+
+  it('B7 a pre-answer holding only a human-only key does not suppress reuse', async () => {
+    const state = freshState({
+      taskRow: {
+        id: 'task-1',
+        status: 'running',
+        autoContinue: true,
+        preAnswers: { 'reuse-form-step': { secretTick: true } },
+        repositoryId: 'repo-1',
+        type: 'env_replicate',
+      },
+      priorFormValues: { name: 'Acme' },
+    });
+    const step = {
+      ...reuseFormStep({ form: SECRET_FORM }),
+      humanOnlyFormFields: ['secretTick'],
+    } as StepDefinition;
+    expect((await advanceStep(runParams(state, step))).status).toBe('done');
+    expect(state.reuseQueried).toBe(true);
+    expect(state.taskStepRow.formValues).toMatchObject({ name: 'Acme' });
+    expect((state.taskStepRow.formValues as Record<string, unknown>).secretTick).not.toBe(true);
+  });
+
+  it('B7 a step without the property replays the values verbatim (PIN)', async () => {
+    const state = freshState({ priorFormValues: prior });
+    expect((await advanceStep(runParams(state, reuseFormStep({ form: SECRET_FORM })))).status).toBe(
+      'done',
+    );
+    expect(state.taskStepRow.formValues).toEqual(prior);
+  });
+});

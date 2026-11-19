@@ -242,6 +242,16 @@ function miningDisallowedTools(stepId: string): string[] | undefined {
   return SUBAGENT_DISALLOWED_STEP_IDS.has(stepId) ? ['Agent'] : undefined;
 }
 
+/** The values without the step's human-only keys: the same object when none is present, undefined when none remain. */
+function withoutHumanOnlyFields(
+  values: Record<string, unknown> | undefined,
+  keys: readonly string[] | undefined,
+): Record<string, unknown> | undefined {
+  if (!values || !keys?.length || !keys.some((k) => k in values)) return values;
+  const kept = Object.fromEntries(Object.entries(values).filter(([k]) => !keys.includes(k)));
+  return Object.keys(kept).length > 0 ? kept : undefined;
+}
+
 /** Loads the submitted `formValues` from the most recent successfully completed
  *  task (same repository, same user, same workflow type) whose row for this step
  *  id finished (status 'done') with non-null form values. Returns undefined when
@@ -3583,7 +3593,7 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
     }
     const rawPreAnswer = insightApprovalRequired
       ? undefined
-      : (taskFlags?.preAnswers ?? {})[meta.id];
+      : withoutHumanOnlyFields((taskFlags?.preAnswers ?? {})[meta.id], stepDef.humanOnlyFormFields);
     const normalizedPreAnswer = rawPreAnswer && normalizeStepFormValues(meta.id, rawPreAnswer);
     if (normalizedPreAnswer && !normalizedPreAnswer.success)
       throw new Error(normalizedPreAnswer.issues.join('; '));
@@ -3720,12 +3730,15 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
           !stepPreAnswer &&
           meta.reuseLastCompletedFormValues &&
           taskFlags?.repositoryId
-            ? await loadLastCompletedFormValues(db, {
-                repositoryId: taskFlags.repositoryId,
-                userId: params.userId,
-                type: taskFlags.type,
-                stepId: meta.id,
-              })
+            ? withoutHumanOnlyFields(
+                await loadLastCompletedFormValues(db, {
+                  repositoryId: taskFlags.repositoryId,
+                  userId: params.userId,
+                  type: taskFlags.type,
+                  stepId: meta.id,
+                }),
+                stepDef.humanOnlyFormFields,
+              )
             : undefined;
         // Those answers are a snapshot of the repo as it was when the prior task ran.
         // A step whose answers can go stale (declare-deps: the repo gained a DDEV

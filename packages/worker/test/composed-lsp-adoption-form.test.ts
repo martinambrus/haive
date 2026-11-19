@@ -148,7 +148,8 @@ describe('detect composedLspAdoptable', () => {
 
   it('C1 leaves the other detect output as it was (legacy parity pin)', async () => {
     const detected = await declareDepsStep.detect!(makeCtx());
-    const legacyKeys = (d: object) => Object.keys(d).filter((k) => k !== 'composedLspAdoptable');
+    const legacyKeys = (d: object) =>
+      Object.keys(d).filter((k) => k !== 'composedLspAdoptable' && k !== 'legacyLspReplaceable');
     expect(legacyKeys(detected)).toEqual(
       legacyKeys(await declareDepsStep.detect!(makeCtx({ linked: true }))),
     );

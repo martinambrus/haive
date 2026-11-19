@@ -91,3 +91,39 @@ export async function composedLspAdoptable(
     ? { ok: true }
     : { ok: false, reason: 'providers' };
 }
+
+export type ComposedLspReplacementReason =
+  'rollout_off' | 'cli_unsupported' | 'selection' | 'run_list' | 'providers';
+
+/** Thrown when a ticked replacement of a legacy environment is refused; the message is for people, match on code and reason. */
+export class ComposedLspReplacementRefusedError extends Error {
+  readonly code = 'composed_lsp_replacement_refused';
+  constructor(readonly reason: ComposedLspReplacementReason) {
+    super(
+      `composed_lsp_replacement_refused: the legacy environment cannot be replaced (${reason}).`,
+    );
+    this.name = 'ComposedLspReplacementRefusedError';
+  }
+}
+
+/** Whether a legacy environment may be replaced by a contract-2 one for this task; read-only. */
+export async function decideLegacyLspReplacement(
+  db: Database,
+  args: {
+    taskId: string;
+    userId: string;
+    defaultProviderId: string | null;
+    rolloutOn: boolean;
+    cliSupportsLsp: boolean;
+    lspServers: readonly string[];
+  },
+): Promise<{ ok: true } | { ok: false; reason: ComposedLspReplacementReason }> {
+  if (!args.rolloutOn) return { ok: false, reason: 'rollout_off' };
+  if (!args.cliSupportsLsp) return { ok: false, reason: 'cli_unsupported' };
+  if (!isComposedLspSelection(args.lspServers)) return { ok: false, reason: 'selection' };
+  return composedLspAdoptable(db, {
+    taskId: args.taskId,
+    userId: args.userId,
+    defaultProviderId: args.defaultProviderId,
+  });
+}
