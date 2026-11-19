@@ -909,6 +909,23 @@ describe.skipIf(!url)(
         });
       });
 
+      it('a volume login generation change locks the set in id order', async () => {
+        const { W, ids } = await seedW();
+        await finish(W, async () => {
+          const before = await Promise.all([ids.R1, ids.R2, ids.R3, ids.X].map(provider));
+          const { held } = await besideHolder(ids.R1, [ids.R2, ids.R3], async () => {
+            await authState.advanceVolumeLoginGeneration(db, before[0]!);
+            return new Response();
+          });
+          expect(held).toEqual([]);
+          const after = await Promise.all([ids.R1, ids.R2, ids.R3, ids.X].map(provider));
+          expect(new Set(after.slice(0, 3).map((p) => p.authGeneration)).size).toBe(1);
+          for (const [i, p] of after.slice(0, 3).entries())
+            expect(p.authGeneration).not.toBe(before[i]!.authGeneration);
+          expect(after[3]).toEqual(before[3]);
+        });
+      });
+
       it('a settings save that un-isolates a row locks that row with its new set', async () => {
         const { W, ids } = await seedW();
         await finish(W, async () => {
