@@ -192,7 +192,8 @@ export async function deleteLoginTokenFromSet(
 
 /** Gives a row that joined a set the login of the set: the token and credential state of the member
  * that holds the newest token. The caller locked `members` (the joiner included) with `lockLoginSet`
- * before writing anything for the request. Nothing is written when no other member holds a token. */
+ * before writing anything for the request. Nothing is written when no other member holds a token.
+ * `row` is the joiner as it stands after the seed, and absent when nothing was seeded. */
 export async function seedJoinerFromSet(
   tx: Parameters<Parameters<Database['transaction']>[0]>[0],
   opts: {
@@ -201,10 +202,10 @@ export async function seedJoinerFromSet(
     members: { id: string }[];
     assertHeld: () => Promise<void>;
   },
-): Promise<AuditEvent[]> {
+): Promise<{ events: AuditEvent[]; row?: typeof schema.cliProviders.$inferSelect }> {
   const { userId, joinerId, members, assertHeld } = opts;
   const others = members.filter((m) => m.id !== joinerId).map((m) => m.id);
-  if (others.length === 0) return [];
+  if (others.length === 0) return { events: [] };
   const [source] = await tx
     .select({
       providerId: schema.cliProviderSecrets.providerId,
@@ -230,7 +231,7 @@ export async function seedJoinerFromSet(
     )
     .orderBy(desc(schema.cliProviderSecrets.updatedAt), asc(schema.cliProviderSecrets.providerId))
     .limit(1);
-  if (!source) return [];
+  if (!source) return { events: [] };
   const event: AuditEvent = {
     actorUserId: userId,
     action: 'cli_provider.secret.set',
@@ -257,7 +258,7 @@ export async function seedJoinerFromSet(
       target: [schema.cliProviderSecrets.providerId, schema.cliProviderSecrets.secretName],
       set: { ...secret, updatedAt: new Date() },
     });
-  await tx
+  const [row] = await tx
     .update(schema.cliProviders)
     .set({
       authStatus: source.authStatus,
@@ -265,7 +266,8 @@ export async function seedJoinerFromSet(
       authLastCheckedAt: sql`${source.authCheckedAt}::timestamp`,
       authGeneration: source.authGeneration,
     })
-    .where(eq(schema.cliProviders.id, joinerId));
+    .where(eq(schema.cliProviders.id, joinerId))
+    .returning();
   await assertHeld();
-  return [event];
+  return { events: [event], row };
 }

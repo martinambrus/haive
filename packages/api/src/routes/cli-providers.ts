@@ -569,12 +569,14 @@ cliProviderRoutes.post('/', requireNewWorkAllowed, async (c) => {
             assertHeld,
           });
         } else if (seedsFromSet) {
-          setEvents = await seedJoinerFromSet(tx, {
+          const seeded = await seedJoinerFromSet(tx, {
             userId,
             joinerId: rows[0]!.id,
             members,
             assertHeld,
           });
+          setEvents = seeded.events;
+          if (seeded.row) return { rows: [seeded.row], event };
         }
         return { rows, event };
       }),
@@ -851,7 +853,9 @@ cliProviderRoutes.patch('/:id', async (c) => {
           assertHeld,
         });
       } else if (joinsSet) {
-        setEvents = await seedJoinerFromSet(tx, { userId, joinerId: id, members, assertHeld });
+        const seeded = await seedJoinerFromSet(tx, { userId, joinerId: id, members, assertHeld });
+        setEvents = seeded.events;
+        if (seeded.row) return { rows: [seeded.row], event };
       }
       return { rows, event };
     }),
@@ -1209,12 +1213,14 @@ cliProviderRoutes.post('/:id/clone', requireNewWorkAllowed, async (c) => {
         };
         await insertAuditEvent(tx, cloneEvent);
         if (joinsSet) {
-          setEvents = await seedJoinerFromSet(tx, {
+          const seeded = await seedJoinerFromSet(tx, {
             userId,
             joinerId: row.id,
             members,
             assertHeld,
           });
+          setEvents = seeded.events;
+          if (seeded.row) return seeded.row;
         }
         return row;
       }),

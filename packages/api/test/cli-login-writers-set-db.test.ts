@@ -629,6 +629,55 @@ describe.skipIf(!url)(
     });
 
     describe('a row that joins a login set receives the login of the set', () => {
+      const answered = async (res: Response) =>
+        ((await res.json()) as { provider: Record<string, unknown> }).provider;
+      const health3 = (p: Record<string, unknown>) => [
+        p.authStatus,
+        p.authMessage,
+        p.authLastCheckedAt,
+      ];
+      const ownHealth = (r: Row) => [
+        r.authStatus,
+        r.authMessage,
+        r.authLastCheckedAt?.toISOString() ?? null,
+      ];
+
+      it('a created row is answered with the login it took', async () => {
+        await differ('B');
+        const body = createBody(null);
+        const res = await call('POST', '', body);
+        expect(res.status).toBe(201);
+        const p = await answered(res);
+        expect(health3(p)).toEqual(ownHealth(rows.B));
+        expect(p.label).toBe(body.label);
+        expect(p.label).toBe((await findNew(body.label)).label);
+      });
+
+      it('a cloned row is answered with the login it took', async () => {
+        await differ('B');
+        const res = await cloneOf('A');
+        expect(res.status).toBe(201);
+        const p = await answered(res);
+        expect(health3(p)).toEqual(ownHealth(rows.B));
+        expect(p.label).toBe((await provider(p.id as string)).label);
+      });
+
+      it('a settings save that joins a set is answered with the login it took', async () => {
+        await differ('B');
+        await db
+          .update(schema.cliProviders)
+          .set({ authStatus: 'auth_expired' })
+          .where(eq(schema.cliProviders.id, rows.C.id));
+        const label = `joined-${rnd()}`;
+        const res = await patch('C', { isolateAuth: false, label });
+        expect(res.status).toBe(200);
+        const p = await answered(res);
+        expect(health3(p)).toEqual(ownHealth(rows.B));
+        expect(p.label).toBe(label);
+        expect(p.isolateAuth).toBe(false);
+        expect((await provider(rows.C.id)).label).toBe(label);
+      });
+
       it.each(['A', 'B'] as const)(
         'a created row without a typed token takes the login of the member with the newest token (%s)',
         async (newest) => {
@@ -834,7 +883,20 @@ describe.skipIf(!url)(
           await dropToken('A');
           await dropToken('B');
           const own = await plain(rows[key].id, TOKEN);
-          expect((await patch(key, change)).status).toBe(200);
+          const res = await patch(key, change);
+          expect(res.status).toBe(200);
+          const answer = ((await res.json()) as { provider: Record<string, unknown> }).provider;
+          expect([
+            answer.authStatus,
+            answer.authMessage,
+            answer.authLastCheckedAt,
+            answer.label,
+          ]).toEqual([
+            rows[key].authStatus,
+            rows[key].authMessage,
+            rows[key].authLastCheckedAt?.toISOString() ?? null,
+            rows[key].label,
+          ]);
           const p = await provider(rows[key].id);
           expect([p.authStatus, p.authMessage, p.authGeneration]).toEqual([
             rows[key].authStatus,
@@ -869,6 +931,18 @@ describe.skipIf(!url)(
         const label = `kept-${rnd()}`;
         const res = await patch('A', { label, authMode: 'subscription', isolateAuth: false });
         expect(res.status).toBe(200);
+        const answer = ((await res.json()) as { provider: Record<string, unknown> }).provider;
+        expect([
+          answer.authStatus,
+          answer.authMessage,
+          answer.authLastCheckedAt,
+          answer.label,
+        ]).toEqual([
+          rows.A.authStatus,
+          rows.A.authMessage,
+          rows.A.authLastCheckedAt?.toISOString() ?? null,
+          label,
+        ]);
         expect(await joinEvents()).toEqual([]);
         expect((await plain(rows.A.id, TOKEN)) === own).toBe(true);
         const p = await provider(rows.A.id);
