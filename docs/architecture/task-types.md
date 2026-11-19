@@ -167,6 +167,9 @@ values refuse task creation with a static error, no task/event/job and no echoed
 The other `definitionForCreate` callers copy snapshots and prompt steps only; they do not copy
 pre-answers. Worker default expansion is guarded separately at the final answer and schema-copy
 boundaries ([Secret and git-data masking](sandbox-masking.md)).
+A step lists the form keys only a person may set in `humanOnlyFormFields`. The runner drops them from
+`tasks.pre_answers` and from reused prior-task values before either becomes a default or an
+auto-submit, so a preset never sets one ([Sandbox](sandbox.md), Composed LSP adoption).
 
 A custom type may include `06-run-config`, which writes `tasks.pre_answers` for the steps after it as
 the workflow does. Its ordering rule makes it precede every token whose steps read those answers

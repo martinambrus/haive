@@ -1162,8 +1162,9 @@ Rollback: stop adding the step to new definitions but keep its registered implem
 resumable pinned task names it, since removing it under those pins creates dead tasks. Once none
 remain, revert this support before the earlier composed readers and cache contract; no schema,
 metadata or image rollback is needed. The writer is stopped first (see Composed LSP adoption);
-restore retained legacy template links and images before removing readers, and never downgrade
-metadata on a body without its legacy installers.
+restore retained legacy template links and images before removing readers (a replaced task's
+link comes back from its `env_template.replaced` event, see Composed LSP adoption), and never
+downgrade metadata on a body without its legacy installers.
 
 Deploying the environment-image build changes no schema, metadata or reference. A task verified
 before it keeps its pinned launch image, but its readiness is withdrawn until the final
@@ -1177,7 +1178,8 @@ Step `01-declare-deps` writes `declaredDeps.lspInstallContractVersion = 2` only 
 environment: no template is linked to the task when apply runs. The decision is made once. A
 template that exists keeps what it stores (absent stays absent, 1 stays 1, 2 stays 2) whatever the
 task's form says, and a stored value that is not absent, 1 or 2 is refused before any write.
-Replacing an absent/1 template with 2 is a separate, explicit action that 01 does not perform.
+Replacing an absent/1 template with 2 is a separate, explicit action that only a person's tick on
+step 01's form performs (see Replacing a legacy template below).
 
 The switch is on. It was off for a while because the composed build once re-ran the environment
 body in a context holding only its Dockerfile, and a body that copies project files (the
@@ -1209,6 +1211,36 @@ Auto-continue therefore adopts. An environment that is not adopted writes no con
 template hash and image tag are those of the legacy path. Once the cheap checks pass, step 01 logs
 the decision with a closed reason: `run_list`, `providers`, or none when adopted.
 
+Replacing a legacy template. A task linked to a stored absent/1 template (it ticked the opt-out,
+or it was created while adoption was off) can move to 2 from step 01's visible form. The checkbox
+`replaceLegacyLspInstall`, unticked by default, is shown only when detect finds the linked template
+absent/1 and the adoption conditions above hold for the default selection
+(`decideLegacyLspReplacement`: the same rollout constant and predicates, and the provider lock is
+mandatory because a contract-2 link restricts dispatch at once). A plain Retry of 01 stops at the
+form; no route or page offers the action. Only a person ticks it: 01 lists the field in
+`humanOnlyFormFields`, and the runner drops listed keys from the task's pre-answers for the step and
+from reused prior-task values before they are overlaid or auto-submitted, so a task-type preset,
+prior-task reuse and auto-continue never replace a template. Apply re-decides from the submitted
+form and never trusts detect. A refusal throws `ComposedLspReplacementRefusedError` (code
+`composed_lsp_replacement_refused`, closed `reason`: `rollout_off`, `cli_unsupported`, `selection`,
+`run_list`, `providers`) before any write.
+
+On acceptance one transaction inserts a NEW template row, links only the acting task to it and
+writes a `task_events` row `env_template.replaced` with `sourceTemplateId` and
+`candidateTemplateId`. The row holds the form's deps plus contract 2 and no Dockerfile, so 02
+renders it: the generator emits the installer block only when the contract is not 2, so no stored
+body is ever stripped or edited, and an edit made to the old body is not carried over. The old
+row, hash, image and other links are not written; the key is part of the hash, so the new row
+never equals the old one. The default image tag of a contract-2 row ends in the first 8 characters
+of its id: template names are not unique (every row a task creates is named `task-<id8>`), so a
+same-named row would otherwise re-point the old image's tag, and a forced removal by tag would
+delete the wrong image. Legacy tags are unchanged. A contract-2 row built before this rule keeps its
+stored tag until step 03 rebuilds it, which moves the tag and removes the superseded image by id.
+The task picks the replacement up on that Retry: it resets 01 and every later step, so 02, 03, 04,
+01b and 01b1 build and verify the new row. Other tasks keep what they link, and a task that is
+not retried stays on the old row. The old row can end up unlinked, so repository delete also
+tears down a repository's templates that no task links.
+
 Provider lock. A task whose template is contract 2 can launch only a provider that holds a
 retained effective composed image. A switch is refused with 409 `composed_lsp_provider_locked` on
 the step-CLI choice route and the summary CLI route, and a fix-round choice is refused with
@@ -1225,6 +1257,18 @@ Rollback. Set `COMPOSED_LSP_NEW_ENVIRONMENT_ADOPTION` to false: new environments
 while templates already at 2 keep being carried, generated and read, so running tasks are
 unaffected. Keep the readers, the lock and verification until no task links a contract-2 template.
 Never set absent or 1 on a body whose installers were skipped.
+
+Undoing one replacement needs no migration. The event names the old row:
+`SELECT payload FROM task_events WHERE task_id = <task> AND event_type = 'env_template.replaced'
+ORDER BY created_at DESC LIMIT 1`. Point the task back with
+`UPDATE tasks SET env_template_id = <sourceTemplateId>, updated_at = now() WHERE id = <task> AND
+env_template_id = <candidateTemplateId>` (guarded, so a second run changes nothing), then Retry
+step 02, not 01: 01 re-declares the linked row from the form and may rewrite it in place, while 02
+keeps the saved body and 03 reuses the ready image. The abandoned new row, once built, stays unlinked
+with its image until its repository is deleted; remove it by hand when no task links it. Never set the
+new row's key to absent or 1.
+Switching `COMPOSED_LSP_NEW_ENVIRONMENT_ADOPTION` off also stops the replacement offer and its
+acceptance; tasks already replaced keep contract 2 and its readers.
 
 ## PHP database drivers in generated environments
 
