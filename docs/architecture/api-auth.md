@@ -383,8 +383,10 @@ encrypted-secret promotion, one strict event per row written and targeting that 
 `source`, `secretName`, `viaProviderId`, `setSize`), so a login through one row leaves an event for
 each row of its set; those keep their strict write. The other writers of that token do the same in
 their own transaction: a manual login-secret POST and a token typed on create or in a settings save
-(source `manual` or `environment`) record the event on every other row of the set, and a manual delete
-of it records `cli_provider.secret.delete` on every row it removed the token from (the clicked row's
+(source `manual` or `environment`) record the event on every other row of the set, a row that joins a set
+without typing the token (a create, a clone of a row of the set, or a settings save that moves a row into it)
+records one event on itself (source `join`, `viaProviderId` the row it copied the token from, `setSize`),
+and a manual delete of it records `cli_provider.secret.delete` on every row it removed the token from (the clicked row's
 event as before, the others adding `viaProviderId` and `setSize`). All follow commit.
 
 **CLI sign-out requires its request row before enqueue.** The API commits
