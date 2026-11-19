@@ -676,6 +676,21 @@ status: open · kind: docs · found: guarded span prerequisites docs (#1268) · 
 
 `docs/architecture/task-types.md` (~:780 heading "Pinned execution declarations (P6; admission only)", ~:786, ~:851) and `docs/architecture/worker-restarts.md` (~:766) name an internal plan phase ("P6") in product text. Replace with the behaviour and the PR number (#1222). Docs-only; ride with the next change touching either file.
 
+### T719 · FNF[env-template-lifecycle] · environment template lifecycle leftovers (+8)
+
+status: open · kind: fix · found: legacy template replacement design (T709) 2026-11-19 · priority: P4
+
+All PRE-EXISTING, none blocking the replacement series. Paths are under `packages/`.
+
+1. Legacy shared forks reuse the name `task-<id8>`, and so the default tag `haive-env-<slug>:latest`, when the acting task also created the source row (`worker/src/step-engine/steps/env-replicate/01-declare-deps.ts` ~:1005-1015, `03-build-image.ts` ~:30-36). Not seen live. Fix: a tag check in 03's detect, or the row-id suffix the replacement series gives contract-2 rows (that changes every legacy tag).
+2. The boot reaper counts `completed` and `failed` tasks as dead (`worker/src/sandbox/env-template-reaper.ts:7`), while `pinsEnvTemplate` releases a pin only on `cancelled` (`env-replicate/_shared.ts:91-98`). A failed task that is Retried later can find its non-ready template row reaped.
+3. 01 inserts the template row and links the task in two statements, not one transaction (`01-declare-deps.ts` ~:1005-1018). A crash between them leaves an unlinked row.
+4. `createTaskSchema` accepts an `envTemplateId` that no route reads (`shared/src/schemas/tasks.ts:92`). Drop the field or wire it.
+5. A comment in `api/src/routes/tooling-upgrades.ts` ~:280-284 says the next task re-runs 01 on an existing template; a new task has no link. Comment only.
+6. `assertKnownLspInstallContract` throws a bare `Error` that tests match by message (`worker/src/sandbox/lsp-install-contract.ts` ~:12-18). Give it a typed error.
+7. Deleting a user cascades `env_templates` rows without removing their images (`database/migrations/0000_baseline.sql` ~:1021; the delete hooks are unchecked).
+8. `composedLspImageRefs` of an abandoned contract-2 row keep pinning images after a rollback (`worker/src/lsp/composed-evidence.ts` ~:399-418).
+
 ### T718 · Translator module lows (review and correction approval)
 
 status: open · kind: bug · found: translator review milestone (module PRs #5, #6) · priority: P4
