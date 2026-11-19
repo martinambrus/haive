@@ -1,0 +1,791 @@
+import { randomBytes } from 'node:crypto';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import { and, asc, eq, inArray, sql } from 'drizzle-orm';
+import { Hono } from 'hono';
+import { tryCliAuthLock } from '@haive/database';
+import * as authState from '@haive/shared/cli-auth-state';
+import { audits, cleanActor, createDatabase, KEK, makeActor, schema } from './security-audit-db.js';
+
+const url = process.env.CLI_SECRETS_AUDIT_TEST_URL;
+if (url && !new URL(url).pathname.startsWith('/cli_secrets_audit_test'))
+  throw new Error('Use a dedicated cli_secrets_audit_test database');
+const h = vi.hoisted(() => ({
+  db: undefined as any,
+  actor: '',
+  add: vi.fn(),
+  poll: vi.fn(),
+  insert: vi.fn(),
+  log: vi.fn(),
+  loseAt: undefined as number | undefined,
+  checks: 0,
+}));
+vi.mock('@haive/database', async (original) => {
+  const real = await original<any>();
+  return {
+    ...real,
+    tryCliAuthLock: async (...args: any[]) => {
+      const lock = await real.tryCliAuthLock(...args);
+      if (!lock || typeof h.loseAt !== 'number') return lock;
+      return Object.assign(() => lock(), lock, {
+        assertHeld: async () => {
+          h.checks += 1;
+          if (h.checks >= h.loseAt!) throw new real.CliAuthLockLostError();
+          await lock.assertHeld();
+        },
+      });
+    },
+  };
+});
+vi.mock('../src/db.js', () => ({ getDb: () => h.db }));
+vi.mock('../src/lib/audit.js', async (original) => {
+  const real = await original<any>();
+  return {
+    ...real,
+    insertAuditEvent: async (db: any, event: any, options?: { id?: string }) => {
+      h.insert(event);
+      return real.insertAuditEvent(db, event, options);
+    },
+    logAuditEvent: (event: any) => {
+      h.log(event);
+      real.logAuditEvent(event);
+    },
+  };
+});
+vi.mock('../src/middleware/auth.js', () => ({
+  requireAuth: async (c: any, next: any) => {
+    c.set('userId', h.actor);
+    await next();
+  },
+}));
+vi.mock('../src/queues.js', () => ({
+  getUsagePollQueue: () => ({ add: h.poll }),
+  getCliExecQueue: () => ({ add: h.add }),
+}));
+vi.mock('../src/redis.js', () => ({ getRedis: () => ({ eval: async () => '' }) }));
+vi.mock('../src/lib/cli-auth-write.js', async (original) => ({
+  ...(await original<any>()),
+  CLI_AUTH_JOIN_WAIT_MS: 60,
+}));
+import { CLI_EXEC_JOB_NAMES, configService, envelopeDecrypt, secretsService } from '@haive/shared';
+import { upsertProviderSecret } from '@haive/shared';
+import * as authWrite from '../src/lib/cli-auth-write.js';
+import { cliProviderRoutes } from '../src/routes/cli-providers.js';
+import { errorHandler } from '../src/middleware/error-handler.js';
+import type { AppEnv } from '../src/context.js';
+
+const rnd = () => randomBytes(16).toString('hex');
+const PAST = new Date('2020-01-01T00:00:00Z');
+const TOKEN = 'CLAUDE_CODE_OAUTH_TOKEN';
+const USAGE = 'CLAUDE_USAGE_OAUTH';
+const NAMES = [TOKEN, USAGE, 'ANTHROPIC_AUTH_TOKEN'];
+type Row = typeof schema.cliProviders.$inferSelect;
+type Key = 'A' | 'B' | 'C' | 'D' | 'E' | 'F';
+const SET_ACTION = 'cli_provider.secret.set';
+const DELETE_ACTION = 'cli_provider.secret.delete';
+
+describe.skipIf(!url)(
+  'every writer of the Claude login token writes the whole credential set',
+  () => {
+    let db: ReturnType<typeof createDatabase>;
+    let U: string;
+    let V: string;
+    let rows: Record<Key, Row>;
+    const app = new Hono<AppEnv>().onError(errorHandler).route('/cli-providers', cliProviderRoutes);
+    const ids = () => Object.values(rows).map((r) => r.id);
+    const call = (method: string, path: string, body?: unknown) =>
+      app.request(`/cli-providers${path}`, {
+        method,
+        headers: { 'content-type': 'application/json' },
+        body: body === undefined ? undefined : JSON.stringify(body),
+      });
+    const post = (key: Key, name: string, value: string) =>
+      call('POST', `/${rows[key].id}/secrets`, { secretName: name, value });
+    const del = (key: Key, name: string) => call('DELETE', `/${rows[key].id}/secrets/${name}`);
+    const patch = (key: Key, body: unknown) => call('PATCH', `/${rows[key].id}`, body);
+    const createBody = (token: string | null, extra: object = {}) => ({
+      name: 'claude-code',
+      label: `new-${rnd()}`,
+      authMode: 'subscription',
+      isolateAuth: false,
+      envVars: token ? { [TOKEN]: token } : { KEEP: 'new' },
+      ...extra,
+    });
+    const provider = (id: string) =>
+      db.query.cliProviders.findFirst({ where: eq(schema.cliProviders.id, id) }).then((r) => r!);
+    const secretRows = (pids: string[]) =>
+      db
+        .select()
+        .from(schema.cliProviderSecrets)
+        .where(inArray(schema.cliProviderSecrets.providerId, pids))
+        .orderBy(asc(schema.cliProviderSecrets.id));
+    const world = async () => ({
+      providers: await db
+        .select()
+        .from(schema.cliProviders)
+        .where(inArray(schema.cliProviders.userId, [U, V]))
+        .orderBy(asc(schema.cliProviders.id)),
+      secrets: await secretRows(ids()),
+      audits: (await audits(db)).filter((a) => a.actorUserId === U || ids().includes(a.targetId!)),
+    });
+    const plain = async (id: string, name: string) => {
+      const [s] = (await secretRows([id])).filter((r) => r.secretName === name);
+      return s && envelopeDecrypt(s, KEK);
+    };
+    const outside = async (keys: Key[]) => {
+      const pids = keys.map((k) => rows[k].id);
+      return {
+        providers: await Promise.all(pids.map(provider)),
+        secrets: await secretRows(pids),
+        audits: (await audits(db)).filter((a) => pids.includes(a.targetId!)),
+      };
+    };
+    const health = (p: Row) => [p.authStatus, p.authMessage, p.authLastCheckedAt?.getTime()];
+    const others = async (pids: string[]) =>
+      (await secretRows(pids)).filter((s) => s.secretName !== TOKEN);
+    const byAction = async (action: string) =>
+      (await audits(db)).filter((a) => a.actorUserId === U && a.action === action);
+    const findNew = (label: string) =>
+      db.query.cliProviders
+        .findFirst({
+          where: and(eq(schema.cliProviders.userId, U), eq(schema.cliProviders.label, label)),
+        })
+        .then((r) => r!);
+    /** Every member holds the token and one shared generation that differs from each old one. */
+    const expectWritten = async (
+      token: string,
+      members: (Key | string)[],
+      envs: Record<string, unknown> = {},
+    ) => {
+      const gens = new Set<string>();
+      for (const m of members) {
+        const old = rows[m as Key] as Row | undefined;
+        const p = await provider(old ? old.id : m);
+        expect((await plain(p.id, TOKEN)) === token, m).toBe(true);
+        gens.add(p.authGeneration);
+        if (old) {
+          expect(p.authGeneration, m).not.toBe(old.authGeneration);
+          expect(health(p), m).toEqual(health(old));
+          expect(p.envVars, m).toEqual(m in envs ? envs[m] : old.envVars);
+        }
+      }
+      expect(gens.size).toBe(1);
+    };
+    /** Exactly the clicked row's event plus one strict sibling event per other written row. */
+    const expectEvents = async (
+      action: string,
+      source: string,
+      via: string,
+      siblings: string[],
+      setSize: number,
+      clicked: object | null = { source, secretName: TOKEN },
+    ) => {
+      const events = await byAction(action);
+      expect(events.map((e) => e.targetId).sort()).toEqual(
+        [...(clicked ? [via] : []), ...siblings].sort(),
+      );
+      if (clicked) expect(events.find((e) => e.targetId === via)!.metadata).toEqual(clicked);
+      for (const s of siblings)
+        expect(events.find((e) => e.targetId === s)!.metadata, s).toEqual({
+          source,
+          secretName: TOKEN,
+          viaProviderId: via,
+          setSize,
+        });
+      const shape = (a: (typeof events)[number]) => ({
+        actorUserId: U,
+        action: a.action,
+        targetType: 'cli_provider',
+        targetId: a.targetId,
+        metadata: a.metadata,
+      });
+      for (const spy of [h.insert, h.log])
+        for (const e of events) expect(spy.mock.calls.map((c) => c[0])).toContainEqual(shape(e));
+    };
+    const trigger = async (table: string, when: string, body: string, ret = 'NEW') => {
+      const fn = `writers_set_${rnd()}`;
+      await db.execute(
+        sql.raw(
+          `CREATE FUNCTION ${fn}() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN ${body} RETURN ${ret}; END $$`,
+        ),
+      );
+      await db.execute(
+        sql.raw(`CREATE TRIGGER ${fn} ${when} ON ${table} FOR EACH ROW EXECUTE FUNCTION ${fn}()`),
+      );
+      return async () => {
+        await db.execute(sql.raw(`DROP TRIGGER IF EXISTS ${fn} ON ${table}`));
+        await db.execute(sql.raw(`DROP FUNCTION IF EXISTS ${fn}()`));
+      };
+    };
+    const refuseSecretWrites = () =>
+      trigger(
+        'cli_provider_secrets',
+        'BEFORE INSERT OR UPDATE',
+        `IF NEW.provider_id = '${rows.B.id}'::uuid THEN RAISE EXCEPTION 'secret write refused'; END IF;`,
+      );
+    const refuseSiblingAudit = () =>
+      trigger(
+        'audit_events',
+        'BEFORE INSERT',
+        `IF NEW.target_id = '${rows.B.id}'::uuid THEN RAISE EXCEPTION 'audit insert refused'; END IF;`,
+      );
+    const holdSet = async () => {
+      const release = await tryCliAuthLock(db, authState.cliAuthScope(rows.A));
+      expect(release).not.toBeNull();
+      return release!;
+    };
+    const dropToken = (key: Key) =>
+      db
+        .delete(schema.cliProviderSecrets)
+        .where(
+          and(
+            eq(schema.cliProviderSecrets.providerId, rows[key].id),
+            eq(schema.cliProviderSecrets.secretName, TOKEN),
+          ),
+        );
+    const signOut = async (key: Key) => {
+      h.add.mockClear();
+      const res = await call('POST', `/${rows[key].id}/sign-out`);
+      return { res, payload: h.add.mock.calls[0]?.[1] };
+    };
+
+    beforeAll(() => {
+      db = createDatabase(url!);
+      h.db = db;
+    });
+    afterAll(async () => {
+      await db.$client.end({ timeout: 5 });
+    });
+    const setup = async () => {
+      h.loseAt = undefined;
+      h.checks = 0;
+      h.insert.mockClear();
+      h.log.mockClear();
+      h.poll.mockReset().mockResolvedValue(undefined);
+      h.add.mockReset().mockResolvedValue({ id: 'job-id' });
+      vi.spyOn(secretsService, 'getMasterKek').mockResolvedValue(KEK);
+      vi.spyOn(configService, 'getFresh').mockResolvedValue('normal');
+      U = (await makeActor(db)).id;
+      V = (await makeActor(db)).id;
+      h.actor = U;
+      const spec = {
+        A: [U, 'claude-code', 'subscription', false, 'unknown'],
+        B: [U, 'claude-code', 'subscription', false, 'auth_expired'],
+        C: [U, 'claude-code', 'subscription', true, 'ok'],
+        D: [U, 'claude-code', 'api_key', false, 'ok'],
+        E: [V, 'claude-code', 'subscription', false, 'auth_expired'],
+        F: [U, 'codex', 'subscription', false, 'unknown'],
+      } as const;
+      const made: any = {};
+      for (const [key, [userId, name, authMode, isolateAuth, authStatus]] of Object.entries(spec)) {
+        const [row] = await db
+          .insert(schema.cliProviders)
+          .values({
+            userId,
+            name,
+            authMode,
+            isolateAuth,
+            authStatus,
+            label: key,
+            authMessage: 'synthetic',
+            authLastCheckedAt: PAST,
+            envVars: key === 'A' ? { KEEP: 'yes' } : key === 'B' ? { KEEP: 'b' } : null,
+          })
+          .returning();
+        made[key] = row;
+        if (key !== 'F')
+          for (const secret of NAMES)
+            await upsertProviderSecret(db, {
+              providerId: row!.id,
+              name: secret,
+              value: rnd(),
+              masterKek: KEK,
+              onExisting: 'overwrite',
+            });
+      }
+      rows = made;
+    };
+    beforeEach(setup);
+    const teardown = async () => {
+      await cleanActor(db, U);
+      await cleanActor(db, V);
+    };
+    afterEach(async () => {
+      h.loseAt = undefined;
+      await teardown();
+      vi.restoreAllMocks();
+    });
+
+    it.each([
+      ['holds', 200],
+      ['lacks', 201],
+    ])('a pasted token on a row that %s one writes every row of its set', async (state, status) => {
+      if (state === 'lacks') await dropToken('A');
+      const before = await outside(['C', 'D', 'E', 'F']);
+      const keep = await others([rows.A.id, rows.B.id]);
+      const token = rnd();
+      const res = await post('A', TOKEN, token);
+      expect(res.status).toBe(status);
+      expect(await res.text()).not.toContain(token);
+      await expectWritten(token, ['A', 'B']);
+      expect(await others([rows.A.id, rows.B.id])).toEqual(keep);
+      await expectEvents(SET_ACTION, 'manual', rows.A.id, [rows.B.id], 2);
+      expect(await outside(['C', 'D', 'E', 'F'])).toEqual(before);
+    });
+
+    it.each([
+      ['isolated', 'C', ['A', 'B', 'D', 'E', 'F']],
+      ['api-key', 'D', ['A', 'B', 'C', 'E', 'F']],
+    ] as [string, Key, Key[]][])(
+      'a pasted token on an %s row writes only that row',
+      async (_name, key, rest) => {
+        const before = await outside(rest);
+        const token = rnd();
+        expect((await post(key, TOKEN, token)).status).toBe(200);
+        await expectWritten(token, [key]);
+        await expectEvents(SET_ACTION, 'manual', rows[key].id, [], 1);
+        expect(await outside(rest)).toEqual(before);
+      },
+    );
+
+    it('keeps the usage connection and other secrets per row', async () => {
+      const before = await outside(['B', 'C', 'D', 'E', 'F']);
+      const usage = rnd();
+      expect((await post('A', USAGE, usage)).status).toBe(200);
+      expect((await plain(rows.A.id, USAGE)) === usage).toBe(true);
+      const a = await provider(rows.A.id);
+      expect(a.authGeneration).not.toBe(rows.A.authGeneration);
+      expect(await outside(['B', 'C', 'D', 'E', 'F'])).toEqual(before);
+
+      const other = rnd();
+      expect((await post('A', 'ANTHROPIC_AUTH_TOKEN', other)).status).toBe(200);
+      expect((await plain(rows.A.id, 'ANTHROPIC_AUTH_TOKEN')) === other).toBe(true);
+      expect((await provider(rows.A.id)).authGeneration).toBe(a.authGeneration);
+      expect(await outside(['B', 'C', 'D', 'E', 'F'])).toEqual(before);
+
+      expect((await del('A', USAGE)).status).toBe(200);
+      expect(await plain(rows.A.id, USAGE)).toBeUndefined();
+      expect(await outside(['B', 'C', 'D', 'E', 'F'])).toEqual(before);
+      expect((await provider(rows.A.id)).authGeneration).toBe(a.authGeneration);
+    });
+
+    it('deletes the token from every row of the set that has it', async () => {
+      const before = await outside(['C', 'D', 'E', 'F']);
+      const keep = await others([rows.A.id, rows.B.id]);
+      const res = await del('A', TOKEN);
+      expect(res.status).toBe(200);
+      for (const key of ['A', 'B'] as const) {
+        expect(await plain(rows[key].id, TOKEN), key).toBeUndefined();
+        expect(await provider(rows[key].id), key).toEqual(rows[key]);
+      }
+      expect(await others([rows.A.id, rows.B.id])).toEqual(keep);
+      await expectEvents(DELETE_ACTION, 'manual', rows.A.id, [rows.B.id], 2);
+      expect(await outside(['C', 'D', 'E', 'F'])).toEqual(before);
+      const events = (await audits(db)).length;
+      expect((await del('A', TOKEN)).status).toBe(404);
+      expect((await audits(db)).length).toBe(events);
+    });
+
+    it('deletes through a row that no longer has the token when a sibling still does', async () => {
+      await dropToken('A');
+      const before = await outside(['C', 'D', 'E', 'F']);
+      expect((await del('A', TOKEN)).status).toBe(200);
+      expect(await plain(rows.B.id, TOKEN)).toBeUndefined();
+      expect(await provider(rows.B.id)).toEqual(rows.B);
+      await expectEvents(DELETE_ACTION, 'manual', rows.A.id, [rows.B.id], 2, null);
+      expect(await outside(['C', 'D', 'E', 'F'])).toEqual(before);
+    });
+
+    it('writes the set when a settings save types the token, leaving plaintext env alone', async () => {
+      const before = await outside(['C', 'D', 'E', 'F']);
+      const token = rnd();
+      const res = await patch('A', { envVars: { KEEP: 'yes', [TOKEN]: token } });
+      expect(res.status).toBe(200);
+      expect(await res.text()).not.toContain(token);
+      await expectWritten(token, ['A', 'B'], { A: { KEEP: 'yes' }, B: { KEEP: 'b' } });
+      await expectEvents(SET_ACTION, 'environment', rows.A.id, [rows.B.id], 2, {
+        source: 'environment',
+        secretCount: 1,
+        secretNames: [TOKEN],
+      });
+      expect(await outside(['C', 'D', 'E', 'F'])).toEqual(before);
+    });
+
+    it('keeps a typed secret that is not the login token on the clicked row', async () => {
+      const before = await outside(['B', 'C', 'D', 'E', 'F']);
+      const other = rnd();
+      expect(
+        (await patch('A', { envVars: { KEEP: 'yes', ANTHROPIC_AUTH_TOKEN: other } })).status,
+      ).toBe(200);
+      expect((await plain(rows.A.id, 'ANTHROPIC_AUTH_TOKEN')) === other).toBe(true);
+      expect((await provider(rows.A.id)).authGeneration).toBe(rows.A.authGeneration);
+      expect(await outside(['B', 'C', 'D', 'E', 'F'])).toEqual(before);
+    });
+
+    it('writes the set the row has after the save, when an isolated row joins it', async () => {
+      const before = await outside(['D', 'E', 'F']);
+      const token = rnd();
+      const res = await patch('C', { isolateAuth: false, envVars: { [TOKEN]: token } });
+      expect(res.status).toBe(200);
+      await expectWritten(token, ['A', 'B', 'C'], { C: {} });
+      await expectEvents(SET_ACTION, 'environment', rows.C.id, [rows.A.id, rows.B.id], 3, {
+        source: 'environment',
+        secretCount: 1,
+        secretNames: [TOKEN],
+      });
+      expect(await outside(['D', 'E', 'F'])).toEqual(before);
+    });
+
+    it('writes the set the row has after the save, when an API-key row joins it', async () => {
+      const before = await outside(['C', 'E', 'F']);
+      const token = rnd();
+      const res = await patch('D', { authMode: 'subscription', envVars: { [TOKEN]: token } });
+      expect(res.status).toBe(200);
+      await expectWritten(token, ['A', 'B', 'D'], { D: {} });
+      await expectEvents(SET_ACTION, 'environment', rows.D.id, [rows.A.id, rows.B.id], 3, {
+        source: 'environment',
+        secretCount: 1,
+        secretNames: [TOKEN],
+      });
+      expect(await outside(['C', 'E', 'F'])).toEqual(before);
+    });
+
+    it('writes the new row and the whole set when a created row types the token', async () => {
+      const before = await outside(['C', 'D', 'E', 'F']);
+      const token = rnd();
+      const body = createBody(token);
+      const res = await call('POST', '', body);
+      expect(res.status).toBe(201);
+      expect(await res.text()).not.toContain(token);
+      const created = await findNew(body.label);
+      await expectWritten(token, ['A', 'B', created.id]);
+      const sets = await byAction(SET_ACTION);
+      expect(sets.map((e) => e.targetId).sort()).toEqual([rows.A.id, rows.B.id, created.id].sort());
+      expect(sets.find((e) => e.targetId === created.id)!.metadata).toEqual({
+        source: 'environment',
+        secretCount: 1,
+        secretNames: [TOKEN],
+      });
+      for (const key of ['A', 'B'] as const)
+        expect(sets.find((e) => e.targetId === rows[key].id)!.metadata, key).toEqual({
+          source: 'environment',
+          secretName: TOKEN,
+          viaProviderId: created.id,
+          setSize: 3,
+        });
+      expect((await byAction('cli_provider.create')).map((e) => e.targetId)).toEqual([created.id]);
+      for (const spy of [h.insert, h.log])
+        for (const e of sets)
+          expect(spy.mock.calls.map((c) => c[0])).toContainEqual(
+            expect.objectContaining({ action: SET_ACTION, targetId: e.targetId }),
+          );
+      expect(h.add).toHaveBeenCalledTimes(1);
+      expect(h.add.mock.calls[0]![0]).toBe(CLI_EXEC_JOB_NAMES.BUILD_SANDBOX_IMAGE);
+      expect(await outside(['C', 'D', 'E', 'F'])).toEqual(before);
+    });
+
+    it('writes only an isolated created row, and takes no lock without a typed token', async () => {
+      const before = await outside(['A', 'B', 'C', 'D', 'E', 'F']);
+      const token = rnd();
+      const body = createBody(token, { isolateAuth: true });
+      expect((await call('POST', '', body)).status).toBe(201);
+      const created = await findNew(body.label);
+      expect((await plain(created.id, TOKEN)) === token).toBe(true);
+      expect(await outside(['A', 'B', 'C', 'D', 'E', 'F'])).toEqual(before);
+      const release = await holdSet();
+      try {
+        expect((await call('POST', '', createBody(null))).status).toBe(201);
+      } finally {
+        await release();
+      }
+      expect(await outside(['A', 'B', 'C', 'D', 'E', 'F'])).toEqual(before);
+    });
+
+    describe('when a write for another row of the set fails', () => {
+      it.each([
+        ['a pasted token', () => post('A', TOKEN, rnd())],
+        [
+          'a settings save',
+          () => patch('A', { label: 'renamed', envVars: { KEEP: 'yes', [TOKEN]: rnd() } }),
+        ],
+        ['a created row', () => call('POST', '', createBody(rnd()))],
+      ])('%s changes nothing when a sibling secret write is refused', async (_name, run) => {
+        const before = await world();
+        const drop = await refuseSecretWrites();
+        try {
+          expect((await run()).status).toBeGreaterThanOrEqual(400);
+        } finally {
+          await drop();
+        }
+        expect(await world()).toEqual(before);
+        expect(h.log).not.toHaveBeenCalled();
+      });
+
+      it('a token delete changes nothing when a sibling secret delete is refused', async () => {
+        const before = await world();
+        const drop = await trigger(
+          'cli_provider_secrets',
+          'BEFORE DELETE',
+          `IF OLD.provider_id = '${rows.B.id}'::uuid THEN RAISE EXCEPTION 'secret delete refused'; END IF;`,
+          'OLD',
+        );
+        try {
+          expect((await del('A', TOKEN)).status).toBeGreaterThanOrEqual(400);
+        } finally {
+          await drop();
+        }
+        expect(await world()).toEqual(before);
+        expect(h.log).not.toHaveBeenCalled();
+      });
+
+      it.each([
+        ['a pasted token', () => post('A', TOKEN, rnd())],
+        ['a created row', () => call('POST', '', createBody(rnd()))],
+      ])('%s changes nothing when a sibling audit insert is refused', async (_name, run) => {
+        const before = await world();
+        const drop = await refuseSiblingAudit();
+        try {
+          expect((await run()).status).toBeGreaterThanOrEqual(400);
+        } finally {
+          await drop();
+        }
+        expect(await world()).toEqual(before);
+        expect(h.log).not.toHaveBeenCalled();
+      });
+    });
+
+    describe('when the lock is lost during a write', () => {
+      const paths: [string, number, () => Response | Promise<Response>][] = [
+        ['a pasted token', 4, () => post('A', TOKEN, rnd())],
+        ['a settings save', 5, () => patch('A', { envVars: { KEEP: 'yes', [TOKEN]: rnd() } })],
+        ['a created row', 3, () => call('POST', '', createBody(rnd()))],
+      ];
+      it.each(paths)(
+        '%s is refused and changes nothing at every check',
+        async (_name, max, run) => {
+          h.loseAt = Infinity;
+          h.checks = 0;
+          expect((await run()).status).toBeLessThan(300);
+          expect(h.checks).toBeGreaterThanOrEqual(max);
+          for (let k = 1; k <= max; k++) {
+            await teardown();
+            await setup();
+            const before = await world();
+            h.loseAt = k;
+            h.checks = 0;
+            const res = await run();
+            h.loseAt = undefined;
+            expect(res.status, `check ${k}`).toBe(409);
+            expect(((await res.json()) as { code?: string }).code, `check ${k}`).toBe(
+              'cli_auth_busy',
+            );
+            expect(await world(), `check ${k}`).toEqual(before);
+            expect(await byAction(SET_ACTION), `check ${k}`).toEqual([]);
+          }
+        },
+      );
+    });
+
+    it('does not write the Claude token to a set of another CLI', async () => {
+      const [other] = await db
+        .insert(schema.cliProviders)
+        .values({
+          userId: U,
+          name: 'codex',
+          authMode: 'subscription',
+          isolateAuth: false,
+          label: 'G',
+          authLastCheckedAt: PAST,
+        })
+        .returning();
+      const before = await provider(other!.id);
+      const res = await post('F', TOKEN, rnd());
+      expect(res.status).toBeLessThan(300);
+      expect(await secretRows([other!.id])).toEqual([]);
+      expect(await provider(other!.id)).toEqual(before);
+      expect((await byAction(SET_ACTION)).map((e) => e.targetId)).toEqual([rows.F.id]);
+    });
+
+    it('an isolated created row takes no lock and is not refused while the set is held', async () => {
+      const before = await outside(['A', 'B', 'C', 'D', 'E', 'F']);
+      const token = rnd();
+      const body = createBody(token, { isolateAuth: true });
+      const release = await holdSet();
+      let res: Response;
+      try {
+        res = await call('POST', '', body);
+      } finally {
+        await release();
+      }
+      expect(res.status).toBe(201);
+      expect((await plain((await findNew(body.label)).id, TOKEN)) === token).toBe(true);
+      expect(await outside(['A', 'B', 'C', 'D', 'E', 'F'])).toEqual(before);
+    });
+
+    describe('when the set is locked', () => {
+      it.each([
+        ['a pasted token', () => post('A', TOKEN, rnd())],
+        ['a settings save', () => patch('A', { envVars: { KEEP: 'yes', [TOKEN]: rnd() } })],
+        ['a token delete', () => del('A', TOKEN)],
+      ])('%s is refused as busy and changes nothing', async (_name, run) => {
+        const before = await world();
+        const release = await holdSet();
+        try {
+          const res = await run();
+          expect(res.status).toBe(409);
+          expect(((await res.json()) as { code?: string }).code).toBe('cli_auth_busy');
+        } finally {
+          await release();
+        }
+        expect(await world()).toEqual(before);
+      });
+
+      it('a created row with a typed token is refused as busy after the wait limit', async () => {
+        const before = await world();
+        const release = await holdSet();
+        try {
+          const res = await call('POST', '', createBody(rnd()));
+          expect(res.status).toBe(409);
+          expect(((await res.json()) as { code?: string }).code).toBe('cli_auth_busy');
+        } finally {
+          await release();
+        }
+        expect(await world()).toEqual(before);
+      });
+
+      it('a created row with a typed token waits for a holder that releases in time', async () => {
+        const token = rnd();
+        const body = createBody(token);
+        const release = await holdSet();
+        const timer = setTimeout(() => void release(), 20);
+        let res: Response;
+        try {
+          res = await call('POST', '', body);
+        } finally {
+          clearTimeout(timer);
+          await release();
+        }
+        expect(res.status).toBe(201);
+        await expectWritten(token, ['A', 'B', (await findNew(body.label)).id]);
+      });
+
+      it('the lock helper waits up to its limit and then refuses as busy', async () => {
+        const lock = authWrite.withCliAuthLocks as any;
+        const release = await holdSet();
+        const timer = setTimeout(() => void release(), 100);
+        try {
+          await expect(lock(db, [rows.A], async () => 'ok', { waitMs: 400 })).resolves.toBe('ok');
+        } finally {
+          clearTimeout(timer);
+          await release();
+        }
+        const held = await holdSet();
+        try {
+          await expect(lock(db, [rows.A], async () => 'ok', { waitMs: 100 })).rejects.toMatchObject(
+            {
+              status: 409,
+              code: 'cli_auth_busy',
+            },
+          );
+        } finally {
+          await held();
+        }
+      });
+
+      it('the production wait limit is ten seconds', async () => {
+        const real = await vi.importActual<any>('../src/lib/cli-auth-write.js');
+        expect(real.CLI_AUTH_JOIN_WAIT_MS).toBe(10_000);
+      });
+    });
+
+    describe('a sign-out request', () => {
+      const signOutMetadata = async (key: Key) =>
+        (await audits(db)).find(
+          (a) => a.action === 'cli_provider.sign_out' && a.targetId === rows[key].id,
+        )!.metadata;
+
+      it.each([
+        ['a shared row', 'A', [['A', 'B']]],
+        ['an isolated row', 'C', [['C']]],
+      ] as [string, Key, Key[][]][])('names the set of %s', async (_name, key, [members]) => {
+        const { res, payload } = await signOut(key);
+        expect(res.status).toBe(202);
+        expect(await res.json()).toEqual({ jobId: 'job-id' });
+        expect(payload).toEqual({
+          providerId: rows[key].id,
+          userId: U,
+          authGeneration: rows[key].authGeneration,
+        });
+        const setIds = members!.map((k) => rows[k].id).sort();
+        expect(await signOutMetadata(key)).toEqual({ setSize: setIds.length, setIds });
+      });
+
+      it('lists at most fifty ids of a larger set and never a secret', async () => {
+        const W = (await makeActor(db)).id;
+        try {
+          const made = await db
+            .insert(schema.cliProviders)
+            .values(
+              Array.from({ length: 55 }, (_, i) => ({
+                userId: W,
+                name: 'claude-code' as const,
+                label: `w${i}`,
+              })),
+            )
+            .returning({ id: schema.cliProviders.id });
+          const sorted = made.map((r) => r.id).sort();
+          h.actor = W;
+          h.add.mockClear();
+          const res = await call('POST', `/${made[7]!.id}/sign-out`);
+          expect(res.status).toBe(202);
+          const [event] = (await audits(db)).filter(
+            (a) => a.actorUserId === W && a.action === 'cli_provider.sign_out',
+          );
+          expect(event!.metadata).toEqual({ setSize: 55, setIds: sorted.slice(0, 50) });
+          expect(JSON.stringify(event!.metadata)).not.toMatch(/OAUTH|TOKEN|SECRET/i);
+        } finally {
+          h.actor = U;
+          await cleanActor(db, W);
+        }
+      });
+
+      it('is superseded when a sibling later receives a new token', async () => {
+        const { payload } = await signOut('A');
+        const token = rnd();
+        expect((await post('B', TOKEN, token)).status).toBe(200);
+        expect((await provider(rows.A.id)).authGeneration).not.toBe(payload.authGeneration);
+        await expectWritten(token, ['A', 'B']);
+      });
+
+      it('stays current when a sibling later loses its token', async () => {
+        const { payload } = await signOut('A');
+        expect((await del('B', TOKEN)).status).toBe(200);
+        expect((await provider(rows.A.id)).authGeneration).toBe(payload.authGeneration);
+      });
+    });
+
+    it('keeps the token out of audit rows, audit calls, responses and error text', async () => {
+      const seen: string[] = [];
+      const tokens = [rnd(), rnd(), rnd(), rnd(), rnd()];
+      const keep = async (res: Response) => void seen.push(await res.text());
+      await keep(await post('A', TOKEN, tokens[0]!));
+      await keep(await patch('B', { envVars: { KEEP: 'b', [TOKEN]: tokens[1]! } }));
+      await keep(await call('POST', '', createBody(tokens[2]!)));
+      for (const [refuse, run] of [
+        [refuseSecretWrites, () => post('A', TOKEN, tokens[3]!)],
+        [refuseSiblingAudit, () => post('A', TOKEN, tokens[4]!)],
+      ] as const) {
+        const drop = await refuse();
+        try {
+          await keep(await run());
+        } finally {
+          await drop();
+        }
+      }
+      seen.push(
+        JSON.stringify(await audits(db)),
+        JSON.stringify([h.insert.mock.calls, h.log.mock.calls]),
+      );
+      for (const text of seen) for (const token of tokens) expect(text).not.toContain(token);
+    });
+  },
+);

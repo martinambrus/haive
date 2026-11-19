@@ -205,5 +205,5 @@ it('runs the snapshot control in compose-boot with worker tooling, shared bind p
   assert.ok(step.run.includes('-e SNAPSHOT_SANDBOX_TEST_IMAGE=haive-cli-sandbox:latest'));
   assert.ok(step.run.includes('vitest run --root . test/exec-core-boundary-mounts.test.ts'));
   assert.ok(!step.run.includes('pnpm --filter'));
-  assert.equal(listedFiles.length, 168);
+  assert.equal(listedFiles.length, 169);
 });
