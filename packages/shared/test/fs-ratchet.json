@@ -16,6 +16,7 @@
   "packages/worker/src/sandbox/ddev-runner.ts": 9,
   "packages/worker/src/sandbox/docker-runner.ts": 2,
   "packages/worker/src/sandbox/egress-gateway.ts": 3,
+  "packages/worker/src/sandbox/git-mcp-pin.ts": 2,
   "packages/worker/src/sandbox/ide-runner.ts": 1,
   "packages/worker/src/sandbox/sandbox-core-image.ts": 2,
   "packages/worker/src/sandbox/sandbox-runner.ts": 11,
