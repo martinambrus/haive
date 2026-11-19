@@ -20,7 +20,7 @@ const h = vi.hoisted(() => ({
   checks: 0,
   afterLock: undefined as (() => Promise<void>) | undefined,
   joinWaitMs: 0,
-  attempts: 0,
+  refused: undefined as (() => void) | undefined,
 }));
 vi.mock('@haive/database', async (original) => {
   const real = await original<any>();
@@ -28,8 +28,11 @@ vi.mock('@haive/database', async (original) => {
     ...real,
     tryCliAuthLock: async (...args: any[]) => {
       const lock = await real.tryCliAuthLock(...args);
-      // Counted once the try has an answer: each try opens its own connection before it asks.
-      h.attempts += 1;
+      if (!lock && h.refused) {
+        const refused = h.refused;
+        h.refused = undefined;
+        refused();
+      }
       if (lock && h.afterLock) {
         const hook = h.afterLock;
         h.afterLock = undefined;
@@ -344,6 +347,7 @@ describe.skipIf(!url)(
         'BEFORE INSERT',
         `IF NEW.action = '${SET_ACTION}' AND NEW.metadata ->> 'source' = 'join' THEN RAISE EXCEPTION 'audit insert refused'; END IF;`,
       );
+    const FAKE: ('setTimeout' | 'clearTimeout' | 'Date')[] = ['setTimeout', 'clearTimeout', 'Date'];
     const holdSet = async (key: Key = 'A') => {
       const release = await tryCliAuthLock(db, authState.cliAuthScope(rows[key]));
       expect(release).not.toBeNull();
@@ -376,7 +380,7 @@ describe.skipIf(!url)(
       h.afterLock = undefined;
       h.checks = 0;
       h.joinWaitMs = 0;
-      h.attempts = 0;
+      h.refused = undefined;
       h.insert.mockClear();
       h.log.mockClear();
       h.poll.mockReset().mockResolvedValue(undefined);
@@ -432,7 +436,8 @@ describe.skipIf(!url)(
       h.loseAt = undefined;
       h.afterLock = undefined;
       h.joinWaitMs = 0;
-      h.attempts = 0;
+      h.refused = undefined;
+      vi.useRealTimers();
       await teardown();
       vi.restoreAllMocks();
     });
@@ -894,28 +899,58 @@ describe.skipIf(!url)(
       it.each([
         ['a created row', () => call('POST', '', createBody(null))],
         ['a cloned row', () => cloneOf('A')],
+      ])(
+        '%s is refused as busy once its wait has run out, and changes nothing',
+        async (_n, run) => {
+          const before = await world();
+          h.joinWaitMs = 1000;
+          const release = await holdSet();
+          try {
+            vi.useFakeTimers({ toFake: FAKE });
+            const refusal = new Promise<void>((resolve) => {
+              h.refused = resolve;
+            });
+            const pending = run();
+            await refusal;
+            await vi.advanceTimersByTimeAsync(1000);
+            const res = await pending;
+            expect(res.status).toBe(409);
+            expect(((await res.json()) as { code?: string }).code).toBe('cli_auth_busy');
+          } finally {
+            vi.useRealTimers();
+            await release();
+          }
+          expect(await world()).toEqual(before);
+        },
+      );
+
+      it.each([
+        ['a created row', () => call('POST', '', createBody(null))],
+        ['a cloned row', () => cloneOf('A')],
       ])('%s waits for the set lock and joins once it is released', async (_n, run) => {
         await differ('B');
         h.joinWaitMs = 5000;
         const release = await holdSet();
-        let pending: Response | Promise<Response>;
+        let released = false;
         try {
-          h.attempts = 0;
-          pending = run();
-          // A try that has come back was refused by the held lock, so the request is now waiting.
-          const deadline = Date.now() + 5000;
-          while (h.attempts < 1) {
-            if (Date.now() > deadline)
-              throw new Error('the held lock did not refuse the request within 5000 ms');
-            await new Promise((resolve) => setTimeout(resolve, 20));
-          }
-        } finally {
+          vi.useFakeTimers({ toFake: FAKE });
+          const refusal = new Promise<void>((resolve) => {
+            h.refused = resolve;
+          });
+          const pending = run();
+          // The first try was refused by the held lock, so the request is now waiting.
+          await refusal;
           await release();
+          released = true;
+          await vi.advanceTimersByTimeAsync(500);
+          const res = await pending;
+          expect(res.status).toBe(201);
+          const id = ((await res.json()) as { provider: { id: string } }).provider.id;
+          await expectJoined(id, 'B', 3);
+        } finally {
+          vi.useRealTimers();
+          if (!released) await release();
         }
-        const res = await pending;
-        expect(res.status).toBe(201);
-        const id = ((await res.json()) as { provider: { id: string } }).provider.id;
-        await expectJoined(id, 'B', 3);
       });
 
       it('a settings save is refused when its scope changed between the read and the lock', async () => {
