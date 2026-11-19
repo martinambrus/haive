@@ -689,7 +689,7 @@ All PRE-EXISTING. Paths are under `packages/`. Check each against the shared usa
 5. The providers page loads one usage-auth request per claude row (`web/src/app/(app)/cli-providers/page.tsx` ~:138-155): 41 requests on the dev install.
 6. THIRD-PARTY (needs approval before any work): the vendor's refresh semantics are unverified ("single-use" is only a comment at `shared/src/cli-providers/claude-oauth.ts:48`), and the usage endpoint is undocumented (`worker/src/usage-window/fetchers/index.ts` ~:37-41).
 
-### T723 · FNF[claude-login-set] · Claude login set leftovers (+13)
+### T723 · FNF[claude-login-set] · Claude login set leftovers (+17)
 
 status: open · kind: fix · found: #1282 build and review 2026-11-19 · priority: P4
 
@@ -709,11 +709,52 @@ Paths are under `packages/`. Items 2 to 4 are PRE-EXISTING; item 1 is PRE-EXISTI
 12. The same shape in the grok credential refresh (`worker/src/usage-window/credential-refresh.ts` ~:167-181): on `invalid_grant` one autocommit UPDATE marks every row sharing the volume, in scan order. Lock those rows in id order first.
 13. A task insert that names both `cliProviderId` and `summaryCliProviderId` (`api/src/routes/tasks/index.ts` ~:751-760, `database/src/schema/tasks.ts` ~:156-160) takes its two foreign-key share locks in constraint order, not id order, so it can deadlock with a holder of `FOR UPDATE` on provider rows in id order (the image job, `lockLoginSet`). Direction: those id-ordered lockers change no key and delete no row, so `FOR NO KEY UPDATE` would stop them conflicting with child-row inserts at all; check first that nothing relies on them blocking a concurrent secret insert. Rare (two share locks microseconds apart), and the loser gets a deadlock error and can retry.
 
+14. NEW with #1285: a settings save that joins a set and types a `CLAUDE_USAGE_OAUTH` secret in the same request. The update (`api/src/routes/cli-providers.ts` ~:827) bumps `authGeneration` to supersede a queued sign-out, then the join seed overwrites it with the source row's generation (`api/src/lib/cli-login-secret.ts` ~:266), so the supersede fails when the source's generation equals the queued sign-out's payload. Narrow; no control covers a join and a typed usage secret in one save.
+15. NEW with #1285, a disclosed decision: a clone of a row whose login token sits only in legacy `env_vars` (not yet copied to a secret row by the boot step) ends with no token, where it used to get one. The seed reads secret rows only (`api/src/lib/cli-login-secret.ts` ~:204-226). Reachable only before the boot copy has run on an install.
+16. No control pins the seed's tie rule (newest token, then smallest id); a tie needs equal secret `updated_at`, which after a set-wide write means equal logins. Test only.
+17. PRE-EXISTING, related: `AUTH_RE` (`worker/src/queues/cli-exec/failure-class.ts:294`) does not match Claude's own "Not logged in · Please run /login" or "Invalid API key · Please run /login" (checked against the real regex). A run on a row whose auth volume exists but holds no token (item 1, a deleted token, item 15) fails with the generic `cli invocation failed: <tail>` and no Log in hint, and the status stays `ok`, so every retry fails the same way until Test or Sign out. Only a missing volume gives `CliLoginRequiredError` and the Log in button. Fix: classify the binary's no-login line as an auth failure, with a negative control for prose that only mentions logging in.
+
 ### T724 · Step 11 review cannot keep one learning the recorder plans to delete
 
 status: open · kind: design · found: agent-memory pilot pair 2 (the treatment task's step 11) 2026-11-19 · priority: P4
 
 PRE-EXISTING, by design today. The step-11 learning review offers `writeFiles` (every planned op or none), the KB and skill sync switches, and an instruction. A planned insert or update can be vetoed alone by emptying its staged draft in the inline editor. A planned delete cannot: a delete op gets no `editPath` (`packages/worker/src/step-engine/steps/workflow/11-phase-8-learning.ts` `learningOpsToDiffFiles` ~:1103, pinned by `11-phase-8-learning.test.ts` ~:528-529). A reviewer who wants to keep one learning the recorder calls stale must reject every op or spend a re-roll through the instruction. Seen on a real run: the recorder planned 2 new, 2 updated and 1 removed learning, and the removal could only be refused by rejecting all five. Needs a decision: a per-op keep for deletes (for example a staged tombstone the reviewer can clear) or a per-op checklist for every op. Interacts with the deletion identity records (#1202) and the replay rules in T672.
+
+### T725 · FNF[translator-render] · Translator render step and artifact lows (+7)
+
+status: open · kind: bug · found: translator assembly milestone (module PR #7) · priority: P4
+
+In `martinambrus/haive-module-translator`; all NEW with the render step, none blocking.
+
+1. `src/render/assemble.ts` (`mdInline`, `delimited`): CommonMark's flanking rules leave emphasis next to a word character, with punctuation or a code span on its inside, as literal asterisks in `translation.md` (fuzzing: 3555 of 20000 paragraphs, and 1500 documents). The HTML is faithful. Documented in the README.
+2. `src/render/assemble.ts` (`mdLines`, `codeSpan`): a paragraph that is only a line break, a trailing line break, and a newline inside an inline code value differ between the Markdown and the HTML (the Markdown drops them or writes a space). Documented.
+3. `src/db/artifacts.ts:54`: coverage reads `jsonb_array_length(parsed->'blocks')`, which detoasts the parsed source on every detect; the unit inventory count would do.
+4. `src/db/artifacts.ts:43-46`: with no review row yet, an unfinished translation answers `review-incomplete`.
+5. `src/routes.ts` artifact list: one artifact recorded for another repository turns the whole list into a 404 (as specified). Same route as T726 item 1.
+6. `translation.md` in GFM viewers: bare `http://` runs become links (text only).
+7. Guards no control pins: the part-count cap throw in `src/routes.ts`; the review status check and the revision comparison between the two sessions in `src/db/artifacts.ts`; `fenceIn` parts other than blocks and invalidations; the store's marker-list check; manifest bytes in `accounted_bytes`.
+
+### T726 · FNF[translator-retention] · Translator delete, orphan reconcile and operator leftovers (+9)
+
+status: open · kind: fix · found: translator retention milestone (module PR #8) · priority: P3
+
+In `martinambrus/haive-module-translator`; all NEW with the delete and reconcile slice. Item 1 first: it departs from a host rule.
+
+1. `src/routes.ts:54`: the artifact list GET runs the caller's lazy orphan reconcile unless `Sec-Fetch-Site` is `cross-site`, against the host rule that a GET starts no work. A browser without Fetch Metadata, or a page on the same site (another localhost port, such as the task's own app), can still trigger it. The effect is timing only: the caller's own orphans past the 30-day grace, at most 5 per call, are purged before the next visit would purge them. Fix: move the trigger to a POST, or to the render step, when the module gets its web page.
+2. `src/db/retention.ts:70-72` (`deleteTask`): an invocation that never ends (no `ended_at`, not superseded) blocks the owner's delete with 409 `runs-live` until it ends or is superseded. A run that starts after the check is not blocked (documented): the tombstone refuses its module writes, but the core run still costs.
+3. `src/teardown.ts:18`: teardown truncates tombstones and receipts with the rest, so a task deleted before a reinstall can be written again after it (the data the tombstone protected is gone by then). Documented.
+4. `src/steps/tr-setup.ts:117`: the `setup_attempts` insert takes no owner lock and makes no tombstone check after the entry check in `store()`. Safe only because the purge deletes attempts and, after it, the source foreign key refuses the insert. No race control.
+5. `src/db/retention.ts:28,82`: `CANDIDATE_BOUND` examines at most 5000 candidates per call, oldest first, so a user with more than 5000 tasks holding module rows is not examined past the first 5000 until those resolve. No control.
+6. `src/migrations/0009_retention.sql:21-26`: the trigger admits the DELETE of any row while the setting names a tombstoned task; it does not compare `OLD.task_id`, since a per-row `to_jsonb(OLD)` would serialise large bytea. Reachable only inside the purge transaction; md5 controls show other tasks' rows survive. Re-examine if the purge ever runs other statements.
+7. `src/db/retention.ts:129-150` (`remove()`) with the 0009 trigger: purging a very large task (60 units, 8.4 MB of parts, 30000 review blocks, 30000 seen and 30000 outcome rows) holds the owner advisory lock for about 5 s, mostly the per-row trigger on `pass_seen`, and the same user's other work waits that long. Bounded by the 10 s lock and 60 s statement timeouts. Measured, within limits.
+8. `src/db/passes.ts:39,367-392`: the operator view lists at most 200 intents, 200 unbound invocations and 200 audit rows (unresolved and unquarantined first), so thousands of stale invocations need several quarantine rounds to surface. Documented; the scale run belongs to a later slice.
+9. Tests: the fake-context unit tests print warn lines from `reconcileQuietly`, and no control pins `CANDIDATE_BOUND`.
+
+### T727 · Translator consent reserves no allowance for the rendered files
+
+status: open · kind: design · found: translator assembly milestone (module PR #7) · priority: P4
+
+In `martinambrus/haive-module-translator`, PRE-EXISTING design. Consent reserves allowance for model calls only, so the render step can fail on the allowance after the translation was paid for; each render of changed text stores another artifact, and the operator extension raises calls only. The same question as T718 (c) for review decisions: decide whether consent reserves byte headroom for later phases, or whether rendered files are exempt or replace the previous render.
 
 ### T721 · The Claude usage grant reaches sandbox environments
 
@@ -733,7 +774,7 @@ status: open (items 2-9; item 1 done #1281) · kind: security · found: login-se
 
 ### T720 · A Claude login reaches one provider row, its sign-out resets them all
 
-status: open, in work since 2026-11-19 (owner decided); login and sign-out for the whole set merged #1282 (3a7b57ac1) and deployed 2026-11-19 13:10Z; set-wide paste, typed token and delete merged #1283 (5cfe1f86a, with the provider-row lock order against the image job), deploy pending; rows joining a set in work (create, clone, un-isolate, auth mode); then the usage connection · kind: design · found: #1280 review 2026-11-19 · priority: P2
+status: open, in work since 2026-11-19 (owner decided); login and sign-out for the whole set merged #1282 (3a7b57ac1) and deployed 2026-11-19 13:10Z; set-wide paste, typed token and delete merged #1283 (5cfe1f86a, with the provider-row lock order against the image job), deployed 2026-11-19 17:32Z; rows joining a set (create, clone, un-isolate, auth mode) in review as #1285; then the usage connection · kind: design · found: #1280 review 2026-11-19 · priority: P2
 
 A `claude-code` subscription login is a token saved on the one provider row it was made on (`api/src/lib/cli-login-secret.ts` `saveCliLoginSecret`), and each run reads the token of its own row (`worker/src/secrets/provider-secrets.ts`). A sign-out through one row deletes that row's token (`worker/src/queues/cli-exec/handlers.ts` ~:1436-1449) but resets `auth_status` on every row sharing the auth volume (~:1451-1472). The other rows keep their own tokens, which may still work, and read `unknown`.
 
@@ -758,11 +799,11 @@ All PRE-EXISTING, none blocking the replacement series. Paths are under `package
 7. Deleting a user cascades `env_templates` rows without removing their images (`database/migrations/0000_baseline.sql` ~:1021; the delete hooks are unchecked).
 8. `composedLspImageRefs` of an abandoned contract-2 row keep pinning images after a rollback (`worker/src/lsp/composed-evidence.ts` ~:399-418).
 
-### T718 · Translator module lows (review and correction approval)
+### T718 · Translator module lows (review and correction approval) (+4)
 
 status: open · kind: bug · found: translator review milestone (module PRs #5, #6) · priority: P4
 
-In `martinambrus/haive-module-translator`. NEW = a limit of the review feature, none a regression. (a) `src/db/review-patches.ts:95,146`: `page` and `applyRound` load every block version and write about 2.4 statements per proposal. NEW. (b) `src/steps/tr-review.ts:167,178`: a stale or repeated submit after a reopen fails the step (Retry recovers), inherited from the `explicit` pattern in `src/db/setup.ts`. PRE-EXISTING. (c) `src/db/review.ts:32`: `acceptBytes` reserves nothing for decisions or the batch, so near the allowance they can fail after every unit was reviewed. NEW, documented in the README. (d) `src/db/review-patches.ts:174`: seam windows use the target language (equivalent for en and sk). NEW. (e) `src/protocol/patch.ts:87,105,127`: groups built by spread, O(k^2) per block. NEW. (f) `test/review-step.test.ts`: `FakeReviewStore` duplicates `test/support/patch-fakes.ts`. NEW. (g) Documented limits: corrections valid only as a pair are not applied, re-review after a batch needs a Retry, a rejected correction can be proposed again, decisions are final, the reason text is not shown on the page. PRE-EXISTING at `4a2efb8`: (h) `src/manifest.ts:7` `schemaVersion: 4` with 7 migrations; (i) milestone labels in test titles (`test/setup-gates.test.ts:6`, `pass-step.test.ts:12`, `manifest.test.ts:6`, `pass-store.test.ts:20`, `passes.test.ts:8,83`, `setup.test.ts:9`) and the `README.md:14` heading; (j) `src/db/passes.ts:100,105` bookkeeping inserts in read-only sessions; (k) `exactKeys` and duplicate-key pattern (`src/protocol/passes.ts:76,111-128`, `review.ts:88`), and `validateReply` does not check text well-formedness; (l) `test/pass-db.test.mjs:221-233` pins only the allow side of headroom.
+In `martinambrus/haive-module-translator`. NEW = a limit of the review feature, none a regression. (a) `src/db/review-patches.ts:95,146`: `page` and `applyRound` load every block version and write about 2.4 statements per proposal. NEW. (b) `src/steps/tr-review.ts:167,178`: a stale or repeated submit after a reopen fails the step (Retry recovers), inherited from the `explicit` pattern in `src/db/setup.ts`. PRE-EXISTING. (c) `src/db/review.ts:32`: `acceptBytes` reserves nothing for decisions or the batch, so near the allowance they can fail after every unit was reviewed. NEW, documented in the README. (d) `src/db/review-patches.ts:174`: seam windows use the target language (equivalent for en and sk). NEW. (e) `src/protocol/patch.ts:87,105,127`: groups built by spread, O(k^2) per block. NEW. (f) `test/review-step.test.ts`: `FakeReviewStore` duplicates `test/support/patch-fakes.ts`. NEW. (g) Documented limits: corrections valid only as a pair are not applied, re-review after a batch needs a Retry, a rejected correction can be proposed again, decisions are final, the reason text is not shown on the page. PRE-EXISTING at `4a2efb8`: (h) `src/manifest.ts:7` `schemaVersion: 4` with 7 migrations; (i) milestone labels in test titles (`test/setup-gates.test.ts:6`, `pass-step.test.ts:12`, `manifest.test.ts:6`, `pass-store.test.ts:20`, `passes.test.ts:8,83`, `setup.test.ts:9`) and the `README.md:14` heading; (j) `src/db/passes.ts:100,105` bookkeeping inserts in read-only sessions; (k) `exactKeys` and duplicate-key pattern (`src/protocol/passes.ts:76,111-128`, `review.ts:88`), and `validateReply` does not check text well-formedness; (l) `test/pass-db.test.mjs:221-233` pins only the allow side of headroom. Added from the assembly and retention milestones (module PRs #7, #8), all PRE-EXISTING: (m) `src/protocol/passes.ts:135-141` `validateReply` does not constrain code or definition blocks or `open:a`/url adjacency, so a word inside a code block still fails `code-block` at the render step, after payment (same function as (k)); (n) `src/db/passes.ts` (session to lineage): the render step checks the live provider policy although it calls no model, while downloads do not; (o) `src/db/passes.ts:131-136` `session()` commits the seen and outcome rows of the task's runs even when the operator action or another `run` is refused (it rethrows after the commit; accounting facts only); (p) `src/db/passes.ts:149` `cap()` throws a plain `Error('Invalid operator extension')` on an unsafe stored total, which surfaces as a 500 instead of a refusal.
 
 ### T717 · The sandbox image's own uv is unpinned and unused by Haive
 
