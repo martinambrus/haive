@@ -5,6 +5,7 @@ import {
   mcpAcceptanceMark,
   type CliProviderName,
 } from '@haive/shared';
+import { GIT_MCP_PYTHON } from './git-mcp-pin.js';
 
 const EMPTY_MCP_SETTINGS = '{\n  "mcpServers": {}\n}\n';
 
@@ -224,23 +225,10 @@ export function emittedDefaultServerNames(gates: {
   hasRepo: boolean;
   hasWorktree: boolean;
   ragOnly: boolean;
-  /** `git` runs through uvx, and the sandbox image ships no Python, so it cannot start where
-   *  the sandbox cannot reach PyPI and the GitHub release its interpreter comes from.
-   *
-   *  OPTIONAL because the prompt is built at DISPATCH, before the invocation's egress is
-   *  resolved. Leaving it unset keeps `git` in the shadow set, which under-reports a user's own
-   *  server rather than announcing one that is not theirs — the safe direction, and the only
-   *  case where the two readers still differ. */
-  registriesReachable?: boolean;
 }): Set<string> {
   const names = new Set<string>();
   if (gates.hasRepo) names.add('filesystem');
-  if (
-    gates.hasRepo &&
-    !gates.hasWorktree &&
-    !gates.ragOnly &&
-    gates.registriesReachable !== false
-  ) {
+  if (gates.hasRepo && !gates.hasWorktree && !gates.ragOnly) {
     names.add('git');
   }
   return names;
@@ -273,8 +261,12 @@ export function buildDefaultMcpServers(opts: BuildDefaultMcpServersOptions): Mcp
   if (includeGit) {
     servers.push({
       name: 'git',
-      command: 'uvx',
-      args: ['mcp-server-git', '--repository', opts.repoPath],
+      // Baked into the image, so it starts under any egress. `-I` ignores PYTHON* variables, the
+      // user site and the working directory: a repository's own `click.py` or `mcp/` at its
+      // root would otherwise shadow the server's imports (MEASURED: it breaks both the console
+      // script and plain `-m`).
+      command: GIT_MCP_PYTHON,
+      args: ['-I', '-m', 'mcp_server_git', '--repository', opts.repoPath],
     });
   }
 

@@ -1,9 +1,23 @@
 import { readFileSync } from 'node:fs';
-import { describe, expect, it } from 'vitest';
+import { fileURLToPath } from 'node:url';
+import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { schema, type Database } from '@haive/database';
 import { createFakeDb } from '@haive/database/testing';
 import { hasReadyLspBridge } from '../src/lsp/configured-lsp.js';
 import { fakeDockerRunner } from './fake-docker-runner.js';
+
+// The captured composition hash covers the git MCP layer's digest; a stub context keeps it from
+// moving when the real lock is bumped.
+const realContext = process.env.SANDBOX_CORE_CONTEXT;
+beforeAll(() => {
+  process.env.SANDBOX_CORE_CONTEXT = fileURLToPath(
+    new URL('./fixtures/git-mcp-context', import.meta.url),
+  );
+});
+afterAll(() => {
+  if (realContext === undefined) delete process.env.SANDBOX_CORE_CONTEXT;
+  else process.env.SANDBOX_CORE_CONTEXT = realContext;
+});
 
 // A captured valid verification row, not a reimplementation of its matcher. This
 // also pins schema/recipe identity: regenerate deliberately when recipes change.

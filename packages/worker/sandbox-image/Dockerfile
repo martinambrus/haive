@@ -38,11 +38,23 @@ RUN apt-get update \
 # binary was never installed here, so the fallback could not have worked. Debian names the
 # binary `chromium` (not `google-chrome`), which is why --channel=stable is not used.
 
-# uv (Astral) — provides `uvx`, used by the git MCP server. Installed to
+# uv (Astral) — available to agents and repositories that use it. Installed to
 # /usr/local/bin so it is on PATH for the node user (the installer otherwise
-# drops into $HOME/.local/bin).
+# drops into $HOME/.local/bin). The git MCP server no longer runs through uvx:
+# it is baked below.
 RUN curl -LsSf https://astral.sh/uv/install.sh | env UV_INSTALL_DIR=/usr/local/bin sh \
  && uv --version
+
+# The git MCP server (mcp-server-git), baked so it starts with no network. Run through uvx
+# it downloaded a CPython and 32 packages on every run, 10-130 s, past the CLI's start
+# window. install-git-mcp.sh installs the release pinned in git-mcp-requirements.txt (every
+# dependency hashed) with its own uv-managed CPython into /opt/haive-git-mcp-<version>,
+# apart from any python the image or a repository uses. image-composer.ts appends the same
+# COPY, RUN and LABEL to every composed image, and mcp-config.ts declares the server from that path.
+COPY git-mcp-requirements.txt install-git-mcp.sh /tmp/haive-git-mcp/
+RUN sh /tmp/haive-git-mcp/install-git-mcp.sh && rm -rf /tmp/haive-git-mcp
+# The worker declares the git MCP server only for an image carrying this label.
+LABEL haive.git-mcp="2026.11.11"
 
 # rtk (Rust Token Killer) — proxies dev commands to compress tool output before
 # it lands in the LLM context. Pinned by tag + sha256; opt-in per-repo via

@@ -1,3 +1,4 @@
+import { fileURLToPath } from 'node:url';
 import { describe, expect, it, vi } from 'vitest';
 import { renderDockerfile } from '../src/step-engine/steps/env-replicate/02-generate-dockerfile.js';
 import { composeSandboxImage } from '../src/sandbox/image-composer.js';
@@ -107,10 +108,21 @@ describe('stored version render boundaries', () => {
   }
   it('matches origin/main renderer bytes for valid pins', () => {
     for (const f of fixtures.environments) expect(renderDockerfile(f.base, f.deps)).toBe(f.output);
-    for (const f of fixtures.compositions)
-      expect(composeSandboxImage(f.input as Parameters<typeof composeSandboxImage>[0])).toEqual(
-        f.output,
-      );
+    // The baseline pins the composer's own bytes; the git MCP layer's digest comes from a stub
+    // context, so bumping the real lock does not move it.
+    const realContext = process.env.SANDBOX_CORE_CONTEXT;
+    process.env.SANDBOX_CORE_CONTEXT = fileURLToPath(
+      new URL('./fixtures/git-mcp-context', import.meta.url),
+    );
+    try {
+      for (const f of fixtures.compositions)
+        expect(composeSandboxImage(f.input as Parameters<typeof composeSandboxImage>[0])).toEqual(
+          f.output,
+        );
+    } finally {
+      if (realContext === undefined) delete process.env.SANDBOX_CORE_CONTEXT;
+      else process.env.SANDBOX_CORE_CONTEXT = realContext;
+    }
     for (const f of fixtures.providers)
       expect(buildProviderInstallLines(f.name as CliProviderName, f.version)).toEqual(f.output);
   });

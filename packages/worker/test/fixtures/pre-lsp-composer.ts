@@ -1,6 +1,8 @@
 // Frozen pre-LSP assembly AND buildHaiveRuntimeToolsLayer from 7164a86ca.
 // Shared RTK constants and provider codegen stay live; intentional runtime-tools edits
-// require updating this fixture too, or the no-selection identity control will fail.
+// require updating this fixture too, or the no-selection identity control will fail. The
+// git MCP layer is imported live like that codegen: it is not part of the frozen assembly,
+// only a layer both composers push right after the runtime tools.
 import { createHash } from 'node:crypto';
 import {
   assertVersionToken,
@@ -9,6 +11,7 @@ import {
   type CliProviderName,
 } from '@haive/shared';
 import { buildProviderInstallLines } from '../../src/cli-versions/codegen.js';
+import { buildGitMcpLayer } from '../../src/sandbox/git-mcp-pin.js';
 
 export const SANDBOX_CORE_IMAGE = `${imageRepo('cli-sandbox')}:latest`;
 
@@ -70,6 +73,7 @@ export function composeSandboxImage(input: ComposeInput): SandboxImageCompositio
   // composed images built on top of env-templates get it too.
   const rtkVersion = input.rtkVersion || DEFAULT_RTK_VERSION;
   parts.push(buildHaiveRuntimeToolsLayer(rtkVersion));
+  parts.push(buildGitMcpLayer());
   if (installLines.length > 0) parts.push(installLines.join('\n'));
   if (extra.length > 0) parts.push(extra);
 

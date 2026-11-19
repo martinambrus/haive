@@ -30,6 +30,10 @@ import {
 import { broker, content, listed, runCleanups, start } from './support/integrations-mcp-process.js';
 
 vi.mock('../src/lsp/configured-lsp.js', () => ({ hasReadyLspBridge: async () => false }));
+vi.mock('../src/sandbox/git-mcp-pin.js', async (original) => ({
+  ...(await original<object>()),
+  imageCarriesGitMcp: async () => true,
+}));
 
 const merged = vi.hoisted(() => ({
   cli: [] as unknown[][],
@@ -76,7 +80,7 @@ const CUSTOM_STEP_ID = 'custom.demo.audit';
 type Provider = 'claude-code' | 'codex' | 'gemini' | 'antigravity';
 type Files = Array<{ containerPath: string; content: string }>;
 type Entry = { command: string; args: string[]; env?: Record<string, string> };
-type Run = NonNullable<Parameters<typeof resolveMcpExtraFiles>[9]>;
+type Run = NonNullable<Parameters<typeof resolveMcpExtraFiles>[8]>;
 
 const PROVIDERS: Provider[] = ['claude-code', 'codex', 'gemini', 'antigravity'];
 
@@ -130,7 +134,6 @@ const extra = (
     profile,
     false,
     true,
-    null,
     forRun,
   );
 
@@ -434,7 +437,6 @@ describe.each(PROVIDERS)(
         'none',
         false,
         true,
-        null,
         run(),
       );
       expect(files).toEqual([]);

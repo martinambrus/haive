@@ -24,6 +24,7 @@ import { join } from 'node:path';
 import { arch } from 'node:process';
 import { CLI_INSTALL_METADATA, cliProviderNameSchema, type CliProviderName } from '@haive/shared';
 import { composeSandboxImage, SANDBOX_CORE_IMAGE } from '../src/sandbox/image-composer.js';
+import { writeGitMcpContext } from '../src/sandbox/git-mcp-pin.js';
 import { buildProviderInstallLines } from '../src/cli-versions/codegen.js';
 
 /**
@@ -97,6 +98,7 @@ function checkProvider(name: CliProviderName): Result {
   const dir = mkdtempSync(join(tmpdir(), `haive-arch-${name}-`));
   try {
     writeFileSync(join(dir, 'Dockerfile'), composition.dockerfileBody);
+    writeGitMcpContext(dir);
     const tag = `haive-archcheck-${name}:latest`;
     const build = run('docker', ['build', '-t', tag, dir]);
     if (build.code !== 0) {

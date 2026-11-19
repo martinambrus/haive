@@ -46,9 +46,9 @@
             {
               "providerId": "33333333-3333-4333-8333-333333333333",
               "effective": {
-                "tag": "haive-sandbox:c42eb9f14d04d450",
+                "tag": "haive-sandbox:3ac0274b81920dbf",
                 "imageId": "sha256:verified",
-                "identityHash": "4e5a5108cddd0b65129712d1c3bc22ee29874c137879328358e792f34d9ed670",
+                "identityHash": "86434c5b0dd0873274edc9a2be40f0efa21f6df06f8cd21639dfb0a5aec38092",
                 "inputs": {
                   "rtkVersion": "1.0.1",
                   "baseImageId": "sha256:verified",
@@ -245,8 +245,8 @@
                   "ready": true,
                   "filesHash": null
                 },
-                "compositionHash": "c42eb9f14d04d450",
-                "tag": "haive-sandbox:c42eb9f14d04d450",
+                "compositionHash": "3ac0274b81920dbf",
+                "tag": "haive-sandbox:3ac0274b81920dbf",
                 "imageId": "sha256:verified",
                 "inputs": {
                   "rtkVersion": "1.0.1",

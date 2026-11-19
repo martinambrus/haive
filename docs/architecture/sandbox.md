@@ -101,6 +101,71 @@ carries this install's `haive.install` label: on a daemon shared by two installs
 has lost the repository name that would say whose it is. One built before either label carries
 none, so the sweep cannot prove its owner, and it stays (about one base image per install).
 
+**The git MCP server is baked into every sandbox image, never fetched.** It ran as `uvx mcp-server-git`,
+and the core image has no Python, so each run downloaded a CPython (about 34 MiB, GitHub) and 32 wheels
+(PyPI): MEASURED 10 to 131 s cold, longer than the CLI waits for an MCP server, and exec-core discards a
+run whose declared server failed to start (`MCP server failed to start: git`). `sandbox-image/install-git-mcp.sh`
+now installs, at image build time and as root, the release pinned in `sandbox-image/git-mcp-requirements.txt`
+into `/opt/haive-git-mcp-<version>/`: a uv-managed CPython 3.13 in `python/` and a venv in `venv/`, apart from
+any python the image or a repository uses and on nobody's PATH. The server is declared as
+`/opt/haive-git-mcp-<version>/venv/bin/python -I -m mcp_server_git --repository <path>` (`GIT_MCP_PYTHON`,
+`mcp-config.ts`) and starts in about 0.6 s under `--network none`, MEASURED in the real core image (before: 107 s
+with network, a timeout without). `-I` keeps `PYTHON*` variables, the user site and the working directory off
+the import path: with the repository as working directory, a repository's own `click.py` or `mcp/` at its root
+broke both the console script and plain `python -m` (MEASURED).
+
+The pin is the lock. `git-mcp-requirements.txt` is `uv pip compile --universal --generate-hashes` output: every
+dependency exact and every wheel hash listed, so x86_64 and aarch64, glibc and musl all install from it, with
+`--require-hashes --only-binary :all:`. The script pins its own toolchain (`uv_version`, `python_version`) and
+downloads that uv instead of trusting the image's: Alpine's packaged uv (0.7.22) cannot find the pinned CPython. It
+takes uv's release tarball for the build's architecture and libc and checks it against a sha256 pinned in the script,
+never astral's installer script, which nothing would check; uv then checks the CPython it downloads against the hashes
+built into it, so every download in the chain is verified.
+3.13, not 3.12: `mcp-server-git` requires `>=3.10` and every locked wheel installs on 3.13 (checked for both
+architectures and both libcs with `uv pip install --dry-run --python-platform`). The version in the path is the
+lock's pin: the script refuses a lock without `mcp-server-git==`, and `git-mcp-baked.test.ts` fails when the
+lock, `GIT_MCP_SERVER_VERSION` (`git-mcp-pin.ts`), the core Dockerfile stanza or the composer layer disagree.
+
+An image advertises its tree with `LABEL haive.git-mcp="<version>"` (the core Dockerfile and the composer layer both
+set it), and `resolveMcpExtraFiles` declares the server only for an image whose label equals the pinned version
+(`imageCarriesGitMcp`). Any other image runs without the git server and logs a warning, because a declared server that
+cannot start makes exec-core discard the run. Two images are such: a verified composed image, which keeps its tag by
+design (see "A verified launch stays pinned") and so predates the layer, and an operator-pinned `SANDBOX_IMAGE`
+without the tree. For the first the layer is an ordinary recipe change: besides the git server, the environment's LSP
+readiness lapses (`readyComposedLspImage` recomposes the body, and the new body hashes to a tag that was never built)
+until the environment is verified again. A null image, an image that does not exist yet and a failed inspect count as
+carrying the tree, since nothing can be told and the server is then declared as designed; an image that exists but
+reports no such label does not, and neither does one whose config cannot be parsed. A new terminal shell container
+(`ensureShellContainer`) applies the same check to the MCP config it writes. A container that is reused keeps the
+config it was created with.
+
+Bump it on purpose; Dependabot does not read these files. Pick a release at least 7 days old (the repository sets
+no minimum release age, so this is the floor used), then run from the repository root
+`echo 'mcp-server-git==<V>' | uv pip compile - --universal --generate-hashes --python-version 3.13 --exclude-newer <UTC time 7 days ago> -o packages/worker/sandbox-image/git-mcp-requirements.txt`
+(the cut-off puts the same floor under every dependency), set `GIT_MCP_SERVER_VERSION` and the core Dockerfile's
+`LABEL haive.git-mcp` to `<V>`, and run
+`git-mcp-baked.test.ts` and the composed-image tests. Moving `uv_version` (with its four tarball hashes, from the `.sha256` files beside each release asset) or
+`python_version` in the script is a bump of the same kind. The tree's `install.sha256` is the hash of the lock and the script together: a base that
+already holds that exact pair skips the install (a composed layer on the core image costs nothing), and a change to
+either file reinstalls over an older tree.
+
+Every file of `sandbox-image/` is hashed into `sandboxCoreIdentity`, so a change rebuilds `haive-cli-sandbox:latest`
+at its next use and moves every per-CLI tag, which carries that identity. A composed body carries the two files'
+digest as `# haive-git-mcp-context: sha256:...`, so a composed tag moves with them too, and both composed build
+sites copy the files beside the Dockerfile through `writeGitMcpContext` (`composed-image-cache.ts`, and
+`scripts/check-cli-arch.ts` for the arm64 CI check): a new COPY source in the layer must be added there. The layer
+adds about 160 MB per image (CPython 106 MB, venv 47 MB, MEASURED), and the first build after a change needs the
+network for CPython and the wheels. The install needs `curl` (the runtime-tools layer installs it) and fails the build
+with a named message on a base that has none, since the label must not claim a tree that is absent. Its import check
+sets `GIT_PYTHON_REFRESH=quiet`: GitPython refuses to import without a git executable, which the server itself still
+needs at run time, as it did under uvx.
+
+**Restricted egress no longer drops git.** The server makes no network call of its own (its tools are local `git`
+operations; `git_remote` only lists remotes) and starting it fetches nothing, so the gate that removed it under a
+per-task egress of `none` or an allowlist (`networkPolicyReachesPackageRegistries`, with `resolveMcpExtraFiles`'s
+`networkPolicy` parameter) is gone. Those runs now get the same git tools as any repository-root run; the worktree
+and rag-only gates of `emittedDefaultServerNames` remain the policy. No egress is widened.
+
 **rtk seeds a task's auth volume only with hooks the task's own image can run.**
 `seedRtkInTaskVolume` runs `rtk init -g` from the base image, but a task can run another rtk: an
 env-template image installs the repository's pin. A 1.0 seed writes codex a PreToolUse hook on

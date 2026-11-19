@@ -18,6 +18,10 @@ import {
 import { api, content, runCleanups, start } from './support/custom-mcp-process.js';
 
 vi.mock('../src/lsp/configured-lsp.js', () => ({ hasReadyLspBridge: async () => false }));
+vi.mock('../src/sandbox/git-mcp-pin.js', async (original) => ({
+  ...(await original<object>()),
+  imageCarriesGitMcp: async () => true,
+}));
 
 const afterSurface = vi.hoisted(() => ({ run: undefined as (() => void) | undefined }));
 vi.mock('../src/sandbox/mcp-surface.js', async (importOriginal) => {
@@ -126,7 +130,7 @@ function dbFor(
   } as unknown as Database;
 }
 
-type Run = NonNullable<Parameters<typeof resolveMcpExtraFiles>[9]>;
+type Run = NonNullable<Parameters<typeof resolveMcpExtraFiles>[8]>;
 const run = (over: Partial<CliExecJobPayload> = {}): Run => ({
   customTools: ['repo_status', 'house_rules'],
   invocationId: 'inv-1',
@@ -154,7 +158,6 @@ const extra = (
     profile,
     false,
     true,
-    null,
     forRun,
   );
 

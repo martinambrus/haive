@@ -82,7 +82,6 @@ import {
   createStepStatusUpdater,
   ensureRepoMountWritable,
   loadProviderRuntimeConfig,
-  networkPolicyReachesPackageRegistries,
   resolveAuthMounts,
   resolveMcpExtraFiles,
   resolveInvocationRepoMount,
@@ -544,7 +543,6 @@ export async function executeByKind(
               toolProfile ?? 'full',
               hasWorktree,
               hasRepo,
-              networkPolicy,
               payload,
               workspaceKind,
               providerRow,
@@ -585,7 +583,6 @@ export async function executeByKind(
             hasRepo,
             hasWorktree,
             ragOnly: toolProfile === 'rag_only',
-            registriesReachable: networkPolicyReachesPackageRegistries(networkPolicy),
           }).has('filesystem')
         ) {
           await warmNpmPackage(sandboxImage, '@modelcontextprotocol/server-filesystem', ['/tmp']);

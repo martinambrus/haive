@@ -131,7 +131,7 @@ describe('composeSandboxImage', () => {
   describe('haive runtime tools layer', () => {
     // Composer always injects an idempotent install layer for tools the
     // CLI session relies on but env-templates won't necessarily ship —
-    // currently uv (for the mcp-server-git MCP server) and ripgrep (for
+    // currently uv (for agents and repositories that use it) and ripgrep (for
     // gemini's GrepTool, which prints "Ripgrep is not available" otherwise).
     it('injects the runtime tools layer between base and CLI install lines', () => {
       const result = composeSandboxImage({

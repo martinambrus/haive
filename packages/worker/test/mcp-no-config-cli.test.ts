@@ -44,6 +44,10 @@ vi.mock('../src/queues/cli-park-timing.js', () => ({
   markCliParkBegin: async () => {},
 }));
 vi.mock('../src/lsp/configured-lsp.js', () => ({ hasReadyLspBridge: async () => false }));
+vi.mock('../src/sandbox/git-mcp-pin.js', async (original) => ({
+  ...(await original<object>()),
+  imageCarriesGitMcp: async () => true,
+}));
 
 import { handleCliExecJob } from '../src/queues/cli-exec/handlers.js';
 import { isTransientCliFailure } from '../src/queues/cli-exec/failure-class.js';
@@ -84,7 +88,7 @@ const pinnedHouseRules = {
   },
 };
 
-type Run = NonNullable<Parameters<typeof resolveMcpExtraFiles>[9]>;
+type Run = NonNullable<Parameters<typeof resolveMcpExtraFiles>[8]>;
 const run = (over: Partial<Run> = {}): Run => ({
   invocationId: INV_1,
   taskStepId: STEP_ROW_ID,
@@ -107,7 +111,6 @@ const extra = (
     profile,
     false,
     true,
-    null,
     forRun,
   );
 

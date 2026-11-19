@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import { readdir, readFile } from 'node:fs/promises';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { fileURLToPath } from 'node:url';
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Database } from '@haive/database';
 import { ComposedImageNotVerifiedError } from '../src/lsp/composed-image-refs.js';
 import { composedRequestedInputsHash } from '../src/lsp/composed-image-refs.js';
@@ -19,6 +20,19 @@ import {
 import type { DockerBuildOpts } from '../src/sandbox/docker-runner.js';
 import { ensureSandboxCoreImage } from '../src/sandbox/sandbox-core-image.js';
 import { fakeDockerRunner } from './fake-docker-runner.js';
+
+// The goldens pin the composer's own bytes; the git MCP layer's digest comes from a stub context,
+// so bumping the real lock does not move them.
+const realContext = process.env.SANDBOX_CORE_CONTEXT;
+beforeAll(() => {
+  process.env.SANDBOX_CORE_CONTEXT = fileURLToPath(
+    new URL('./fixtures/git-mcp-context', import.meta.url),
+  );
+});
+afterAll(() => {
+  if (realContext === undefined) delete process.env.SANDBOX_CORE_CONTEXT;
+  else process.env.SANDBOX_CORE_CONTEXT = realContext;
+});
 
 vi.mock('../src/sandbox/sandbox-core-image.js', async (original) => ({
   ...(await original<object>()),
@@ -80,11 +94,11 @@ describe('A composer from the environment image', () => {
   });
   it('contract 2 without the field equals the unchanged output', () => {
     expect(compose(contract2)).toMatchObject({
-      tag: 'haive-sandbox:385c49473450529f',
-      hash: '385c49473450529f',
+      tag: 'haive-sandbox:19e600548bec9184',
+      hash: '19e600548bec9184',
     });
     expect(sha(compose(contract2).dockerfileBody)).toBe(
-      '385c49473450529f006478a4a8dc4615f9efabc02bdeaa50de1b828608d8343d',
+      '19e600548bec918466786c07f989d8726d68528bba1246f798355fa20ee17152',
     );
   });
   it('contract 1 ignores the field', () => {
@@ -117,8 +131,8 @@ describe('B legacy golden', () => {
   it('no env template', () =>
     golden(
       { envTemplateDockerfile: null, provider: legacyProvider },
-      '080ed97bfc44a64d',
-      '080ed97bfc44a64d2edef266e1a977cd062283de8c14f2b917e907a2afa8e5e5',
+      '83c5089a241f3504',
+      '83c5089a241f3504995f4f39a2c9983c824c5e80c20d07861833cbd0abce3014',
     ));
   it('env body', () =>
     golden(
@@ -127,8 +141,8 @@ describe('B legacy golden', () => {
         provider: legacyProvider,
         rtkVersion: '0.42.4',
       },
-      '0f3bbfa2005ceecf',
-      '0f3bbfa2005ceecf1183989398505f614b9bcf984fd687e976de2c77b8c945af',
+      '1e7ed04332720485',
+      '1e7ed0433272048577774474ec7d944eba5793e42bfd4290a13ab51cf7092650',
     ));
   it('env body with the COPY line, contract absent and explicit 1', () => {
     for (const lspInstallContractVersion of [undefined, 1]) {
@@ -139,8 +153,8 @@ describe('B legacy golden', () => {
           rtkVersion: '0.42.4',
           lspInstallContractVersion,
         },
-        'ed50ea4f4e4c4e3f',
-        'ed50ea4f4e4c4e3fe126c88cfe3330963d8ea71f433e558ea78ed1027efe3ad0',
+        'b413570a412022a8',
+        'b413570a412022a857427ed69e890d54152c304ec96028875ffbdc9bc3b2f844',
       );
     }
   });
@@ -151,8 +165,8 @@ describe('B legacy golden', () => {
         provider: { ...legacyProvider, sandboxDockerfileExtra: 'RUN echo extra' },
         rtkVersion: '0.40.0',
       },
-      '8a408a2fa778bbee',
-      '8a408a2fa778bbee050f7c0553dc1d5f02f593b262f3ae63ef93fb46e41de710',
+      '008e3ecc8250291f',
+      '008e3ecc8250291f2ff5f756d49e7cf9c5eb1f402c8c9ce8cc5cad25ff983695',
     ));
   it('env body on the core image mixes the base id', () =>
     golden(
@@ -162,8 +176,8 @@ describe('B legacy golden', () => {
         baseImageId: 'sha256:core',
         rtkVersion: '0.42.4',
       },
-      '067db18b9c6c0ad5',
-      '011ff636e2320219fb48440399e1ff94bb660c73ce1fd76a1c8612dad2a26679',
+      '049e3d8ca8b6f6c6',
+      '3b9e44f64ef69157d37dade15a9de2d4d5f0930351ba9033c43060e746eef9fa',
     ));
 });
 
@@ -255,14 +269,18 @@ beforeEach(() => {
 });
 
 describe('C ensureComposedImage builds from the environment image', () => {
-  it('builds once FROM the env tag with a Dockerfile-only context', async () => {
+  it('builds once FROM the env tag with only the Dockerfile and the git MCP install files', async () => {
     const { runner, build, seen } = dockerLike(envOk());
     const tag = await ensureComposedImage(database(), 't', provider, runner);
     expect(tag).toMatch(/^haive-sandbox:[0-9a-f]{16}$/);
     expect(build).toHaveBeenCalledTimes(1);
     expect(seen[0]!.dockerfile.startsWith(`FROM ${ENV_TAG}\n`)).toBe(true);
     expect(seen[0]!.dockerfile).not.toContain('composer.json');
-    expect(seen[0]!.context).toEqual(['Dockerfile']);
+    expect(seen[0]!.context).toEqual([
+      'Dockerfile',
+      'git-mcp-requirements.txt',
+      'install-git-mcp.sh',
+    ]);
   });
 });
 
