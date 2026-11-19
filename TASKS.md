@@ -676,6 +676,12 @@ status: open · kind: docs · found: guarded span prerequisites docs (#1268) · 
 
 `docs/architecture/task-types.md` (~:780 heading "Pinned execution declarations (P6; admission only)", ~:786, ~:851) and `docs/architecture/worker-restarts.md` (~:766) name an internal plan phase ("P6") in product text. Replace with the behaviour and the PR number (#1222). Docs-only; ride with the next change touching either file.
 
+### T718 · Translator module lows (review and correction approval)
+
+status: open · kind: bug · found: translator review milestone (module PRs #5, #6) · priority: P4
+
+In `martinambrus/haive-module-translator`. NEW = a limit of the review feature, none a regression. (a) `src/db/review-patches.ts:95,146`: `page` and `applyRound` load every block version and write about 2.4 statements per proposal. NEW. (b) `src/steps/tr-review.ts:167,178`: a stale or repeated submit after a reopen fails the step (Retry recovers), inherited from the `explicit` pattern in `src/db/setup.ts`. PRE-EXISTING. (c) `src/db/review.ts:32`: `acceptBytes` reserves nothing for decisions or the batch, so near the allowance they can fail after every unit was reviewed. NEW, documented in the README. (d) `src/db/review-patches.ts:174`: seam windows use the target language (equivalent for en and sk). NEW. (e) `src/protocol/patch.ts:87,105,127`: groups built by spread, O(k^2) per block. NEW. (f) `test/review-step.test.ts`: `FakeReviewStore` duplicates `test/support/patch-fakes.ts`. NEW. (g) Documented limits: corrections valid only as a pair are not applied, re-review after a batch needs a Retry, a rejected correction can be proposed again, decisions are final, the reason text is not shown on the page. PRE-EXISTING at `4a2efb8`: (h) `src/manifest.ts:7` `schemaVersion: 4` with 7 migrations; (i) milestone labels in test titles (`test/setup-gates.test.ts:6`, `pass-step.test.ts:12`, `manifest.test.ts:6`, `pass-store.test.ts:20`, `passes.test.ts:8,83`, `setup.test.ts:9`) and the `README.md:14` heading; (j) `src/db/passes.ts:100,105` bookkeeping inserts in read-only sessions; (k) `exactKeys` and duplicate-key pattern (`src/protocol/passes.ts:76,111-128`, `review.ts:88`), and `validateReply` does not check text well-formedness; (l) `test/pass-db.test.mjs:221-233` pins only the allow side of headroom.
+
 ### T717 · The sandbox image's own uv is unpinned and unused by Haive
 
 status: open · kind: design · found: git MCP warm start (#1279) · priority: P4
