@@ -198,7 +198,9 @@ describe.skipIf(!url)('a Claude subscription login covers every row of its crede
         (s) => s.secretName !== 'CLAUDE_CODE_OAUTH_TOKEN',
       ),
     ).toEqual(keep);
-    const set = (await audits(db)).filter((a) => a.action === 'cli_provider.secret.set');
+    const set = (await audits(db)).filter(
+      (a) => a.action === 'cli_provider.secret.set' && ids().includes(a.targetId!),
+    );
     expect(set).toHaveLength(2);
     expect(set.map((a) => a.targetId).sort()).toEqual([rows.A.id, rows.B.id].sort());
     for (const a of set) {
@@ -260,7 +262,8 @@ describe.skipIf(!url)('a Claude subscription login covers every row of its crede
       expect(calls).toBeLessThan(k);
       break;
     }
-    expect(threw).toBeGreaterThanOrEqual(6);
+    // Pre-transaction check, clicked read, set lock, two per row for the two-row set, final check.
+    expect(threw).toBeGreaterThanOrEqual(8);
     await expectSetCommitted(token);
   });
 

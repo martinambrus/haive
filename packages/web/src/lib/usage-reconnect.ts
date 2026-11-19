@@ -50,10 +50,10 @@ function checkedAt(row: LoginRow): number {
 }
 
 /** CLIs whose subscription login is a token stored on each row, not a file in the auth volume
- *  that rows share. A login, and a sign-out, write the token to every row that shares the login
- *  (same user, CLI and auth mode, not isolated), so those rows agree; each run still reads the
- *  token of its own row. A row's own stored status is therefore the word to read: nothing is
- *  borrowed from a sibling. */
+ *  that rows share. A login writes the token to every row that shares the login (same user,
+ *  CLI and auth mode, not isolated) and a sign-out deletes it from every such row, so those
+ *  rows agree; each run still reads the token of its own row. A row's own stored status is
+ *  therefore the word to read: nothing is borrowed from a sibling. */
 const ROW_LOGIN_PROVIDERS: readonly CliProviderName[] = ['claude-code'];
 
 /** A row's stored auth status as its login really stands, for `cliLoginOffered`.
