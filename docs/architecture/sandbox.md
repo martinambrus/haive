@@ -668,6 +668,21 @@ with unknown attribution. A missing file uses the env token directly; other read
 failures also emit one stderr diagnostic. No new token type, audience or tool
 argument is used.
 
+**A worker-only provider secret never enters a container environment.** `resolveProviderSecrets`
+(`worker/src/secrets/provider-secrets.ts`) is the resolver every env builder uses: the run
+(`handleCliExecJob`), the provider probe with its image and auth checks, and the terminal shell
+env. It skips every name in `WORKER_ONLY_SECRET_NAMES` before decrypting. Today that is
+`CLAUDE_USAGE_OAUTH`, the usage-connection grant: its refresh token's scope includes
+`org:create_api_key`, and only the usage poller uses it.
+Code inside the worker that needs a secret by name calls `readProviderSecret`, which includes
+worker-only names; its result is never merged into an env. A new worker-only secret goes into the
+set, and any new env builder resolves secrets through `resolveProviderSecrets`, never by reading
+`cli_provider_secrets` itself. The grant is not secret-like by name (`SECRET_LIKE_ENV_NAME`) and no
+writer puts it in `envVars`, so the `provider.envVars` paths (login container, plugin install)
+carry nothing to skip. A shell container created before this rule keeps its create-time env until
+it is recreated. Reconnecting usage stores a new grant; that the vendor then retires the old one is
+unverified.
+
 Captured Claude OAuth credentials are verified before promotion. The login API envelope-encrypts
 its candidate with purpose, user and provider bindings before putting it on `cli-probe`; the
 worker decrypts it for that probe only. It resolves no active provider secrets, mounts no shared
