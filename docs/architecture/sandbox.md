@@ -723,12 +723,17 @@ clicked row's generation alone, which is enough because the api writers of a log
 whole set (a clone copies its source's token onto the new row and the boot copy of legacy environment
 values writes the row it finds; neither advances the others). A manual login-secret POST, a settings
 save that types the token and a create that types it do so in one transaction under the set's lock (`writeLoginTokenToSet`, `api/src/lib/cli-login-secret.ts`):
-the clicked or created row keeps the write and audit event it always had, the set's rows are locked in id
-order before any sibling's secret is touched, each sibling gets the token and its own strict
-`cli_provider.secret.set` event (`source` `manual` or `environment`, `viaProviderId`, `setSize`), and every
-row written gets one new `auth_generation`. A write made on a sibling between the click and the run
-therefore supersedes the sign-out, and the new token survives on every row. A settings save writes the
-set the row has after its own update. The manual DELETE of the token removes it from every row of the set
+the transaction's first lock on any provider row is `lockLoginSet` over every row it will touch, the clicked
+row included, in id order: no row lock, row update or secret write for a member may come before it (a new
+secret row takes a share lock on its provider row). The image job (`markProvidersReady`) locks provider rows
+in id order without the auth lock, so a writer that held one row while it waited for a lower id could
+deadlock with it; a create inserts its own row first, which is invisible to other transactions until commit.
+The clicked or created row keeps the write and audit event it always had, each sibling gets the token and its
+own strict `cli_provider.secret.set` event (`source` `manual` or `environment`, `viaProviderId`, `setSize`),
+and every row written gets one new `auth_generation`. A write made on a sibling between the click and the run
+therefore supersedes the sign-out, and the new token survives on every row. A settings save locks and writes
+the set the row has after its own update plus the clicked row, so a row that stops being isolated is locked
+with its new set. The manual DELETE of the token removes it from every row of the set
 that holds it (404 only when none does), records `cli_provider.secret.delete` on each row it removed it
 from, and advances no generation or status, so it cannot supersede a sign-out. The usage reconnect, a
 manual POST of the usage token and every other secret stay per row, as does the usage token a sign-out
