@@ -696,7 +696,8 @@ that the login socket is still open before promotion and across the transaction'
 a close observed before the final check rolls back the credential, health and audit together.
 Failure, an unknown/missing result, a thrown probe, session revocation or timeout preserves the
 previous credential and profile. Successful promotion updates encrypted storage, legacy-env
-cleanup, active auth health and its audit in one transaction, then requests the usage tick.
+cleanup, active auth health and the audit of every row of the login's set (below) in one transaction,
+then requests the usage tick.
 
 For a captured Claude token, wire `auth-success` is sent only after promotion commits, immediately
 before `saved`. The browser uses that event as proof the credential is durable when recovering a
@@ -705,6 +706,27 @@ phase, shows queue progress, and offers a fresh login if the socket closes. The 
 guard still suppresses duplicate captures and `probePending` keeps stream EOF from ending the
 session. Volume-based logins retain their existing earlier success event because their credential
 is already stored.
+
+**A Claude login belongs to its row set.** The rows that share a login are those of one user, CLI and
+auth mode with `isolate_auth` off; a row with it on is a set of one (`cliAuthSetWhere`, beside
+`cliAuthScope` in `@haive/shared/cli-auth-state`: the set is the namespace the auth lock is keyed on).
+The Claude login is a token stored on each row, and a run reads its own row's copy, so a login writes
+it to every row of the set. Inside the promotion transaction `lockLoginSet` (`@haive/shared`) locks the
+set's rows in id order, before any of their secrets; each row in turn gets its strict
+`cli_provider.secret.set` audit, the secret upsert and the legacy-env cleanup; then one update gives all
+of them one new `auth_generation`, status `ok` and a later check stamp. A login through any row
+therefore supersedes a sign-out queued from any row of the set. The sign-out job deletes the login
+token of every row of the set and, when no volume failed, resets their status, in one transaction that
+reads the set once, so a row that joined while the volumes were being removed is deleted and reset
+with the rest; it still deletes the usage token on the clicked row only. Its supersede check reads the
+clicked row's generation alone, and the other credential writes (a manual login-secret POST, a PATCH
+that moves one, the usage reconnect) still advance only their own row, so one made on a sibling
+between the click and the run does not supersede it and that token goes with the set's.
+`credentialRepairedAt` skips claude-code rows, since a login's `ok` is not a repair of the usage
+connection. A row nobody has logged in or signed out through since this rule began keeps its own token
+and status; the first login or sign-out through any row of its set overwrites (login) or deletes
+(sign-out) the stored login of every row in it. Switching to another account goes through Sign out
+first: a login alone does not change what a usage connection meters.
 
 ## CLI sign-out and newer logins
 
@@ -716,7 +738,8 @@ wait minutes, so a login completed in between must survive it. Two pieces do tha
   `cli_provider.login` audit), the Claude OAuth save (`saveCliLoginSecret`, same transaction as the
   secret), a manual secret POST or a PATCH that moves a login secret, the usage reconnect, and the
   boot copy of secret-like env. A shared-volume login advances every row sharing that volume
-  (`advanceVolumeLoginGeneration`, `@haive/shared/cli-auth-state`). An abandoned attempt, a usage
+  (`advanceVolumeLoginGeneration`, `@haive/shared/cli-auth-state`), and the Claude OAuth save advances
+  every row of its set with one new value. An abandoned attempt, a usage
   refresh, a grok refresh and a task's sync-back never advance it. The sign-out job carries the
   value read at request time and, when the row's value differs, removes nothing and returns
   `{ ok: true, superseded: true }`; the poll route reports it as `done` and the page says the user
