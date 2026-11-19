@@ -213,6 +213,14 @@ second-task comparison is exploratory, not controlled. None can turn this result
 benefit: no paired count has a pair the treatment won, no learning covers the README trap, and a
 failed authorship or equivalence review only removes pairs or the fixture.
 
+**Evidence.** The fixture is commit `79db1ab` of the private repositories
+`martinambrus/ledger-export-cli-a` (treatment) and `martinambrus/ledger-export-cli-b` (control). The
+private grader is revision `9f9469c`, run in a pinned PHP image. The run log (`log.md`: the six task
+ids, the Haive build each pair ran on, every form submitted), the step captures, the twelve grades,
+the M1 to M7 and store measurement outputs and the invocation cost ledger are kept untracked in
+`.claude/tmp/codex-run/AMP6-S/`; the measurement queries are
+`.claude/tmp/codex-run/AMP3-S/codex-1/measurement-queries.sql`, run unchanged.
+
 ## P3: gaps, each built only when its trigger fires
 
 - **G1: consolidation pass ("dreaming").** An offline pass over one repository: its learnings and
