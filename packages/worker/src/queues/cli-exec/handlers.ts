@@ -28,6 +28,7 @@ import {
   createRedisConnection,
   getCliProviderMetadata,
   resolveCliAuthUserVolumeName,
+  lockLoginSet,
   type AuthMode,
   type CliExecJobPayload,
   type CliLoginCreateJobPayload,
@@ -1430,45 +1431,46 @@ export async function handleSignOutJob(
     // Claude's subscription login lives in the env-injected CLAUDE_CODE_OAUTH_TOKEN secret
     // (the login flow even strips it out of envVars), NOT in a volume file — so removing
     // volumes alone leaves the provider authenticated and the next login skips browser auth.
-    // Delete the login + usage-tracking token secrets to log out for real. A user-entered
-    // BYOK key (apiKeyEnvName, e.g. ANTHROPIC_AUTH_TOKEN) is not a login artifact -> kept.
+    // Delete the login token of every row sharing the login and the clicked row's usage token
+    // to log out for real. A user-entered BYOK key (apiKeyEnvName, e.g. ANTHROPIC_AUTH_TOKEN)
+    // is not a login artifact -> kept.
     await release.assertHeld();
-    if (provider.name === 'claude-code') {
-      await db
-        .delete(schema.cliProviderSecrets)
-        .where(
-          and(
-            eq(schema.cliProviderSecrets.providerId, provider.id),
-            inArray(schema.cliProviderSecrets.secretName, [
-              'CLAUDE_CODE_OAUTH_TOKEN',
-              CLAUDE_USAGE_OAUTH_SECRET,
-            ]),
-          ),
-        );
-    }
-
-    await release.assertHeld();
-    if (failed.length === 0) {
-      await db
-        .update(schema.cliProviders)
-        .set({
-          authStatus: 'unknown',
-          authMessage: null,
-          // Always advance the check stamp, even when two writes share a clock tick.
-          authLastCheckedAt: sql`greatest(clock_timestamp()::timestamp, ${schema.cliProviders.authLastCheckedAt} + interval '1 microsecond')`,
-          updatedAt: new Date(),
-        })
-        .where(
-          provider.isolateAuth
-            ? eq(schema.cliProviders.id, provider.id)
-            : and(
-                eq(schema.cliProviders.userId, provider.userId),
-                eq(schema.cliProviders.name, provider.name),
-                eq(schema.cliProviders.authMode, provider.authMode),
-                eq(schema.cliProviders.isolateAuth, false),
-              ),
-        );
-    }
+    const target = provider;
+    await db.transaction(async (tx) => {
+      const ids = (await lockLoginSet(tx, target)).map((m) => m.id);
+      if (target.name === 'claude-code') {
+        await tx
+          .delete(schema.cliProviderSecrets)
+          .where(
+            and(
+              inArray(schema.cliProviderSecrets.providerId, ids),
+              eq(schema.cliProviderSecrets.secretName, 'CLAUDE_CODE_OAUTH_TOKEN'),
+            ),
+          );
+        await tx
+          .delete(schema.cliProviderSecrets)
+          .where(
+            and(
+              eq(schema.cliProviderSecrets.providerId, target.id),
+              eq(schema.cliProviderSecrets.secretName, CLAUDE_USAGE_OAUTH_SECRET),
+            ),
+          );
+      }
+      await release.assertHeld();
+      if (failed.length === 0) {
+        await tx
+          .update(schema.cliProviders)
+          .set({
+            authStatus: 'unknown',
+            authMessage: null,
+            // Always advance the check stamp, even when two writes share a clock tick.
+            authLastCheckedAt: sql`greatest(clock_timestamp()::timestamp, ${schema.cliProviders.authLastCheckedAt} + interval '1 microsecond')`,
+            updatedAt: new Date(),
+          })
+          .where(inArray(schema.cliProviders.id, ids));
+      }
+      await release.assertHeld();
+    });
 
     log.info(
       { providerId: provider.id, removedCount: removed.length, failedCount: failed.length },

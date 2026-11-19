@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { and, eq } from 'drizzle-orm';
+import { and, eq, type SQL } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
 import { resolveCliAuthUserVolumeName } from './cli-providers/auth-volume.js';
 import type { AuthMode, CliProviderName } from './types/index.js';
@@ -26,6 +26,18 @@ export function cliAuthScope(provider: CliAuthProvider): string {
   );
 }
 
+/** The rows that share one login: the row itself when isolated, else same user, CLI, auth mode. */
+export function cliAuthSetWhere(provider: CliAuthProvider): SQL {
+  return provider.isolateAuth
+    ? eq(schema.cliProviders.id, provider.id)
+    : and(
+        eq(schema.cliProviders.userId, provider.userId),
+        eq(schema.cliProviders.name, provider.name),
+        eq(schema.cliProviders.authMode, provider.authMode),
+        eq(schema.cliProviders.isolateAuth, false),
+      )!;
+}
+
 /** A volume login changes the credential of every row sharing that volume. Call while
  * holding its auth lock. Token refresh and abandoned login do not count as a new login. */
 export async function advanceVolumeLoginGeneration(
@@ -35,14 +47,5 @@ export async function advanceVolumeLoginGeneration(
   await db
     .update(schema.cliProviders)
     .set({ authGeneration: randomUUID() })
-    .where(
-      provider.isolateAuth
-        ? eq(schema.cliProviders.id, provider.id)
-        : and(
-            eq(schema.cliProviders.userId, provider.userId),
-            eq(schema.cliProviders.name, provider.name),
-            eq(schema.cliProviders.authMode, provider.authMode),
-            eq(schema.cliProviders.isolateAuth, false),
-          ),
-    );
+    .where(cliAuthSetWhere(provider));
 }

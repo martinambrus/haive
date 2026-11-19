@@ -70,13 +70,23 @@ interface DbCalls {
 }
 
 function makeDb(row: ReturnType<typeof makeProviderRow> | null, calls: DbCalls): Database {
-  return {
+  const db = {
     query: {
       cliProviders: {
         async findFirst() {
           return row;
         },
       },
+    },
+    transaction: async (fn: (tx: unknown) => Promise<unknown>) => fn(db),
+    select() {
+      const chain = {
+        from: () => chain,
+        where: () => chain,
+        orderBy: () => chain,
+        for: async () => (row ? [{ id: row.id, envVars: row.envVars }] : []),
+      };
+      return chain;
     },
     delete() {
       return {
@@ -98,6 +108,7 @@ function makeDb(row: ReturnType<typeof makeProviderRow> | null, calls: DbCalls):
       };
     },
   } as unknown as Database;
+  return db;
 }
 
 interface MockRunner extends DockerRunner {
