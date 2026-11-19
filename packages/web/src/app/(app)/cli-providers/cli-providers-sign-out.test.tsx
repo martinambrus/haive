@@ -73,6 +73,7 @@ it('aborts sign-out polling when the providers page unmounts', async () => {
 });
 
 it('offers Log in after a completed sign-out without running Test first', async () => {
+  vi.useFakeTimers();
   vi.stubGlobal('confirm', () => true);
   let authStatus = 'ok';
   h.post.mockResolvedValue({ jobId: '7' });
@@ -105,15 +106,16 @@ it('offers Log in after a completed sign-out without running Test first', async 
     return { status: 'pending', state: 'waiting' };
   });
   const view = createRenderer(() => createElement(CliProvidersPage));
-  await vi.waitFor(() => {
-    view.draw();
-    expect(buttons(view.tree(), /^sign out$/i)).toHaveLength(1);
-  });
+  await vi.advanceTimersByTimeAsync(0);
+  view.draw();
+  expect(buttons(view.tree(), /^sign out$/i)).toHaveLength(1);
   expect(buttons(view.tree(), /^log in$/i)).toHaveLength(0);
   fire.click(buttons(view.tree(), /^sign out$/i)[0]!);
-  await vi.waitFor(() => {
-    view.draw();
-    expect(buttons(view.tree(), /^log in$/i)).toHaveLength(1);
-  });
+  // The job answers done on its first poll, so no poll delay is armed: flushing the pending
+  // promises is enough for the sign-out to finish and the page to reload the row.
+  await vi.advanceTimersByTimeAsync(0);
+  view.draw();
+  expect(buttons(view.tree(), /^log in$/i)).toHaveLength(1);
   expect(buttons(view.tree(), /^sign out$/i)).toHaveLength(0);
+  expect(vi.getTimerCount()).toBe(0);
 });
