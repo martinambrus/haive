@@ -2,6 +2,7 @@
 
 > Implementation review: 2026-11-12 against `3426c8c34`; corrections are folded into the relevant sections.
 > **P1.1 implemented** (2026-11-14): versioned reconcile measurements and replay deduplication; see [Step 11 reconcile measurements](../architecture/learning-reconcile.md). **P1.2 implemented** (2026-11-14): bounded learning origin/update records excluded from excerpts and indexed content; see the same topic. RAG invocation attribution is implemented; see [RAG query attribution](../architecture/rag-playground.md#rag-query-attribution). P0 shipped with T580 (`a3d71d4f7` and `dfa43bf68`).
+> **P2 first pilot run** (2026-11-19): one repository pair, six tasks, one model; no benefit measured, no P3 trigger fires, three human reviews open; see [P2](#p2-measurements-for-the-next-benchmark-round).
 > Sources reviewed: "The components of agent memory" (Anthropic research, 2026-11-06), the Managed
 > Agents Dreams docs and the "Dreaming with a dynamic workflow" cookbook. Verdict: no dream pass yet.
 > Fix the step 11 defects that keep the loop from closing (P0), add the records the next benchmark
@@ -147,6 +148,78 @@ step-11 cost, and whole-task cost. Any allocation of prompt tokens to retrieval 
 
 Report each with its sample counts and per model. A model-dependent effect is the expected shape,
 not noise (the research's own numbers differ by model).
+
+**First pilot (2026-11-18 to 2026-11-19), one repository pair.** One fixture was copied into a
+control and a treatment repository. It has the shape of the reference pack in
+`step-benchmark-suite.md` (PHP 8.3, Composer, SQLite, 28 files, seven planted traps), but a model
+wrote it, not a person. Each repository ran onboarding, a first work task (a JSON export) and a
+second (a CSV export). Each pair of tasks ran on claude-opus-5-5 in Claude Code: onboarding at
+effort medium, both work pairs at high. Six tasks, 99 invocations (8 were failed or discarded
+attempts in the treatment's onboarding), notional cost 28.62 USD, billable cost 0. The treatment's
+first work task approved four learnings and the control none, by protocol, so the second work tasks
+ran with four against none. One pair is not a sample: every figure is a count.
+
+- **M1, retrieval in the second work task.** Treatment: discovery made the one search that hit a
+  learning (rank 1 of 8 hits), then read all four files; implementation searched once, hit none and
+  read none; validation and step 11 read all four files; the two reviewers saw one or two through
+  grep (the peer reviewer cited one and reported it stale); step 11 did not search. Control: 3
+  searches, 0 learning hits, no learning read.
+- **M2 and M3, reconcile and admission.** The four step 11 runs proposed 3 (control, first work
+  task), 4 (treatment, first), 2 (control, second) and 5 (treatment, second) entries: 14 parsed, 0
+  dropped by the file:line rule. The treatment's first run approved all four proposals unedited
+  (bootstrap order, subprocess tests, zero handling, journal rollback) and wrote them. Its second
+  run saw 4 of 4 learnings and proposed 2 inserts, 2 updates and 1 delete, none downgraded. The
+  protocol excluded all five, not on merit, because the approved learnings stay unchanged; it
+  excluded the control's 3 and 2 as well, because the control keeps none. The delete targets the
+  zero-handling learning, which the recorder called obsolete once the code was fixed. The review
+  form has no per-op keep for a delete: a delete has no draft to clear (`stageLearningDrafts` skips
+  deletes) and `writeFiles` switches every op together.
+- **M4, outcome.** Paired traps (zero handling primary, misleading name secondary) gave the same
+  counts at the first implementation, at gate 2 and after the merge: treatment avoided and control
+  hit 0, treatment hit and control avoided 0, both avoided 1 (misleading name), both hit 1 (zero
+  handling). All 12 grades (four work tasks, three points each) were 1 of 7, the one pass being
+  misleading name. The traps keyed on output names fail on the name in both arms (both emit
+  `reference`, the grader expects `customer_id` or `customer_ref`), so zero handling is a hit in
+  both arms although both kept the zero row. The one non-paired cell that went the treatment's way
+  is the partner prefix: the treatment applied it and the control did not, though it still fails on
+  the name; it is unpaired because the treatment's first task had fixed that bootstrap order before
+  any learning existed. The treatment's second task entered one fix round (control: none), for an
+  environmental cause: the implementer left no `vendor/`, so `composer test` exited 127; the fix ran
+  `composer install` and changed no source. No gate rejected, none escalated.
+- **M5, store.** After the second work task the treatment holds 4 learnings (4832 bytes), 3613 bytes
+  of knowledge base and 15047 bytes of source; the control holds 0 learnings, 2987 bytes of
+  knowledge base and 16061 bytes of source. No near-duplicate or contradicting pair. No growth in
+  the second work task, because the protocol excluded every proposal.
+- **M6, learned guidance.** Skipped in all four step 11 runs; no guidance rows. Not measured.
+- **M7, cost.** Step 11 cost 0.49 and 0.42 USD for the control (first, second work task) and 0.60
+  and 0.76 for the treatment, one invocation each, notional. Retrieval cost is not separable from
+  CLI totals (P1): 8 searches in the four work tasks. The treatment's second task cost 6.24 USD
+  against 5.25; the fix round is 0.91 of that 0.99 gap.
+
+**Trigger verdicts (P3).** None fires on this evidence.
+
+| Trigger | Pilot evidence | Verdict |
+| --- | --- | --- |
+| G1 | 4 learnings against about 20; 0 duplicate or contradicting pairs; the recorder planned 2 updates and 1 delete among them | Not fired |
+| G2 | M1 half partly met: 2 of the treatment's 20 second-task invocations searched and the implementation search hit no learning. M4 half not shown: the 2 graded repeats of described traps (zero handling, partner prefix) are key-name grades, and both arms kept the zero row | Not fired, nearest |
+| G3 | 0 of 14 proposals dropped; none removed on merit; each admitted learning was read by a later step and one was cited; 1 called obsolete by the recorder | Not fired |
+| G4 | One model and one CLI: no model comparison | Not fired, untestable |
+
+**Open human reviews.** (1) Fixture authorship: a model wrote the fixture, traps and hidden grader
+and no person has signed a review of them; the suite plan expects the reference pack by hand. (2)
+The README trap: its machine part fails in both arms, so only a person can judge the prose. (3) The
+first work pair's equivalence: until a person signs that the two first tasks were comparable, the
+second-task comparison is exploratory, not controlled. None can turn this result into a measured
+benefit: no paired count has a pair the treatment won, no learning covers the README trap, and a
+failed authorship or equivalence review only removes pairs or the fixture.
+
+**Evidence.** The fixture is commit `79db1ab` of the private repositories
+`martinambrus/ledger-export-cli-a` (treatment) and `martinambrus/ledger-export-cli-b` (control). The
+private grader is revision `9f9469c`, run in a pinned PHP image. The run log (`log.md`: the six task
+ids, the Haive build each pair ran on, every form submitted), the step captures, the twelve grades,
+the M1 to M7 and store measurement outputs and the invocation cost ledger are kept untracked in
+`.claude/tmp/codex-run/AMP6-S/`; the measurement queries are
+`.claude/tmp/codex-run/AMP3-S/codex-1/measurement-queries.sql`, run unchanged.
 
 ## P3: gaps, each built only when its trigger fires
 
