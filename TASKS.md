@@ -795,7 +795,7 @@ Paths are under `packages/`. NEW means introduced by #1288.
 
 ### T729 · A CLI remembered on another task can be refused at dispatch for a composed LSP task
 
-status: open · kind: design · found: #1288 review 2026-11-20 · priority: P3
+status: open, explained to the owner 2026-11-20 (options a, b and c; recommendation a), waiting for the decision · kind: design · found: #1288 review 2026-11-20 · priority: P3
 
 Saved CLI preferences ("Also for my later tasks") are user-wide, so a pick remembered on another task is not ordered against this task's composed LSP decision, and `resolvePreferredCli` (`worker/src/step-engine/step-runner.ts` ~:377) applies none of the provider rule. A contract-2 task whose step later resolves a remembered CLI the lock refuses is stopped by the dispatch backstop, and the step fails. The task lock cannot cover it. PRE-EXISTING since #1272.
 
@@ -825,6 +825,18 @@ status: open · kind: fix · found: translator scale and acceptance milestone 20
 
 1. `openModuleDatabase` (`shared/src/module-db/index.ts` ~:32-48) creates the module's database when it is absent, and a module's request handlers call it per request (translator `src/db/passes.ts:87,379`, `src/db/retention.ts:67,79`, `src/db/setup.ts:18`). A GET can therefore run `CREATE DATABASE` when an active module's database is missing; the worker creates it at module load (`worker/src/modules/loader.ts:288`), so only after an out-of-band drop. Each call also builds a new two-connection pool that the caller must close. PRE-EXISTING. Fix direction: a create-free open for request paths, creating only at module load, and one cached pool per module.
 
+### T735 · Translator first paid run and its prerequisites
+
+status: open, in work 2026-11-20 (the owner approved the first paid run and runs it, guided) · kind: feature · found: owner decisions 2026-11-20 · priority: P2
+
+In `martinambrus/haive-module-translator`.
+
+1. The declared call timeout goes from 180 s to 300 s (owner decision 2026-11-20): module PR #11. The host floor `CLI_TIMEOUT_BASE_MINUTES` (45 minutes on the dev install) already decides a step's own call (`escalatedTimeoutMs`, `packages/shared/src/constants/index.ts` ~:863), so the change matters only if that floor is set lower.
+2. Validate the 32 MiB page bound (`src/web/download.ts:4` `ASSEMBLY_BOUND_BYTES`; building the Blob holds a second copy, about 64 MiB at peak) with a generated book just under and just over it: the first downloads, the second is refused, and the tab's peak memory is recorded. No model calls (owner decision 2026-11-20).
+3. Before the run: T733 merged; the module installed on the dev stack (`external-modules/translator`, `pnpm module add translator`, install, build, `pnpm docker rebuild` while nothing runs); the task type made startable on that install only, by an uncommitted `selectable: true` in `src/manifest.ts`, until the owner's quality sign-off.
+4. A walkthrough for the owner, written after walking the free steps (upload, source approval, consent screen) in the browser.
+5. After the owner's quality sign-off: unhide in a module PR (`selectable: true`, and the README's hidden-type text).
+
 ### T721 · The Claude usage grant reaches sandbox environments
 
 status: open (items 2-9; item 1 done #1281) · kind: security · found: login-set design (T720) 2026-11-19 · priority: P3 (was P1 until #1281)
@@ -843,7 +855,7 @@ status: open (items 2-9; item 1 done #1281) · kind: security · found: login-se
 
 ### T720 · A Claude login reaches one provider row, its sign-out resets them all
 
-status: open, in work since 2026-11-19 (owner decided); login and sign-out for the whole set merged #1282 (3a7b57ac1) and deployed 2026-11-19 13:10Z; set-wide paste, typed token and delete merged #1283 (5cfe1f86a, with the provider-row lock order against the image job), deployed 2026-11-19 17:32Z; rows joining a set (create, clone, un-isolate, auth mode) merged #1285 (bb8276fd2), deployed 2026-11-20 03:33Z; the usage connection is built and open as #1291 (poller) and #1292 (api, web, stacked), held for the owner's OK before merge, since the first tick after deploy overwrites the 40 dead usage grants of the dev install with the live one (40 audit rows) · kind: design · found: #1280 review 2026-11-19 · priority: P2
+status: done 2026-11-20 (owner decided 2026-11-19); login and sign-out for the whole set merged #1282 (3a7b57ac1) and deployed 2026-11-19 13:10Z; set-wide paste, typed token and delete merged #1283 (5cfe1f86a, with the provider-row lock order against the image job), deployed 2026-11-19 17:32Z; rows joining a set (create, clone, un-isolate, auth mode) merged #1285 (bb8276fd2), deployed 2026-11-20 03:33Z; the usage connection merged with the owner's OK as #1291 (03f9143df, poller) and #1292 (50804c662, api and web), deployed 2026-11-20 17:29Z; the first poll tick at 17:34:38Z replaced the 40 dead usage grants of the dev install (40 `cli_provider.secret.set` audit rows) · kind: design · found: #1280 review 2026-11-19 · priority: P2
 
 A `claude-code` subscription login is a token saved on the one provider row it was made on (`api/src/lib/cli-login-secret.ts` `saveCliLoginSecret`), and each run reads the token of its own row (`worker/src/secrets/provider-secrets.ts`). A sign-out through one row deletes that row's token (`worker/src/queues/cli-exec/handlers.ts` ~:1436-1449) but resets `auth_status` on every row sharing the auth volume (~:1451-1472). The other rows keep their own tokens, which may still work, and read `unknown`.
 
@@ -859,7 +871,7 @@ status: open · kind: fix · found: legacy template replacement design (T709) 20
 
 All PRE-EXISTING, none blocking the replacement series. Paths are under `packages/`.
 
-1. Legacy shared forks reuse the name `task-<id8>`, and so the default tag `haive-env-<slug>:latest`, when the acting task also created the source row (`worker/src/step-engine/steps/env-replicate/01-declare-deps.ts` ~:1005-1015, `03-build-image.ts` ~:30-36). Not seen live. Fix: a tag check in 03's detect, or the row-id suffix the replacement series gives contract-2 rows (that changes every legacy tag).
+1. DONE #1295. Legacy shared forks reuse the name `task-<id8>`, and so the default tag `haive-env-<slug>:latest`, when the acting task also created the source row (`worker/src/step-engine/steps/env-replicate/01-declare-deps.ts` ~:1005-1015, `03-build-image.ts` ~:30-36). Not seen live. Fix: a tag check in 03's detect, or the row-id suffix the replacement series gives contract-2 rows (that changes every legacy tag).
 2. The boot reaper counts `completed` and `failed` tasks as dead (`worker/src/sandbox/env-template-reaper.ts:7`), while `pinsEnvTemplate` releases a pin only on `cancelled` (`env-replicate/_shared.ts:91-98`). A failed task that is Retried later can find its non-ready template row reaped.
 3. 01 inserts the template row and links the task in two statements, not one transaction (`01-declare-deps.ts` ~:1005-1018). A crash between them leaves an unlinked row.
 4. `createTaskSchema` accepts an `envTemplateId` that no route reads (`shared/src/schemas/tasks.ts:92`). Drop the field or wire it.
@@ -927,7 +939,7 @@ Leftovers, none blocking: (a) a dependent span re-entered in a later fix round f
 
 ### T712 · Legacy composed builds fail on an environment body that copies project files
 
-status: open, decided and in work 2026-11-20 · kind: fix · found: composed LSP live check (#1274) · priority: P2
+status: done 2026-11-20 (#1295, 5385c14ba, worker deployed 17:29Z); live check owed: a workflow task on ledger-export-cli-lsp with the legacy opt-out and preinstall passes 01b and 00b · kind: fix · found: composed LSP live check (#1274) · priority: P2
 
 A legacy (absent/1) composed image still pastes the environment Dockerfile body into a build context that holds only the Dockerfile (`sandbox/image-composer.ts` ~:137-140 `resolveBase`, `sandbox/composed-image-cache.ts` ~:283-293 `buildComposedImage`), while `02-generate-dockerfile.ts` ~:941-988 emits a `COPY` of manifest files per package manager when dependencies are preinstalled. Such a legacy environment builds at 03 and then fails its composed build at task launch with "not found". PRE-EXISTING; reproduced through the real launch entry with a fake docker and with real docker (evidence `.claude/tmp/codex-run/LSPB-S/evidence/legacy-copy-launch-base.log`, `from-probe/h.log`). Not fixed with #1274 because moving legacy onto the environment image changes every existing legacy composed tag (a rebuild of each, readiness unaffected since legacy has none), and a body-text COPY heuristic is fragile. Decision needed: move legacy onto the environment image too (one-time rebuild of every legacy composed image) or give the composed build the repository context. Check first how many existing templates carry such a COPY.
 
@@ -1061,18 +1073,18 @@ Resolution: the diagnosis above did not hold for the live error. Codex read its 
 
 ### T694 · FNF[insight-gate3] · insight-cycle approval exposures beside the gate-3 park (+10)
 
-status: open · kind: fix · found: review of the gate-3 park change 2026-11-16 · priority: P2
+status: open; items 1, 3 and 4 done by #1294 (2c29b923a, deployed 2026-11-20 17:29Z); item 2 decided by the owner 2026-11-20; item 10 waits for the owner · kind: fix · found: review of the gate-3 park change 2026-11-16 · priority: P2
 
-1. Stale-tab attestation: the step submit body carries only `values` and targets the newest `waiting_form` row (`api/src/routes/tasks/steps.ts` ~:902-1017), so any stale tab of the same owner can attest a gate-2 or gate-3 answer for a form it never showed. Bind latched-gate submits to `stepRowId` + `waitingStartedAt`.
-2. A successful second insight cycle (no verify failure, gate 2 skipped) still lets a gate-3 preset commit the refreshed diff (`insight-gate3-return.ts` ~:54-66 settles on the prior done gate 3). Same exposure as the owner's park decision; owner call whether it should park too.
-3. Gate 1.5 (08d2) defaults to accept when nothing blocks (`detected.blocking` false), and accept defers to gate 2, but a successful insight cycle skips gate 2 (`task-queue.ts` ~:2410), so accepted QA findings reach no human in that cycle.
-4. `readValidationSnapshot` is not abortable and reads every changed file serially (up to 8 MiB each, two attempts); a cancel waits for it.
+1. DONE #1294. Stale-tab attestation: the step submit body carries only `values` and targets the newest `waiting_form` row (`api/src/routes/tasks/steps.ts` ~:902-1017), so any stale tab of the same owner can attest a gate-2 or gate-3 answer for a form it never showed. Bind latched-gate submits to `stepRowId` + `waitingStartedAt`.
+2. A successful second insight cycle (no verify failure, gate 2 skipped) still lets a gate-3 preset commit the refreshed diff (`insight-gate3-return.ts` ~:54-66 settles on the prior done gate 3). Same exposure as the owner's park decision; owner call whether it should park too. OWNER DECIDED 2026-11-20: always park gate 3 after a gate-3 insight cycle, whether or not its verification failed; presets and pre-answers are ignored there. Scope: only cycles a person started by picking insights at a parked gate 3 (`10-gate-3-commit.ts` ~:639); automatic rounds (`autoActOnInsights`, `08e-insights-triage.ts` ~:247) stay as they are. Once the person answers that gate 3, Retry, Resume and worker takeover must not park it again, and the fresh-submission anchor (`freshInsightGateSubmission`, today the latest `gate2_approved` event) moves to the cycle.
+3. DONE #1294. Gate 1.5 (08d2) defaults to accept when nothing blocks (`detected.blocking` false), and accept defers to gate 2, but a successful insight cycle skips gate 2 (`task-queue.ts` ~:2410), so accepted QA findings reach no human in that cycle.
+4. DONE #1294. `readValidationSnapshot` is not abortable and reads every changed file serially (up to 8 MiB each, two attempts); a cancel waits for it.
 5. PRE-EXISTING: `readValidationSnapshot({ db, taskId })` in `worker/src/queues/validation-recheck.ts` ~:127 passes no cancel source (`validationSuccessor` has no `StepContext`), so the queue-level recheck read cannot be cancelled.
 6. PRE-EXISTING, bounded: the git `readChangedFiles` call before the first per-file check, and a single in-flight file read of up to 8 MiB, are not interruptible (`worker/src/step-engine/steps/workflow/_validation-snapshot.ts`).
 7. BY DESIGN, from #1294: the api's latched-gate predicate (`api/src/routes/tasks/steps.ts` `insightGateLatched`) is a superset of the worker's, with no settled or `approvedRound` exemption, so a later gate-3 park the worker would not latch still refuses old tabs and non-web clients with 409 `step_form_stale` (the web always sends the fields). Fix if it bites: one latch predicate shared through `@haive/shared`.
 8. LOW, cosmetic, PRE-EXISTING: a second tab racing the same latched park can show `step_form_not_waiting` without a reload until the next poll (`web/src/app/(app)/tasks/[id]/page.tsx` ~:1372).
 9. COVERAGE: nothing pins what follows the approval of a gate 2 kept for deferred QA findings (depends on item 2), and no case covers the `run_seq` / `created_at` tie-break of `gate3QaDeferred` (`worker/src/queues/insight-gate3-return.ts`).
-10. PRE-EXISTING, decide with item 2: an unlatched gate 2 still honours `preAnswers['09-gate-2-verify-approval']` (`worker/src/step-engine/step-runner.ts` ~:3596; neither gate declares `humanOnlyFormFields`), so a task that pre-answered gate 2 auto-approves the gate 2 that #1294 keeps for deferred QA findings.
+10. PRE-EXISTING, decide with item 2: an unlatched gate 2 still honours `preAnswers['09-gate-2-verify-approval']` (`worker/src/step-engine/step-runner.ts` ~:3596; neither gate declares `humanOnlyFormFields`), so a task that pre-answered gate 2 auto-approves the gate 2 that #1294 keeps for deferred QA findings. Explained to the owner 2026-11-20 with four options: A keep; B in a gate-3 insight cycle, a gate 2 kept for deferred QA findings ignores its pre-answer (recommended); C every gate 2 with deferred QA findings ignores pre-answers; D gate 2 approves and gate 3 lists the findings. Waiting for the decision; it ships with item 2. On the dev install no task type (0 of 15) and no task (0 of 453) has pre-answered gate 2 or 3.
 
 ### T689 · Deep-analysis core runtime: guarded spans (P7) and custom fix target (P8)
 
