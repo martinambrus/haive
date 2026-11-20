@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { and, eq, type SQL } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
 import { resolveCliAuthUserVolumeName } from './cli-providers/auth-volume.js';
+import { lockLoginSet } from './cli-providers/login-set.js';
 import type { AuthMode, CliProviderName } from './types/index.js';
 
 export interface CliAuthProvider {
@@ -39,13 +40,18 @@ export function cliAuthSetWhere(provider: CliAuthProvider): SQL {
 }
 
 /** A volume login changes the credential of every row sharing that volume. Call while
- * holding its auth lock. Token refresh and abandoned login do not count as a new login. */
+ * holding its auth lock. Token refresh and abandoned login do not count as a new login.
+ * The set is locked first, in id order, so the update never holds one row while it waits for
+ * a lower id that the image job, which locks provider rows without the auth lock, holds. */
 export async function advanceVolumeLoginGeneration(
   db: Database,
   provider: CliAuthProvider,
 ): Promise<void> {
-  await db
-    .update(schema.cliProviders)
-    .set({ authGeneration: randomUUID() })
-    .where(cliAuthSetWhere(provider));
+  await db.transaction(async (tx) => {
+    await lockLoginSet(tx, provider);
+    await tx
+      .update(schema.cliProviders)
+      .set({ authGeneration: randomUUID() })
+      .where(cliAuthSetWhere(provider));
+  });
 }

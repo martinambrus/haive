@@ -76,9 +76,10 @@ import {
 import {
   deleteLoginTokenFromSet,
   isSetLoginSecret,
+  seedJoinerFromSet,
   writeLoginTokenToSet,
 } from '../lib/cli-login-secret.js';
-import { cliAuthSetWhere } from '@haive/shared/cli-auth-state';
+import { cliAuthScope, cliAuthSetWhere } from '@haive/shared/cli-auth-state';
 import { providerDisableImpact } from '../lib/provider-disable-impact.js';
 
 function secretAuditMetadata(names: Iterable<string>): {
@@ -468,10 +469,11 @@ cliProviderRoutes.post('/', requireNewWorkAllowed, async (c) => {
   const provisioningModel = shouldProvisionOllamaModel(candidate);
   let secretEvent: AuditEvent | undefined;
   let setEvents: AuditEvent[] = [];
-  const joinsSet =
-    body.name === 'claude-code' &&
-    !!split?.secrets.CLAUDE_CODE_OAUTH_TOKEN &&
-    !(body.isolateAuth ?? false);
+  const sharesLogin = body.name === 'claude-code' && !(body.isolateAuth ?? false);
+  const spreadsToken = sharesLogin && !!split?.secrets.CLAUDE_CODE_OAUTH_TOKEN;
+  // Without a typed token a shared subscription row takes the login the set already has.
+  const seedsFromSet = sharesLogin && !spreadsToken && body.authMode === 'subscription';
+  const joinsSet = spreadsToken || seedsFromSet;
   const lockScopes = joinsSet
     ? [
         {
@@ -556,7 +558,7 @@ cliProviderRoutes.post('/', requireNewWorkAllowed, async (c) => {
           };
           await insertAuditEvent(tx, secretEvent);
         }
-        if (joinsSet) {
+        if (spreadsToken) {
           setEvents = await writeLoginTokenToSet(tx, {
             userId,
             viaId: rows[0]!.id,
@@ -566,6 +568,15 @@ cliProviderRoutes.post('/', requireNewWorkAllowed, async (c) => {
             masterKek: await secretsService.getMasterKek(),
             assertHeld,
           });
+        } else if (seedsFromSet) {
+          const seeded = await seedJoinerFromSet(tx, {
+            userId,
+            joinerId: rows[0]!.id,
+            members,
+            assertHeld,
+          });
+          setEvents = seeded.events;
+          if (seeded.row) return { rows: [seeded.row], event };
         }
         return { rows, event };
       }),
@@ -739,6 +750,12 @@ cliProviderRoutes.patch('/:id', async (c) => {
     isolateAuth: body.isolateAuth ?? existing.isolateAuth,
   };
   const spreadsToken = existing.name === 'claude-code' && !!split?.secrets.CLAUDE_CODE_OAUTH_TOKEN;
+  // A row that moves into a shared subscription set without a typed token takes the set's login.
+  const joinsSet =
+    existing.name === 'claude-code' &&
+    afterSave.authMode === 'subscription' &&
+    !afterSave.isolateAuth &&
+    cliAuthScope(afterSave) !== cliAuthScope(existing);
   const authProviders = authSettingsChanged
     ? [existing, afterSave]
     : authSecretNames.length
@@ -749,7 +766,7 @@ cliProviderRoutes.patch('/:id', async (c) => {
     db.transaction(async (tx) => {
       if (startsJob) await admitNewWork(tx);
       // First lock on any provider row.
-      const members = spreadsToken ? await lockLoginSet(tx, afterSave, id) : [];
+      const members = spreadsToken || joinsSet ? await lockLoginSet(tx, afterSave, id) : [];
       const [current] = await tx
         .select()
         .from(schema.cliProviders)
@@ -835,6 +852,10 @@ cliProviderRoutes.patch('/:id', async (c) => {
           masterKek: await secretsService.getMasterKek(),
           assertHeld,
         });
+      } else if (joinsSet) {
+        const seeded = await seedJoinerFromSet(tx, { userId, joinerId: id, members, assertHeld });
+        setEvents = seeded.events;
+        if (seeded.row) return { rows: [seeded.row], event };
       }
       return { rows, event };
     }),
@@ -1105,82 +1126,109 @@ cliProviderRoutes.post('/:id/clone', requireNewWorkAllowed, async (c) => {
   const split = splitSecretLikeEnv(source.envVars ?? {});
   const provisioningModel = shouldProvisionOllamaModel(source);
   let cloneEvent: AuditEvent;
-  const created = await db.transaction(async (tx) => {
-    await admitNewWork(tx);
-    const inserted = await tx
-      .insert(schema.cliProviders)
-      .values({
-        userId: source.userId,
-        name: source.name,
-        label: newLabel,
-        executablePath: source.executablePath,
-        wrapperPath: source.wrapperPath,
-        wrapperContent: source.wrapperContent,
-        envVars: source.envVars ? split.envVars : null,
-        cliArgs: source.cliArgs,
-        supportsSubagents: source.supportsSubagents,
-        networkPolicy: source.networkPolicy,
-        egressDomains: source.egressDomains,
-        authMode: source.authMode,
-        cliVersion: source.cliVersion,
-        effortLevel: source.effortLevel,
-        model: source.model,
-        modelfile: source.modelfile,
-        sandboxDockerfileExtra: source.sandboxDockerfileExtra,
-        enabled: source.enabled,
-        isolateAuth: source.isolateAuth,
-        disableThinking: source.disableThinking,
-        rulesContent: source.rulesContent,
-        sandboxImageBuildStatus: 'building',
-        ...(provisioningModel ? { modelProvisionStatus: 'provisioning' } : {}),
-      })
-      .returning();
-    const row = inserted[0]!;
+  let setEvents: AuditEvent[] = [];
+  // A clone of a subscription row never copies the login token: it takes the login of its set.
+  const takesSetLogin = source.name === 'claude-code' && source.authMode === 'subscription';
+  const joinsSet = takesSetLogin && !source.isolateAuth;
+  const created = await withCliAuthLocks(
+    db,
+    joinsSet ? [source] : [],
+    (assertHeld) =>
+      db.transaction(async (tx) => {
+        await admitNewWork(tx);
+        const inserted = await tx
+          .insert(schema.cliProviders)
+          .values({
+            userId: source.userId,
+            name: source.name,
+            label: newLabel,
+            executablePath: source.executablePath,
+            wrapperPath: source.wrapperPath,
+            wrapperContent: source.wrapperContent,
+            envVars: source.envVars ? split.envVars : null,
+            cliArgs: source.cliArgs,
+            supportsSubagents: source.supportsSubagents,
+            networkPolicy: source.networkPolicy,
+            egressDomains: source.egressDomains,
+            authMode: source.authMode,
+            cliVersion: source.cliVersion,
+            effortLevel: source.effortLevel,
+            model: source.model,
+            modelfile: source.modelfile,
+            sandboxDockerfileExtra: source.sandboxDockerfileExtra,
+            enabled: source.enabled,
+            isolateAuth: source.isolateAuth,
+            disableThinking: source.disableThinking,
+            rulesContent: source.rulesContent,
+            sandboxImageBuildStatus: 'building',
+            ...(provisioningModel ? { modelProvisionStatus: 'provisioning' } : {}),
+          })
+          .returning();
+        const row = inserted[0]!;
+        // First lock on an existing provider row; the clone is invisible until commit.
+        const members = joinsSet ? await lockLoginSet(tx, row) : [];
 
-    const sourceSecrets = await tx.query.cliProviderSecrets.findMany({
-      where: eq(schema.cliProviderSecrets.providerId, source.id),
-    });
-    if (sourceSecrets.length > 0) {
-      await tx.insert(schema.cliProviderSecrets).values(
-        sourceSecrets.map((s) => ({
-          providerId: row.id,
-          secretName: s.secretName,
-          encryptedValue: s.encryptedValue,
-          encryptedDek: s.encryptedDek,
-          fingerprint: s.fingerprint,
-        })),
-      );
-    }
-    const copied = new Set(sourceSecrets.map((s) => s.secretName));
-    for (const [name, value] of Object.entries(split.secrets)) {
-      if (!copied.has(name)) {
-        await upsertProviderSecret(tx, {
-          providerId: row.id,
-          name,
-          value,
-          masterKek: await secretsService.getMasterKek(),
-          onExisting: 'overwrite',
-        });
-      }
-    }
-    cloneEvent = {
-      actorUserId: userId,
-      action: 'cli_provider.clone',
-      targetType: 'cli_provider',
-      targetId: row.id,
-      metadata: {
-        sourceProviderId: source.id,
-        ...secretAuditMetadata([
-          ...sourceSecrets.map((s) => s.secretName),
-          ...Object.keys(split.secrets),
-        ]),
-      },
-    };
-    await insertAuditEvent(tx, cloneEvent);
-    return row;
-  });
+        const sourceSecrets = (
+          await tx.query.cliProviderSecrets.findMany({
+            where: eq(schema.cliProviderSecrets.providerId, source.id),
+          })
+        ).filter((s) => !(takesSetLogin && isSetLoginSecret(source.name, s.secretName)));
+        if (sourceSecrets.length > 0) {
+          await tx.insert(schema.cliProviderSecrets).values(
+            sourceSecrets.map((s) => ({
+              providerId: row.id,
+              secretName: s.secretName,
+              encryptedValue: s.encryptedValue,
+              encryptedDek: s.encryptedDek,
+              fingerprint: s.fingerprint,
+            })),
+          );
+        }
+        const copied = new Set(sourceSecrets.map((s) => s.secretName));
+        for (const [name, value] of Object.entries(split.secrets)) {
+          if (!copied.has(name) && !(takesSetLogin && isSetLoginSecret(source.name, name))) {
+            await upsertProviderSecret(tx, {
+              providerId: row.id,
+              name,
+              value,
+              masterKek: await secretsService.getMasterKek(),
+              onExisting: 'overwrite',
+            });
+          }
+        }
+        cloneEvent = {
+          actorUserId: userId,
+          action: 'cli_provider.clone',
+          targetType: 'cli_provider',
+          targetId: row.id,
+          metadata: {
+            sourceProviderId: source.id,
+            ...secretAuditMetadata([
+              ...sourceSecrets.map((s) => s.secretName),
+              ...Object.keys(split.secrets).filter(
+                (name) => !(takesSetLogin && isSetLoginSecret(source.name, name)),
+              ),
+            ]),
+          },
+        };
+        await insertAuditEvent(tx, cloneEvent);
+        if (joinsSet) {
+          const seeded = await seedJoinerFromSet(tx, {
+            userId,
+            joinerId: row.id,
+            members,
+            assertHeld,
+          });
+          setEvents = seeded.events;
+          if (seeded.row) return seeded.row;
+        }
+        return row;
+      }),
+    { waitMs: CLI_AUTH_JOIN_WAIT_MS },
+  );
 
   logAuditEvent(cloneEvent!);
+  for (const e of setEvents) logAuditEvent(e);
   await enqueueBuildForProvider(created.id, userId);
   if (provisioningModel) await enqueueOllamaProvisionForProvider(created.id, userId);
   return c.json(

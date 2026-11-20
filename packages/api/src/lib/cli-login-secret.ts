@@ -1,6 +1,6 @@
 import { cliAuthScope, type CliAuthProvider } from '@haive/shared/cli-auth-state';
 import { randomUUID } from 'node:crypto';
-import { and, eq, inArray, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, inArray, sql } from 'drizzle-orm';
 import { schema, tryCliAuthLock, type Database } from '@haive/database';
 import { lockLoginSet, secretsService, upsertProviderSecret } from '@haive/shared';
 import { insertAuditEvent, logAuditEvent, type AuditEvent } from './audit.js';
@@ -188,4 +188,86 @@ export async function deleteLoginTokenFromSet(
     )
     .returning({ providerId: schema.cliProviderSecrets.providerId });
   return { deletedIds: deleted.map((d) => d.providerId), setSize: members.length };
+}
+
+/** Gives a row that joined a set the login of the set: the token and credential state of the member
+ * that holds the newest token. The caller locked `members` (the joiner included) with `lockLoginSet`
+ * before writing anything for the request. Nothing is written when no other member holds a token.
+ * `row` is the joiner as it stands after the seed, and absent when nothing was seeded. */
+export async function seedJoinerFromSet(
+  tx: Parameters<Parameters<Database['transaction']>[0]>[0],
+  opts: {
+    userId: string;
+    joinerId: string;
+    members: { id: string }[];
+    assertHeld: () => Promise<void>;
+  },
+): Promise<{ events: AuditEvent[]; row?: typeof schema.cliProviders.$inferSelect }> {
+  const { userId, joinerId, members, assertHeld } = opts;
+  const others = members.filter((m) => m.id !== joinerId).map((m) => m.id);
+  if (others.length === 0) return { events: [] };
+  const [source] = await tx
+    .select({
+      providerId: schema.cliProviderSecrets.providerId,
+      encryptedValue: schema.cliProviderSecrets.encryptedValue,
+      encryptedDek: schema.cliProviderSecrets.encryptedDek,
+      fingerprint: schema.cliProviderSecrets.fingerprint,
+      authStatus: schema.cliProviders.authStatus,
+      authMessage: schema.cliProviders.authMessage,
+      // Through text: a Date would cut the stamp to milliseconds.
+      authCheckedAt: sql<string | null>`${schema.cliProviders.authLastCheckedAt}::text`,
+      authGeneration: schema.cliProviders.authGeneration,
+    })
+    .from(schema.cliProviderSecrets)
+    .innerJoin(
+      schema.cliProviders,
+      eq(schema.cliProviders.id, schema.cliProviderSecrets.providerId),
+    )
+    .where(
+      and(
+        inArray(schema.cliProviderSecrets.providerId, others),
+        eq(schema.cliProviderSecrets.secretName, 'CLAUDE_CODE_OAUTH_TOKEN'),
+      ),
+    )
+    .orderBy(desc(schema.cliProviderSecrets.updatedAt), asc(schema.cliProviderSecrets.providerId))
+    .limit(1);
+  if (!source) return { events: [] };
+  const event: AuditEvent = {
+    actorUserId: userId,
+    action: 'cli_provider.secret.set',
+    targetType: 'cli_provider',
+    targetId: joinerId,
+    metadata: {
+      source: 'join',
+      secretName: 'CLAUDE_CODE_OAUTH_TOKEN',
+      viaProviderId: source.providerId,
+      setSize: members.length,
+    },
+  };
+  await insertAuditEvent(tx, event);
+  await assertHeld();
+  const secret = {
+    encryptedValue: source.encryptedValue,
+    encryptedDek: source.encryptedDek,
+    fingerprint: source.fingerprint,
+  };
+  await tx
+    .insert(schema.cliProviderSecrets)
+    .values({ providerId: joinerId, secretName: 'CLAUDE_CODE_OAUTH_TOKEN', ...secret })
+    .onConflictDoUpdate({
+      target: [schema.cliProviderSecrets.providerId, schema.cliProviderSecrets.secretName],
+      set: { ...secret, updatedAt: new Date() },
+    });
+  const [row] = await tx
+    .update(schema.cliProviders)
+    .set({
+      authStatus: source.authStatus,
+      authMessage: source.authMessage,
+      authLastCheckedAt: sql`${source.authCheckedAt}::timestamp`,
+      authGeneration: source.authGeneration,
+    })
+    .where(eq(schema.cliProviders.id, joinerId))
+    .returning();
+  await assertHeld();
+  return { events: [event], row };
 }

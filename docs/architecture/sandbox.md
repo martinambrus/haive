@@ -720,8 +720,8 @@ token of every row of the set and, when no volume failed, resets their status, i
 reads the set once, so a row that joined while the volumes were being removed is deleted and reset
 with the rest; it still deletes the usage token on the clicked row only. Its supersede check reads the
 clicked row's generation alone, which is enough because the api writers of a login token all write the
-whole set (a clone copies its source's token onto the new row and the boot copy of legacy environment
-values writes the row it finds; neither advances the others). A manual login-secret POST, a settings
+whole set and a row that joins one takes the set's generation (the boot copy of legacy environment
+values writes the row it finds and advances no other). A manual login-secret POST, a settings
 save that types the token and a create that types it do so in one transaction under the set's lock (`writeLoginTokenToSet`, `api/src/lib/cli-login-secret.ts`):
 the transaction's first lock on any provider row is `lockLoginSet` over every row it will touch, the clicked
 row included, in id order: no row lock, row update or secret write for a member may come before it (a new
@@ -742,10 +742,30 @@ that same row. Unlike a login, the paste, typed-token and delete writers leave `
 `auth_message` and the check stamp alone, and none of them strips a plaintext copy of the token from a
 sibling's `envVars` (a secret overrides the environment at run time).
 `credentialRepairedAt` skips claude-code rows, since a login's `ok` is not a repair of the usage
-connection. A row nobody has logged in or signed out through since this rule began keeps its own token
+connection. A row already in a set that nobody has logged in or signed out through since this rule began keeps its own token
 and status; the first login, pasted or typed token, sign-out or manual delete through any row of its set
 overwrites (login, paste, typed token) or deletes (sign-out, delete) the stored login of every row in it. Switching to another account goes through Sign out
 first: a login alone does not change what a usage connection meters.
+
+**A row that joins a set takes the set's login.** A row enters a claude-code subscription set that is
+not isolated by a create, by a clone of a row of that set, or by a settings save that turns isolation
+off or sets the auth mode to subscription. When the same create or save types the token, that is the
+set-wide write above and nothing is seeded. Each join takes `lockLoginSet` as its first lock on any
+provider row, over the set and the joining row, in id order (a create or a clone inserts its row first,
+which is invisible until commit), under the set's auth lock: a create and a clone wait for it at most
+`CLI_AUTH_JOIN_WAIT_MS` before the 409 `cli_auth_busy`, and a settings save holds both of its scopes as
+before and refuses, before it writes or seeds, a row whose scope moved between its read and the lock.
+`seedJoinerFromSet` (`api/src/lib/cli-login-secret.ts`) then copies, from the other row that holds the
+token with the newest secret `updated_at` (tie: smallest id), its token ciphertext, `auth_status`,
+`auth_message`, check stamp (read through text, so its microseconds survive) and `auth_generation`, and
+records one strict `cli_provider.secret.set` event on the joining row (`source` `join`, `viaProviderId`
+the row it copied from, `setSize`) in the same transaction. The set's login replaces a token the joining
+row had; a set where no other row holds a token seeds nothing, and the joining row keeps its own. A clone
+of a claude-code subscription row leaves the login token out of its secret copy and out of the copy of
+legacy environment values, so an isolated clone starts without one and a joining clone gets the set's;
+every other secret, the usage token included, is copied as before. The create, the clone and the
+settings save answer with the joining row as the seed left it, so the response carries the copied
+status, message and check stamp; a join that seeds nothing answers as before.
 
 ## CLI sign-out and newer logins
 
@@ -757,10 +777,11 @@ wait minutes, so a login completed in between must survive it. Two pieces do tha
   `cli_provider.login` audit), the Claude OAuth save (`saveCliLoginSecret`, same transaction as the
   secret), a manual secret POST or a PATCH that moves a login secret, the usage reconnect, and the
   boot copy of secret-like env. A shared-volume login advances every row sharing that volume
-  (`advanceVolumeLoginGeneration`, `@haive/shared/cli-auth-state`); the Claude OAuth save and every
+  (`advanceVolumeLoginGeneration`, `@haive/shared/cli-auth-state`, which locks the set with `lockLoginSet`
+  first, in one transaction with its update); the Claude OAuth save and every
   other writer of the login token (a manual POST, a settings save or a create that types it) advance
   every row they write with one new value, while a write of the usage token and the boot copy advance
-  their own row only. An abandoned attempt, a usage
+  their own row only and a row that joins a set takes the generation of the row it copies. An abandoned attempt, a usage
   refresh, a grok refresh, a task's sync-back and the delete of a login token never advance it. The sign-out job carries the
   value read at request time and, when the row's value differs, removes nothing and returns
   `{ ok: true, superseded: true }`; the poll route reports it as `done` and the page says the user
@@ -782,11 +803,12 @@ wait minutes, so a login completed in between must survive it. Two pieces do tha
   origin, auth and ownership checks still refuse before any accept, and the modal keys its sentence
   on the code. Api writers, and the deletes of a login secret (DELETE `usage-auth` and
   `secrets/:name`), answer 409 `cli_auth_busy` when it is held; a delete never advances the
-  generation, so it cannot supersede a pending sign-out. A create that types the login token for a
-  claude-code row that is not isolated waits for the lock at most `CLI_AUTH_JOIN_WAIT_MS` (10 s,
+  generation, so it cannot supersede a pending sign-out. A create of a
+  claude-code row that is not isolated, when it types the login token or is a subscription row, and a clone of
+  such a subscription row wait for the lock at most `CLI_AUTH_JOIN_WAIT_MS` (10 s,
   `api/src/lib/cli-auth-write.ts`; a usage snapshot write holds it for the length of a few queries, a
   token refresh up to its 15 s request deadline, a sign-out up to 31 s per volume it removes, a login
-  dialog for minutes) before the same 409, and any other create takes no lock. The sign-out job defers itself (`deferJob`,
+  dialog for minutes) before the same 409, and any other create or clone takes no lock. The sign-out job defers itself (`deferJob`,
   2 s doubling to 15 s) and fails after `CLI_SIGN_OUT_AUTH_WAIT_MS` (30 minutes, counted from
   enqueue) with a sentence saying nothing was removed. That deadline covers only a job that never
   started: before its first removal the job records `signOutStarted` and the scope it removes
