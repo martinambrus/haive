@@ -115,6 +115,39 @@ function formNotWaiting(what: 'form submission' | 'clarification', stepId: strin
   return new HttpError(409, `No step awaiting ${what} for id ${stepId}`, 'step_form_not_waiting');
 }
 
+/** The 409 for an answer to a gate form that is not the one the tab was shown; the web reloads the current form on its code. */
+function formStale(): HttpError {
+  return new HttpError(
+    409,
+    'This approval changed since you opened it. If the current form is not shown, reload the page; then review it and submit again.',
+    'step_form_stale',
+  );
+}
+
+/**
+ * Whether the answer to this gate is attested only by the route: gate 2 while the latest insight check is a
+ * failed verify, gate 3 while it is a gate 2 approval. An event that cannot be read fails closed (latched).
+ */
+async function insightGateLatched(
+  db: ReturnType<typeof getDb>,
+  taskId: string,
+  stepId: string,
+): Promise<boolean> {
+  if (stepId !== '09-gate-2-verify-approval' && stepId !== '10-gate-3-commit') return false;
+  const latest = await db.query.taskEvents.findFirst({
+    where: and(
+      eq(schema.taskEvents.taskId, taskId),
+      eq(schema.taskEvents.eventType, 'insight.check'),
+    ),
+    orderBy: [desc(schema.taskEvents.createdAt), desc(schema.taskEvents.id)],
+  });
+  if (!latest) return false;
+  const kind = latest.payload?.version === 1 ? latest.payload.kind : undefined;
+  return stepId === '09-gate-2-verify-approval'
+    ? kind !== 'gate2_approved'
+    : kind !== 'verify_failed';
+}
+
 function notResumable(): HttpError {
   return new HttpError(
     409,
@@ -1059,6 +1092,15 @@ stepRoutes.post('/:id/steps/:stepId/submit', async (c) => {
     .limit(1);
   const step = stepRows[0];
   if (!step) throw formNotWaiting('form submission', stepId);
+  if (await insightGateLatched(db, id, stepId)) {
+    if (
+      body.stepRowId !== step.id ||
+      step.waitingStartedAt === null ||
+      typeof body.waitingStartedAt !== 'string' ||
+      new Date(body.waitingStartedAt).getTime() !== step.waitingStartedAt.getTime()
+    )
+      throw formStale();
+  }
   // Upgrade the same persisted 06 schema the display and worker readers use. Keep all
   // other fields sparse: their existing defaults/presets are resolved by 06 apply.
   const submitSchema = upgradeRunConfigSchema(

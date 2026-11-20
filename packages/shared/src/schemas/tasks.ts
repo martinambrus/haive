@@ -223,6 +223,9 @@ export function resolvePlanNodeLinks(body: {
 
 export const submitStepRequestSchema = z.object({
   values: z.record(z.string(), z.unknown()),
+  // The row and park the form was rendered for; a latched insight gate refuses an answer without them.
+  stepRowId: z.string().optional(),
+  waitingStartedAt: z.string().nullish(),
 });
 
 export type SubmitStepRequest = z.infer<typeof submitStepRequestSchema>;

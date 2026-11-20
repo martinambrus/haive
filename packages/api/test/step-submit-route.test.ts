@@ -207,3 +207,202 @@ it('binds a gate-2 human decision to the authenticated owner and parked generati
     formValues: { decision: 'approve' },
   });
 });
+
+const GATE2 = '09-gate-2-verify-approval';
+const GATE3 = '10-gate-3-commit';
+const PARK = new Date('2026-01-02T03:04:05.678Z');
+const STALE_PARK = new Date('2026-01-02T03:00:00.000Z');
+
+function gateFixture(opts: {
+  stepId: string;
+  kinds?: Array<Record<string, unknown>>;
+  waitingStartedAt?: Date | null;
+}) {
+  const fake = createFakeDb({
+    tasks: schema.tasks,
+    taskSteps: schema.taskSteps,
+    taskEvents: schema.taskEvents,
+  });
+  fake.insert(schema.tasks, { id: TASK, userId: USER, status: 'waiting_user' });
+  fake.insert(schema.taskSteps, {
+    taskId: TASK,
+    stepId: opts.stepId,
+    status: 'waiting_form',
+    round: 0,
+    rerunGeneration: 1,
+    idleMs: 0,
+    waitingStartedAt: opts.waitingStartedAt === undefined ? PARK : opts.waitingStartedAt,
+  });
+  (opts.kinds ?? []).forEach((payload, i) =>
+    fake.insert(schema.taskEvents, {
+      taskId: TASK,
+      eventType: 'insight.check',
+      payload,
+      createdAt: new Date(Date.UTC(2026, 0, 1, 0, 0, i)),
+    }),
+  );
+  h.db = fake.db;
+  h.add.mockResolvedValue(undefined);
+  const stepRowId = () => fake.rows(schema.taskSteps)[0]!.id as string;
+  return { fake, stepRowId };
+}
+
+const check = (kind: string, extra: Record<string, unknown> = {}) => ({
+  version: 1,
+  batchId: 'x',
+  kind,
+  ...extra,
+});
+
+async function postGate(stepId: string, extra: Record<string, unknown>, values?: unknown) {
+  return app.request(`/${TASK}/steps/${stepId}/submit`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      values: values ?? (stepId === GATE2 ? { decision: 'approve' } : { commit: true }),
+      ...extra,
+    }),
+  });
+}
+
+async function expectRefused(
+  res: Response,
+  fake: ReturnType<typeof gateFixture>['fake'],
+  before: { steps: unknown; events: unknown },
+) {
+  expect(res.status).toBe(409);
+  expect(await res.json()).toMatchObject({ code: 'step_form_stale' });
+  expect(fake.rows(schema.taskSteps)).toEqual(before.steps);
+  expect(fake.rows(schema.taskEvents)).toEqual(before.events);
+  expect(h.add).not.toHaveBeenCalled();
+}
+
+const snap = (fake: ReturnType<typeof gateFixture>['fake']) => ({
+  steps: structuredClone(fake.rows(schema.taskSteps)),
+  events: structuredClone(fake.rows(schema.taskEvents)),
+});
+
+it.each([
+  [
+    'a stale row id',
+    (id: string) => ({ stepRowId: `${id}-x`, waitingStartedAt: PARK.toISOString() }),
+  ],
+  [
+    'a stale park stamp',
+    (id: string) => ({ stepRowId: id, waitingStartedAt: STALE_PARK.toISOString() }),
+  ],
+  ['no fields', () => ({})],
+  ['a garbage stamp', (id: string) => ({ stepRowId: id, waitingStartedAt: 'not a date' })],
+])('refuses a latched gate-2 answer with %s', async (_name, fields) => {
+  const { fake, stepRowId } = gateFixture({ stepId: GATE2, kinds: [check('verify_failed')] });
+  const before = snap(fake);
+  const res = await postGate(GATE2, fields(stepRowId()));
+  await expectRefused(res, fake, before);
+});
+
+it('accepts a latched gate-2 answer that carries the form it was rendered for', async () => {
+  const { fake, stepRowId } = gateFixture({ stepId: GATE2, kinds: [check('verify_failed')] });
+  const res = await postGate(GATE2, {
+    stepRowId: stepRowId(),
+    waitingStartedAt: PARK.toISOString(),
+  });
+  expect(res.status).toBe(200);
+  expect(fake.rows(schema.taskEvents).map((e) => e.eventType)).toContain('step.form_submitted');
+  expect(
+    fake.rows(schema.taskEvents).find((e) => e.eventType === 'step.form_submitted'),
+  ).toMatchObject({
+    payload: expect.objectContaining({ userId: USER, generation: 1, decision: 'approve' }),
+  });
+});
+
+it('binds a latched gate-3 answer the same way', async () => {
+  const stale = gateFixture({ stepId: GATE3, kinds: [check('gate2_approved')] });
+  const before = snap(stale.fake);
+  const refused = await postGate(GATE3, {
+    stepRowId: stale.stepRowId(),
+    waitingStartedAt: STALE_PARK.toISOString(),
+  });
+  await expectRefused(refused, stale.fake, before);
+  h.add.mockReset();
+  const ok = gateFixture({ stepId: GATE3, kinds: [check('gate2_approved')] });
+  const res = await postGate(GATE3, {
+    stepRowId: ok.stepRowId(),
+    waitingStartedAt: PARK.toISOString(),
+  });
+  expect(res.status).toBe(200);
+  expect(ok.fake.rows(schema.taskEvents).at(-1)).toMatchObject({
+    eventType: 'step.form_submitted',
+    payload: expect.objectContaining({ commit: true }),
+  });
+});
+
+it.each([
+  ['gate 2 after an approval', GATE2, [check('gate2_approved')]],
+  ['gate 2 with no check event', GATE2, []],
+  ['gate 3 after a failed verify', GATE3, [check('verify_failed')]],
+  ['gate 3 with no check event', GATE3, []],
+])('needs no fields for an unlatched gate: %s', async (_name, stepId, kinds) => {
+  const { fake } = gateFixture({ stepId, kinds });
+  const res = await postGate(stepId, {});
+  expect(res.status).toBe(200);
+  expect(fake.rows(schema.taskEvents).map((e) => e.eventType)).toContain('step.form_submitted');
+});
+
+it('reads the LATEST check event to decide the latch', async () => {
+  const { fake } = gateFixture({
+    stepId: GATE2,
+    kinds: [check('verify_failed'), check('gate2_approved')],
+  });
+  expect((await postGate(GATE2, {})).status).toBe(200);
+  expect(fake.rows(schema.taskSteps)[0]).toMatchObject({ waitingStartedAt: null });
+});
+
+it('ignores the binding fields for an ordinary step', async () => {
+  const fake = createFakeDb({
+    tasks: schema.tasks,
+    taskSteps: schema.taskSteps,
+    taskEvents: schema.taskEvents,
+  });
+  fake.insert(schema.tasks, { id: TASK, userId: USER, status: 'waiting_user' });
+  fake.insert(schema.taskSteps, {
+    taskId: TASK,
+    stepId: STEP,
+    status: 'waiting_form',
+    round: 0,
+    idleMs: 0,
+    waitingStartedAt: PARK,
+  });
+  h.db = fake.db;
+  h.add.mockResolvedValueOnce(undefined);
+  const res = await app.request(`/${TASK}/steps/${STEP}/submit`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      values: { message: 'hi' },
+      stepRowId: 'someone-else',
+      waitingStartedAt: STALE_PARK.toISOString(),
+    }),
+  });
+  expect(res.status).toBe(200);
+});
+
+it('fails closed when the latest check event cannot be read', async () => {
+  const { fake } = gateFixture({ stepId: GATE2, kinds: [{ version: 2, kind: 'gate2_approved' }] });
+  const before = snap(fake);
+  const res = await postGate(GATE2, {});
+  await expectRefused(res, fake, before);
+});
+
+it.each([null, PARK.toISOString()])(
+  'refuses a latched answer to a wait that was already answered (stamp sent: %s)',
+  async (sent) => {
+    const { fake, stepRowId } = gateFixture({
+      stepId: GATE2,
+      kinds: [check('verify_failed')],
+      waitingStartedAt: null,
+    });
+    const before = snap(fake);
+    const res = await postGate(GATE2, { stepRowId: stepRowId(), waitingStartedAt: sent });
+    await expectRefused(res, fake, before);
+  },
+);

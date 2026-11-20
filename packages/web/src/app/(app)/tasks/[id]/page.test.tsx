@@ -84,6 +84,9 @@ const net = vi.hoisted(() => ({
   patchError: null as string | null,
   actionError: null as string | null,
   stopResult: { killed: 0, cancelled: 0, stopped: 0 },
+  submits: [] as Record<string, unknown>[],
+  submitFailure: null as { status: number; error: string; code?: string } | null,
+  detailFetches: 0,
 }));
 
 const PAUSED_AT = '2026-10-15T09:00:00.000Z';
@@ -146,6 +149,17 @@ async function fakeFetch(input: unknown, init?: { body?: string; method?: string
       json: async () => ({ ok: true, started: true, status: 'queued' }),
     };
   }
+  if (path === '/tasks/t1/steps/07-implement/submit' && init?.method === 'POST') {
+    net.submits.push(JSON.parse(init.body ?? '{}') as Record<string, unknown>);
+    const failure = net.submitFailure;
+    if (failure)
+      return {
+        ok: false,
+        status: failure.status,
+        json: async () => ({ error: failure.error, code: failure.code }),
+      };
+    return { ok: true, status: 200, json: async () => ({ ok: true, queued: true }) };
+  }
   if (path === '/tasks/t1/cancel-active-cli') {
     return { ok: true, status: 200, json: async () => net.stopResult };
   }
@@ -162,6 +176,7 @@ async function fakeFetch(input: unknown, init?: { body?: string; method?: string
       net.heldDetail = null;
       return held;
     }
+    if (path === '/tasks/t1') net.detailFetches += 1;
     return { ok: true, status: 200, json: async () => structuredClone(net.detail) };
   }
   if (path === '/tasks/t1/ports')
@@ -206,6 +221,8 @@ beforeEach(() => {
   net.actionError = null;
   net.routeId = 't1';
   net.heldDetail = null;
+  net.submits = [];
+  net.submitFailure = null;
   net.integrationSnapshot = { categories: [], choices: [], grants: [] };
 });
 afterAll(() => {
@@ -818,4 +835,58 @@ it('keeps active step cards and approval forms visible when canvas is open', asy
 it('hides the step view toggle when the task has no steps', async () => {
   const view = await mount({});
   expect(buttons(view.tree(), /^canvas$/)).toHaveLength(0);
+});
+
+describe('task page: a refused answer to a re-parked form', () => {
+  const P1 = '2026-10-15T09:00:00.000Z';
+  const P2 = '2026-10-15T09:05:00.000Z';
+  const parked = (stamp: string, label: string) => ({
+    ...stepRow(),
+    status: 'waiting_form',
+    waitingStartedAt: stamp,
+    formSchema: {
+      fields: [{ id: 'note', type: 'text', label, default: 'ok' }],
+      sections: [],
+    },
+  });
+  const submit = async (view: Renderer) => {
+    const form = findAll(view.tree(), (h) => h.tag === 'form')[0]!;
+    (form.props.onSubmit as (e: unknown) => void)({ preventDefault() {} });
+    for (let i = 0; i < 5; i += 1) await view.flush();
+  };
+
+  it('sends the row and park it rendered, then reloads the current form on a stale refusal', async () => {
+    const view = await mount({ pausedAt: null, currentStepId: '07-implement' }, [
+      parked(P1, 'Old label'),
+    ]);
+    expect(textOf(view.tree())).toContain('Old label');
+    net.detail.steps = [parked(P2, 'New label')];
+    net.submitFailure = {
+      status: 409,
+      error: 'This approval changed since you opened it.',
+      code: 'step_form_stale',
+    };
+    const fetchesBefore = net.detailFetches;
+    await submit(view);
+    expect(net.submits).toEqual([
+      { values: { note: 'ok' }, stepRowId: 's1', waitingStartedAt: P1 },
+    ]);
+    expect(net.detailFetches).toBeGreaterThan(fetchesBefore);
+    const text = textOf(view.tree());
+    expect(text).toContain('New label');
+    expect(text).not.toContain('Old label');
+    expect(text).toContain('This approval changed since you opened it.');
+    expect(buttons(view.tree(), /submitting/i)).toHaveLength(0);
+  });
+
+  it('does not reload for any other refusal', async () => {
+    const view = await mount({ pausedAt: null, currentStepId: '07-implement' }, [
+      parked(P1, 'Old label'),
+    ]);
+    net.submitFailure = { status: 500, error: 'Something else broke', code: 'other_failure' };
+    const fetchesBefore = net.detailFetches;
+    await submit(view);
+    expect(net.detailFetches).toBe(fetchesBefore);
+    expect(textOf(view.tree())).toContain('Something else broke');
+  });
 });
