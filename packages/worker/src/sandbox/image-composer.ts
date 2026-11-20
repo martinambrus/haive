@@ -74,8 +74,9 @@ export interface ComposeInput {
    * Accepts persisted language or server keys; unsupported selections fail explicitly. */
   lspServers?: readonly string[] | null;
   lspServerVersions?: Readonly<Record<string, string | null>> | null;
-  /** Contract 2 only: build FROM this already-built environment image instead of pasting
-   * the template body. The id is part of the Dockerfile text, hence of the tag. */
+  /** Build FROM this already-built environment image instead of pasting the template body;
+   * contract 2 requires it, a legacy composition passes it when the row's environment image is
+   * usable. The id is part of the Dockerfile text, hence of the tag. */
   environmentImage?: EnvironmentImageRef | null;
 }
 
@@ -89,7 +90,7 @@ export function composeSandboxImage(input: ComposeInput): SandboxImageCompositio
   const codegen = buildProviderInstallLines(input.provider.name, input.provider.cliVersion);
   const installLines = codegen.supported ? codegen.lines : [];
 
-  const environmentImage = contract === 2 ? input.environmentImage : null;
+  const environmentImage = input.environmentImage;
   if (environmentImage) {
     assertEnvironmentImageField('ref', environmentImage.ref, ENV_REF_PATTERN);
     assertEnvironmentImageField('imageId', environmentImage.imageId, ENV_IMAGE_ID_PATTERN);
