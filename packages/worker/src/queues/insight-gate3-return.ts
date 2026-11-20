@@ -94,7 +94,7 @@ export async function freshInsightGateSubmission(
       : decision !== 'approve' && decision !== 'reject')
   )
     return false;
-  const cycle = gate3 ? await openGate3Cycle(db, row.taskId, row.round) : null;
+  const cycle = await openGate3Cycle(db, row.taskId, row.round);
   const checked = sql`(
         select max(failed.created_at) from ${schema.taskEvents} failed
         where failed.task_id = ${row.taskId} and failed.event_type = 'insight.check'
@@ -179,6 +179,14 @@ export async function gate3InsightCycle(db: Database, taskId: string, round: num
   });
   if (gate?.status === 'done' || gate?.status === 'skipped') return null;
   return { request, verifyFailed: (await pendingInsightApproval(db, taskId)) !== null };
+}
+/** A gate 2 that runs inside an open gate-3 cycle because its accepted QA review deferred findings to it. */
+export async function insightGate2QaKept(
+  db: Database,
+  row: typeof schema.taskSteps.$inferSelect,
+): Promise<boolean> {
+  const cycle = await openGate3Cycle(db, row.taskId, row.round);
+  return cycle !== null && (await gate3QaDeferred(db, row.taskId, cycle.request.round, row.round));
 }
 /** An accepted QA review waives nothing and defers its findings to gate 2, so gate 2 must still run. */
 export async function gate3QaDeferred(

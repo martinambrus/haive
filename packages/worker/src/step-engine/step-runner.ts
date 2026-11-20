@@ -6,6 +6,7 @@ import {
   pendingInsightApproval,
   freshInsightGateSubmission,
   insightGate3ReviewRequired,
+  insightGate2QaKept,
 } from '../queues/insight-gate3-return.js';
 import { classifierPolicy } from './steps/workflow/_insight-auto.js';
 import { DataEdgePlanError } from '@haive/shared/data-edge-plan';
@@ -3582,7 +3583,8 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
     const autoContinue = taskFlags?.autoContinue ?? true;
     const insightApprovalRequired =
       (meta.id === '09-gate-2-verify-approval' &&
-        (await pendingInsightApproval(db, taskId)) !== null) ||
+        ((await pendingInsightApproval(db, taskId)) !== null ||
+          (await insightGate2QaKept(db, current)))) ||
       (meta.id === '10-gate-3-commit' && (await insightGate3ReviewRequired(db, current)));
     const insightHumanSubmission =
       insightApprovalRequired && (await freshInsightGateSubmission(db, params.userId, current));

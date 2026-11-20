@@ -483,3 +483,57 @@ it.each([
   const res = await postGate(GATE3, {});
   await expectRefused(res, fake, before);
 });
+
+it.each([
+  [
+    'a stale row id',
+    (id: string) => ({ stepRowId: `${id}-x`, waitingStartedAt: PARK.toISOString() }),
+  ],
+  [
+    'a stale park stamp',
+    (id: string) => ({ stepRowId: id, waitingStartedAt: STALE_PARK.toISOString() }),
+  ],
+  ['no fields', () => ({})],
+  ['a garbage stamp', (id: string) => ({ stepRowId: id, waitingStartedAt: 'not a date' })],
+])('refuses a gate-2 answer after a gate-3 insight cycle with %s', async (_name, fields) => {
+  const { fake, stepRowId } = gateFixtureWithContinuation(GATE2, cycleEvent());
+  const before = snap(fake);
+  const res = await postGate(GATE2, fields(stepRowId()));
+  await expectRefused(res, fake, before);
+});
+
+it('accepts a gate-2 answer after a gate-3 insight cycle that carries the form it was rendered for', async () => {
+  const { fake, stepRowId } = gateFixtureWithContinuation(GATE2, cycleEvent());
+  const res = await postGate(GATE2, {
+    stepRowId: stepRowId(),
+    waitingStartedAt: PARK.toISOString(),
+  });
+  expect(res.status).toBe(200);
+  expect(fake.rows(schema.taskEvents).at(-1)).toMatchObject({
+    eventType: 'step.form_submitted',
+    payload: expect.objectContaining({ userId: USER, generation: 1, decision: 'approve' }),
+  });
+});
+
+it('needs no fields for a gate-2 answer after an automatic round, which is not a gate-3 cycle', async () => {
+  const { fake } = gateFixtureWithContinuation(
+    GATE2,
+    cycleEvent({ mode: undefined, stage: undefined }),
+  );
+  const res = await postGate(GATE2, {});
+  expect(res.status).toBe(200);
+  expect(fake.rows(schema.taskEvents).map((e) => e.eventType)).toContain('step.form_submitted');
+});
+
+it.each([
+  ['an unsupported version', { continuation: { version: 2, kind: 'insight_revise' } }],
+  ['no continuation', {}],
+])(
+  'fails closed for gate 2 when a continuation event cannot be read: %s',
+  async (_name, payload) => {
+    const { fake } = gateFixtureWithContinuation(GATE2, payload);
+    const before = snap(fake);
+    const res = await postGate(GATE2, {});
+    await expectRefused(res, fake, before);
+  },
+);

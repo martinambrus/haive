@@ -132,8 +132,13 @@ was rendered for, else 409 `step_form_stale` (worker-restarts, form park marker)
 requirement ends once a gate 3 at or after the cycle's first round completed (done or skipped)
 before the current round. Until then Retry, Resume and boot re-entry keep an unanswered form
 parked; re-entry after the owner's answer (Resume, takeover, a duplicate advance) uses that
-answer and does not park again. A warning note explains that the refreshed changes need review
-and a new commit decision. Ordinary gates retain their existing preset behavior.
+answer and does not park again. A Retry of the gate itself resets its answer and generation, so
+it asks again. A Retry of the pick's own row, or of a step above it in the pick's round, ends the
+cycle: that row no longer holds the generation the cycle named (`gate3InsightCycle` reads it the
+same way), so the next gate 3 is an ordinary one. A warning note explains that the refreshed
+changes need review and a new commit decision. Inside the same cycle, a gate 2 kept because the
+accepted QA review deferred its findings parks for the owner the same way (fix-loop). Ordinary
+gates retain their existing preset behavior.
 Step-runner retains the invocation through form submission
 and recovery using its existing pre-form lifecycle.
 

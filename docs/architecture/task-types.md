@@ -1678,7 +1678,8 @@ creating another task. A pending failed-insight approval overrides task/type gat
 presets, prior-task form reuse and auto-continue: gate 2 parks with its own computed
 form defaults and `autoSubmit: false`. Preset overlays never change that recommendation.
 Only a fresh explicit owner submission bound to the row and rerun generation can clear
-it; latch-free gate-2 preset behavior is unchanged.
+it. A gate 2 kept for deferred QA findings inside a gate-3 insight cycle is latched the same way
+(fix-loop); otherwise gate-2 preset behavior is unchanged.
 Existing tasks retain their immutable lists and fail the source
 step retryably if their destinations are incomplete. No data migration weakens the rule.
 The development install had no such stored types when checked by the session.
