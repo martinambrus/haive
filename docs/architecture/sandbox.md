@@ -680,8 +680,8 @@ set, and any new env builder resolves secrets through `resolveProviderSecrets`, 
 `cli_provider_secrets` itself. The grant is not secret-like by name (`SECRET_LIKE_ENV_NAME`) and no
 writer puts it in `envVars`, so the `provider.envVars` paths (login container, plugin install)
 carry nothing to skip. A shell container created before this rule keeps its create-time env until
-it is recreated. Reconnecting usage stores a new grant; that the vendor then retires the old one is
-unverified.
+it is recreated. Connecting usage stores a new grant on every row of the login set (below); that the
+vendor then retires the old one is unverified.
 
 Captured Claude OAuth credentials are verified before promotion. The login API envelope-encrypts
 its candidate with purpose, user and provider bindings before putting it on `cli-probe`; the
@@ -718,7 +718,8 @@ of them one new `auth_generation`, status `ok` and a later check stamp. A login 
 therefore supersedes a sign-out queued from any row of the set. The sign-out job deletes the login
 token of every row of the set and, when no volume failed, resets their status, in one transaction that
 reads the set once, so a row that joined while the volumes were being removed is deleted and reset
-with the rest; it still deletes the usage token on the clicked row only. Its supersede check reads the
+with the rest; it also deletes the usage token and the usage snapshot of every row of the set. Its
+supersede check reads the
 clicked row's generation alone, which is enough because the api writers of a login token all write the
 whole set and a row that joins one takes the set's generation (the boot copy of legacy environment
 values writes the row it finds and advances no other). A manual login-secret POST, a settings
@@ -735,17 +736,17 @@ therefore supersedes the sign-out, and the new token survives on every row. A se
 the set the row has after its own update plus the clicked row, so a row that stops being isolated is locked
 with its new set. The manual DELETE of the token removes it from every row of the set
 that holds it (404 only when none does), records `cli_provider.secret.delete` on each row it removed it
-from, and advances no generation or status, so it cannot supersede a sign-out. The usage reconnect, a
-manual POST of the usage token and every other secret stay per row, as does the usage token a sign-out
-deletes; a reconnect advances its own row's generation, so it can only supersede a sign-out clicked on
-that same row. Unlike a login, the paste, typed-token and delete writers leave `auth_status`,
+from, and advances no generation or status, so it cannot supersede a sign-out. The usage token is
+written and deleted the same way (see the usage connection below); every other secret stays per row.
+Unlike a login, the paste, typed-token and delete writers leave `auth_status`,
 `auth_message` and the check stamp alone, and none of them strips a plaintext copy of the token from a
 sibling's `envVars` (a secret overrides the environment at run time).
 `credentialRepairedAt` skips claude-code rows, since a login's `ok` is not a repair of the usage
 connection. A row already in a set that nobody has logged in or signed out through since this rule began keeps its own token
 and status; the first login, pasted or typed token, sign-out or manual delete through any row of its set
 overwrites (login, paste, typed token) or deletes (sign-out, delete) the stored login of every row in it. Switching to another account goes through Sign out
-first: a login alone does not change what a usage connection meters.
+first: a login alone does not change what a usage connection meters (it cannot tell which account it
+belongs to), and only a sign-out removes the usage grants of the set.
 
 **A row that joins a set takes the set's login.** A row enters a claude-code subscription set that is
 not isolated by a create, by a clone of a row of that set, or by a settings save that turns isolation
@@ -761,11 +762,62 @@ token with the newest secret `updated_at` (tie: smallest id), its token cipherte
 records one strict `cli_provider.secret.set` event on the joining row (`source` `join`, `viaProviderId`
 the row it copied from, `setSize`) in the same transaction. The set's login replaces a token the joining
 row had; a set where no other row holds a token seeds nothing, and the joining row keeps its own. A clone
-of a claude-code subscription row leaves the login token out of its secret copy and out of the copy of
-legacy environment values, so an isolated clone starts without one and a joining clone gets the set's;
-every other secret, the usage token included, is copied as before. The create, the clone and the
+of a claude-code subscription row leaves the login token and the usage token out of its secret copy (and
+the login token out of the copy of legacy environment values), so an isolated clone starts without
+either and a joining clone gets the set's; every other secret is copied as before, and a clone of an
+API-key row copies the usage token too. The create, the clone and the
 settings save answer with the joining row as the seed left it, so the response carries the copied
 status, message and check stamp; a join that seeds nothing answers as before.
+
+**A login set has one usage connection.** The usage grant (`CLAUDE_USAGE_OAUTH`) is stored on every
+row like the login token. The vendor is understood to retire a refresh token once any copy of it
+refreshes (unverified, as above), and the dev install matched that: 41 copies, one live and 40
+reconnect prompts. A set therefore holds identical copies of ONE grant, so copies cannot retire each
+other by refreshing separately. The identity of a copy is its
+`encrypted_value` (a copy copies the ciphertext columns); `fingerprint` (first 8 and last 4 characters)
+is the same for every grant and `updated_at` is only an ordering. The usage poller
+(`queues/usage-poll-queue.ts`, `usage-window/usage-grant-set.ts`) works per set: a tick polls one enabled
+row per `cliAuthScope`, and the backoff, minimum interval, dead-refresh-token, dead-fetch-token and
+auth-strike gates of a Claude row are keyed by that scope (every other CLI keeps its provider id). The
+holder is the member holding a grant whose usage snapshot is `ok` with the newest `fetched_at`, else one
+whose snapshot is `error`, else one with no snapshot, else one that needs a reconnect (so a transient error
+on the live copy never hands the set to a dead copy stamped newer); within a tier, the newest grant
+`updated_at`, then the smallest id. A holder whose grant is unparsable or dead skips the set, with no
+fallback to another member. A refresh runs under the set's auth lock (try once;
+busy skips the tick) with the vendor call outside any transaction, and writes the rotated grant in one
+transaction to every member that held the holder's pre-refresh ciphertext, with one encryption and one
+`updated_at`.
+
+Convergence: only a fetch that returned `ok` proves the holder's grant live. In the same snapshot write,
+under the lock and only while the holder still holds the ciphertext the fetch used, every member whose
+grant differs (disabled rows and copies stamped newer than the holder's included) is overwritten with the
+holder's ciphertext, data key, fingerprint and `updated_at`, with one strict `cli_provider.secret.set`
+audit per overwritten row in the same transaction (actor the set's user; metadata `source`
+`usage-poll`, `actorKind` `system`, `secretName`, `viaProviderId` the holder, `setSize`). Nothing is
+overwritten before a fetch, after a failed, refused or denied one, or from a holder whose grant changed
+meanwhile, and a member that holds no grant is never given one. The snapshot of every member holding the
+holder's copy is written with one `fetched_at`; a refused refresh token or three denials in a row mark
+the whole set as needing a reconnect.
+
+The api writers treat the grant like the login token. Connect (`usage-auth/complete`) and the manual
+POST write it to every row of the set under the auth lock and `lockLoginSet`, with one encryption, one
+`updated_at`, one new `auth_generation` and a strict `cli_provider.secret.set` audit per row
+(`viaProviderId` and `setSize` on the rows other than the clicked one); Connect also requests a usage
+tick, and the manual POST refuses a value that is not a grant. Disconnect (`DELETE usage-auth`), the
+manual DELETE and the sign-out job delete the grant and the usage snapshot of every row of the set (the
+first two record `cli_provider.secret.delete` per row that held a grant and advance no generation or
+status). A row that joins a subscription set is seeded with the grant of the member holding the newest
+grant `updated_at`, in the transaction of its login seed (`source` `join`), and a usage tick follows
+the commit. A row's usage connection is that of its current login set, so a settings save that changes
+its scope (isolation on or off, another auth mode) first deletes the row's own grant and usage snapshot
+(`source` `leave`; two scopes holding one grant would retire each other) and then seeds it as above when
+it joins a subscription set that holds a grant; a row that becomes isolated, or joins a set without a
+grant, ends without a connection and connects again if it should meter. API-key sets are not seeded on
+join. Disconnect refuses a row that is not Claude Code. The readers stay per row:
+`credentialRepairedAt` and GET `usage-auth` read the row's own grant. Where a transaction writes more
+than one provider's rows, the order is the set's advisory auth lock, then `lockLoginSet` over the set's
+provider rows in id order as the first row lock, then the secret and snapshot writes: the image job
+locks provider rows in id order without the auth lock.
 
 ## CLI sign-out and newer logins
 
@@ -780,9 +832,10 @@ wait minutes, so a login completed in between must survive it. Two pieces do tha
   (`advanceVolumeLoginGeneration`, `@haive/shared/cli-auth-state`, which locks the set with `lockLoginSet`
   first, in one transaction with its update); the Claude OAuth save and every
   other writer of the login token (a manual POST, a settings save or a create that types it) advance
-  every row they write with one new value, while a write of the usage token and the boot copy advance
-  their own row only and a row that joins a set takes the generation of the row it copies. An abandoned attempt, a usage
-  refresh, a grok refresh, a task's sync-back and the delete of a login token never advance it. The sign-out job carries the
+  every row they write with one new value, as do Connect and the manual POST of the usage token, while
+  the boot copy advances its own row only and a row that joins a set takes the generation of the row it
+  copies. An abandoned attempt, a usage refresh or convergence, a grok refresh, a task's sync-back and
+  the delete of a login or usage token never advance it. The sign-out job carries the
   value read at request time and, when the row's value differs, removes nothing and returns
   `{ ok: true, superseded: true }`; the poll route reports it as `done` and the page says the user
   signed in again. A job queued without the field (older release) deletes as before.
@@ -822,9 +875,9 @@ wait minutes, so a login completed in between must survive it. Two pieces do tha
   since the api session already holds it: a volume probe publishes health only by compare-and-set
   on the generation, auth mode, isolation and the exact `auth_last_checked_at` it read, which a
   sign-out advances, so a probe that read before a sign-out cannot write over it; and a sign-out
-  retries a volume still in use by a login helper (six attempts, 31 s of backoff). The usage poll takes the lock to refresh,
-  re-reading the token under it, and again for every snapshot write, so a Disconnect between its
-  fetch and its write leaves no stale snapshot. Each holder keeps the lock on its own connection, at
+  retries a volume still in use by a login helper (six attempts, 31 s of backoff). The usage poll takes a set's lock to refresh,
+  re-reading the holder's token under it, and again for the snapshot write of the set, so a
+  Disconnect between its fetch and its write leaves no stale snapshot. Each holder keeps the lock on its own connection, at
   most 32 per process (`MAX_CLI_AUTH_LOCK_CONNECTIONS`; beyond it a writer answers busy). A holder
   checks the lock is still its own (`assertHeld`, the backend pid it was taken on; a check unanswered within 5 s counts as lost) before a
   credential write; after a PostgreSQL restart or a terminated backend it stops, and a login
