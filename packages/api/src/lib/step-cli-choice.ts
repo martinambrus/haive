@@ -3,6 +3,7 @@ import { schema, type Database, type DbTx } from '@haive/database';
 import { CLI_PROVIDER_CATALOG, type CliProviderName } from '@haive/shared';
 import {
   checkTaskComposedLspProvider,
+  lockTaskForComposedLsp,
   COMPOSED_LSP_PROVIDER_LOCKED,
 } from '@haive/shared/composed-lsp-provider-lock';
 import { HttpError } from '../context.js';
@@ -75,10 +76,14 @@ export async function writeStepCliChoice(
   let effortLevel: string | null = null;
   if (cliProviderId) {
     const provider = await loadUsableProvider(db, userId, cliProviderId);
-    await assertComposedLspProviderAllowed(db, userId, taskId, cliProviderId);
     effortLevel = clampEffort(provider.name, params.requestedEffort);
   }
   await (db as Database).transaction(async (tx) => {
+    if (cliProviderId) {
+      // Lock the task row, then decide: see lockTaskForComposedLsp for the lock order.
+      await lockTaskForComposedLsp(tx, { userId, taskId });
+      await assertComposedLspProviderAllowed(tx, userId, taskId, cliProviderId);
+    }
     await tx
       .insert(schema.taskStepCliChoices)
       .values({ taskId, stepId, role, cliProviderId, effortLevel })

@@ -1,7 +1,10 @@
 import { and, asc, desc, eq, inArray } from 'drizzle-orm';
 import { schema, type Database, type DbTx } from '@haive/database';
 import { CLI_DISPATCH_STEP_IDS } from '@haive/shared';
-import { checkTaskComposedLspProvider } from '@haive/shared/composed-lsp-provider-lock';
+import {
+  checkTaskComposedLspProvider,
+  lockTaskForComposedLsp,
+} from '@haive/shared/composed-lsp-provider-lock';
 import type { CliProviderRecord } from '../../../cli-adapters/types.js';
 import { ProviderBuildError } from '../../../cli-adapters/prompt-delivery.js';
 import { resolveDispatch } from '../../../orchestrator/dispatcher.js';
@@ -177,6 +180,8 @@ export async function recordFixRoundCliChoice(
     throw new FixRoundCliUnavailable(
       `Next fix round CLI "${provider.label}" cannot run ${target.metadata.id}; choose another CLI.`,
     );
+  // Lock the task row, then decide: see lockTaskForComposedLsp for the lock order.
+  await lockTaskForComposedLsp(db, { userId, taskId });
   const lock = await checkTaskComposedLspProvider(db, { userId, taskId, providerId: provider.id });
   if (lock && !lock.ok) throw new FixRoundCliLocked(lock.message);
   await db

@@ -20,7 +20,7 @@ export function isComposedLspSelection(keys: readonly string[]): boolean {
 
 /** Every provider id this task could run a step on, over-approximated. */
 async function collectProviderIds(
-  db: Database,
+  db: Pick<Database, 'query' | 'select'>,
   args: { taskId: string; userId: string; defaultProviderId: string | null; stepIds: string[] },
 ): Promise<(string | null)[]> {
   const ids: (string | null)[] = [args.defaultProviderId];
@@ -69,7 +69,7 @@ async function collectProviderIds(
 
 /** Whether a new environment for this task may adopt contract 2: the run list carries the composed steps and one enabled claude-code provider serves every step. */
 export async function composedLspAdoptable(
-  db: Database,
+  db: Pick<Database, 'query' | 'select'>,
   args: { taskId: string; userId: string; defaultProviderId: string | null },
 ): Promise<{ ok: true } | { ok: false; reason: 'run_list' | 'providers' }> {
   const stepIds = await taskRunListStepIds(db, args.taskId);
@@ -108,7 +108,7 @@ export class ComposedLspReplacementRefusedError extends Error {
 
 /** Whether a legacy environment may be replaced by a contract-2 one for this task; read-only. */
 export async function decideLegacyLspReplacement(
-  db: Database,
+  db: Pick<Database, 'query' | 'select'>,
   args: {
     taskId: string;
     userId: string;

@@ -103,3 +103,36 @@ export async function checkTaskComposedLspProvider(
     providers,
   });
 }
+
+/**
+ * Lock the task row (`FOR NO KEY UPDATE`, so child inserts that take KEY SHARE on the task do not
+ * block) and return its provider choice, or null when the task is not the user's.
+ *
+ * Taken by every writer of a provider choice (step CLI choice, CLIs-tab write, summary CLI, the
+ * model-health default rewrite on the step-CLI route, fix-round choice) and by every writer that
+ * newly links a task to a contract-2 template (step 01 replacement, step 01 new-environment
+ * adoption). Each decides inside it, reading what it needs again after the lock is held.
+ *
+ * Order, outermost first: 1 repository (its task key `lockRepositoryTasksKey`, then its row FOR
+ * UPDATE: repository delete and task revival); 2 the task's step rows, one id-ordered batch
+ * (`lockStepRows`);
+ * 3 this lock, the task row; 4 leaf rows (provider rows and step rows through foreign keys as KEY
+ * SHARE, saved preference rows, the template row, task events). Step 01 inserts its template row
+ * (KEY SHARE on the repository row) before taking this lock so it never asks for the repository
+ * after the task row. The provider-row writers (`lockLoginSet`, `markProvidersReady`) never take a
+ * task or step row. One inversion, already true of the summary route's update: DELETE of a
+ * provider holds the provider row and then needs the task rows its SET NULL rewrites, while a
+ * holder of this lock needs that provider's KEY SHARE; Postgres aborts one of the two (40P01) and
+ * the state stays consistent.
+ */
+export async function lockTaskForComposedLsp(
+  tx: Pick<Database, 'select'>,
+  params: { userId: string; taskId: string },
+): Promise<{ cliProviderId: string | null } | null> {
+  const [row] = await tx
+    .select({ cliProviderId: schema.tasks.cliProviderId })
+    .from(schema.tasks)
+    .where(and(eq(schema.tasks.id, params.taskId), eq(schema.tasks.userId, params.userId)))
+    .for('no key update');
+  return row ?? null;
+}

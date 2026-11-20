@@ -2408,7 +2408,7 @@ stepRoutes.patch('/:id/steps/:stepId/cli-provider', async (c) => {
   };
   // A re-run saves the choice inside its transaction, after its check of the row it holds, so a
   // refused one changes nothing: a row that never enters the transaction saves it here.
-  if (!reruns) await saveChoice(db);
+  if (!reruns) await db.transaction((tx) => saveChoice(tx));
 
   let redrive: { epoch: number; leftActive: (typeof schema.taskSteps.$inferSelect)[] } | null =
     null;

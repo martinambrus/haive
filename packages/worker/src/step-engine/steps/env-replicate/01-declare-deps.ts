@@ -21,6 +21,7 @@ import {
   linkTaskToEnvTemplate,
   liveTasksSharingEnvTemplate,
 } from './_shared.js';
+import { lockTaskForComposedLsp } from '@haive/shared/composed-lsp-provider-lock';
 import { loadCliProviderMetadata } from '../onboarding/_helpers.js';
 import { assertKnownLspInstallContract } from '../../../sandbox/lsp-install-contract.js';
 import {
@@ -1019,6 +1020,22 @@ export const declareDepsStep: StepDefinition<DeclareDepsDetect, DeclareDepsApply
           })
           .returning();
         if (!created) throw new Error('failed to insert env_template row');
+        // The insert precedes the lock (it takes KEY SHARE on the repository row); see
+        // lockTaskForComposedLsp for the lock order. The refusal rolls the insert back.
+        const locked = await lockTaskForComposedLsp(tx, {
+          userId: ctx.userId,
+          taskId: ctx.taskId,
+        });
+        if (!locked) throw new Error('task not found');
+        const decision = await decideLegacyLspReplacement(tx, {
+          taskId: ctx.taskId,
+          userId: ctx.userId,
+          defaultProviderId: locked.cliProviderId ?? ctx.cliProviderId,
+          rolloutOn: COMPOSED_LSP_NEW_ENVIRONMENT_ADOPTION,
+          cliSupportsLsp,
+          lspServers,
+        });
+        if (!decision.ok) throw new ComposedLspReplacementRefusedError(decision.reason);
         await linkTaskToEnvTemplate(tx, ctx.taskId, created.id);
         await tx.insert(schema.taskEvents).values({
           taskId: ctx.taskId,
@@ -1090,20 +1107,57 @@ export const declareDepsStep: StepDefinition<DeclareDepsDetect, DeclareDepsApply
       return { envTemplateId: existing.id, baseImage };
     }
 
-    const inserted = await ctx.db
-      .insert(schema.envTemplates)
-      .values({
-        userId: ctx.userId,
-        repositoryId: task?.repositoryId ?? null,
-        name: templateName,
-        baseImage,
-        declaredDeps,
-        status: 'pending',
-      })
-      .returning();
-    const row = inserted[0];
-    if (!row) throw new Error('failed to insert env_template row');
-    await linkTaskToEnvTemplate(ctx.db, ctx.taskId, row.id);
+    const insertTemplate = (handle: Pick<Database, 'insert'>, deps: Record<string, unknown>) =>
+      handle
+        .insert(schema.envTemplates)
+        .values({
+          userId: ctx.userId,
+          repositoryId: task?.repositoryId ?? null,
+          name: templateName,
+          baseImage,
+          declaredDeps: deps,
+          status: 'pending',
+        })
+        .returning();
+    let row: typeof schema.envTemplates.$inferSelect | undefined;
+    // Only a new environment adopts. A fork carries the contract of the row it was forked from, which
+    // the task already runs under, so it needs no decision.
+    if (!existing && lspContract === 2) {
+      row = await ctx.db.transaction(async (tx) => {
+        const [created] = await insertTemplate(tx, declaredDeps);
+        if (!created) throw new Error('failed to insert env_template row');
+        // The insert precedes the lock (it takes KEY SHARE on the repository row); see
+        // lockTaskForComposedLsp for the lock order.
+        const locked = await lockTaskForComposedLsp(tx, {
+          userId: ctx.userId,
+          taskId: ctx.taskId,
+        });
+        if (!locked) throw new Error('task not found');
+        const decision = await composedLspAdoptable(tx, {
+          taskId: ctx.taskId,
+          userId: ctx.userId,
+          defaultProviderId: locked.cliProviderId ?? ctx.cliProviderId,
+        });
+        if (!decision.ok) {
+          // Demote: store exactly what the non-adopting path stores, no contract key.
+          const { lspInstallContractVersion: _contract, ...legacyDeps } = declaredDeps;
+          await tx
+            .update(schema.envTemplates)
+            .set({ declaredDeps: legacyDeps })
+            .where(eq(schema.envTemplates.id, created.id));
+          ctx.logger.info(
+            { taskId: ctx.taskId, lspInstallContract: null, reason: decision.reason },
+            'composed LSP adoption refused under the task lock; storing a legacy template',
+          );
+        }
+        await linkTaskToEnvTemplate(tx, ctx.taskId, created.id);
+        return created;
+      });
+    } else {
+      [row] = await insertTemplate(ctx.db, declaredDeps);
+      if (!row) throw new Error('failed to insert env_template row');
+      await linkTaskToEnvTemplate(ctx.db, ctx.taskId, row.id);
+    }
     ctx.logger.info({ envTemplateId: row.id, baseImage, templateName }, 'env template declared');
     return { envTemplateId: row.id, baseImage };
   },

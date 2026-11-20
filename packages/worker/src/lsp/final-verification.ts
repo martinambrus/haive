@@ -10,7 +10,10 @@ import { stepRegistry } from '../step-engine/registry.js';
 
 /** The step ids of the task's run list, or null when the task row is missing. Frozen
  * static/derived lists stay frozen. */
-export async function taskRunListStepIds(db: Database, taskId: string): Promise<string[] | null> {
+export async function taskRunListStepIds(
+  db: Pick<Database, 'query'>,
+  taskId: string,
+): Promise<string[] | null> {
   const task = await db.query.tasks.findFirst({ where: eq(schema.tasks.id, taskId) });
   if (!task) return null;
   const definition =

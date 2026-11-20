@@ -1,9 +1,12 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
+import type { SQL } from 'drizzle-orm';
+import { PgDialect } from 'drizzle-orm/pg-core';
 import { schema, type Database } from '@haive/database';
 import { createFakeDb } from '@haive/database/testing';
 import {
   checkTaskComposedLspProvider,
   decideComposedLspProviderLock,
+  lockTaskForComposedLsp,
   type ComposedLspLockProvider,
 } from '../src/composed-lsp-provider-lock.js';
 
@@ -181,5 +184,42 @@ describe('checkTaskComposedLspProvider', () => {
       ok: false,
       violation: { code: 'unverified_provider', providerId: id(4), providerName: null },
     });
+  });
+});
+
+describe('lockTaskForComposedLsp', () => {
+  const run = (rows: { cliProviderId: string | null }[]) => {
+    const calls: { from?: unknown; where?: unknown; lock: unknown[] } = { lock: [] };
+    const chain = {
+      from: vi.fn((table: unknown) => {
+        calls.from = table;
+        return chain;
+      }),
+      where: vi.fn((cond: unknown) => {
+        calls.where = cond;
+        return chain;
+      }),
+      for: vi.fn((mode: unknown) => {
+        calls.lock.push(mode);
+        return Promise.resolve(rows);
+      }),
+    };
+    const tx = { select: vi.fn(() => chain) } as unknown as Pick<Database, 'select'>;
+    return { calls, result: lockTaskForComposedLsp(tx, { userId: 'u-1', taskId: 't-1' }) };
+  };
+
+  it('selects the task row scoped by id and user, locked FOR NO KEY UPDATE once', async () => {
+    const { calls, result } = run([{ cliProviderId: CLAUDE }]);
+    expect(await result).toEqual({ cliProviderId: CLAUDE });
+    expect(calls.from).toBe(schema.tasks);
+    expect(calls.lock).toEqual(['no key update']);
+    const query = new PgDialect().sqlToQuery(calls.where as SQL);
+    expect(query.sql).toContain('"tasks"."id" = $1');
+    expect(query.sql).toContain('"tasks"."user_id" = $2');
+    expect(query.params).toEqual(['t-1', 'u-1']);
+  });
+
+  it("returns null when the task is not the user's", async () => {
+    expect(await run([]).result).toBeNull();
   });
 });
