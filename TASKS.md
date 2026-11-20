@@ -787,7 +787,7 @@ Options: (a) at dispatch, skip a saved preference the rule refuses, use the task
 
 ### T730 · Step 01 suggests the retired PHP language server key, so its form cannot be submitted
 
-status: open, in work 2026-11-20 · kind: fix · found: legacy template replacement live check 2026-11-20 · priority: P2
+status: done 2026-11-20 (#1289, dc2c67edb, worker reloaded 06:27Z) · kind: fix · found: legacy template replacement live check 2026-11-20 · priority: P2
 
 Step 01's detect still suggests `intelephense` for a PHP project that is neither a CMS nor on DDEV (`worker/src/step-engine/steps/env-replicate/01-declare-deps.ts` ~:1401, ~:1518), but the PHP consolidation left `intelephense-extended` as the only option (`LSP_OPTIONS` ~:333-336; stored repository values were normalized by migration 0084, and none on the dev install holds the old key). The suggestion becomes the form default of every such repository without stored `lsp_servers` (83 of 85 on the dev install), the UI renders it as nothing ticked, and the submit fails "lspServers: invalid option intelephense"; ticking the visible option does not remove the hidden value. PRE-EXISTING. Fix: suggest the surviving key for every PHP project, and pin that the form's defaults pass its own validation.
 
@@ -885,7 +885,7 @@ Leftovers, none blocking: (a) a dependent span re-entered in a later fix round f
 
 ### T712 · Legacy composed builds fail on an environment body that copies project files
 
-status: open, decided 2026-11-20 · kind: fix · found: composed LSP live check (#1274) · priority: P2
+status: open, decided and in work 2026-11-20 · kind: fix · found: composed LSP live check (#1274) · priority: P2
 
 A legacy (absent/1) composed image still pastes the environment Dockerfile body into a build context that holds only the Dockerfile (`sandbox/image-composer.ts` ~:137-140 `resolveBase`, `sandbox/composed-image-cache.ts` ~:283-293 `buildComposedImage`), while `02-generate-dockerfile.ts` ~:941-988 emits a `COPY` of manifest files per package manager when dependencies are preinstalled. Such a legacy environment builds at 03 and then fails its composed build at task launch with "not found". PRE-EXISTING; reproduced through the real launch entry with a fake docker and with real docker (evidence `.claude/tmp/codex-run/LSPB-S/evidence/legacy-copy-launch-base.log`, `from-probe/h.log`). Not fixed with #1274 because moving legacy onto the environment image changes every existing legacy composed tag (a rebuild of each, readiness unaffected since legacy has none), and a body-text COPY heuristic is fragile. Decision needed: move legacy onto the environment image too (one-time rebuild of every legacy composed image) or give the composed build the repository context. Check first how many existing templates carry such a COPY.
 
