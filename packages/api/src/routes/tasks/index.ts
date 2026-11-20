@@ -100,6 +100,7 @@ import {
   assertNewWorkAllowed,
   requireNewWorkAllowed,
 } from '../../middleware/maintenance.js';
+import { lockTaskForComposedLsp } from '@haive/shared/composed-lsp-provider-lock';
 import { assertComposedLspProviderAllowed, loadUsableProvider } from '../../lib/step-cli-choice.js';
 import { HttpError, type AppEnv } from '../../context.js';
 import {
@@ -1962,7 +1963,6 @@ taskRoutes.patch('/:id/summary-cli', async (c) => {
 
   if (body.summaryCliProviderId) {
     await loadUsableProvider(db, userId, body.summaryCliProviderId);
-    await assertComposedLspProviderAllowed(db, userId, id, body.summaryCliProviderId);
   }
 
   const patch: Partial<typeof schema.tasks.$inferInsert> = { updatedAt: new Date() };
@@ -1979,7 +1979,14 @@ taskRoutes.patch('/:id/summary-cli', async (c) => {
   // instead of what was just picked here.
   patch.summaryCliChoiceAt = new Date();
 
-  await db.update(schema.tasks).set(patch).where(eq(schema.tasks.id, id));
+  await db.transaction(async (tx) => {
+    if (body.summaryCliProviderId) {
+      // Lock the task row, then decide: see lockTaskForComposedLsp for the lock order.
+      await lockTaskForComposedLsp(tx, { userId, taskId: id });
+      await assertComposedLspProviderAllowed(tx, userId, id, body.summaryCliProviderId);
+    }
+    await tx.update(schema.tasks).set(patch).where(eq(schema.tasks.id, id));
+  });
 
   await appendTaskEvent(db, id, null, 'task.summary_cli_changed', {
     summaryCliProviderId: patch.summaryCliProviderId ?? null,

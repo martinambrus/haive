@@ -20,7 +20,7 @@ export function isComposedLspSelection(keys: readonly string[]): boolean {
 
 /** Every provider id this task could run a step on, over-approximated. */
 async function collectProviderIds(
-  db: Database,
+  db: Pick<Database, 'query' | 'select'>,
   args: { taskId: string; userId: string; defaultProviderId: string | null; stepIds: string[] },
 ): Promise<(string | null)[]> {
   const ids: (string | null)[] = [args.defaultProviderId];
@@ -69,7 +69,7 @@ async function collectProviderIds(
 
 /** Whether a new environment for this task may adopt contract 2: the run list carries the composed steps and one enabled claude-code provider serves every step. */
 export async function composedLspAdoptable(
-  db: Database,
+  db: Pick<Database, 'query' | 'select'>,
   args: { taskId: string; userId: string; defaultProviderId: string | null },
 ): Promise<{ ok: true } | { ok: false; reason: 'run_list' | 'providers' }> {
   const stepIds = await taskRunListStepIds(db, args.taskId);
@@ -90,4 +90,40 @@ export async function composedLspAdoptable(
   return decideComposedLspProviderLock({ effectiveProviderIds, providers }).ok
     ? { ok: true }
     : { ok: false, reason: 'providers' };
+}
+
+export type ComposedLspReplacementReason =
+  'rollout_off' | 'cli_unsupported' | 'selection' | 'run_list' | 'providers';
+
+/** Thrown when a ticked replacement of a legacy environment is refused; the message is for people, match on code and reason. */
+export class ComposedLspReplacementRefusedError extends Error {
+  readonly code = 'composed_lsp_replacement_refused';
+  constructor(readonly reason: ComposedLspReplacementReason) {
+    super(
+      `composed_lsp_replacement_refused: the legacy environment cannot be replaced (${reason}).`,
+    );
+    this.name = 'ComposedLspReplacementRefusedError';
+  }
+}
+
+/** Whether a legacy environment may be replaced by a contract-2 one for this task; read-only. */
+export async function decideLegacyLspReplacement(
+  db: Pick<Database, 'query' | 'select'>,
+  args: {
+    taskId: string;
+    userId: string;
+    defaultProviderId: string | null;
+    rolloutOn: boolean;
+    cliSupportsLsp: boolean;
+    lspServers: readonly string[];
+  },
+): Promise<{ ok: true } | { ok: false; reason: ComposedLspReplacementReason }> {
+  if (!args.rolloutOn) return { ok: false, reason: 'rollout_off' };
+  if (!args.cliSupportsLsp) return { ok: false, reason: 'cli_unsupported' };
+  if (!isComposedLspSelection(args.lspServers)) return { ok: false, reason: 'selection' };
+  return composedLspAdoptable(db, {
+    taskId: args.taskId,
+    userId: args.userId,
+    defaultProviderId: args.defaultProviderId,
+  });
 }

@@ -21,11 +21,14 @@ import {
   linkTaskToEnvTemplate,
   liveTasksSharingEnvTemplate,
 } from './_shared.js';
+import { lockTaskForComposedLsp } from '@haive/shared/composed-lsp-provider-lock';
 import { loadCliProviderMetadata } from '../onboarding/_helpers.js';
 import { assertKnownLspInstallContract } from '../../../sandbox/lsp-install-contract.js';
 import {
   COMPOSED_LSP_NEW_ENVIRONMENT_ADOPTION,
+  ComposedLspReplacementRefusedError,
   composedLspAdoptable,
+  decideLegacyLspReplacement,
   isComposedLspSelection,
 } from '../../../lsp/composed-adoption.js';
 import { matchYamlField, parseDdevConfig, type DdevConfigFields } from '../_ddev-config.js';
@@ -297,6 +300,8 @@ export interface DeclareDepsDetect {
   /** True when this task would declare a new environment that may install its language
    *  servers in the composed layer. Absent in detect output cached before the field existed. */
   composedLspAdoptable?: boolean;
+  /** True when the linked legacy environment could be replaced by a contract-2 one on this form. */
+  legacyLspReplaceable?: boolean;
 }
 
 export interface DeclareDepsApply {
@@ -389,6 +394,7 @@ export const declareDepsStep: StepDefinition<DeclareDepsDetect, DeclareDepsApply
     reuseLastCompletedFormValues: true,
     providerSensitive: true,
   },
+  humanOnlyFormFields: ['replaceLegacyLspInstall'],
 
   async detect(ctx) {
     const result = await scanRepoForDeps(ctx.repoPath);
@@ -545,6 +551,30 @@ export const declareDepsStep: StepDefinition<DeclareDepsDetect, DeclareDepsApply
     ) {
       result.composedLspAdoptable = true;
     }
+    if (
+      COMPOSED_LSP_NEW_ENVIRONMENT_ADOPTION &&
+      cliSupportsLsp &&
+      existingTpl !== null &&
+      isLegacyLspContract(existingTpl.declaredDeps)
+    ) {
+      // Repo-level servers win over the suggestion, as in apply.
+      const repoLspRow = repositoryId
+        ? await ctx.db
+            .select({ lspServers: schema.repositories.lspServers })
+            .from(schema.repositories)
+            .where(eq(schema.repositories.id, repositoryId))
+            .limit(1)
+        : [];
+      const decision = await decideLegacyLspReplacement(ctx.db, {
+        taskId: ctx.taskId,
+        userId: ctx.userId,
+        defaultProviderId: ctx.cliProviderId,
+        rolloutOn: COMPOSED_LSP_NEW_ENVIRONMENT_ADOPTION,
+        cliSupportsLsp,
+        lspServers: repoLspRow[0]?.lspServers ?? result.suggestedLsp,
+      });
+      if (decision.ok) result.legacyLspReplaceable = true;
+    }
     result.repositoryId = repositoryId;
     result.cliSupportsLsp = cliSupportsLsp;
     result.lspVersionByOption = lspVersionByOption;
@@ -671,6 +701,18 @@ export const declareDepsStep: StepDefinition<DeclareDepsDetect, DeclareDepsApply
               label: 'Install language servers in the environment image',
               description:
                 'By default the selected language servers are installed in a separate image layer that Haive verifies after the environment is built, and only Claude Code can run it. Ticking this installs them in the environment image instead, which keeps other CLIs usable. It applies when this task first declares its environment and cannot be changed afterwards.',
+              default: false,
+            },
+          ]
+        : []),
+      ...(detected.legacyLspReplaceable === true
+        ? [
+            {
+              type: 'checkbox' as const,
+              id: 'replaceLegacyLspInstall',
+              label: 'Replace the environment with one that installs language servers separately',
+              description:
+                'Creates a new environment for this task only. Language servers go in a separate image layer that Haive verifies after the build, and only Claude Code can run it. Every later step of this task runs again. Dockerfile edits of the current environment are not carried over. The current environment stays for other tasks and for undoing this.',
               default: false,
             },
           ]
@@ -854,7 +896,24 @@ export const declareDepsStep: StepDefinition<DeclareDepsDetect, DeclareDepsApply
       );
     }
     let lspContract: 1 | 2 | undefined;
-    if (existing) {
+    let replacing = false;
+    if (
+      existing &&
+      isLegacyLspContract(existing.declaredDeps) &&
+      values.replaceLegacyLspInstall === true
+    ) {
+      const decision = await decideLegacyLspReplacement(ctx.db, {
+        taskId: ctx.taskId,
+        userId: ctx.userId,
+        defaultProviderId: ctx.cliProviderId,
+        rolloutOn: COMPOSED_LSP_NEW_ENVIRONMENT_ADOPTION,
+        cliSupportsLsp,
+        lspServers,
+      });
+      if (!decision.ok) throw new ComposedLspReplacementRefusedError(decision.reason);
+      lspContract = 2;
+      replacing = true;
+    } else if (existing) {
       lspContract = (existing.declaredDeps as { lspInstallContractVersion?: 1 | 2 } | null)
         ?.lspInstallContractVersion;
     } else if (
@@ -947,6 +1006,52 @@ export const declareDepsStep: StepDefinition<DeclareDepsDetect, DeclareDepsApply
 
     assertDependencyTokens(declaredDeps);
 
+    if (replacing && existing) {
+      const replacement = await ctx.db.transaction(async (tx) => {
+        const [created] = await tx
+          .insert(schema.envTemplates)
+          .values({
+            userId: ctx.userId,
+            repositoryId: task?.repositoryId ?? null,
+            name: templateName,
+            baseImage,
+            declaredDeps,
+            status: 'pending',
+          })
+          .returning();
+        if (!created) throw new Error('failed to insert env_template row');
+        // The insert precedes the lock (it takes KEY SHARE on the repository row); see
+        // lockTaskForComposedLsp for the lock order. The refusal rolls the insert back.
+        const locked = await lockTaskForComposedLsp(tx, {
+          userId: ctx.userId,
+          taskId: ctx.taskId,
+        });
+        if (!locked) throw new Error('task not found');
+        const decision = await decideLegacyLspReplacement(tx, {
+          taskId: ctx.taskId,
+          userId: ctx.userId,
+          defaultProviderId: locked.cliProviderId ?? ctx.cliProviderId,
+          rolloutOn: COMPOSED_LSP_NEW_ENVIRONMENT_ADOPTION,
+          cliSupportsLsp,
+          lspServers,
+        });
+        if (!decision.ok) throw new ComposedLspReplacementRefusedError(decision.reason);
+        await linkTaskToEnvTemplate(tx, ctx.taskId, created.id);
+        await tx.insert(schema.taskEvents).values({
+          taskId: ctx.taskId,
+          taskStepId: ctx.taskStepId,
+          eventType: 'env_template.replaced',
+          payload: { sourceTemplateId: existing.id, candidateTemplateId: created.id },
+        });
+        return created;
+      });
+      ctx.logger.info(
+        { envTemplateId: replacement.id, sourceTemplateId: existing.id, baseImage, templateName },
+        'legacy env template replaced by a composed LSP template',
+      );
+      return { envTemplateId: replacement.id, baseImage };
+    }
+
     // A changed base image or declared-deps set makes the previously saved
     // Dockerfile (and any image built from it) stale — it was rendered from
     // the OLD inputs. Drop both so step 02 re-renders from the new deps and
@@ -1002,20 +1107,57 @@ export const declareDepsStep: StepDefinition<DeclareDepsDetect, DeclareDepsApply
       return { envTemplateId: existing.id, baseImage };
     }
 
-    const inserted = await ctx.db
-      .insert(schema.envTemplates)
-      .values({
-        userId: ctx.userId,
-        repositoryId: task?.repositoryId ?? null,
-        name: templateName,
-        baseImage,
-        declaredDeps,
-        status: 'pending',
-      })
-      .returning();
-    const row = inserted[0];
-    if (!row) throw new Error('failed to insert env_template row');
-    await linkTaskToEnvTemplate(ctx.db, ctx.taskId, row.id);
+    const insertTemplate = (handle: Pick<Database, 'insert'>, deps: Record<string, unknown>) =>
+      handle
+        .insert(schema.envTemplates)
+        .values({
+          userId: ctx.userId,
+          repositoryId: task?.repositoryId ?? null,
+          name: templateName,
+          baseImage,
+          declaredDeps: deps,
+          status: 'pending',
+        })
+        .returning();
+    let row: typeof schema.envTemplates.$inferSelect | undefined;
+    // Only a new environment adopts. A fork carries the contract of the row it was forked from, which
+    // the task already runs under, so it needs no decision.
+    if (!existing && lspContract === 2) {
+      row = await ctx.db.transaction(async (tx) => {
+        const [created] = await insertTemplate(tx, declaredDeps);
+        if (!created) throw new Error('failed to insert env_template row');
+        // The insert precedes the lock (it takes KEY SHARE on the repository row); see
+        // lockTaskForComposedLsp for the lock order.
+        const locked = await lockTaskForComposedLsp(tx, {
+          userId: ctx.userId,
+          taskId: ctx.taskId,
+        });
+        if (!locked) throw new Error('task not found');
+        const decision = await composedLspAdoptable(tx, {
+          taskId: ctx.taskId,
+          userId: ctx.userId,
+          defaultProviderId: locked.cliProviderId ?? ctx.cliProviderId,
+        });
+        if (!decision.ok) {
+          // Demote: store exactly what the non-adopting path stores, no contract key.
+          const { lspInstallContractVersion: _contract, ...legacyDeps } = declaredDeps;
+          await tx
+            .update(schema.envTemplates)
+            .set({ declaredDeps: legacyDeps })
+            .where(eq(schema.envTemplates.id, created.id));
+          ctx.logger.info(
+            { taskId: ctx.taskId, lspInstallContract: null, reason: decision.reason },
+            'composed LSP adoption refused under the task lock; storing a legacy template',
+          );
+        }
+        await linkTaskToEnvTemplate(tx, ctx.taskId, created.id);
+        return created;
+      });
+    } else {
+      [row] = await insertTemplate(ctx.db, declaredDeps);
+      if (!row) throw new Error('failed to insert env_template row');
+      await linkTaskToEnvTemplate(ctx.db, ctx.taskId, row.id);
+    }
     ctx.logger.info({ envTemplateId: row.id, baseImage, templateName }, 'env template declared');
     return { envTemplateId: row.id, baseImage };
   },
@@ -1102,6 +1244,8 @@ export interface DeclareDepsFormValues extends FormValues {
   lspServers?: LspKey[];
   /** Opt out of composed installation for a new environment; a frozen parked form lacks it. */
   keepLegacyLspInstall?: boolean;
+  /** Human-only tick: replace the linked legacy environment with a composed-LSP one. */
+  replaceLegacyLspInstall?: boolean;
   preinstallDeps: boolean;
   browserTesting: boolean;
   /** '' = system default, else a verified Chromium-family type. */
@@ -1111,6 +1255,13 @@ export interface DeclareDepsFormValues extends FormValues {
   browserVersion_chrome?: string;
   browserVersion_edge?: string;
   extraPackages: string;
+}
+
+/** True when a stored template's LSP install contract is absent or 1. */
+function isLegacyLspContract(declaredDeps: unknown): boolean {
+  const v = (declaredDeps as { lspInstallContractVersion?: number } | null)
+    ?.lspInstallContractVersion;
+  return v === undefined || v === 1;
 }
 
 export function computeBaseImage(containerTool: ContainerTool): string {

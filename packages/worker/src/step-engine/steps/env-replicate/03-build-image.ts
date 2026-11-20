@@ -17,6 +17,8 @@ export interface BuildImageDetect {
   dockerfile: string;
   currentImageId: string | null;
   status: string;
+  /** The row's declared LSP install contract; absent in older cached detect output (legacy). */
+  lspInstallContractVersion?: 1 | 2;
 }
 
 export interface BuildImageApply {
@@ -94,11 +96,16 @@ export function createBuildImageStep(
         dockerfile: row.generatedDockerfile,
         currentImageId,
         status,
+        lspInstallContractVersion: (
+          row.declaredDeps as { lspInstallContractVersion?: 1 | 2 } | null
+        )?.lspInstallContractVersion,
       };
     },
 
     form(_ctx, detected): FormSchema {
-      const defaultTag = `${DEFAULT_TAG_PREFIX}-${slugifyName(detected.name)}:latest`;
+      const idSuffix =
+        detected.lspInstallContractVersion === 2 ? `-${detected.envTemplateId.slice(0, 8)}` : '';
+      const defaultTag = `${DEFAULT_TAG_PREFIX}-${slugifyName(detected.name)}${idSuffix}:latest`;
       const alreadyBuilt = detected.currentImageId !== null && detected.status === 'ready';
       const fields: FormSchema['fields'] = [
         {

@@ -107,7 +107,13 @@ function callLoggingDb(opts: {
     }),
     userStepCliPreferences: table('userStepCliPreferences', () => opts.saved),
   };
-  const db = { query: tables } as unknown as Database;
+  const db = {
+    query: tables,
+    // The composed-LSP provider lock reads the task row FOR NO KEY UPDATE.
+    select: () => ({
+      from: () => ({ where: () => ({ for: async () => [{ cliProviderId: null }] }) }),
+    }),
+  } as unknown as Database;
   return { db, calls };
 }
 
@@ -372,6 +378,10 @@ function writeDb(providers: CliProviderRecord[] = PROVIDERS) {
       // The composed-LSP provider lock reads the task row; no environment template means no lock.
       tasks: { findFirst: async () => ({ cliProviderId: null, envTemplateId: null }) },
     },
+    // The lock reads the task row FOR NO KEY UPDATE.
+    select: () => ({
+      from: () => ({ where: () => ({ for: async () => [{ cliProviderId: null }] }) }),
+    }),
     insert: () => ({
       values: (values: Record<string, unknown>) => ({
         onConflictDoUpdate: async (config: Record<string, unknown>) => {

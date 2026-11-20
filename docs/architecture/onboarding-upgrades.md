@@ -101,9 +101,10 @@ repeats the checks once 01b is done. Retry 04 or Retry 01b resets the final step
 false until it completes again. It skips absent/1 templates. The writer in 01 carries existing
 contract metadata forward like savedWebserver and enables 2 only for a new environment whose run
 list holds 04, worktree setup, 01b and the final step in that order. See [Sandbox](sandbox.md).
-A manifest bump alone cannot migrate a stored/custom Dockerfile; 01 never replaces an absent/1
-template with 2, and the legacy installer stays until replacement images exist and are verified.
-See [Sandbox](sandbox.md).
+A manifest bump alone cannot migrate a stored/custom Dockerfile; 01 replaces an absent/1
+template with 2 only when a person ticks the replacement on its form, never from a manifest bump,
+and the legacy installer stays until replacement images exist and are verified. See
+[Sandbox](sandbox.md).
 
 ## Upgrades and rollbacks
 

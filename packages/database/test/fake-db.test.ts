@@ -1028,3 +1028,99 @@ describe('the clamped park wait SET expressions', () => {
     expect(fake.rows(steps)[0]!.idleMs).toBe(expression);
   });
 });
+
+describe('row locks on the fake', () => {
+  function locked(rowLocks: boolean | undefined) {
+    const fake = createFakeDb(
+      { tasks: schema.tasks },
+      rowLocks === undefined ? undefined : { rowLocks },
+    );
+    for (const id of [TASK, TASK2]) {
+      fake.insert(schema.tasks, { id, userId: USER, type: 'workflow', title: 'task' });
+    }
+    const db = fake.db as unknown as Database;
+    const lock = (
+      tx: Pick<Database, 'select'>,
+      strength: 'update' | 'no key update' | 'share' | 'key share',
+    ) =>
+      tx
+        .select({ title: schema.tasks.title })
+        .from(schema.tasks)
+        .where(eq(schema.tasks.id, TASK))
+        .for(strength);
+    return { fake, db, lock };
+  }
+
+  it('is exclusive between two transactions, and the waiter sees the committed update', async () => {
+    const { fake, db, lock } = locked(true);
+    const waits: string[] = [];
+    fake.hooks.onWait = (key) => waits.push(key);
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    let held!: () => void;
+    const holding = new Promise<void>((resolve) => (held = resolve));
+    const first = db.transaction(async (tx) => {
+      await lock(tx, 'no key update');
+      expect(fake.rowLocked(schema.tasks, TASK.toUpperCase())).toBe(true);
+      held();
+      await gate;
+      await tx.update(schema.tasks).set({ title: 'changed' }).where(eq(schema.tasks.id, TASK));
+    });
+    await holding;
+    expect(waits).toEqual([]);
+    const second = db.transaction(async (tx) => lock(tx, 'update'));
+    let resumed = false;
+    const secondDone = second.then((rows) => ((resumed = true), rows));
+    release();
+    await first;
+    expect(await secondDone).toEqual([{ title: 'changed' }]);
+    expect(resumed).toBe(true);
+    expect(waits).toEqual([`row:tasks:${TASK}`]);
+    expect(fake.rowLocked(schema.tasks, TASK)).toBe(false);
+  });
+
+  it('is released by commit and by rollback, and never blocks another row', async () => {
+    const { fake, db, lock } = locked(true);
+    await db.transaction(async (tx) => {
+      await lock(tx, 'update');
+      await tx.select().from(schema.tasks).where(eq(schema.tasks.id, TASK2)).for('update');
+      expect(fake.rowLocked(schema.tasks, TASK)).toBe(true);
+      expect(fake.rowLocked(schema.tasks, TASK2)).toBe(true);
+    });
+    expect(fake.rowLocked(schema.tasks, TASK)).toBe(false);
+    await expect(
+      db.transaction(async (tx) => {
+        await lock(tx, 'update');
+        throw new Error('boom');
+      }),
+    ).rejects.toThrow('boom');
+    expect(fake.rowLocked(schema.tasks, TASK)).toBe(false);
+  });
+
+  it('is re-entrant inside one transaction chain and reports no wait', async () => {
+    const { fake, db, lock } = locked(true);
+    const waits: string[] = [];
+    fake.hooks.onWait = (key) => waits.push(key);
+    await db.transaction(async (tx) => {
+      await lock(tx, 'update');
+      await tx.transaction(async (inner) => lock(inner, 'no key update'));
+    });
+    expect(waits).toEqual([]);
+  });
+
+  it('takes nothing with rowLocks off, outside a transaction, or for a share lock', async () => {
+    const off = locked(undefined);
+    await off.db.transaction(async (tx) => {
+      await off.lock(tx, 'update');
+      expect(off.fake.rowLocked(schema.tasks, TASK)).toBe(false);
+    });
+    const on = locked(true);
+    await on.lock(on.db, 'update');
+    expect(on.fake.rowLocked(schema.tasks, TASK)).toBe(false);
+    await on.db.transaction(async (tx) => {
+      await on.lock(tx, 'share');
+      await on.lock(tx, 'key share');
+      expect(on.fake.rowLocked(schema.tasks, TASK)).toBe(false);
+    });
+  });
+});

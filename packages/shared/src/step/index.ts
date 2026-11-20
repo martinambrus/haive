@@ -680,6 +680,9 @@ export interface StepDefinition<TDetect = unknown, TApply = unknown> {
   /** Keep validated answers sparse when apply distinguishes submitted fields from defaults.
    * The step supplies defaults for omitted fields; saved answers retain that distinction. */
   readonly preserveOmittedFormFields?: boolean;
+  /** Form keys no task pre-answer or prior-task reuse may supply;
+   * only a person's own submit sets them. */
+  readonly humanOnlyFormFields?: readonly string[];
   /** When this step parks on a form (waiting_form), set the TASK status to this instead
    *  of the default 'waiting_user'. Used by 13-pr-wait to surface a task waiting for its
    *  PR to merge as 'waiting_pr'. Only takes effect when the step actually parks. */

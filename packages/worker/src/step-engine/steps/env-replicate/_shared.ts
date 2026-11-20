@@ -41,7 +41,7 @@ export async function getTaskEnvTemplate(
 }
 
 export async function linkTaskToEnvTemplate(
-  db: Database,
+  db: Pick<Database, 'update'>,
   taskId: string,
   envTemplateId: string,
 ): Promise<void> {

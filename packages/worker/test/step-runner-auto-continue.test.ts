@@ -2092,3 +2092,80 @@ it.each(['required pre-dispatch', 'module loadRoleOutput'])(
     expect(apply).toHaveBeenCalledTimes(path === 'required pre-dispatch' ? 0 : 1);
   },
 );
+
+// Human-only form fields: a key a step lists is never taken from a pre-answer.
+describe('advanceStep humanOnlyFormFields pre-answers', () => {
+  const SECRET_FORM: FormSchema = {
+    ...QUESTION_FORM,
+    fields: [...QUESTION_FORM.fields, { type: 'checkbox', id: 'secretTick', label: 'Secret' }],
+  };
+  const humanOnlyStep = () =>
+    ({
+      ...makeStep({ form: () => SECRET_FORM }),
+      humanOnlyFormFields: ['secretTick'],
+    }) as StepDefinition;
+  const defaultOf = (state: MockState, id: string) => {
+    const field = (state.taskStepRow.formSchema as FormSchema).fields.find((f) => f.id === id);
+    return field && 'default' in field ? field.default : undefined;
+  };
+
+  it('B7 auto mode does not submit a pre-answered human-only key', async () => {
+    const state = freshState();
+    state.taskRow = {
+      id: 'task-1',
+      autoContinue: true,
+      preAnswers: { 'cfg-step': { action: 'skip', secretTick: true } },
+    };
+    expect((await run(state, humanOnlyStep())).status).toBe('done');
+    const values = state.taskStepRow.formValues as Record<string, unknown>;
+    expect(values.action).toBe('skip');
+    expect(values.secretTick).not.toBe(true);
+  });
+
+  it('B7 a form that stops does not overlay a pre-answered human-only key', async () => {
+    const state = freshState();
+    state.taskRow = {
+      id: 'task-1',
+      autoContinue: false,
+      preAnswers: { 'cfg-step': { action: 'skip', secretTick: true } },
+    };
+    expect((await run(state, humanOnlyStep())).status).toBe('waiting_form');
+    expect(defaultOf(state, 'secretTick')).not.toBe(true);
+    expect(defaultOf(state, 'action')).toBe('skip');
+  });
+
+  it('B7 a pre-answer holding only human-only keys counts as no pre-answer', async () => {
+    const state = freshState();
+    state.taskRow = {
+      id: 'task-1',
+      autoContinue: true,
+      preAnswers: { 'cfg-step': { secretTick: true } },
+    };
+    const step = humanOnlyStep();
+    const apply = vi.fn(step.apply);
+    step.apply = apply;
+    expect((await run(state, step)).status).toBe('waiting_form');
+    expect(apply).not.toHaveBeenCalled();
+    expect(defaultOf(state, 'secretTick')).not.toBe(true);
+  });
+
+  it('B7 a values submit by a person still reaches apply with the human-only key (PIN)', async () => {
+    const state = freshState();
+    state.taskRow = { id: 'task-1', autoContinue: false, preAnswers: null };
+    const result = await run(state, humanOnlyStep(), { action: 'skip', secretTick: true });
+    expect(result.status).toBe('done');
+    expect(state.taskStepRow.formValues).toMatchObject({ action: 'skip', secretTick: true });
+    expect(state.taskStepRow.output).toMatchObject({ values: { secretTick: true } });
+  });
+
+  it('B7 a step without the property still receives the same pre-answer unchanged (PIN)', async () => {
+    const state = freshState();
+    state.taskRow = {
+      id: 'task-1',
+      autoContinue: true,
+      preAnswers: { 'cfg-step': { action: 'skip', secretTick: true } },
+    };
+    expect((await run(state, makeStep({ form: () => SECRET_FORM }))).status).toBe('done');
+    expect(state.taskStepRow.formValues).toMatchObject({ action: 'skip', secretTick: true });
+  });
+});
