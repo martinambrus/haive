@@ -1431,7 +1431,7 @@ export async function handleSignOutJob(
     // Claude's subscription login lives in the env-injected CLAUDE_CODE_OAUTH_TOKEN secret
     // (the login flow even strips it out of envVars), NOT in a volume file — so removing
     // volumes alone leaves the provider authenticated and the next login skips browser auth.
-    // Delete the login token of every row sharing the login and the clicked row's usage token
+    // Delete the login token and the usage grant and snapshot of every row sharing the login
     // to log out for real. A user-entered BYOK key (apiKeyEnvName, e.g. ANTHROPIC_AUTH_TOKEN)
     // is not a login artifact -> kept.
     await release.assertHeld();
@@ -1451,10 +1451,13 @@ export async function handleSignOutJob(
           .delete(schema.cliProviderSecrets)
           .where(
             and(
-              eq(schema.cliProviderSecrets.providerId, target.id),
+              inArray(schema.cliProviderSecrets.providerId, ids),
               eq(schema.cliProviderSecrets.secretName, CLAUDE_USAGE_OAUTH_SECRET),
             ),
           );
+        await tx
+          .delete(schema.usageWindowSnapshots)
+          .where(inArray(schema.usageWindowSnapshots.providerId, ids));
       }
       await release.assertHeld();
       if (failed.length === 0) {

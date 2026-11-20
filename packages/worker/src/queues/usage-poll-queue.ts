@@ -7,6 +7,7 @@ import {
   QUEUE_NAMES,
   TASK_JOB_NAMES,
   configService,
+  lockLoginSet,
   logger,
   parseAllowanceWatchMode,
   type AuthMode,
@@ -21,7 +22,6 @@ import {
   claudeTokenNeedsRefresh,
   isClaudeRefreshRejected,
   refreshClaudeToken,
-  type ClaudeOauthTokens,
 } from '@haive/shared/claude-oauth';
 import { USAGE_PROVIDERS, type ProviderUsageConfig } from '../usage-window/fetchers/index.js';
 import {
@@ -29,11 +29,14 @@ import {
   allowanceVerdict,
   serverErrorVerdict,
 } from '../usage-window/allowance-watch.js';
+import { readAuthVolumeFile, readProviderSecretToken } from '../usage-window/token-source.js';
 import {
-  readAuthVolumeFile,
-  readProviderSecretToken,
-  writeProviderSecret,
-} from '../usage-window/token-source.js';
+  convergeSetCopies,
+  pickGrantHolder,
+  rotateGrantCopies,
+  type GrantHolder,
+} from '../usage-window/usage-grant-set.js';
+import { logAuditEvent } from '../audit.js';
 import { harvestInTaskCredentials } from '../usage-window/credential-harvest.js';
 import { refreshExpiringCliCredentials } from '../usage-window/credential-refresh.js';
 import { authDenialSeverity, nextAuthStrike } from '../usage-window/types.js';
@@ -68,7 +71,7 @@ const FETCH_CONCURRENCY = 4;
 const BACKOFF_BASE_MS = 10 * 60 * 1000; // first 429 -> skip ~2 ticks
 const BACKOFF_MAX_MS = 6 * 60 * 60 * 1000;
 
-/** Per-provider 429 backoff, kept in-process (the poll worker is a singleton). */
+/** 429 backoff per gate key (the login-set scope for Claude, else the provider id), kept in-process (the poll worker is a singleton). */
 const backoff = new Map<string, { until: number; strikes: number }>();
 
 // Extra cushion over a vendor's documented minimum so clock drift / vendor-side
@@ -83,7 +86,7 @@ const MIN_POLL_INTERVAL_MS: Partial<Record<CliProviderName, number>> = {
 };
 const DEFAULT_MIN_POLL_INTERVAL_MS = 60 * 1000 + POLL_LEEWAY_MS;
 
-/** Per-provider time of the last actual vendor call (in-process; the poll worker is a
+/** Per-gate-key time of the last actual vendor call (in-process; the poll worker is a
  *  singleton). Drives the min-interval throttle; cleared on restart, where a fresh boot
  *  poll is fine. */
 const lastPollAt = new Map<string, number>();
@@ -91,7 +94,7 @@ const lastPollAt = new Map<string, number>();
 /** Providers whose stored usage refresh token the token endpoint has rejected with
  *  invalid_grant — revoked, or (common when one account is registered as several
  *  providers sharing the OAuth client) superseded when a sibling refreshed. Keyed by
- *  provider id -> the exact dead refresh token, so the gate self-clears the instant a
+ *  gate key (the login-set scope) -> the exact dead refresh token, so the gate self-clears the instant a
  *  reconnect rotates the stored token. Without it every tick re-fires a doomed refresh
  *  (400) then a fetch (401). In-process (singleton worker); cleared on restart, where
  *  one re-discovery is fine. */
@@ -102,13 +105,13 @@ const deadUsageRefreshToken = new Map<string, string>();
  *  insufficient-scope grant. This is the no-refresh sibling of deadUsageRefreshToken:
  *  it catches the providers that have no OAuth refresh step at all (codex/zai/gemini),
  *  plus any token a refresh renewed that the usage endpoint still denies. Keyed by
- *  provider id -> the exact denied token, so a reconnect/edit that rotates the token
+ *  gate key -> the exact denied token, so a reconnect/edit that rotates the token
  *  (or a healthy refresh minting a new access token) lifts the gate on its own. Stops
  *  the poller re-hitting a guaranteed deny every tick once needs_reconnect is recorded.
  *  In-process; cleared on restart, where one re-probe is fine. */
 const deadUsageFetchToken = new Map<string, string>();
 
-/** Consecutive auth-denial (401/403) strikes per provider. Escalation to needs_reconnect /
+/** Consecutive auth-denial (401/403) strikes per gate key. Escalation to needs_reconnect /
  *  hidden error waits for AUTH_STRIKE_THRESHOLD denials in a row, so a transient 403
  *  (codex/Cloudflare, gemini/Google) or a just-expired volumeJson token no longer nags on the
  *  first hit. Reset on any ok, 429, or other non-auth response. In-process (singleton worker);
@@ -164,78 +167,63 @@ interface ProviderRow {
   envVars: Record<string, string> | null;
 }
 
-/** Read a stored ClaudeOauthTokens secret, refreshing (and re-storing the rotated
- *  token) when the access token is near expiry. Returns null when not connected.
- *  Ordinary reads need no lock. A refresh re-reads under the shared auth lock so it
- *  cannot spend a refresh token replaced or removed since the initial read. */
-async function resolveOauthRefreshToken(
+/** Usage grant of a login set: the holder's copy, refreshed when its access token is near
+ *  expiry. One refresh serves every identical copy. Returns null when the set is not connected,
+ *  the grant is unusable or dead, or authentication is busy. Ordinary reads need no lock. A
+ *  refresh re-picks the holder under the shared auth lock so it cannot spend a refresh token
+ *  replaced or removed since the initial read. */
+async function resolveSetGrant(
   db: Database,
-  provider: ProviderRow,
-  secretName: string,
-): Promise<{ token: string } | null> {
-  const readStored = async (): Promise<ClaudeOauthTokens | null> => {
-    const raw = await readProviderSecretToken(db, provider.id, secretName);
-    if (!raw) return null; // usage tracking not connected for this provider
-    let stored: ClaudeOauthTokens;
-    try {
-      stored = JSON.parse(raw) as ClaudeOauthTokens;
-    } catch {
-      return null;
-    }
-    if (!stored.accessToken) return null;
-
-    // Known-dead refresh token: skip both the guaranteed-400 refresh and the doomed 401
-    // fetch a stale access token would draw. Returns null so pollProvider treats the
-    // provider as not pollable and moves on — zero vendor calls. A reconnect writes a new
-    // refresh token, which no longer matches this entry, so the gate lifts on its own.
-    if (stored.refreshToken && deadUsageRefreshToken.get(provider.id) === stored.refreshToken) {
-      return null;
-    }
-    return stored;
+  rep: ProviderRow,
+  key: string,
+): Promise<GrantHolder | null> {
+  // Known-dead refresh token: skip both the guaranteed-400 refresh and the doomed 401 fetch a
+  // stale access token would draw. A reconnect writes a new refresh token, which no longer
+  // matches this entry, so the gate lifts on its own. No fallback to another member's copy.
+  const pick = async (): Promise<GrantHolder | null> => {
+    const holder = await pickGrantHolder(db, rep);
+    if (!holder) return null;
+    const dead =
+      holder.grant.refreshToken && deadUsageRefreshToken.get(key) === holder.grant.refreshToken;
+    return dead ? null : holder;
   };
 
-  const current = await readStored();
+  const current = await pick();
   if (!current) return null;
-  if (!current.refreshToken || !claudeTokenNeedsRefresh(current.expiresAt)) {
-    return { token: current.accessToken };
+  if (!current.grant.refreshToken || !claudeTokenNeedsRefresh(current.grant.expiresAt)) {
+    return current;
   }
 
-  const release = await tryCliAuthLock(db, cliAuthScope(provider));
+  const release = await tryCliAuthLock(db, key);
   if (!release) {
-    log.debug({ providerId: provider.id }, 'usage OAuth refresh skipped: authentication is busy');
+    log.debug({ providerId: rep.id }, 'usage OAuth refresh skipped: authentication is busy');
     return null;
   }
   try {
-    const stored = await readStored();
-    if (!stored) return null;
+    const holder = await pick();
+    if (!holder) return null;
 
-    if (stored.refreshToken && claudeTokenNeedsRefresh(stored.expiresAt)) {
+    if (holder.grant.refreshToken && claudeTokenNeedsRefresh(holder.grant.expiresAt)) {
       try {
-        const fresh = await refreshClaudeToken(stored.refreshToken);
+        const fresh = await refreshClaudeToken(holder.grant.refreshToken);
         await release.assertHeld();
-        await writeProviderSecret(
-          db,
-          provider.id,
-          secretName,
-          JSON.stringify(fresh),
-          release.assertHeld,
-        );
-        deadUsageRefreshToken.delete(provider.id); // recovered (or was never dead)
-        return { token: fresh.accessToken };
+        const rotated = await rotateGrantCopies(db, rep, holder, fresh, release.assertHeld);
+        deadUsageRefreshToken.delete(key); // recovered (or was never dead)
+        return rotated;
       } catch (err) {
         if (isClaudeRefreshRejected(err)) {
-          // Permanently rejected (revoked, or superseded by a sibling provider sharing
-          // the account). Retrying only re-fires the 400/401 pair each tick. Mark it dead
-          // to stop the churn, and record ONE needs_reconnect snapshot so the UI can
-          // prompt a re-auth instead of the chip silently vanishing.
+          // Permanently rejected (revoked, or superseded by another login that shares the
+          // account). Retrying only re-fires the 400/401 pair each tick. Mark it dead to stop
+          // the churn, and record ONE needs_reconnect snapshot so the UI can prompt a re-auth
+          // instead of the chip silently vanishing.
           log.warn(
-            { providerId: provider.id },
+            { providerId: rep.id },
             'usage OAuth refresh rejected (invalid_grant); marking needs_reconnect, polling paused until re-auth',
           );
-          const written = await writeSnapshotIfCurrent(
+          const written = await writeSetSnapshot(
             db,
-            provider,
-            { token: stored.accessToken },
+            rep,
+            holder,
             {
               ok: false,
               error:
@@ -245,19 +233,19 @@ async function resolveOauthRefreshToken(
             release,
           ).catch(() => false);
           // A skipped/failed write must retry next tick so the reconnect prompt is not lost.
-          if (written) deadUsageRefreshToken.set(provider.id, stored.refreshToken);
+          if (written) deadUsageRefreshToken.set(key, holder.grant.refreshToken);
           return null;
         }
         // Transient (network / 5xx): try the stale token anyway; the fetch surfaces the
         // state without marking the token permanently dead.
         log.warn(
-          { providerId: provider.id, err },
+          { providerId: rep.id, err },
           'claude usage token refresh failed; using stale token',
         );
-        return { token: stored.accessToken };
+        return holder;
       }
     }
-    return { token: stored.accessToken };
+    return holder;
   } finally {
     await release();
   }
@@ -267,27 +255,13 @@ async function resolveToken(
   db: Database,
   provider: ProviderRow,
   cfg: ProviderUsageConfig,
-  refresh = true,
 ): Promise<{ token: string; accountId?: string | null } | null> {
   if (cfg.token.kind === 'secret') {
     const token = await readProviderSecretToken(db, provider.id, cfg.token.secretName);
     return token ? { token } : null;
   }
-  if (cfg.token.kind === 'oauthRefresh') {
-    if (refresh) return resolveOauthRefreshToken(db, provider, cfg.token.secretName);
-    // Snapshot validation only reads: it must never refresh over HTTP while holding
-    // the short write lock, nor turn a disconnected secret into a new credential.
-    const raw = await readProviderSecretToken(db, provider.id, cfg.token.secretName);
-    if (!raw) return null;
-    try {
-      const stored = JSON.parse(raw) as Partial<ClaudeOauthTokens> | null;
-      return typeof stored?.accessToken === 'string' && stored.accessToken
-        ? { token: stored.accessToken }
-        : null;
-    } catch {
-      return null;
-    }
-  }
+  // A login set's usage grant is resolved by resolveSetGrant, never per row.
+  if (cfg.token.kind === 'oauthRefresh') return null;
   const raw = await readAuthVolumeFile(
     {
       userId: provider.userId,
@@ -319,9 +293,7 @@ async function writeSnapshotIfCurrent(
   provider: ProviderRow,
   expected: { token: string; accountId?: string | null },
   outcome: Parameters<typeof upsertSnapshot>[2],
-  held?: CliAuthLock,
 ): Promise<boolean> {
-  if (held) return writeSnapshotUnderLock(db, provider, expected, outcome, held);
   const scope = cliAuthScope(provider);
   const prior = snapshotWrites.get(scope);
   const writing = (async () => {
@@ -344,9 +316,8 @@ async function writeSnapshotUnderLock(
   provider: ProviderRow,
   expected: { token: string; accountId?: string | null },
   outcome: Parameters<typeof upsertSnapshot>[2],
-  held?: CliAuthLock,
 ): Promise<boolean> {
-  const release = held ?? (await tryCliAuthLock(db, cliAuthScope(provider)));
+  const release = await tryCliAuthLock(db, cliAuthScope(provider));
   if (!release) return false;
   try {
     const current = await db.query.cliProviders.findFirst({
@@ -355,7 +326,7 @@ async function writeSnapshotUnderLock(
     if (!current || cliAuthScope(current) !== cliAuthScope(provider)) return false;
     const cfg = USAGE_PROVIDERS[current.name];
     if (!cfg) return false;
-    const creds = await resolveToken(db, current, cfg, false);
+    const creds = await resolveToken(db, current, cfg);
     if (
       !creds ||
       creds.token !== expected.token ||
@@ -366,17 +337,56 @@ async function writeSnapshotUnderLock(
     await upsertSnapshot(db, current, outcome);
     return true;
   } finally {
+    await release();
+  }
+}
+
+/** Snapshot write turn of a login set, under the set's advisory lock (`held`, or tried once:
+ *  busy returns false so the tick retries). The fetch is unlocked, so the holder must still hold
+ *  the exact copy it used. A live fetch converges every differing copy of the set onto the
+ *  holder's; the snapshot then reaches every member holding that copy, all stamped alike.
+ *  Lock order: advisory lock (scope), then the transaction's first lock lockLoginSet (provider
+ *  rows, id order), then secret and snapshot writes. */
+async function writeSetSnapshot(
+  db: Database,
+  rep: ProviderRow,
+  holder: GrantHolder,
+  outcome: Parameters<typeof upsertSnapshot>[2],
+  held?: CliAuthLock,
+): Promise<boolean> {
+  const scope = cliAuthScope(rep);
+  const release = held ?? (await tryCliAuthLock(db, scope));
+  if (!release) return false;
+  try {
+    const result = await db.transaction(async (tx) => {
+      await release.assertHeld();
+      const memberIds = (await lockLoginSet(tx, rep)).map((m) => m.id);
+      const current = await tx.query.cliProviders.findFirst({
+        where: eq(schema.cliProviders.id, rep.id),
+      });
+      if (!memberIds.includes(rep.id) || !current || cliAuthScope(current) !== scope) return null;
+      const copies = await convergeSetCopies(tx, rep, holder, memberIds, outcome.ok);
+      if (!copies) return null;
+      const now = new Date();
+      for (const id of copies.copyIds) await upsertSnapshot(tx, { ...rep, id }, outcome, now);
+      await release.assertHeld();
+      return copies.events;
+    });
+    if (!result) return false;
+    result.forEach(logAuditEvent);
+    return true;
+  } finally {
     if (!held) await release();
   }
 }
 
 async function upsertSnapshot(
-  db: Database,
-  provider: ProviderRow,
+  db: Pick<Database, 'insert'>,
+  provider: Pick<ProviderRow, 'id' | 'userId' | 'name'>,
   outcome:
     Extract<UsageFetchOutcome, { ok: true }> | { ok: false; error: string; reconnect?: boolean },
+  now = new Date(),
 ): Promise<void> {
-  const now = new Date();
   const iso = (s: string | null | undefined): Date | null => (s ? new Date(s) : null);
   if (outcome.ok) {
     const w = outcome.windows;
@@ -429,24 +439,39 @@ async function pollProvider(db: Database, provider: ProviderRow): Promise<void> 
   const cfg = USAGE_PROVIDERS[provider.name];
   if (!cfg) return; // provider has no readable window
 
-  const bo = backoff.get(provider.id);
+  // The Claude usage grant belongs to the login set, so its gates are keyed by the set's scope.
+  const oauth = cfg.token.kind === 'oauthRefresh';
+  const key = oauth ? cliAuthScope(provider) : provider.id;
+
+  const bo = backoff.get(key);
   if (bo && Date.now() < bo.until) return; // still backing off after a 429
 
   // Min-interval throttle: never call a vendor more often than its rate limit allows.
   // The 5-min repeatable tick always clears this; step-finish-triggered ticks may not.
   const minInterval = MIN_POLL_INTERVAL_MS[provider.name] ?? DEFAULT_MIN_POLL_INTERVAL_MS;
-  if (Date.now() - (lastPollAt.get(provider.id) ?? 0) < minInterval) return;
+  if (Date.now() - (lastPollAt.get(key) ?? 0) < minInterval) return;
 
-  const creds = await resolveToken(db, provider, cfg);
-  if (!creds) return; // not logged in / no token -> skip silently (no error row)
+  let creds: { token: string; accountId?: string | null };
+  let write: (outcome: Parameters<typeof upsertSnapshot>[2]) => Promise<boolean>;
+  if (oauth) {
+    const holder = await resolveSetGrant(db, provider, key);
+    if (!holder) return; // not connected / unusable or dead grant -> skip silently
+    creds = { token: holder.grant.accessToken };
+    write = (outcome) => writeSetSnapshot(db, provider, holder, outcome);
+  } else {
+    const resolved = await resolveToken(db, provider, cfg);
+    if (!resolved) return; // not logged in / no token -> skip silently (no error row)
+    creds = resolved;
+    write = (outcome) => writeSnapshotIfCurrent(db, provider, resolved, outcome);
+  }
 
   // Already-denied token: the usage endpoint rejected this exact token (401/403) on a
   // prior tick and it won't change until a re-auth. Skip the call entirely — the
   // needs_reconnect status is already recorded. Keyed on the token, so a reconnect that
   // rotates it lifts the gate on the next tick.
-  if (deadUsageFetchToken.get(provider.id) === creds.token) return;
+  if (deadUsageFetchToken.get(key) === creds.token) return;
 
-  lastPollAt.set(provider.id, Date.now()); // record the actual vendor-call time
+  lastPollAt.set(key, Date.now()); // record the actual vendor-call time
 
   const baseUrl = provider.envVars?.ANTHROPIC_BASE_URL ?? null;
   const ctx: UsageFetchContext = {
@@ -459,10 +484,10 @@ async function pollProvider(db: Database, provider: ProviderRow): Promise<void> 
   const outcome = await cfg.fetch(creds.token, ctx);
 
   if (!outcome.ok && outcome.rateLimited) {
-    authStrikes.delete(provider.id); // 429 is a non-auth response → reset the auth-denial streak
+    authStrikes.delete(key); // 429 is a non-auth response → reset the auth-denial streak
     const strikes = (bo?.strikes ?? 0) + 1;
     const until = Date.now() + Math.min(BACKOFF_MAX_MS, BACKOFF_BASE_MS * 2 ** (strikes - 1));
-    backoff.set(provider.id, { until, strikes });
+    backoff.set(key, { until, strikes });
     log.warn(
       { providerId: provider.id, provider: provider.name, strikes },
       'usage endpoint 429; backing off',
@@ -475,11 +500,8 @@ async function pollProvider(db: Database, provider: ProviderRow): Promise<void> 
     // token the CLI refreshes itself, so hold the prior snapshot and only escalate once
     // AUTH_STRIKE_THRESHOLD denials land in a row. Below the threshold we neither gate the
     // token nor write an error row, so a good prior reading stays visible.
-    const { strikes, action } = nextAuthStrike(
-      authStrikes.get(provider.id) ?? 0,
-      AUTH_STRIKE_THRESHOLD,
-    );
-    authStrikes.set(provider.id, strikes);
+    const { strikes, action } = nextAuthStrike(authStrikes.get(key) ?? 0, AUTH_STRIKE_THRESHOLD);
+    authStrikes.set(key, strikes);
     if (action === 'hold') {
       log.debug(
         { providerId: provider.id, provider: provider.name, strikes },
@@ -492,8 +514,8 @@ async function pollProvider(db: Database, provider: ProviderRow): Promise<void> 
     // streak. A self-healing provider (codex/gemini) records a hidden `error` instead of the
     // actionable needs_reconnect nag — UNLESS the token it rejected had not expired yet, which
     // means the vendor revoked it and no amount of waiting for the CLI to refresh will help.
-    backoff.delete(provider.id);
-    authStrikes.delete(provider.id);
+    backoff.delete(key);
+    authStrikes.delete(key);
     const reconnectable =
       authDenialSeverity({
         reconnectable: cfg.reconnectable !== false,
@@ -504,7 +526,7 @@ async function pollProvider(db: Database, provider: ProviderRow): Promise<void> 
       { providerId: provider.id, provider: provider.name, error: outcome.error, reconnectable },
       'usage endpoint rejected the token past the strike threshold; pausing polls until it rotates',
     );
-    const written = await writeSnapshotIfCurrent(db, provider, creds, {
+    const written = await write({
       ok: false,
       // "rejected", not "expired": this branch now also covers a token the vendor revoked
       // while it was still within its own lifetime, and a diagnostic column that names the
@@ -515,15 +537,15 @@ async function pollProvider(db: Database, provider: ProviderRow): Promise<void> 
       reconnect: reconnectable,
     });
     // Contention must not permanently suppress a denial whose snapshot was skipped.
-    if (written) deadUsageFetchToken.set(provider.id, creds.token);
-    else authStrikes.set(provider.id, strikes);
+    if (written) deadUsageFetchToken.set(key, creds.token);
+    else authStrikes.set(key, strikes);
     return;
   }
 
-  authStrikes.delete(provider.id); // any non-auth response resets the auth-denial streak
-  backoff.delete(provider.id); // any non-429 response clears the 429 backoff
-  if (outcome.ok) deadUsageFetchToken.delete(provider.id); // recovered / token rotated
-  await writeSnapshotIfCurrent(db, provider, creds, outcome);
+  authStrikes.delete(key); // any non-auth response resets the auth-denial streak
+  backoff.delete(key); // any non-429 response clears the 429 backoff
+  if (outcome.ok) deadUsageFetchToken.delete(key); // recovered / token rotated
+  await write(outcome);
 }
 
 export async function runUsagePollTick(db: Database): Promise<void> {
@@ -548,7 +570,21 @@ export async function runUsagePollTick(db: Database): Promise<void> {
       envVars: true,
     },
   })) as ProviderRow[];
-  const targets = providers.filter((p) => supported.has(p.name));
+  // Providers of one Claude login set share one usage grant: poll the set once, through its
+  // enabled member with the smallest id.
+  const targets: ProviderRow[] = [];
+  const setReps = new Map<string, ProviderRow>();
+  for (const p of providers) {
+    if (!supported.has(p.name)) continue;
+    if (USAGE_PROVIDERS[p.name]?.token.kind !== 'oauthRefresh') {
+      targets.push(p);
+      continue;
+    }
+    const scope = cliAuthScope(p);
+    const rep = setReps.get(scope);
+    if (!rep || p.id < rep.id) setReps.set(scope, p);
+  }
+  targets.push(...setReps.values());
 
   if (targets.length > 0) {
     for (let i = 0; i < targets.length; i += FETCH_CONCURRENCY) {

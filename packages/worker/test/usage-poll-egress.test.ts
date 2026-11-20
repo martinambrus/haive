@@ -14,7 +14,6 @@ vi.mock('@haive/database', async (original) => ({
 vi.mock('../src/usage-window/token-source.js', () => ({
   readProviderSecretToken: async () => 'fixture-token',
   readAuthVolumeFile: async () => null,
-  writeProviderSecret: vi.fn(),
 }));
 
 import { runUsagePollTick } from '../src/queues/usage-poll-queue.js';

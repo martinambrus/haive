@@ -34,9 +34,26 @@ vi.mock('@haive/database', async (original) => ({
   ...(await original<typeof import('@haive/database')>()),
   tryCliAuthLock: h.acquire,
 }));
-vi.mock('../src/usage-window/token-source.js', async (original) => ({
-  ...(await original<typeof import('../src/usage-window/token-source.js')>()),
-  readProviderSecretToken: h.read,
+// The fake db cannot join snapshots to secrets or update one row from another: the holder is
+// built from the mocked read, its ciphertext identity being the stored string, and convergence is
+// pinned by the real-database controls. The rotation write stays real.
+vi.mock('../src/usage-window/usage-grant-set.js', async (original) => ({
+  ...(await original<typeof import('../src/usage-window/usage-grant-set.js')>()),
+  pickGrantHolder: async (_db: unknown, rep: { id: string }) => {
+    const raw = (await h.read()) as string | null;
+    if (!raw) return null;
+    try {
+      const grant = JSON.parse(raw);
+      if (!grant?.accessToken) return null;
+      return { providerId: rep.id, encryptedValue: raw, encryptedDek: 'dek', grant };
+    } catch {
+      return null;
+    }
+  },
+  convergeSetCopies: async (_tx: unknown, _rep: unknown, holder: { providerId: string }) => ({
+    events: [],
+    copyIds: [holder.providerId],
+  }),
 }));
 vi.mock('@haive/shared/claude-oauth', async (original) => ({
   ...(await original<typeof import('@haive/shared/claude-oauth')>()),
@@ -46,7 +63,7 @@ vi.mock('../src/cli-adapters/probe-fetch.js', () => ({
   resolveProbeFetch: async () => async () => new Response('{}'),
 }));
 import { runUsagePollTick } from '../src/queues/usage-poll-queue.js';
-import { writeProviderSecret } from '../src/usage-window/token-source.js';
+import { rotateGrantCopies } from '../src/usage-window/usage-grant-set.js';
 import { handleSignOutJob } from '../src/queues/cli-exec-queue.js';
 import type { DockerRunner } from '../src/sandbox/docker-runner.js';
 
@@ -68,6 +85,16 @@ function setup(isolateAuth = true) {
   });
   return fake;
 }
+const GRANT = JSON.stringify({ accessToken: 'old', refreshToken: 'refresh', expiresAt: 0 });
+/** The stored copy of the grant the mocked read returns, as the rotation write finds it. */
+function seedGrant(fake: ReturnType<typeof setup>) {
+  fake.insert(schema.cliProviderSecrets, {
+    providerId: fake.rows(schema.cliProviders)[0]!.id,
+    secretName: 'CLAUDE_USAGE_OAUTH',
+    encryptedValue: GRANT,
+    encryptedDek: 'dek',
+  });
+}
 beforeEach(() => {
   h.acquire.mockReset().mockResolvedValue(h.release);
   h.release.mockClear();
@@ -77,11 +104,7 @@ beforeEach(() => {
     .mockReset()
     .mockImplementation(async () => Response.json({ five_hour: { utilization: 12 } }));
   vi.stubGlobal('fetch', h.fetch);
-  h.read
-    .mockReset()
-    .mockResolvedValue(
-      JSON.stringify({ accessToken: 'old', refreshToken: 'refresh', expiresAt: 0 }),
-    );
+  h.read.mockReset().mockResolvedValue(GRANT);
   h.refresh.mockReset().mockResolvedValue({
     accessToken: 'new',
     refreshToken: 'rotated',
@@ -97,6 +120,7 @@ afterEach(() => {
 });
 it('holds the shared scope across the usage credential read, grant and write without advancing the login generation', async () => {
   const fake = setup();
+  seedGrant(fake);
   h.refresh.mockImplementation(async () => {
     expect(h.acquire).toHaveBeenCalledOnce();
     expect(h.release).not.toHaveBeenCalled();
@@ -116,6 +140,7 @@ it('holds the shared scope across the usage credential read, grant and write wit
 });
 it('a usage refresh after a sign-out request still removes the volumes and both Claude secrets', async () => {
   const fake = setup();
+  seedGrant(fake);
   const provider = fake.rows(schema.cliProviders)[0]!;
   const payload = {
     providerId: provider.id as string,
@@ -162,67 +187,32 @@ it('logs and skips refresh while sign-out or a credential writer owns the scope'
     expect.any(String),
   );
 });
-it('leaves the usage secret and login generation unchanged when the upsert fails', async () => {
+it('leaves the usage secret and login generation unchanged when the rotation update fails', async () => {
   const fake = setup();
-  fake.hooks.beforeInsert = async () => {
-    throw new Error('upsert refused');
+  seedGrant(fake);
+  const provider = fake.rows(schema.cliProviders)[0]!;
+  fake.hooks.beforeUpdate = async () => {
+    throw new Error('update refused');
   };
   await expect(
-    writeProviderSecret(
+    rotateGrantCopies(
       fake.db as unknown as Database,
-      fake.rows(schema.cliProviders)[0]!.id as string,
-      'CLAUDE_USAGE_OAUTH',
-      'new',
+      provider as any,
+      {
+        providerId: provider.id as string,
+        encryptedValue: GRANT,
+        encryptedDek: 'dek',
+        grant: JSON.parse(GRANT),
+      },
+      { accessToken: 'new', refreshToken: 'rotated', expiresAt: Date.now() + 100000, scopes: [] },
       h.release.assertHeld,
     ),
-  ).rejects.toThrow('upsert refused');
-  expect(fake.rows(schema.cliProviderSecrets)).toHaveLength(0);
+  ).rejects.toThrow('update refused');
+  expect(fake.rows(schema.cliProviderSecrets)).toHaveLength(1);
+  expect(fake.rows(schema.cliProviderSecrets)[0]!.encryptedValue).toBe(GRANT);
   expect(fake.rows(schema.cliProviders)[0]!.authGeneration).toBe(
     '00000000-0000-4000-8000-000000000001',
   );
-});
-
-it('polls two same-scope providers unlocked and serialises their short snapshot writes', async () => {
-  const fake = setup(false);
-  const first = fake.rows(schema.cliProviders)[0]!;
-  fake.insert(schema.cliProviders, { ...first, id: randomUUID() });
-  const scopes = new Set<string>();
-  h.acquire.mockImplementation(async (_db, scope: string) => {
-    if (scopes.has(scope)) return null;
-    scopes.add(scope);
-    return Object.assign(
-      async () => {
-        scopes.delete(scope);
-      },
-      {
-        assertHeld: async () => {
-          if (!scopes.has(scope)) throw new Error('lock lost');
-        },
-      },
-    );
-  });
-  h.read.mockResolvedValue(
-    JSON.stringify({
-      accessToken: 'fresh',
-      refreshToken: 'refresh',
-      expiresAt: Date.now() + 3600000,
-    }),
-  );
-  await runUsagePollTick(fake.db as unknown as Database);
-  expect(h.fetch).toHaveBeenCalledTimes(2);
-  expect(
-    fake
-      .rows(schema.usageWindowSnapshots)
-      .map((row) => row.providerId)
-      .sort(),
-  ).toEqual(
-    fake
-      .rows(schema.cliProviders)
-      .map((row) => row.id)
-      .sort(),
-  );
-  expect(h.acquire).toHaveBeenCalledTimes(2);
-  expect(h.refresh).not.toHaveBeenCalled();
 });
 
 it.each([
@@ -240,7 +230,7 @@ it.each([
     return h.release;
   });
   await runUsagePollTick(fake.db as unknown as Database);
-  expect(h.read).toHaveBeenCalledTimes(token ? 3 : 2);
+  expect(h.read).toHaveBeenCalledTimes(2);
   expect(h.refresh).not.toHaveBeenCalled();
   expect(fake.rows(schema.cliProviderSecrets)).toHaveLength(0);
   if (token) {
@@ -262,7 +252,7 @@ it('refreshes using the token re-read under the lock', async () => {
     JSON.stringify({ accessToken: 'obsolete', refreshToken: 'spent', expiresAt: 0 }),
   );
   await runUsagePollTick(fake.db as unknown as Database);
-  expect(h.read).toHaveBeenCalledTimes(3);
+  expect(h.read).toHaveBeenCalledTimes(2);
   expect(h.refresh).toHaveBeenCalledWith('refresh');
   expect(h.release).toHaveBeenCalledTimes(2);
 });
@@ -271,6 +261,7 @@ it.each(['key', 'write'])(
   'rolls back refreshed usage credentials after lock loss during %s',
   async (phase) => {
     const fake = setup();
+    seedGrant(fake);
     const lose = () => {
       h.release.assertHeld.mockRejectedValue(new Error('lock lost'));
     };
@@ -280,12 +271,12 @@ it.each(['key', 'write'])(
         return 'ab'.repeat(32);
       });
     else
-      fake.hooks.beforeInsert = async (table) => {
+      fake.hooks.beforeUpdate = async (table) => {
         if (table === schema.cliProviderSecrets) lose();
       };
     await runUsagePollTick(fake.db as unknown as Database);
     expect(h.refresh).toHaveBeenCalledOnce();
-    expect(fake.rows(schema.cliProviderSecrets)).toHaveLength(0);
+    expect(fake.rows(schema.cliProviderSecrets)).toMatchObject([{ encryptedValue: GRANT }]);
   },
 );
 
