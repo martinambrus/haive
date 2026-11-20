@@ -756,6 +756,33 @@ status: open · kind: design · found: translator assembly milestone (module PR 
 
 In `martinambrus/haive-module-translator`, PRE-EXISTING design. Consent reserves allowance for model calls only, so the render step can fail on the allowance after the translation was paid for; each render of changed text stores another artifact, and the operator extension raises calls only. The same question as T718 (c) for review decisions: decide whether consent reserves byte headroom for later phases, or whether rendered files are exempt or replace the previous render.
 
+### T728 · FNF[composed-lsp-provider-lock] · composed LSP provider lock and template replacement leftovers (+12)
+
+status: open · kind: fix · found: legacy template replacement build and review (#1288) 2026-11-20 · priority: P4
+
+Paths are under `packages/`. NEW means introduced by #1288.
+
+1. Step 01's locked decision falls back to the provider resolved before the lock when the task has no default: `locked.cliProviderId ?? ctx.cliProviderId` (`worker/src/step-engine/steps/env-replicate/01-declare-deps.ts` ~:1033, ~:1139). Provider writes never take the task lock. NEW, low.
+2. The lock controls pin that the lock is held at each write, not that the summary route and the fix-round path read after it (`api/test/composed-lsp-provider-lock-held.test.ts`, `worker/test/composed-lsp-fix-round-lock-held.test.ts`); the fake database has no read hook. Coverage only.
+3. No contention test on a real Postgres for `lockTaskForComposedLsp` (`shared/src/composed-lsp-provider-lock.ts`); the fake database's row-lock model has no isolation levels. Coverage only.
+4. Deleting a provider while a holder of the task lock needs that provider's KEY SHARE ends in `40P01` and aborts one side (the summary route PRE-EXISTING, the choice inserts NEW). The state stays consistent; what the aborted request or step shows is unchecked. Fix direction: retry once on `40P01`.
+5. `09_6-skill-verification` writes `task_step_cli_choices` with no lock and no rule check. Latent: onboarding tasks never link a template. PRE-EXISTING.
+6. `fixRoundOptionProviders` stays an advisory read outside the lock; the write is locked. PRE-EXISTING.
+7. Ticking the replacement and editing the dependency selection in the same submit fails step 01 with `selection`; nothing is written and Retry shows the form. Better: re-park the form with a notice through `ReopenStepFormError(msg, { notice: true })` (`worker/src/step-engine/step-runner.ts` ~:4012-4062) and update the replacement controls that pin the typed refusal for that one reason. NEW.
+8. The replacement transaction has no step-ownership or epoch fence (`01-declare-deps.ts` ~:1009-1031), like the rest of 01's apply. PRE-EXISTING pattern.
+9. A redelivered job reads saved answers without the human-only strip (`step-runner.ts` ~:3690-3697). Theoretical: only a person's submit writes those values. NEW.
+10. An adoption demoted to the legacy variant under the task lock is logged, not shown on the task page. NEW.
+11. Step 01's new-environment offer does not check the dependency selection (`01-declare-deps.ts` ~:539-552). PRE-EXISTING.
+12. `worker/test/step-runner-reuse.test.ts` prints "invs is not iterable" (test noise). PRE-EXISTING.
+
+### T729 · A CLI remembered on another task can be refused at dispatch for a composed LSP task
+
+status: open · kind: design · found: #1288 review 2026-11-20 · priority: P3
+
+Saved CLI preferences ("Also for my later tasks") are user-wide, so a pick remembered on another task is not ordered against this task's composed LSP decision, and `resolvePreferredCli` (`worker/src/step-engine/step-runner.ts` ~:377) applies none of the provider rule. A contract-2 task whose step later resolves a remembered CLI the lock refuses is stopped by the dispatch backstop, and the step fails. The task lock cannot cover it. PRE-EXISTING since #1272.
+
+Options: (a) at dispatch, skip a saved preference the rule refuses, use the task's own allowed CLI, and say so on the step; (b) refuse the remember-pick for tasks under the lock, which blocks a pick that is valid for other tasks; (c) keep refusing and name the remembered pick in the failure. Recommendation (a): the documented rule "work is refused, never moved to another CLI" protects a choice made for this task, and a user-wide remembered pick is a default. Needs the owner, since (a) relaxes that rule's wording.
+
 ### T721 · The Claude usage grant reaches sandbox environments
 
 status: open (items 2-9; item 1 done #1281) · kind: security · found: login-set design (T720) 2026-11-19 · priority: P3 (was P1 until #1281)
@@ -784,7 +811,7 @@ OWNER DECISION 2026-11-19: one Claude login per user. A login saves the token fo
 
 OWNER DECISION 2026-11-19: the usage connection (`CLAUDE_USAGE_OAUTH`, refreshed per row by the usage poller) is shared the same way, as its own PR after the login PR. T590 items 32 and 33 are the same gap for the volume-login CLIs.
 
-### T719 · FNF[env-template-lifecycle] · environment template lifecycle leftovers (+8)
+### T719 · FNF[env-template-lifecycle] · environment template lifecycle leftovers (+9)
 
 status: open · kind: fix · found: legacy template replacement design (T709) 2026-11-19 · priority: P4
 
@@ -798,6 +825,7 @@ All PRE-EXISTING, none blocking the replacement series. Paths are under `package
 6. `assertKnownLspInstallContract` throws a bare `Error` that tests match by message (`worker/src/sandbox/lsp-install-contract.ts` ~:12-18). Give it a typed error.
 7. Deleting a user cascades `env_templates` rows without removing their images (`database/migrations/0000_baseline.sql` ~:1021; the delete hooks are unchecked).
 8. `composedLspImageRefs` of an abandoned contract-2 row keep pinning images after a rollback (`worker/src/lsp/composed-evidence.ts` ~:399-418).
+9. A template delete whose `docker image rm` fails because the image is already gone leaves the row behind (`worker/src/queues/task-queue.ts` ~:5011-5019, `worker/src/sandbox/docker-runner.ts` ~:440-448), and the reference count and the delete are not atomic (`task-queue.ts` ~:5001-5021). PRE-EXISTING, found with #1288.
 
 ### T718 · Translator module lows (review and correction approval) (+4)
 
