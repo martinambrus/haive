@@ -4,12 +4,22 @@ const log = logger.child({ module: 'cli-version-fetcher' });
 
 const USER_AGENT = 'haive-cli-version-fetcher/1.0';
 
-async function fetchJson(url: string, timeoutMs = 15_000): Promise<unknown> {
+/** npm's abbreviated metadata carries the `versions` keys and `dist-tags` read here, without each
+ *  version's full manifest (5.6 MB for codex, against 19.3 MB). A registry without it answers
+ *  the full document, which q=0.8 accepts. */
+const NPM_ABBREVIATED_ACCEPT =
+  'application/vnd.npm.install-v1+json; q=1.0, application/json; q=0.8, */*';
+
+async function fetchJson(
+  url: string,
+  accept = 'application/json',
+  timeoutMs = 15_000,
+): Promise<unknown> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
     const res = await fetch(url, {
-      headers: { 'User-Agent': USER_AGENT, Accept: 'application/json' },
+      headers: { 'User-Agent': USER_AGENT, Accept: accept },
       signal: controller.signal,
     });
     if (!res.ok) {
@@ -59,14 +69,22 @@ function sortSemverDesc(versions: string[]): string[] {
   return parsed.map((p) => p.v);
 }
 
-export async function fetchNpmVersions(pkg: string): Promise<FetchedVersions> {
+/** A semver prerelease part: a hyphen right after `X.Y.Z`. */
+const SEMVER_PRERELEASE_RE = /^\d+\.\d+\.\d+-/;
+
+export async function fetchNpmVersions(
+  pkg: string,
+  releasesOnly = false,
+): Promise<FetchedVersions> {
   const url = `https://registry.npmjs.org/${pkg}`;
-  const body = (await fetchJson(url)) as {
+  const body = (await fetchJson(url, NPM_ABBREVIATED_ACCEPT)) as {
     versions?: Record<string, unknown>;
     'dist-tags'?: Record<string, string>;
   };
   const all = Object.keys(body.versions ?? {});
-  const stable = filterStable(all);
+  const stable = filterStable(
+    releasesOnly ? all.filter((v) => !SEMVER_PRERELEASE_RE.test(v)) : all,
+  );
   const sorted = sortSemverDesc(stable).slice(0, MAX_VERSIONS_PER_PROVIDER);
   const distTags = body['dist-tags'] ?? {};
   const latest = distTags['stable'] ?? distTags['latest'] ?? sorted[0] ?? null;
@@ -128,7 +146,7 @@ export async function fetchVersionsFromSource(
 ): Promise<FetchedVersions | null> {
   switch (source.kind) {
     case 'npm':
-      return fetchNpmVersions(source.package);
+      return fetchNpmVersions(source.package, source.releasesOnly === true);
     case 'github-releases':
       return fetchGithubReleases(source.repo, source.tagPrefix);
     case 'pypi':

@@ -5,7 +5,15 @@ export type AutoUpdateDisableKnob =
   | { kind: 'config-file'; path: string; content: string };
 
 export type VersionSource =
-  | { kind: 'npm'; package: string }
+  | {
+      kind: 'npm';
+      package: string;
+      /** List only versions without a semver prerelease part (`X.Y.Z-…`). For a package that
+       *  publishes builds other than its releases under such versions: codex publishes every
+       *  release again per platform (`0.171.0-linux-x64`). Not for amp, whose releases
+       *  themselves carry one (`0.0.<n>-g<sha>`). */
+      releasesOnly?: boolean;
+    }
   | { kind: 'github-releases'; repo: string; tagPrefix?: string }
   | { kind: 'pypi'; package: string }
   | { kind: 'gem'; gem: string }
@@ -52,7 +60,9 @@ export const CLI_INSTALL_METADATA: Record<CliProviderName, CliInstallMetadata> =
   },
   codex: {
     install: { kind: 'npm', package: '@openai/codex', binary: 'codex' },
-    versionSource: { kind: 'github-releases', repo: 'openai/codex', tagPrefix: 'rust-v' },
+    // The registry it installs from. Its GitHub release list answered 504: each release carries
+    // some 330 KB of assets, so a page of 100 outlasts the API's own deadline.
+    versionSource: { kind: 'npm', package: '@openai/codex', releasesOnly: true },
     autoUpdateDisable: [
       {
         kind: 'config-file',

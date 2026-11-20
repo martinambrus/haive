@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { CLI_INSTALL_METADATA } from '@haive/shared';
 import {
   fetchGemVersions,
   fetchGithubReleases,
@@ -67,6 +68,60 @@ describe('fetchVersionsFromSource', () => {
     const res = await fetchVersionsFromSource({ kind: 'npm', package: 'intelephense' });
     expect(res?.latestVersion).toBe('2.8.6');
     expect(res?.versions).toEqual(['2.8.6', '2.8.5']);
+  });
+});
+
+describe('npm version sources', () => {
+  function stubNpm(payload: unknown) {
+    const fn = vi.fn(async (_url: string, _init?: RequestInit) => ({
+      ok: true,
+      status: 200,
+      json: async () => payload,
+    }));
+    vi.stubGlobal('fetch', fn as unknown as typeof fetch);
+    return fn;
+  }
+
+  it('asks the registry for the abbreviated document', async () => {
+    const fn = stubNpm({ versions: { '2.1.0': {} }, 'dist-tags': { latest: '2.1.0' } });
+    await fetchVersionsFromSource({ kind: 'npm', package: '@anthropic-ai/claude-code' });
+    const headers = fn.mock.calls[0]?.[1]?.headers as Record<string, string>;
+    expect(headers.Accept).toMatch(/^application\/vnd\.npm\.install-v1\+json/);
+  });
+
+  it('drops every version with a prerelease part when the source takes releases only', async () => {
+    stubNpm({
+      versions: {
+        '0.171.0': {},
+        '0.171.0-linux-x64': {},
+        '0.171.0-darwin-arm64': {},
+        '0.170.0': {},
+        '0.172.0-alpha.1': {},
+      },
+      'dist-tags': { latest: '0.171.0' },
+    });
+    const res = await fetchVersionsFromSource({
+      kind: 'npm',
+      package: '@openai/codex',
+      releasesOnly: true,
+    });
+    expect(res).toEqual({ versions: ['0.171.0', '0.170.0'], latestVersion: '0.171.0' });
+  });
+
+  it('keeps hyphenated releases when the source does not take releases only', async () => {
+    stubNpm({
+      versions: { '0.0.1795147237-g4dbcdb': {}, '0.0.1795000000-gabc123': {} },
+      'dist-tags': { latest: '0.0.1795147237-g4dbcdb' },
+    });
+    const res = await fetchVersionsFromSource({ kind: 'npm', package: '@sourcegraph/amp' });
+    expect(res?.versions).toEqual(['0.0.1795147237-g4dbcdb', '0.0.1795000000-gabc123']);
+  });
+
+  it('lists the versions of the package each npm-installed CLI installs', () => {
+    for (const meta of Object.values(CLI_INSTALL_METADATA)) {
+      if (meta.install.kind !== 'npm') continue;
+      expect(meta.versionSource).toMatchObject({ kind: 'npm', package: meta.install.package });
+    }
   });
 });
 
