@@ -791,6 +791,12 @@ status: done 2026-11-20 (#1289, dc2c67edb, worker reloaded 06:27Z) · kind: fix 
 
 Step 01's detect still suggests `intelephense` for a PHP project that is neither a CMS nor on DDEV (`worker/src/step-engine/steps/env-replicate/01-declare-deps.ts` ~:1401, ~:1518), but the PHP consolidation left `intelephense-extended` as the only option (`LSP_OPTIONS` ~:333-336; stored repository values were normalized by migration 0084, and none on the dev install holds the old key). The suggestion becomes the form default of every such repository without stored `lsp_servers` (83 of 85 on the dev install), the UI renders it as nothing ticked, and the submit fails "lspServers: invalid option intelephense"; ticking the visible option does not remove the hidden value. PRE-EXISTING. Fix: suggest the surviving key for every PHP project, and pin that the form's defaults pass its own validation.
 
+### T732 · FNF[composed-image-launch] · composed sandbox image launch lows (+1)
+
+status: open · kind: fix · found: legacy composed image fix (T712 build) 2026-11-20 · priority: P4
+
+1. A launch ensures the sandbox core image even when the composition does not build on it (`worker/src/sandbox/composed-image-cache.ts` ~:247-253 calling ~:283-291; hash rule `sandbox/image-composer.ts` ~:126-128). A composition built on its environment image (contract 2, and legacy with a usable environment image) never uses the core image, so that ensure is dead work at every launch. PRE-EXISTING. Fix direction: ensure the core image only when the composition's base is the core image.
+
 ### T721 · The Claude usage grant reaches sandbox environments
 
 status: open (items 2-9; item 1 done #1281) · kind: security · found: login-set design (T720) 2026-11-19 · priority: P3 (was P1 until #1281)
