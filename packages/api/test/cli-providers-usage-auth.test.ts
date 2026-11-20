@@ -116,6 +116,8 @@ beforeEach(() => {
     userId: h.user,
     name: 'claude-code',
     label: 'p',
+    authMode: 'subscription',
+    isolateAuth: false,
     rulesContent: DEFAULT_AGENT_RULES,
   });
   h.db = fake.db;

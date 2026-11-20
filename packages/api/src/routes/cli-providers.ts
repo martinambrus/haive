@@ -79,6 +79,14 @@ import {
   seedJoinerFromSet,
   writeLoginTokenToSet,
 } from '../lib/cli-login-secret.js';
+import {
+  deleteUsageGrantFromSet,
+  dropLeaverUsageGrant,
+  isUsageGrantSecret,
+  isUsageGrantValue,
+  seedUsageGrantJoiner,
+  writeUsageGrantToSet,
+} from '../lib/usage-grant-set.js';
 import { cliAuthScope, cliAuthSetWhere } from '@haive/shared/cli-auth-state';
 import { providerDisableImpact } from '../lib/provider-disable-impact.js';
 
@@ -449,6 +457,12 @@ const PROVIDER_SECURITY_FIELDS = [
   'modelfile',
 ] as const;
 
+/** Kick an immediate usage poll so a changed grant shows within seconds, not at the next tick. */
+const requestUsagePollTick = () =>
+  getUsagePollQueue()
+    .add('usage-poll-tick', {}, { removeOnComplete: true, removeOnFail: 10 })
+    .catch(() => {});
+
 cliProviderRoutes.post('/', requireNewWorkAllowed, async (c) => {
   const userId = c.get('userId');
   const body = createCliProviderRequestSchema.parse(await c.req.json());
@@ -474,6 +488,8 @@ cliProviderRoutes.post('/', requireNewWorkAllowed, async (c) => {
   // Without a typed token a shared subscription row takes the login the set already has.
   const seedsFromSet = sharesLogin && !spreadsToken && body.authMode === 'subscription';
   const joinsSet = spreadsToken || seedsFromSet;
+  const seedsUsageGrant = sharesLogin && body.authMode === 'subscription';
+  let usageSeeded = false;
   const lockScopes = joinsSet
     ? [
         {
@@ -522,7 +538,9 @@ cliProviderRoutes.post('/', requireNewWorkAllowed, async (c) => {
           })
           .returning();
         // First lock on an existing provider row; the new row is invisible until commit.
+        // Order: advisory auth lock, this set lock, then secret writes.
         const members = joinsSet ? await lockLoginSet(tx, rows[0]!) : [];
+        let loginSeeded: typeof schema.cliProviders.$inferSelect | undefined;
         const fields: string[] = PROVIDER_SECURITY_FIELDS.filter(
           (field) => body[field] !== undefined,
         );
@@ -576,9 +594,19 @@ cliProviderRoutes.post('/', requireNewWorkAllowed, async (c) => {
             assertHeld,
           });
           setEvents = seeded.events;
-          if (seeded.row) return { rows: [seeded.row], event };
+          loginSeeded = seeded.row;
         }
-        return { rows, event };
+        if (seedsUsageGrant) {
+          const grant = await seedUsageGrantJoiner(tx, {
+            userId,
+            joinerId: rows[0]!.id,
+            members,
+            assertHeld,
+          });
+          setEvents = [...setEvents, ...grant];
+          usageSeeded = grant.length > 0;
+        }
+        return { rows: loginSeeded ? [loginSeeded] : rows, event };
       }),
     { waitMs: CLI_AUTH_JOIN_WAIT_MS },
   );
@@ -587,6 +615,7 @@ cliProviderRoutes.post('/', requireNewWorkAllowed, async (c) => {
   logAuditEvent(inserted.event);
   if (secretEvent) logAuditEvent(secretEvent);
   for (const e of setEvents) logAuditEvent(e);
+  if (usageSeeded) await requestUsagePollTick();
   await enqueueBuildForProvider(created.id, userId);
   if (provisioningModel) await enqueueOllamaProvisionForProvider(created.id, userId);
   return c.json(
@@ -756,6 +785,10 @@ cliProviderRoutes.patch('/:id', async (c) => {
     afterSave.authMode === 'subscription' &&
     !afterSave.isolateAuth &&
     cliAuthScope(afterSave) !== cliAuthScope(existing);
+  // A row that moves to another login scope drops its own usage grant and snapshot.
+  const leavesScope =
+    existing.name === 'claude-code' && cliAuthScope(afterSave) !== cliAuthScope(existing);
+  let usageSeeded = false;
   const authProviders = authSettingsChanged
     ? [existing, afterSave]
     : authSecretNames.length
@@ -765,7 +798,7 @@ cliProviderRoutes.patch('/:id', async (c) => {
   const updated = await withCliAuthLocks(db, authProviders, (assertHeld) =>
     db.transaction(async (tx) => {
       if (startsJob) await admitNewWork(tx);
-      // First lock on any provider row.
+      // First lock on any provider row. Order: advisory auth locks, this set lock, then secret writes.
       const members = spreadsToken || joinsSet ? await lockLoginSet(tx, afterSave, id) : [];
       const [current] = await tx
         .select()
@@ -842,22 +875,36 @@ cliProviderRoutes.patch('/:id', async (c) => {
       }
       if (secretEvent) await insertAuditEvent(tx, secretEvent);
       await assertHeld();
+      // The leave comes before the seed: a row that moves into another set replaces its own grant.
+      const leaveEvents = leavesScope
+        ? await dropLeaverUsageGrant(tx, { userId, leaverId: id, assertHeld })
+        : [];
+      setEvents = leaveEvents;
+      let loginSeeded: typeof schema.cliProviders.$inferSelect | undefined;
       if (spreadsToken) {
-        setEvents = await writeLoginTokenToSet(tx, {
-          userId,
-          viaId: id,
-          members,
-          source: 'environment',
-          value: split!.secrets.CLAUDE_CODE_OAUTH_TOKEN!,
-          masterKek: await secretsService.getMasterKek(),
-          assertHeld,
-        });
+        setEvents = [
+          ...leaveEvents,
+          ...(await writeLoginTokenToSet(tx, {
+            userId,
+            viaId: id,
+            members,
+            source: 'environment',
+            value: split!.secrets.CLAUDE_CODE_OAUTH_TOKEN!,
+            masterKek: await secretsService.getMasterKek(),
+            assertHeld,
+          })),
+        ];
       } else if (joinsSet) {
         const seeded = await seedJoinerFromSet(tx, { userId, joinerId: id, members, assertHeld });
-        setEvents = seeded.events;
-        if (seeded.row) return { rows: [seeded.row], event };
+        setEvents = [...leaveEvents, ...seeded.events];
+        loginSeeded = seeded.row;
       }
-      return { rows, event };
+      if (joinsSet) {
+        const grant = await seedUsageGrantJoiner(tx, { userId, joinerId: id, members, assertHeld });
+        setEvents = [...setEvents, ...grant];
+        usageSeeded = grant.length > 0;
+      }
+      return { rows: loginSeeded ? [loginSeeded] : rows, event };
     }),
   );
   const updatedRow = updated.rows[0]!;
@@ -865,6 +912,7 @@ cliProviderRoutes.patch('/:id', async (c) => {
   if (updated.event) logAuditEvent(updated.event);
   if (secretEvent) logAuditEvent(secretEvent);
   for (const e of setEvents) logAuditEvent(e);
+  if (usageSeeded) await requestUsagePollTick();
 
   if (provisioningModel) await enqueueOllamaProvisionForProvider(id, userId);
   const modelStatusOverride = provisioningModel
@@ -1130,6 +1178,10 @@ cliProviderRoutes.post('/:id/clone', requireNewWorkAllowed, async (c) => {
   // A clone of a subscription row never copies the login token: it takes the login of its set.
   const takesSetLogin = source.name === 'claude-code' && source.authMode === 'subscription';
   const joinsSet = takesSetLogin && !source.isolateAuth;
+  // The login token and the usage grant both come from the set, never from the source's copy.
+  const fromSet = (name: string) =>
+    takesSetLogin && (isSetLoginSecret(source.name, name) || isUsageGrantSecret(source.name, name));
+  let usageSeeded = false;
   const created = await withCliAuthLocks(
     db,
     joinsSet ? [source] : [],
@@ -1166,13 +1218,14 @@ cliProviderRoutes.post('/:id/clone', requireNewWorkAllowed, async (c) => {
           .returning();
         const row = inserted[0]!;
         // First lock on an existing provider row; the clone is invisible until commit.
+        // Order: advisory auth lock, this set lock, then secret writes.
         const members = joinsSet ? await lockLoginSet(tx, row) : [];
 
         const sourceSecrets = (
           await tx.query.cliProviderSecrets.findMany({
             where: eq(schema.cliProviderSecrets.providerId, source.id),
           })
-        ).filter((s) => !(takesSetLogin && isSetLoginSecret(source.name, s.secretName)));
+        ).filter((s) => !fromSet(s.secretName));
         if (sourceSecrets.length > 0) {
           await tx.insert(schema.cliProviderSecrets).values(
             sourceSecrets.map((s) => ({
@@ -1186,7 +1239,7 @@ cliProviderRoutes.post('/:id/clone', requireNewWorkAllowed, async (c) => {
         }
         const copied = new Set(sourceSecrets.map((s) => s.secretName));
         for (const [name, value] of Object.entries(split.secrets)) {
-          if (!copied.has(name) && !(takesSetLogin && isSetLoginSecret(source.name, name))) {
+          if (!copied.has(name) && !fromSet(name)) {
             await upsertProviderSecret(tx, {
               providerId: row.id,
               name,
@@ -1205,9 +1258,7 @@ cliProviderRoutes.post('/:id/clone', requireNewWorkAllowed, async (c) => {
             sourceProviderId: source.id,
             ...secretAuditMetadata([
               ...sourceSecrets.map((s) => s.secretName),
-              ...Object.keys(split.secrets).filter(
-                (name) => !(takesSetLogin && isSetLoginSecret(source.name, name)),
-              ),
+              ...Object.keys(split.secrets).filter((name) => !fromSet(name)),
             ]),
           },
         };
@@ -1219,7 +1270,14 @@ cliProviderRoutes.post('/:id/clone', requireNewWorkAllowed, async (c) => {
             members,
             assertHeld,
           });
-          setEvents = seeded.events;
+          const grant = await seedUsageGrantJoiner(tx, {
+            userId,
+            joinerId: row.id,
+            members,
+            assertHeld,
+          });
+          setEvents = [...seeded.events, ...grant];
+          usageSeeded = grant.length > 0;
           if (seeded.row) return seeded.row;
         }
         return row;
@@ -1229,6 +1287,7 @@ cliProviderRoutes.post('/:id/clone', requireNewWorkAllowed, async (c) => {
 
   logAuditEvent(cloneEvent!);
   for (const e of setEvents) logAuditEvent(e);
+  if (usageSeeded) await requestUsagePollTick();
   await enqueueBuildForProvider(created.id, userId);
   if (provisioningModel) await enqueueOllamaProvisionForProvider(created.id, userId);
   return c.json(
@@ -1271,6 +1330,13 @@ cliProviderRoutes.post('/:providerId/secrets', async (c) => {
   const body = setCliProviderSecretRequestSchema.parse(await c.req.json());
   const db = getDb();
   const provider = await loadOwnedProvider(db, userId, providerId);
+  const usageGrant = isUsageGrantSecret(provider.name, body.secretName);
+  if (usageGrant && !isUsageGrantValue(body.value)) {
+    throw new HttpError(
+      400,
+      'The usage connection must be a JSON object with accessToken, refreshToken, expiresAt and scopes.',
+    );
+  }
 
   const existing = await db.query.cliProviderSecrets.findFirst({
     where: and(
@@ -1291,6 +1357,21 @@ cliProviderRoutes.post('/:providerId/secrets', async (c) => {
   let setEvents: AuditEvent[] = [];
   const secret = await withCliAuthWrite(db, provider, [body.secretName], (assertHeld) =>
     db.transaction(async (tx) => {
+      if (usageGrant) {
+        await assertHeld();
+        // Order: advisory auth lock, this set lock first, then secret writes.
+        const written = await writeUsageGrantToSet(tx, {
+          userId,
+          viaId: providerId,
+          members: await lockLoginSet(tx, provider),
+          source: 'manual',
+          value: body.value,
+          masterKek,
+          assertHeld,
+        });
+        setEvents = written.events;
+        return written.secret;
+      }
       // First lock on any provider row.
       const members = setWide ? await lockLoginSet(tx, provider) : [];
       await insertAuditEvent(tx, event);
@@ -1322,7 +1403,7 @@ cliProviderRoutes.post('/:providerId/secrets', async (c) => {
       return secret;
     }),
   );
-  logAuditEvent(event);
+  if (!usageGrant) logAuditEvent(event);
   for (const e of setEvents) logAuditEvent(e);
   return existing ? c.json({ secret }) : c.json({ secret }, 201);
 });
@@ -1406,13 +1487,6 @@ cliProviderRoutes.post('/:providerId/usage-auth/complete', async (c) => {
         );
       }
       const { verifier } = JSON.parse(taken) as { verifier: string };
-      const event: AuditEvent = {
-        actorUserId: userId,
-        action: 'cli_provider.secret.set',
-        targetType: 'cli_provider',
-        targetId: providerId,
-        metadata: { source: 'usage_oauth', secretName: CLAUDE_USAGE_OAUTH_SECRET },
-      };
       const masterKek = await secretsService.getMasterKek();
       let tokens;
       try {
@@ -1427,25 +1501,23 @@ cliProviderRoutes.post('/:providerId/usage-auth/complete', async (c) => {
           'The granted token is missing the user:profile scope required for usage tracking.',
         );
       }
+      let events: AuditEvent[] = [];
       await db.transaction(async (tx) => {
-        await insertAuditEvent(tx, event);
         await assertHeld();
-        // The secret upsert precedes the provider row lock. The auth-scope advisory lock
-        // serializes credential writers, including those that lock provider then secret.
-        await upsertProviderSecret(tx, {
-          providerId,
-          name: CLAUDE_USAGE_OAUTH_SECRET,
-          value: JSON.stringify(tokens),
-          masterKek,
-          onExisting: 'overwrite',
-        });
-        await tx
-          .update(schema.cliProviders)
-          .set({ authGeneration: randomUUID() })
-          .where(eq(schema.cliProviders.id, providerId));
-        await assertHeld();
+        // Order: advisory auth lock, this set lock first, then secret writes.
+        events = (
+          await writeUsageGrantToSet(tx, {
+            userId,
+            viaId: providerId,
+            members: await lockLoginSet(tx, provider),
+            source: 'usage_oauth',
+            value: JSON.stringify(tokens),
+            masterKek,
+            assertHeld,
+          })
+        ).events;
       });
-      logAuditEvent(event);
+      for (const e of events) logAuditEvent(e);
       return tokens;
     },
   ).catch((err: unknown) => {
@@ -1462,9 +1534,7 @@ cliProviderRoutes.post('/:providerId/usage-auth/complete', async (c) => {
   // Kick an immediate usage poll so the header meter refreshes within seconds instead of
   // waiting for the ~5-min repeatable tick: the freshly rotated token clears the worker's
   // dead-token gate and this poll overwrites the needs_reconnect snapshot with a live one.
-  await getUsagePollQueue()
-    .add('usage-poll-tick', {}, { removeOnComplete: true, removeOnFail: 10 })
-    .catch(() => {});
+  await requestUsagePollTick();
   return c.json({ connected: true, scopes: tokens.scopes, expiresAt: tokens.expiresAt });
 });
 
@@ -1490,36 +1560,22 @@ cliProviderRoutes.delete('/:providerId/usage-auth', async (c) => {
   const providerId = c.req.param('providerId');
   const db = getDb();
   const provider = await loadOwnedProvider(db, userId, providerId);
-  const event: AuditEvent = {
-    actorUserId: userId,
-    action: 'cli_provider.secret.delete',
-    targetType: 'cli_provider',
-    targetId: providerId,
-    metadata: { source: 'usage_oauth', secretName: CLAUDE_USAGE_OAUTH_SECRET },
-  };
-  const deleted = await withCliAuthWrite(db, provider, [CLAUDE_USAGE_OAUTH_SECRET], (assertHeld) =>
+  if (provider.name !== 'claude-code')
+    throw new HttpError(400, 'Usage tracking auth is only available for Claude Code providers');
+  const events = await withCliAuthWrite(db, provider, [CLAUDE_USAGE_OAUTH_SECRET], (assertHeld) =>
     db.transaction(async (tx) => {
       await assertHeld();
-      const rows = await tx
-        .delete(schema.cliProviderSecrets)
-        .where(
-          and(
-            eq(schema.cliProviderSecrets.providerId, providerId),
-            eq(schema.cliProviderSecrets.secretName, CLAUDE_USAGE_OAUTH_SECRET),
-          ),
-        )
-        .returning({ id: schema.cliProviderSecrets.id });
-      if (rows.length > 0) await insertAuditEvent(tx, event);
-      // Drop the last usage snapshot too: with no token the poller will never touch this row
-      // again, so a stale meter / needs_reconnect chip would otherwise linger indefinitely.
-      await tx
-        .delete(schema.usageWindowSnapshots)
-        .where(eq(schema.usageWindowSnapshots.providerId, providerId));
-      await assertHeld();
-      return rows.length > 0;
+      // Order: advisory auth lock, this set lock first, then secret and snapshot deletes.
+      return deleteUsageGrantFromSet(tx, {
+        userId,
+        viaId: providerId,
+        members: await lockLoginSet(tx, provider),
+        source: 'usage_oauth',
+        assertHeld,
+      });
     }),
   );
-  if (deleted) logAuditEvent(event);
+  for (const e of events) logAuditEvent(e);
   return c.json({ connected: false });
 });
 
@@ -1540,6 +1596,18 @@ cliProviderRoutes.delete('/:providerId/secrets/:secretName', async (c) => {
   const events = await withCliAuthWrite(db, provider, [secretName], (assertHeld) =>
     db.transaction(async (tx) => {
       await assertHeld();
+      if (isUsageGrantSecret(provider.name, secretName)) {
+        // Order: advisory auth lock, this set lock first, then secret and snapshot deletes.
+        const gone = await deleteUsageGrantFromSet(tx, {
+          userId,
+          viaId: providerId,
+          members: await lockLoginSet(tx, provider),
+          source: 'manual',
+          assertHeld,
+        });
+        if (gone.length === 0) throw new HttpError(404, 'Secret not found');
+        return gone;
+      }
       const out: AuditEvent[] = [];
       if (isSetLoginSecret(provider.name, secretName)) {
         const { deletedIds, setSize } = await deleteLoginTokenFromSet(tx, provider);
