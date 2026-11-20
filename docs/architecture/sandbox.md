@@ -1209,7 +1209,10 @@ when detect finds the task adoptable. Reused prior-task form values drop the fie
 (`reconcileStaleDeps`), so each task derives its own default and an opt-out is never inherited;
 Auto-continue therefore adopts. An environment that is not adopted writes no contract key, so its
 template hash and image tag are those of the legacy path. Once the cheap checks pass, step 01 logs
-the decision with a closed reason: `run_list`, `providers`, or none when adopted.
+the decision with a closed reason: `run_list`, `providers`, or none when adopted. The decision is
+repeated inside the transaction that inserts and links the row, under the task row lock (see Provider
+lock): a choice or default CLI change that landed in between demotes the new row to the legacy
+variant, stored without the key, and the log says so.
 
 Replacing a legacy template. A task linked to a stored absent/1 template (it ticked the opt-out,
 or it was created while adoption was off) can move to 2 from step 01's visible form. The checkbox
@@ -1223,10 +1226,12 @@ from reused prior-task values before they are overlaid or auto-submitted, so a t
 prior-task reuse and auto-continue never replace a template. Apply re-decides from the submitted
 form and never trusts detect. A refusal throws `ComposedLspReplacementRefusedError` (code
 `composed_lsp_replacement_refused`, closed `reason`: `rollout_off`, `cli_unsupported`, `selection`,
-`run_list`, `providers`) before any write.
+`run_list`, `providers`) before any write, and again inside the transaction below, where it rolls
+the inserted row back.
 
-On acceptance one transaction inserts a NEW template row, links only the acting task to it and
-writes a `task_events` row `env_template.replaced` with `sourceTemplateId` and
+On acceptance one transaction inserts a NEW template row, takes the task row lock (see Provider
+lock) and decides again from the task's current CLI and choices, links only the acting task to the
+row and writes a `task_events` row `env_template.replaced` with `sourceTemplateId` and
 `candidateTemplateId`. The row holds the form's deps plus contract 2 and no Dockerfile, so 02
 renders it: the generator emits the installer block only when the contract is not 2, so no stored
 body is ever stripped or edited, and an edit made to the old body is not carried over. The old
@@ -1253,20 +1258,61 @@ gap falls through to another CLI. A prior or verifying reference does not count.
 build makes any reference effective, the set is the lock's verified providers, so the environment
 steps that build the image, and their AI repair, can run; LSP readiness stays false until then. A launch follows the same rule: until some provider holds an effective reference the task's CLI launch uses the provider sandbox image, as a legacy task does before its environment is built; once one exists, a changed input, a vanished image, an unverified provider or a changed provider is refused. Work is refused, never moved to another CLI, and LSP is never dropped silently.
 
+The rule and what it guards change in different transactions, so one lock orders them: the task row,
+taken `FOR NO KEY UPDATE` by `lockTaskForComposedLsp` (`@haive/shared/composed-lsp-provider-lock`).
+Every writer of a provider choice takes it, reads the task's CLI and its template's contract again
+inside it, and only then checks and writes: the step-CLI choice write (the step card and the CLIs
+tab), the summary CLI route, the model-health default rewrite that the step-CLI route makes with its
+choice, and the fix-round choice. So do both writers that give a task a contract-2 link, step 01's
+replacement and its new-environment adoption. Whoever takes the lock second sees the first one's
+committed write: a switch is refused 409 `composed_lsp_provider_locked`, a replacement is refused
+`providers` and its inserted row rolls back, an adoption stores its row without the key. Step 02's
+merge of a candidate onto a row with the same dockerfile hash relinks a task to the same contract
+(the key is part of the hash), so it takes no lock. The lock is NO KEY UPDATE, not UPDATE, so the
+foreign-key checks of inserts (events, choices, invocations) are not blocked.
+
+Lock order, outermost first: the repository (its task key, then its row), the task's step rows in
+one id-ordered batch, the task row, then leaf rows (provider rows and step rows through foreign keys,
+saved preference rows, the template row, task events). Step 01 inserts its template row before it
+takes the task row: the insert takes a share lock on the repository row, and a repository delete
+holds that row and then asks for task rows. The writers of provider rows (`lockLoginSet`,
+`markProvidersReady`) never take a task or step row. One inversion remains: deleting a provider
+holds its row and then needs the task rows its SET NULL rewrites, while a holder of the task row
+needs that provider's share lock (the choice inserts through their foreign key, the summary
+route's update); Postgres aborts one of them (`40P01`) and the state stays consistent. Saved
+preferences are user-wide, so a remembered pick made on another task is not ordered against this
+task's decision.
+
 Rollback. Set `COMPOSED_LSP_NEW_ENVIRONMENT_ADOPTION` to false: new environments stop adopting,
 while templates already at 2 keep being carried, generated and read, so running tasks are
 unaffected. Keep the readers, the lock and verification until no task links a contract-2 template.
 Never set absent or 1 on a body whose installers were skipped.
 
-Undoing one replacement needs no migration. The event names the old row:
+Undoing one replacement needs no migration. It keys on the task's CURRENT link, never on the
+candidate the event names: step 02 can merge the candidate onto an existing row with the same
+dockerfile hash and delete it (`02-generate-dockerfile`, the dedupe relink), and that merge writes no
+event, so the candidate's id may no longer be what the task links. The old row is the event's
+`sourceTemplateId`:
 `SELECT payload FROM task_events WHERE task_id = <task> AND event_type = 'env_template.replaced'
-ORDER BY created_at DESC LIMIT 1`. Point the task back with
-`UPDATE tasks SET env_template_id = <sourceTemplateId>, updated_at = now() WHERE id = <task> AND
-env_template_id = <candidateTemplateId>` (guarded, so a second run changes nothing), then Retry
-step 02, not 01: 01 re-declares the linked row from the form and may rewrite it in place, while 02
-keeps the saved body and 03 reuses the ready image. The abandoned new row, once built, stays unlinked
-with its image until its repository is deleted; remove it by hand when no task links it. Never set the
-new row's key to absent or 1.
+ORDER BY created_at DESC LIMIT 1`. One statement then reads the task's current link, confirms it is
+contract 2 and moves it, so nothing can change the link between the read and the write:
+
+```sql
+UPDATE tasks t SET env_template_id = <sourceTemplateId>, updated_at = now()
+  FROM env_templates cur
+  WHERE t.id = <task> AND cur.id = t.env_template_id
+    AND cur.declared_deps ->> 'lspInstallContractVersion' = '2'
+  RETURNING t.id, cur.id AS replaced_link;
+```
+
+Go on only when exactly one row came back. Zero rows means the task links a legacy row or none (an
+earlier undo ran, or the replacement never reached the link): stop. A second run therefore changes
+nothing, merged or not. Then Retry step 02, not 01: 01 re-declares the linked row from the form and
+may rewrite it in place, while 02 keeps the saved body and 03 reuses the ready image. After a merge
+no abandoned row exists: the row the task linked belongs to every task that links it and is not to be
+deleted. An unmerged candidate, once built, stays unlinked with its image until its repository is
+deleted; delete a template by hand only when `SELECT count(*) FROM tasks WHERE env_template_id =
+<that id>` is 0. Never set a row's key to absent or 1.
 Switching `COMPOSED_LSP_NEW_ENVIRONMENT_ADOPTION` off also stops the replacement offer and its
 acceptance; tasks already replaced keep contract 2 and its readers.
 
