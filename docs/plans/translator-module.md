@@ -1,8 +1,10 @@
 # Translator — a resellable Haive module
 
-> **Not implemented; reviewed 2026-11-12 against `3426c8c34`.** Module and repo-less task
-> foundations ship. The translation protocol, artifact upload/download ownership and checkpoint
-> scheme below remain to build; “no core changes” is a goal to verify, not an established result.
+> **Built in the private module repository `haive-module-translator`; the task type is hidden
+> (2026-11-20).** Ingest, chunking, the per-pass checkpoints, review and corrections, rendering,
+> artifact downloads, retention and a synthetic end-to-end acceptance run with a stub model are
+> merged. Not done yet: the paid end-to-end run under Verification and making the task type
+> selectable; both wait for the owner.
 > Use the current [Modules](../architecture/modules.md) and [Task types](../architecture/task-types.md)
 > contracts rather than the archived modularity plans.
 
