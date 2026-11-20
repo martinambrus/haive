@@ -12,7 +12,7 @@ import {
 import { Card, CardDescription, CardHeader, CardTitle, FormError } from '@/components/ui';
 import { CliProviderForm } from '@/components/cli-provider-form';
 import { CliProviderTest } from '@/components/cli-provider-test';
-import { ClaudeUsageAuth } from '@/components/claude-usage-auth';
+import { ClaudeUsageAuth, LOGIN_SET_NOTE } from '@/components/claude-usage-auth';
 import { usePageTitle } from '@/lib/use-page-title';
 import { storedLoginStatus } from '@/lib/usage-reconnect';
 
@@ -127,7 +127,12 @@ export default function EditCliProviderPage() {
         />
       </Card>
 
-      {provider.name === 'claude-code' && <ClaudeUsageAuth providerId={provider.id} />}
+      {provider.name === 'claude-code' && (
+        <>
+          <p className="text-sm text-neutral-400">{LOGIN_SET_NOTE}</p>
+          <ClaudeUsageAuth providerId={provider.id} />
+        </>
+      )}
     </div>
   );
 }

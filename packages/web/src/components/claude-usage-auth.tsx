@@ -17,6 +17,10 @@ interface UsageAuthStatus {
   connectedAt: string | null;
 }
 
+/** Shown on the providers list and the claude-code edit page. */
+export const LOGIN_SET_NOTE =
+  'On a Claude Code row that does not isolate its auth, Log in, Sign out, a pasted or deleted token and Connect or Disconnect usage apply to every row that shares its login (your rows of the same CLI and authentication mode), and after a deleted token those rows keep their status until their next Test or run.';
+
 /**
  * Claude usage-tracking OAuth (PKCE). Mints a user:profile-scoped token — the one the
  * setup-token used to RUN claude lacks — so the task header can show 5h/weekly windows.
@@ -138,8 +142,8 @@ export function ClaudeUsageAuth({ providerId }: { providerId: string }) {
         <div className="flex flex-col gap-3">
           {needsReconnect ? (
             <p className="text-sm text-amber-400">
-              ⚠ Token expired — reconnect to restore your usage meters. (If this is a duplicate of
-              an account you already track elsewhere, Disconnect it instead.)
+              ⚠ Token expired — reconnect to restore your usage meters. (Disconnect removes the
+              usage token from every row that shares this login.)
             </p>
           ) : (
             <p className="text-sm text-emerald-400">
