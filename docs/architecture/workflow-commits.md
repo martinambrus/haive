@@ -124,7 +124,9 @@ gate-2 re-approval, the regenerated gate 3 must park for a new human answer. The
 uses the existing latched approval guard to ignore every preset and auto-submit source,
 including prior-task reuse, while keeping the freshly computed form defaults. The submit
 route attests owner, generation and explicit commit choice atomically with the answer;
-only matching evidence newer than the re-approval can advance that pass. Retry, Resume
+only matching evidence newer than the re-approval can advance that pass. A stale tab cannot
+supply it: the answer must name the row and park its form was rendered for, else 409
+`step_form_stale` (worker-restarts, form park marker). Retry, Resume
 and boot re-entry keep an unanswered form parked. A warning note explains that the
 refreshed changes need review and a new commit decision. Ordinary gates retain their existing
 preset behavior.
