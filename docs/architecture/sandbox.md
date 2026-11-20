@@ -763,7 +763,9 @@ the row it copied from, `setSize`) in the same transaction. The set's login repl
 row had; a set where no other row holds a token seeds nothing, and the joining row keeps its own. A clone
 of a claude-code subscription row leaves the login token out of its secret copy and out of the copy of
 legacy environment values, so an isolated clone starts without one and a joining clone gets the set's;
-every other secret, the usage token included, is copied as before.
+every other secret, the usage token included, is copied as before. The create, the clone and the
+settings save answer with the joining row as the seed left it, so the response carries the copied
+status, message and check stamp; a join that seeds nothing answers as before.
 
 ## CLI sign-out and newer logins
 
