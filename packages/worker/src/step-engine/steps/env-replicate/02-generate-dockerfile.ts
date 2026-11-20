@@ -151,7 +151,7 @@ export const generateDockerfileStep: StepDefinition<
     // apply hashes the persisted detect output, so refuse when the row's LSP owner moved since.
     const owner = await ctx.db.query.envTemplates.findFirst({
       where: eq(schema.envTemplates.id, args.detected.envTemplateId),
-      columns: { declaredDeps: true },
+      columns: { declaredDeps: true, dockerfileHash: true },
     });
     const ownerVersion = (owner?.declaredDeps as Record<string, unknown> | null | undefined)
       ?.lspInstallContractVersion;
@@ -190,11 +190,17 @@ export const generateDockerfileStep: StepDefinition<
       };
     }
 
+    // The row's image was built from the body its stored hash names. Another body is not that
+    // build, and 03 reuses any ready row whose image still exists: take the row back to
+    // 'pending' (what 01 does when it re-declares) so 03 builds it. builtImageId stays, so that
+    // build can remove the image it supersedes. The same body keeps the row ready.
+    const buildInvalidated = owner?.dockerfileHash !== dockerfileHash;
     await ctx.db
       .update(schema.envTemplates)
       .set({
         generatedDockerfile: dockerfile,
         dockerfileHash,
+        ...(buildInvalidated ? { status: 'pending' as const } : {}),
         updatedAt: new Date(),
       })
       .where(eq(schema.envTemplates.id, currentId));
@@ -203,6 +209,7 @@ export const generateDockerfileStep: StepDefinition<
         envTemplateId: currentId,
         dockerfileLength: dockerfile.length,
         dockerfileHash,
+        buildInvalidated,
       },
       'dockerfile saved',
     );
