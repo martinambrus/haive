@@ -19,7 +19,8 @@ export interface BuildImageDetect {
   status: string;
   /** The row's declared LSP install contract; absent in older cached detect output (legacy). */
   lspInstallContractVersion?: 1 | 2;
-  /** Another row holds the tag this row's name defaults to; absent in older detect output. */
+  /** The tag this row's name defaults to belongs to another row: one holds it, or an older row
+   *  has the same name. Absent in older detect output. */
   defaultTagHeld?: boolean;
 }
 
@@ -97,7 +98,9 @@ export function createBuildImageStep(
       }
       // Template names are not unique: a fork is named for its task, so one forked from the row
       // created for that task has that row's name and defaults to its tag, and building under it
-      // would move that tag onto this image.
+      // would move that tag onto this image. The oldest row of a name owns the name-only tag, so
+      // a younger one builds under its id even while the older row holds no saved tag (not built
+      // yet, or re-declared by 01) and whichever of their build forms is submitted first.
       const holder = await ctx.db.query.envTemplates.findFirst({
         where: and(
           eq(schema.envTemplates.imageTag, defaultImageTag(row.name, '')),
@@ -105,6 +108,15 @@ export function createBuildImageStep(
         ),
         columns: { id: true },
       });
+      const sameName = await ctx.db.query.envTemplates.findMany({
+        where: and(eq(schema.envTemplates.name, row.name), ne(schema.envTemplates.id, row.id)),
+        columns: { id: true, createdAt: true },
+      });
+      const younger = sameName.some(
+        (o) =>
+          o.createdAt < row.createdAt ||
+          (o.createdAt.getTime() === row.createdAt.getTime() && o.id < row.id),
+      );
       return {
         envTemplateId: row.id,
         name: row.name,
@@ -115,7 +127,7 @@ export function createBuildImageStep(
         lspInstallContractVersion: (
           row.declaredDeps as { lspInstallContractVersion?: 1 | 2 } | null
         )?.lspInstallContractVersion,
-        defaultTagHeld: holder !== undefined,
+        defaultTagHeld: holder !== undefined || younger,
       };
     },
 

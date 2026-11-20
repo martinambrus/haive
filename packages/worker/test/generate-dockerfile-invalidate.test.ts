@@ -533,6 +533,22 @@ describe('legacy row other live tasks link: step 02 saves a different Dockerfile
       expect(out.envTemplateId).not.toBe(ENV);
       expect(w.row()).toMatchObject({ generatedDockerfile: BODY_X, dockerfileHash: null });
     });
+
+    it('the fork builds under a tag of its own though the row holds no saved tag', async () => {
+      // The sharer's build form, shown before the fork, offers the name-only tag: a fork that took
+      // it too would lose it to the sharer's build and name the sharer's image.
+      const w = world(LEGACY_DEPS, { sharer: {} });
+      await reset(w);
+      expect(await offeredTag(w, SHARER)).toBe(ENV_TAG);
+      await save(w, BODY_Y);
+      const fork = forkRow(w);
+      expect(fork).toBeDefined();
+      await build03(w);
+      expect(w.docker.built[0]!.tag).toBe(
+        `haive-env-task-00000003-${String(fork!.id).slice(0, 8)}:latest`,
+      );
+      expect(await offeredTag(w, SHARER)).toBe(ENV_TAG);
+    });
   });
 
   it('inserts the fork and links the task in one transaction', async () => {

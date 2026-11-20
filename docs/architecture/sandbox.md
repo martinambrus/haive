@@ -1286,9 +1286,12 @@ never equals the old one. The default image tag of a contract-2 row ends in the 
 of its id: template names are not unique (every row a task creates is named `task-<id8>`), so a
 same-named row would otherwise re-point the old image's tag, and a forced removal by tag would
 delete the wrong image. A legacy row keeps the name-only tag unless another row already holds it
-(step 03 detect looks): a fork is named for its task, so one forked from the row created for
-that task has that row's name, and a build under the name-only tag would move the source row's
-tag onto the fork's image; its default then ends in its id too. A contract-2 row built before
+or an older row has the same name (step 03 detect looks): a fork is named for its task, so one
+forked from the row created for that task has that row's name, and a build under the name-only
+tag would move the source row's tag onto the fork's image; its default then ends in its id too.
+Age decides, not the saved tag, because the source row may hold none (not built yet, or
+re-declared by step 01) while its own build form, shown before the fork, offers the name-only
+tag. A contract-2 row built before
 this rule keeps its stored tag until step 03 rebuilds it, which moves the tag and removes the
 superseded image by id.
 The task picks the replacement up on that Retry: it resets 01 and every later step, so 02, 03, 04,
