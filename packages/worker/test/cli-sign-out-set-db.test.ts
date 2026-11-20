@@ -37,6 +37,12 @@ describe.skipIf(!url)('a Claude sign-out covers every row of its credential set'
       .where(inArray(schema.cliProviderSecrets.providerId, pids))
       .orderBy(asc(schema.cliProviderSecrets.id));
   const names = async (id: string) => (await secretRows([id])).map((s) => s.secretName).sort();
+  const snapshots = (pids: string[]) =>
+    db
+      .select()
+      .from(schema.usageWindowSnapshots)
+      .where(inArray(schema.usageWindowSnapshots.providerId, pids))
+      .orderBy(asc(schema.usageWindowSnapshots.id));
   const world = async () => ({
     providers: await db
       .select()
@@ -44,10 +50,15 @@ describe.skipIf(!url)('a Claude sign-out covers every row of its credential set'
       .where(inArray(schema.cliProviders.userId, [U, V]))
       .orderBy(asc(schema.cliProviders.id)),
     secrets: await secretRows(ids()),
+    snapshots: await snapshots(ids()),
   });
   const outside = async (keys: Key[]) => {
     const pids = keys.map((k) => rows[k].id);
-    return { providers: await Promise.all(pids.map(provider)), secrets: await secretRows(pids) };
+    return {
+      providers: await Promise.all(pids.map(provider)),
+      secrets: await secretRows(pids),
+      snapshots: await snapshots(pids),
+    };
   };
   const volumeNames = (r: Row) =>
     [0, 1].map((i) =>
@@ -88,7 +99,8 @@ describe.skipIf(!url)('a Claude sign-out covers every row of its credential set'
     }) as any;
   const expectSetSignedOut = async (after: Date) => {
     expect(await names(rows.A.id)).toEqual(['ANTHROPIC_AUTH_TOKEN']);
-    expect(await names(rows.B.id)).toEqual(['ANTHROPIC_AUTH_TOKEN', 'CLAUDE_USAGE_OAUTH']);
+    expect(await names(rows.B.id)).toEqual(['ANTHROPIC_AUTH_TOKEN']);
+    expect(await snapshots([rows.A.id, rows.B.id])).toEqual([]);
     for (const key of ['A', 'B'] as const) {
       const p = await provider(rows[key].id);
       expect([p.authStatus, p.authMessage], key).toEqual(['unknown', null]);
@@ -183,6 +195,15 @@ describe.skipIf(!url)('a Claude sign-out covers every row of its credential set'
           });
     }
     rows = made;
+    for (const row of Object.values(rows))
+      await db.insert(schema.usageWindowSnapshots).values({
+        providerId: row.id,
+        userId: row.userId,
+        providerName: row.name,
+        status: 'ok',
+        fiveHourPct: 7,
+        fetchedAt: PAST,
+      });
   });
   afterEach(async () => {
     vi.restoreAllMocks();
@@ -191,16 +212,10 @@ describe.skipIf(!url)('a Claude sign-out covers every row of its credential set'
 
   it('removes the tokens and resets the health of every row of the set', async () => {
     const before = await outside(['C', 'D', 'E', 'F']);
-    const bUsage = (await secretRows([rows.B.id])).filter(
-      (s) => s.secretName === 'CLAUDE_USAGE_OAUTH',
-    );
     const { volumes, runner } = fakeRunner(rows.A);
     expect(await handleSignOutJob(db, payload(rows.A), runner)).toMatchObject({ ok: true });
     expect(volumes.size).toBe(0);
     await expectSetSignedOut(PAST);
-    expect(
-      (await secretRows([rows.B.id])).filter((s) => s.secretName === 'CLAUDE_USAGE_OAUTH'),
-    ).toEqual(bUsage);
     expect(await outside(['C', 'D', 'E', 'F'])).toEqual(before);
   });
 
@@ -209,6 +224,7 @@ describe.skipIf(!url)('a Claude sign-out covers every row of its credential set'
     const { runner } = fakeRunner(rows.C);
     expect(await handleSignOutJob(db, payload(rows.C), runner)).toMatchObject({ ok: true });
     expect(await names(rows.C.id)).toEqual(['ANTHROPIC_AUTH_TOKEN']);
+    expect(await snapshots([rows.C.id])).toEqual([]);
     const c = await provider(rows.C.id);
     expect([c.authStatus, c.authMessage]).toEqual(['unknown', null]);
     expect(await outside(['A', 'B', 'D', 'E', 'F'])).toEqual(before);
@@ -228,7 +244,8 @@ describe.skipIf(!url)('a Claude sign-out covers every row of its credential set'
       spy.mockRestore();
     }
     expect(await names(rows.A.id)).toEqual(['ANTHROPIC_AUTH_TOKEN']);
-    expect(await names(rows.B.id)).toEqual(['ANTHROPIC_AUTH_TOKEN', 'CLAUDE_USAGE_OAUTH']);
+    expect(await names(rows.B.id)).toEqual(['ANTHROPIC_AUTH_TOKEN']);
+    expect(await snapshots([rows.A.id, rows.B.id])).toEqual([]);
     expect((await outside(['A', 'B'])).providers).toEqual(before.providers);
   });
 

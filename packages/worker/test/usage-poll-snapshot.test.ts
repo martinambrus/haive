@@ -23,7 +23,25 @@ vi.mock('@haive/database', async (original) => ({
 vi.mock('../src/usage-window/token-source.js', () => ({
   readProviderSecretToken: async () => h.secret,
   readAuthVolumeFile: async () => h.volume,
-  writeProviderSecret: vi.fn(),
+}));
+// A Claude login set resolves its grant by ciphertext identity, which the fake db cannot join:
+// the grant is the one the test holds, and the holder check is "still the same grant".
+vi.mock('../src/usage-window/usage-grant-set.js', () => ({
+  pickGrantHolder: async (_db: unknown, rep: { id: string }) =>
+    h.secret
+      ? {
+          providerId: rep.id,
+          encryptedValue: h.secret,
+          encryptedDek: 'dek',
+          grant: JSON.parse(h.secret),
+        }
+      : null,
+  convergeSetCopies: async (
+    _tx: unknown,
+    _rep: unknown,
+    holder: { providerId: string; encryptedValue: string },
+  ) => (holder.encryptedValue === h.secret ? { events: [], copyIds: [holder.providerId] } : null),
+  rotateGrantCopies: vi.fn(),
 }));
 vi.mock('../src/usage-window/fetchers/index.js', async (original) => {
   const real = await original<typeof import('../src/usage-window/fetchers/index.js')>();
@@ -61,7 +79,7 @@ beforeEach(() => {
 });
 afterEach(() => vi.restoreAllMocks());
 
-function setup(name: 'zai' | 'claude-code' | 'codex' = 'zai') {
+function setup(name: 'zai' | 'claude-code' | 'codex' = 'zai', isolateAuth = true) {
   h.secret =
     name === 'claude-code'
       ? JSON.stringify({ accessToken: 'synthetic-token', expiresAt: Date.now() + 3_600_000 })
@@ -77,7 +95,7 @@ function setup(name: 'zai' | 'claude-code' | 'codex' = 'zai') {
     name,
     enabled: true,
     authMode: 'subscription' as const,
-    isolateAuth: true,
+    isolateAuth,
     envVars: null,
     cliVersion: null,
   };
@@ -127,6 +145,40 @@ it.each(['zai', 'claude-code', 'codex'] as const)(
     expect(h.release).toHaveBeenCalledOnce();
   },
 );
+
+it('polls two same-scope providers unlocked and serialises their short snapshot writes', async () => {
+  const t = setup('codex', false);
+  t.fake.insert(schema.cliProviders, { ...t.provider, id: randomUUID() });
+  const scopes = new Set<string>();
+  h.acquire.mockImplementation(async (_db: unknown, scope: string) => {
+    if (scopes.has(scope)) return null;
+    scopes.add(scope);
+    return Object.assign(
+      async () => {
+        scopes.delete(scope);
+      },
+      {
+        assertHeld: async () => {
+          if (!scopes.has(scope)) throw new Error('lock lost');
+        },
+      },
+    );
+  });
+  await t.tick();
+  expect(h.fetch).toHaveBeenCalledTimes(2);
+  expect(
+    t.fake
+      .rows(schema.usageWindowSnapshots)
+      .map((row) => row.providerId)
+      .sort(),
+  ).toEqual(
+    t.fake
+      .rows(schema.cliProviders)
+      .map((row) => row.id)
+      .sort(),
+  );
+  expect(h.acquire).toHaveBeenCalledTimes(2);
+});
 
 it('skips a stale result after credential replacement', async () => {
   const t = setup();
@@ -183,6 +235,21 @@ it('refuses the snapshot write after losing the acquired lock', async () => {
     Object.assign(h.release, {
       assertHeld: async () => {
         throw new Error('lock lost');
+      },
+    }),
+  );
+  await t.tick();
+  expect(h.fetch).toHaveBeenCalledOnce();
+  expect(t.fake.rows(schema.usageWindowSnapshots)).toHaveLength(0);
+  expect(h.release).toHaveBeenCalledOnce();
+});
+it('rolls back a Claude set snapshot when the lock is lost after the writes', async () => {
+  const t = setup('claude-code', false);
+  let checks = 0;
+  h.acquire.mockImplementation(async () =>
+    Object.assign(h.release, {
+      assertHeld: async () => {
+        if (++checks > 1) throw new Error('lock lost');
       },
     }),
   );
