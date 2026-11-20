@@ -94,6 +94,54 @@ describe('deleting a repository records its cleanup before it queues it', () => 
     expect(resources.payload).toMatchObject({ repositoryId: REPO, userId: USER, taskIds: [] });
   });
 
+  it("captures the repository's own templates that no task links, and no one else's", async () => {
+    const fake = setup();
+    const OTHER_REPO = '00000000-0000-4000-8000-0000000000b2';
+    const OTHER_USER = '00000000-0000-4000-8000-0000000000a2';
+    const A = '00000000-0000-4000-8000-0000000000c1';
+    const B = '00000000-0000-4000-8000-0000000000c2';
+    const C = '00000000-0000-4000-8000-0000000000c3';
+    const D = '00000000-0000-4000-8000-0000000000c4';
+    fake.insert(schema.envTemplates, {
+      id: A,
+      userId: USER,
+      repositoryId: REPO,
+      imageTag: 'haive-env:a',
+    });
+    fake.insert(schema.envTemplates, {
+      id: B,
+      userId: USER,
+      repositoryId: OTHER_REPO,
+      imageTag: 'haive-env:b',
+    });
+    fake.insert(schema.envTemplates, {
+      id: C,
+      userId: OTHER_USER,
+      repositoryId: REPO,
+      imageTag: 'haive-env:c',
+    });
+    fake.insert(schema.envTemplates, {
+      id: D,
+      userId: USER,
+      repositoryId: null,
+      imageTag: 'haive-env:d',
+    });
+    fake.insert(schema.tasks, {
+      id: '00000000-0000-4000-8000-0000000000d1',
+      userId: USER,
+      repositoryId: REPO,
+      envTemplateId: D,
+    });
+    const res = await app.request(`/${REPO}`, { method: 'DELETE' });
+    expect(res.status).toBe(200);
+    const payload = fake.rows(schema.repoCleanups).find((r) => r.kind === 'resources')!.payload as {
+      envTemplateIds: string[];
+      envImageTags: Record<string, string>;
+    };
+    expect([...payload.envTemplateIds].sort()).toEqual([A, D].sort());
+    expect(payload.envImageTags).toEqual({ [A]: 'haive-env:a', [D]: 'haive-env:d' });
+  });
+
   it('hands each job the id of its row', async () => {
     const fake = setup();
     await app.request(`/${REPO}`, { method: 'DELETE' });
