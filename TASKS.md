@@ -817,7 +817,7 @@ status: open · kind: fix · found: legacy composed image fix (T712 build) 2026-
 
 ### T733 · FNF[translator-chunk-tail-units] · Translator chunking makes tiny units that each cost a full cycle (+1)
 
-status: open · kind: fix · found: translator scale and acceptance milestone (module PRs #9, #10) 2026-11-20 · priority: P3
+status: open, fixed in review as module PR #12 · kind: fix · found: translator scale and acceptance milestone (module PRs #9, #10) 2026-11-20 · priority: P3
 
 In `martinambrus/haive-module-translator`. 1. `src/chunking/group.ts:10-19`: there is no minimum unit size and a unit closes at every heading, so 7 of the 14 units of a 6,584-word book hold 3-6 words, and each still costs a full translate and review cycle of 4 calls, about half of the book's ~58 calls. PRE-EXISTING. Fix direction: merge a unit below a minimum size into its neighbour, so a heading starts a new unit only when the unit before it is large enough.
 
@@ -833,11 +833,32 @@ status: open, in work 2026-11-20 (the owner approved the first paid run and runs
 
 In `martinambrus/haive-module-translator`.
 
-1. The declared call timeout goes from 180 s to 300 s (owner decision 2026-11-20): module PR #11. The host floor `CLI_TIMEOUT_BASE_MINUTES` (45 minutes on the dev install) already decides a step's own call (`escalatedTimeoutMs`, `packages/shared/src/constants/index.ts` ~:863), so the change matters only if that floor is set lower.
+1. DONE module PR #11 (7296b0d). The declared call timeout goes from 180 s to 300 s (owner decision 2026-11-20): module PR #11. The host floor `CLI_TIMEOUT_BASE_MINUTES` (45 minutes on the dev install) already decides a step's own call (`escalatedTimeoutMs`, `packages/shared/src/constants/index.ts` ~:863), so the change matters only if that floor is set lower.
 2. Validate the 32 MiB page bound (`src/web/download.ts:4` `ASSEMBLY_BOUND_BYTES`; building the Blob holds a second copy, about 64 MiB at peak) with a generated book just under and just over it: the first downloads, the second is refused, and the tab's peak memory is recorded. No model calls (owner decision 2026-11-20).
 3. Before the run: T733 merged; the module installed on the dev stack (`external-modules/translator`, `pnpm module add translator`, install, build, `pnpm docker rebuild` while nothing runs); the task type made startable on that install only, by an uncommitted `selectable: true` in `src/manifest.ts`, until the owner's quality sign-off.
 4. A walkthrough for the owner, written after walking the free steps (upload, source approval, consent screen) in the browser.
 5. After the owner's quality sign-off: unhide in a module PR (`selectable: true`, and the README's hidden-type text).
+
+### T736 · FNF[translator-grouping] · Translator unit grouping and calibration envelope leftovers (+8)
+
+status: open · kind: fix · found: tiny-unit grouping build and review (module PR #12) 2026-11-20 · priority: P4
+
+In `martinambrus/haive-module-translator`.
+
+1. PRE-EXISTING: a single block under the word and character caps that serializes past 9,000 characters (roughly 8,950 to 12,000 characters of text, or heavy escaping) becomes a non-exceptional one-block unit. The ingest review form lists only exceptional units (`src/steps/tr-ingest.ts:84`), and calibration refuses the unit later (`src/db/setup.ts:112`). Fix direction: mark such a block exceptional at ingest, or name it on the review form.
+2. PRE-EXISTING duplication, one more copy since module PR #12: the 9,000 envelope is spelled in `src/db/setup.ts:112` (an SQL literal no test pins), `src/steps/tr-setup.ts:98` and `:140`, and `src/ingest/model.ts:6` (`LIMITS.unitEnvelopeChars`, pinned by `test/ingest.test.ts:98`). Fix direction: one constant, passed into the SQL.
+3. LOW: a heading that joins a unit below the minimum is stranded when its first paragraph does not fit, so the paragraph starts the next unit (`src/chunking/group.ts:20-27`); the next unit's `headingIds` still names the heading.
+4. NEGLIGIBLE: the unit-count limit throws before the final join (`src/chunking/group.ts:28`), so a book whose 1,001st unit would have joined back still fails.
+5. COVERAGE, low: the ingest step's replay under a changed grouping (`src/steps/tr-ingest.ts:43-47`) has no step-level test; `saveSource` and the readers are pinned.
+6. TEST TRAP, PRE-EXISTING: `test/path.test.mjs:13-19` imports `../dist/...` (`groupUnits` at :19), so `pnpm test:ingest` tests whatever `dist/` was last built. Fix direction: build first in the script, or import the source.
+7. TEST FRAGILITY, PRE-EXISTING: `test/acceptance.test.mjs:126` caps at `Math.min(51, ...)` from the old 21-unit book; module PR #12 fixed the same kind at :128 by deriving the bound.
+8. COVERAGE REGRESSION from module PR #12, low: the Arabic fixture (`test/acceptance.test.mjs:30`, `targetWords: 60`) is now below the minimum and no longer exercises heading splits (its 4 units are unchanged).
+
+### T737 · FNF[fresh-worktree-typecheck] · A fresh worktree's worker typecheck fails until the statistics module is built
+
+status: open · kind: fix · found: gate-3 parking build (#1296) 2026-11-20 · priority: P4
+
+1. PRE-EXISTING: in a fresh worktree, `pnpm --filter @haive/worker typecheck` fails on `packages/worker/src/modules.generated.ts` until `@haive/module-statistics` is built (`pnpm --filter @haive/module-statistics build`), and `packages/worker/test/step-integrations-boot.test.ts` failed while `modules.generated.ts` was absent. Fix direction: make the worker's typecheck and test tasks build the generated modules first (a dependency turbo's `^build` follows), or say so in `docs/architecture/testing.md`.
 
 ### T721 · The Claude usage grant reaches sandbox environments
 
@@ -1075,7 +1096,7 @@ Resolution: the diagnosis above did not hold for the live error. Codex read its 
 
 ### T694 · FNF[insight-gate3] · insight-cycle approval exposures beside the gate-3 park (+10)
 
-status: open; items 1, 3 and 4 done by #1294 (2c29b923a, deployed 2026-11-20 17:29Z); items 2 and 10 decided by the owner 2026-11-20 (item 10: option B) and in work together · kind: fix · found: review of the gate-3 park change 2026-11-16 · priority: P2
+status: open; items 1, 3 and 4 done by #1294 (2c29b923a, deployed 2026-11-20 17:29Z); items 2 and 10 decided by the owner 2026-11-20 (item 10: option B) in review as #1296 · kind: fix · found: review of the gate-3 park change 2026-11-16 · priority: P2
 
 1. DONE #1294. Stale-tab attestation: the step submit body carries only `values` and targets the newest `waiting_form` row (`api/src/routes/tasks/steps.ts` ~:902-1017), so any stale tab of the same owner can attest a gate-2 or gate-3 answer for a form it never showed. Bind latched-gate submits to `stepRowId` + `waitingStartedAt`.
 2. A successful second insight cycle (no verify failure, gate 2 skipped) still lets a gate-3 preset commit the refreshed diff (`insight-gate3-return.ts` ~:54-66 settles on the prior done gate 3). Same exposure as the owner's park decision; owner call whether it should park too. OWNER DECIDED 2026-11-20: always park gate 3 after a gate-3 insight cycle, whether or not its verification failed; presets and pre-answers are ignored there. Scope: only cycles a person started by picking insights at a parked gate 3 (`10-gate-3-commit.ts` ~:639); automatic rounds (`autoActOnInsights`, `08e-insights-triage.ts` ~:247) stay as they are. Once the person answers that gate 3, Retry, Resume and worker takeover must not park it again, and the fresh-submission anchor (`freshInsightGateSubmission`, today the latest `gate2_approved` event) moves to the cycle.
@@ -1083,10 +1104,14 @@ status: open; items 1, 3 and 4 done by #1294 (2c29b923a, deployed 2026-11-20 17:
 4. DONE #1294. `readValidationSnapshot` is not abortable and reads every changed file serially (up to 8 MiB each, two attempts); a cancel waits for it.
 5. PRE-EXISTING: `readValidationSnapshot({ db, taskId })` in `worker/src/queues/validation-recheck.ts` ~:127 passes no cancel source (`validationSuccessor` has no `StepContext`), so the queue-level recheck read cannot be cancelled.
 6. PRE-EXISTING, bounded: the git `readChangedFiles` call before the first per-file check, and a single in-flight file read of up to 8 MiB, are not interruptible (`worker/src/step-engine/steps/workflow/_validation-snapshot.ts`).
-7. BY DESIGN, from #1294: the api's latched-gate predicate (`api/src/routes/tasks/steps.ts` `insightGateLatched`) is a superset of the worker's, with no settled or `approvedRound` exemption, so a later gate-3 park the worker would not latch still refuses old tabs and non-web clients with 409 `step_form_stale` (the web always sends the fields). Fix if it bites: one latch predicate shared through `@haive/shared`.
+7. BY DESIGN, from #1294: the api's latched-gate predicate (`api/src/routes/tasks/steps.ts` `insightGateLatched`) is a superset of the worker's, with no settled or `approvedRound` exemption, so a later gate-3 park the worker would not latch still refuses old tabs and non-web clients with 409 `step_form_stale` (the web always sends the fields). Fix if it bites: one latch predicate shared through `@haive/shared`. #1296 widens it on purpose: both gates latch on any task that ever ran a gate-3 cycle, or holds a continuation it cannot read, so a non-web client there must send the row id and park stamp (`api/src/routes/tasks/steps.ts:128-153`). The shared predicate stays the fix.
 8. LOW, cosmetic, PRE-EXISTING: a second tab racing the same latched park can show `step_form_not_waiting` without a reload until the next poll (`web/src/app/(app)/tasks/[id]/page.tsx` ~:1372).
-9. COVERAGE: nothing pins what follows the approval of a gate 2 kept for deferred QA findings (depends on item 2), and no case covers the `run_seq` / `created_at` tie-break of `gate3QaDeferred` (`worker/src/queues/insight-gate3-return.ts`).
+9. COVERAGE: nothing pins what follows the approval of a gate 2 kept for deferred QA findings (depends on item 2), and no case covers the `run_seq` / `created_at` tie-break of `gate3QaDeferred` (`worker/src/queues/insight-gate3-return.ts`). #1296 pins that an answered QA-kept gate 2 completes. Its approval writes no `insight.check` event (`worker/src/queues/insight-gate3-return.ts:217-222`; only `step.form_submitted` records it), and the step into the following gate 3 is still not pinned end to end.
 10. PRE-EXISTING, decide with item 2: an unlatched gate 2 still honours `preAnswers['09-gate-2-verify-approval']` (`worker/src/step-engine/step-runner.ts` ~:3596; neither gate declares `humanOnlyFormFields`), so a task that pre-answered gate 2 auto-approves the gate 2 that #1294 keeps for deferred QA findings. Explained to the owner 2026-11-20 with four options: A keep; B in a gate-3 insight cycle, a gate 2 kept for deferred QA findings ignores its pre-answer (recommended); C every gate 2 with deferred QA findings ignores pre-answers; D gate 2 approves and gate 3 lists the findings. OWNER DECIDED 2026-11-20: option B; it ships with item 2. On the dev install no task type (0 of 15) and no task (0 of 453) has pre-answered gate 2 or 3.
+11. PRE-EXISTING, relied on by #1296; follows from the owner's always-park decision, so no new decision: a Retry of a step above the pick row in the pick's round bumps the source row's generation, so `latestGate3Request` returns null and the cycle ends (`worker/src/queues/insight-gate3-return.ts:147-148`, used by `openGate3Cycle` and `gate3InsightCycle`). The re-run gate 3 is then ordinary, and a preset can commit the cycle's edits, which stay in the worktree, unseen. A Retry clicked on the pick row itself stops at its form (`pause_form_on_retry`). Reasoned from the code, not reproduced. Fix direction: latch task-wide as the failed path does, so after a gate-3 cycle applied edits the next gate 3 parks until a person answers one.
+12. OWNER QUESTION: a gate 2 kept by a runtime recheck rather than by deferred QA findings still honours its pre-answer inside a gate-3 cycle, because the decision named only QA deferral (`worker/src/queues/task-queue.ts` ~:2428).
+13. LOW: gate 2's advance now reads continuation events in every task, so an unreadable event throws a step error. It fails closed, and the check handoff already throws on the same event (`insight-gate3-return.ts:131-141`, `step-runner.ts` ~:3584-3588).
+14. LOW: if a cycle's source row were deleted, the park rule would fail open; no code deletes `task_steps` rows today.
 
 ### T689 · Deep-analysis core runtime: guarded spans (P7) and custom fix target (P8)
 
