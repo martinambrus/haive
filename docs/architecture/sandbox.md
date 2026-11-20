@@ -911,7 +911,8 @@ representative valid pins, so unchanged versions keep their Dockerfile bodies an
 ## Optional composed LSP recipes
 
 `ComposeInput.lspInstallContractVersion` selects the installation owner. Absent/1 ignores
-`lspServers` and `lspServerVersions` and keeps the exact legacy Dockerfile body and tag. Contract 2
+`lspServers` and `lspServerVersions` and adds no LSP bytes. Its base is the environment image when
+one is usable, else the pasted body (see Composed LSP verification and retained images). Contract 2
 selects the composed recipes only for a catalogued Claude-binary provider with the existing LSP
 bridge; other CLIs (including grok), unknown names and unknown contracts refuse by name even with
 no selected servers. `lsp-layer.ts` canonicalizes language/server aliases, deduplicates and sorts selection, and
@@ -927,7 +928,8 @@ once. Token validity is not proof that a registry publishes it: legacy 02 adds `
 Go pin, and passes a gem pin directly. Those install-time resolution failures remain failures.
 Selection metadata and recipe bytes enter the hash with provider, RTK, extras and core-image
 identity. Contract 2 includes a constant installation-owner marker even for an empty selection;
-legacy absence/1 adds no bytes and retains the old tag. The structural fixture freezes
+legacy absence/1 adds no bytes; its tag differs from the earlier one only through its base (see
+Composed LSP verification and retained images). The structural fixture freezes
 both pre-feature assembly and `buildHaiveRuntimeToolsLayer`; shared RTK constants and provider
 codegen stay live. Intentional runtime-tools edits must update that fixture too.
 
@@ -1017,7 +1019,7 @@ publication, described below.
 ## Composed LSP verification and retained images
 
 Contract 2 has a writer (see Composed LSP adoption below), readers and verification. Existing
-absent/1 rows retain their checks, reports, image composition and readiness rules. Generation
+absent/1 rows retain their checks, reports, readiness rules and layers above the base. Generation
 renders no "Language servers" installer block for 2, keeps every runtime addition, and refuses a
 contract that is not absent, 1 or 2, saved-body reuse included. 02 apply re-reads the row's
 contract and refuses a body generated under a different owner, so a stale parked form cannot save
@@ -1045,9 +1047,53 @@ environment is rebuilt or removed, and readiness (the identity holds `environmen
 what withdraws. MEASURED with the containerd image store: forcibly removing a parent image by id
 succeeds and leaves the image built on it in place, so step 03 removing a superseded environment
 image does not break a composed image. A daemon that records parent links between images may
-refuse that removal (not measured); step 03 only logs a failed removal. Legacy (absent/1) text,
-tags and builds are unchanged and still paste the body: a legacy body that copies project files
-from the build context still fails at composed build.
+refuse that removal (not measured); step 03 only logs a failed removal.
+
+**A legacy (absent/1) composed image is built on the environment image when one is usable.** Its
+Dockerfile starts with the same `FROM <environment image tag>` and id comment line as contract
+2's, so a body that copies project files from the build context no longer fails at the composed
+build (MEASURED on Docker 29.9.2 with the containerd image store: the launch entry composed a
+legacy row whose body copies a project file, and the composed image held that file; the same call
+on the previous code failed with `"/<file>": not found`). The base is the only difference: legacy
+adds no LSP layer and no contract marker, and contract 2's readiness, retained-reference and
+verification rules stay contract 2's. Every launch and peek path reaches this through
+`resolveSandboxImageComposition` (CLI invocations, 01b and 00b, sub-agents, step commands, the
+task terminal and the dispatch toolchain peek). A legacy call resolves the environment image with
+one inspect (a peek stays inspect-only), and the tag turn re-inspects it before and after the
+build as for contract 2, with a message that says to retry the step.
+
+Without a usable image (no tag, image gone, or a tag that now names another image) a legacy
+composition pastes the saved body as before. Contract 2 refuses there because its readiness names
+the environment image; a refusal for legacy would stop a row that composes today (a body without
+a project-file COPY and an image since pruned) from composing. A body that copies project files
+still fails at the composed build in that case; Retry 03 restores the image.
+
+A legacy composition follows the environment image, so a saved body must not outlive the build
+it names, and one task's edit must not change the image another task composes on. Step 02
+saving a body whose hash differs from the row's saved one (the stored hash, or the hash of the
+saved text when 01 cleared it) acts by who links the row. With no other live task on it, the
+row goes back to `pending` (as 01 does when it re-declares) and keeps `builtImageId` and
+`imageTag`, so 03 builds the new body and removes the image it supersedes. With other live
+tasks on it (02's relink puts tasks onto one another's rows), 02 forks instead, as 01 does for
+a changed definition: one transaction inserts a `pending` row for the saving task and links
+only that task. The fork is named for the task and carries the body, its hash, the base image
+and the row's declared deps (the contract key included); it holds no image, and 03 builds it.
+The shared row stays as it was for its other tasks: body, hash, status, image id and tag. The
+same body forks nothing and leaves the row ready, and 03 reuses its image; a hash stored before
+the hash covered the declared deps never matches, so such a row counts as changed once. Until
+03 has built, the saving task's row is not ready for any reader: a legacy launch uses the
+provider image, and contract 2's verification and readiness wait for 03 and 04. The insert
+precedes the task row write and no task lock is taken (see Composed LSP adoption). Undo: revert
+the change; a row it forked is an ordinary row of its task, like those step 01 forks.
+
+A legacy composition built on its environment image gets a new tag on its next launch after
+this change, and another whenever step 03 replaces the environment image; a row on the pasted
+body keeps its old tag. The core image id enters the hash only when the Dockerfile text names
+the core image, so a legacy body that did no longer follows core rebuilds while its environment
+image stands. Nothing retains a previous legacy tag (retained references are contract 2's), so
+only the boot reaper removes it, once it is older than its age limit and no container uses it.
+Undo: revert the change; legacy tags return to the body-based ones and rebuild once more unless
+the old image is still there. No schema, data or image rollback is needed.
 
 Verification separates runtime/client checks (the inspected environment image) from selected LSP
 servers (the exact inspected composed image ID). Bootstrap 04 and the final step below run the
@@ -1239,8 +1285,12 @@ row, hash, image and other links are not written; the key is part of the hash, s
 never equals the old one. The default image tag of a contract-2 row ends in the first 8 characters
 of its id: template names are not unique (every row a task creates is named `task-<id8>`), so a
 same-named row would otherwise re-point the old image's tag, and a forced removal by tag would
-delete the wrong image. Legacy tags are unchanged. A contract-2 row built before this rule keeps its
-stored tag until step 03 rebuilds it, which moves the tag and removes the superseded image by id.
+delete the wrong image. A legacy row keeps the name-only tag unless another row already holds it
+(step 03 detect looks): a fork is named for its task, so one forked from the row created for
+that task has that row's name, and a build under the name-only tag would move the source row's
+tag onto the fork's image; its default then ends in its id too. A contract-2 row built before
+this rule keeps its stored tag until step 03 rebuilds it, which moves the tag and removes the
+superseded image by id.
 The task picks the replacement up on that Retry: it resets 01 and every later step, so 02, 03, 04,
 01b and 01b1 build and verify the new row. Other tasks keep what they link, and a task that is
 not retried stays on the old row. The old row can end up unlinked, so repository delete also
@@ -1268,8 +1318,10 @@ replacement and its new-environment adoption. Whoever takes the lock second sees
 committed write: a switch is refused 409 `composed_lsp_provider_locked`, a replacement is refused
 `providers` and its inserted row rolls back, an adoption stores its row without the key. Step 02's
 merge of a candidate onto a row with the same dockerfile hash relinks a task to the same contract
-(the key is part of the hash), so it takes no lock. The lock is NO KEY UPDATE, not UPDATE, so the
-foreign-key checks of inserts (events, choices, invocations) are not blocked.
+(the key is part of the hash), so it takes no lock; neither does its fork of a row other tasks
+link, which inserts the row and then links the task in one transaction and carries the row's
+declared deps. The lock is NO KEY UPDATE, not UPDATE, so the foreign-key checks of inserts
+(events, choices, invocations) are not blocked.
 
 Lock order, outermost first: the repository (its task key, then its row), the task's step rows in
 one id-ordered batch, the task row, then leaf rows (provider rows and step rows through foreign keys,
