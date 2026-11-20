@@ -30,6 +30,16 @@ import { getTableConfig, PgJsonb, PgUUID, PgTable } from 'drizzle-orm/pg-core';
  * per-key mutex, re-entrant within one transaction chain and released when the outermost
  * transaction settles, which is what lets a test race two writers.
  * `pg_advisory_xact_lock_shared` is accepted and takes nothing: no exclusive holder is modelled.
+ *
+ * Row locks are opt-in (`createFakeDb(tables, { rowLocks: true })`; off, `.for()` is a no-op and
+ * every other behaviour is unchanged). On, inside a transaction, a select ending in
+ * `.for('update')` or `.for('no key update')` takes an exclusive lock on every row it matches
+ * (key `row:<table>:<id lowercase>`, rows in id order, through the same re-entrant per-chain
+ * `acquire` as the advisory lock) and then RE-READS, so it returns what a waiter would see after
+ * the holder committed. `.for('share')`, `.for('key share')` and any `.for` outside a transaction
+ * take nothing. `hooks.onWait` fires synchronously when an acquire finds the key held by another
+ * transaction, just before it waits; `rowLocked(table, id)` says whether an open transaction
+ * holds that row's lock. Isolation is still not modelled: unlocked reads see uncommitted writes.
  */
 
 export type FakeRow = Record<string, unknown>;
@@ -150,7 +160,7 @@ interface SelectQuery extends PromiseLike<FakeRow[]> {
   orderBy(...orders: unknown[]): SelectQuery;
   limit(n: number): SelectQuery;
   offset(n: number): SelectQuery;
-  /** A row lock, taken as a no-op: with no isolation there is nothing to lock against. */
+  /** A row lock: a no-op unless the db was made with `rowLocks` and this is a transaction. */
   for(strength: string, config?: unknown): SelectQuery;
 }
 
@@ -181,7 +191,10 @@ export interface FakeDbHandle<Q extends string = string> {
   transaction<R>(fn: (tx: FakeDbHandle<Q>) => Promise<R>): Promise<R>;
 }
 
-export function createFakeDb<const T extends Record<string, PgTable>>(tables: T) {
+export function createFakeDb<const T extends Record<string, PgTable>>(
+  tables: T,
+  options: { rowLocks?: boolean } = {},
+) {
   const list = Object.values(tables);
   const store = new Map<PgTable, FakeRow[]>(list.map((t) => [t, []]));
   const tableRows = (table: PgTable): FakeRow[] => {
@@ -196,6 +209,9 @@ export function createFakeDb<const T extends Record<string, PgTable>>(tables: T)
   const clockMs = (): number => Date.UTC(2026, 1, 1) + tick * 1000;
   const now = (): Date => new Date(Date.UTC(2026, 1, 1) + (tick += 1) * 1000);
   const lockTails = new Map<string, Promise<void>>();
+  /** Per key: transactions holding or queued for it, and the keys currently held. */
+  const lockUsers = new Map<string, number>();
+  const holders = new Set<string>();
 
   /** Test-side only: points a test can stop at to arrange an interleaving. */
   const hooks: {
@@ -208,12 +224,16 @@ export function createFakeDb<const T extends Record<string, PgTable>>(tables: T)
     /** Awaited when an outermost transaction's work is done, just before it commits and releases
      *  its locks; a throw fails the commit, which rolls it back. */
     beforeCommit: (() => void | Promise<void>) | null;
+    /** Called synchronously when an acquire finds its key held by another transaction, just
+     *  before it waits (advisory and row keys). */
+    onWait: ((key: string) => void) | null;
   } = {
     beforeLock: null,
     beforeInsert: null,
     beforeUpdate: null,
     beforeDelete: null,
     beforeCommit: null,
+    onWait: null,
   };
 
   /** UUID text spells the same value in either case; other column types keep their case. */
@@ -570,8 +590,13 @@ export function createFakeDb<const T extends Record<string, PgTable>>(tables: T)
   }
 
   /** `select({ alias: column, … }).from(table)`, projected onto the aliases; all columns without. */
-  function selectQuery(fields: Record<string, unknown> | undefined, table: PgTable): SelectQuery {
+  function selectQuery(
+    ctx: TxContext | null,
+    fields: Record<string, unknown> | undefined,
+    table: PgTable,
+  ): SelectQuery {
     const opts: Record<string, unknown> = {};
+    let strength = '';
     const run = (): FakeRow[] =>
       select(table, opts).map((row) => (fields === undefined ? row : project(table, fields, row)));
     const query: SelectQuery = {
@@ -579,8 +604,23 @@ export function createFakeDb<const T extends Record<string, PgTable>>(tables: T)
       orderBy: (...orders) => ((opts.orderBy = orders), query),
       limit: (n) => ((opts.limit = n), query),
       offset: (n) => ((opts.offset = n), query),
-      for: () => query,
-      then: (ok, bad) => Promise.resolve().then(run).then(ok, bad),
+      for: (s) => ((strength = s.toLowerCase()), query),
+      then: (ok, bad) =>
+        Promise.resolve()
+          .then(async () => {
+            if (
+              options.rowLocks &&
+              ctx !== null &&
+              ['update', 'no key update'].includes(strength)
+            ) {
+              const ids = select(table, opts)
+                .map((r) => String(r.id).toLowerCase())
+                .sort();
+              for (const id of ids) await acquire(ctx, `row:${getTableName(table)}:${id}`);
+            }
+            return run();
+          })
+          .then(ok, bad),
     };
     return query;
   }
@@ -724,15 +764,23 @@ export function createFakeDb<const T extends Record<string, PgTable>>(tables: T)
   async function acquire(ctx: TxContext, key: string): Promise<void> {
     if (ctx.held.has(key)) return;
     await hooks.beforeLock?.(key);
+    if (ctx.held.has(key)) return;
+    if ((lockUsers.get(key) ?? 0) > 0) hooks.onWait?.(key);
+    lockUsers.set(key, (lockUsers.get(key) ?? 0) + 1);
     const prev = lockTails.get(key) ?? Promise.resolve();
-    let release!: () => void;
-    const mine = new Promise<void>((resolve) => (release = resolve));
+    let open!: () => void;
+    const mine = new Promise<void>((resolve) => (open = resolve));
     lockTails.set(
       key,
       prev.then(() => mine),
     );
     await prev;
-    ctx.held.set(key, release);
+    holders.add(key);
+    ctx.held.set(key, () => {
+      holders.delete(key);
+      lockUsers.set(key, (lockUsers.get(key) ?? 1) - 1);
+      open();
+    });
   }
 
   const api = (table: PgTable): FakeTableApi => ({
@@ -745,7 +793,7 @@ export function createFakeDb<const T extends Record<string, PgTable>>(tables: T)
       query: Object.fromEntries(
         Object.entries(tables).map(([name, t]) => [name, api(t)]),
       ) as Record<Extract<keyof T, string>, FakeTableApi>,
-      select: (fields) => ({ from: (table) => selectQuery(fields, table) }),
+      select: (fields) => ({ from: (table) => selectQuery(ctx, fields, table) }),
       insert: (table: PgTable) => ({
         values: (values: FakeRow | FakeRow[]): Insert => {
           const run = (
@@ -907,6 +955,9 @@ export function createFakeDb<const T extends Record<string, PgTable>>(tables: T)
     /** Test-side setup: a committed row, as if written before the test began. */
     insert: (table: PgTable, values: FakeRow): FakeRow => insertRow(null, table, values),
     patch,
+    /** True while an open transaction holds the row lock of this row. */
+    rowLocked: (table: PgTable, id: string): boolean =>
+      holders.has(`row:${getTableName(table)}:${id.toLowerCase()}`),
     rows: (table: PgTable): FakeRow[] => select(table, {}),
     compileWhere,
     now,
