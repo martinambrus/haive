@@ -31,6 +31,7 @@ import {
   type StepAction,
   type StepActionResponse,
   type StopActivityResult,
+  type ApiError,
   type Task,
   type TaskAction,
   type TaskEvent,
@@ -1355,7 +1356,11 @@ export default function TaskDetailPage() {
           answer: String(values.mergeGuidance ?? ''),
         });
       } else {
-        await api.post(`/tasks/${id}/steps/${step.stepId}/submit`, { values });
+        await api.post(`/tasks/${id}/steps/${step.stepId}/submit`, {
+          values,
+          stepRowId: step.id,
+          waitingStartedAt: step.waitingStartedAt,
+        });
       }
       await reload();
       // Keep button disabled here. The effect below clears `submitting` once the
@@ -1364,6 +1369,7 @@ export default function TaskDetailPage() {
       // reoffers the form under a new park stamp (a refused answer). Clearing in a
       // `finally` re-enabled the button between reload and backend transition.
     } catch (err) {
+      if ((err as ApiError)?.code === 'step_form_stale') await reload().catch(() => {});
       setSubmitError({
         stepId: step.stepId,
         message: (err as Error).message ?? 'Failed to submit step',

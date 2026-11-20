@@ -1,4 +1,4 @@
-import { eq, sql, type SQL } from 'drizzle-orm';
+import { and, eq, sql, type SQL } from 'drizzle-orm';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createDatabase, schema, type Database } from '@haive/database';
 import type { StepDefinition } from '@haive/shared/step';
@@ -447,6 +447,12 @@ describe.skipIf(!url)(
       return row!;
     };
 
+    // The binding a tab holds for the form it rendered: the row and the park it was shown at.
+    const bindingOf = async (id: string) => {
+      const row = await wholeRow(id);
+      return { stepRowId: row.id, waitingStartedAt: row.waitingStartedAt!.toISOString() };
+    };
+
     const choiceRows = (taskId: string) =>
       db
         .select({
@@ -585,6 +591,7 @@ describe.skipIf(!url)(
         expect(
           await post(`/tasks/${taskId}/steps/${gateId}/submit`, {
             values: { decision: 'approve' },
+            ...(await bindingOf(row.id)),
           }),
         ).toMatchObject({ status: 200 });
         const advancing = advanceStep({ ...params, formValues: { decision: 'reject' } });
@@ -681,6 +688,7 @@ describe.skipIf(!url)(
         expect(
           await post(`/tasks/${taskId}/steps/${gateId}/submit`, {
             values: { decision: 'reject', feedback: { malformed: true } },
+            ...(await bindingOf(row.id)),
           }),
         ).toMatchObject({ status: 200 });
         const result = await advanceStep(params);
@@ -696,6 +704,54 @@ describe.skipIf(!url)(
         expect(
           events.filter((e) => e.eventType === 'insight.check').map((e) => e.payload!.kind),
         ).toEqual(['verify_failed']);
+      },
+      TEST_TIMEOUT,
+    );
+
+    it(
+      'a latched gate answer carries the park it was rendered for, and a re-park refuses the old one',
+      async () => {
+        const gateId = '09-gate-2-verify-approval';
+        const taskId = await seedTask('running', { currentStepId: gateId, currentRound: 0 });
+        const oldStamp = new Date(Date.now() - 60_000);
+        const row = await seedStep(taskId, {
+          stepId: gateId,
+          status: 'waiting_form',
+          waitingStartedAt: oldStamp,
+        });
+        await db.insert(schema.taskEvents).values({
+          taskId,
+          taskStepId: row.id,
+          eventType: 'insight.check',
+          payload: { version: 1, batchId: 'failed-batch', kind: 'verify_failed' },
+        });
+        const stale = await bindingOf(row.id);
+        await db
+          .update(schema.taskSteps)
+          .set({ waitingStartedAt: new Date(oldStamp.getTime() + 30_000) })
+          .where(eq(schema.taskSteps.id, row.id));
+        await expect(
+          post(`/tasks/${taskId}/steps/${gateId}/submit`, {
+            values: { decision: 'approve' },
+            ...stale,
+          }),
+        ).rejects.toMatchObject({ status: 409, code: 'step_form_stale' });
+        expect((await wholeRow(row.id)).formValues).toBeNull();
+        const submitted = () =>
+          db.query.taskEvents.findMany({
+            where: and(
+              eq(schema.taskEvents.taskId, taskId),
+              eq(schema.taskEvents.eventType, 'step.form_submitted'),
+            ),
+          });
+        expect(await submitted()).toHaveLength(0);
+        expect(
+          await post(`/tasks/${taskId}/steps/${gateId}/submit`, {
+            values: { decision: 'approve' },
+            ...(await bindingOf(row.id)),
+          }),
+        ).toMatchObject({ status: 200 });
+        expect(await submitted()).toHaveLength(1);
       },
       TEST_TIMEOUT,
     );

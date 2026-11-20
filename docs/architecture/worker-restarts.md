@@ -673,6 +673,16 @@ A form submit carries no epoch on purpose, so it cannot be fenced. `isStaleSubmi
 lands on a form parked after the job was queued, such as a form a `ReopenStepFormError` reopened,
 which would otherwise answer the new form with what was typed into the old one.
 
+A latched insight gate (gate 2 while a failed insight check awaits re-approval, gate 3 after that
+re-approval) also binds its answer to the form it was rendered for. The body carries `stepRowId`
+and `waitingStartedAt`; unless both equal the row the route found, and that row's marker is still
+set (an answered wait has none), the route answers 409 `step_form_stale` and writes nothing. The
+latch is read from the latest `insight.check` event and fails closed: an event it cannot read
+counts as latched, and gate 3's settled exemption is not repeated. Only these two steps require
+the fields; every other step ignores them, so older tabs and automation keep working there. The
+web sends them on every step submit and reloads the steps on this code. A client that omits them,
+such as an old tab, cannot answer a latched gate until it reloads.
+
 An LLM preparation hook may return `false` when refreshed inputs make the
 invocation unnecessary. `resolveLlmPhase` then returns null output to apply
 before constructing the prompt or reserving a run. RAG finalization uses this

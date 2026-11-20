@@ -567,6 +567,10 @@ its next bounded cohort. Both publish checkpoint ownership in the required conti
 downstream row in the target round is invalidated, even when Retry changes a previous direct-verify route into a validation route whose target
 has no row yet. Runtime recheck bounds and return-address handling remain unchanged.
 
+The snapshot read honours Cancel: it calls the step's `throwIfCancelled` before each attempt and
+each file and rethrows `TaskCancelledError` rather than reading it as an unknown snapshot. The
+queue-level recheck passes no step context, so its read has no cancel source.
+
 Insight rounds write no `fix_loop.started` and do not consume `maxFixRounds`. A blocking
 check inside an insight round still enters the ordinary implementation fix loop and spends
 one of its own allowances. Neither journal history nor spent fix allowances are reset.
@@ -609,7 +613,11 @@ checkout directories cannot prove equality and retain checks too. Complete snaps
 force `--ignore-submodules=none` on both status and fork-point path reads: a repository
 may hide a changed gitlink with `ignore=all` even though staging includes that move.
 The owned checkpoint skips only
-gate 2 when verification never failed; configured checks on either side still run.
+gate 2, and only when verification never failed and the cycle's latest 08d2 row (rounds from the
+cycle's first round) is not a done `accept`. An accept waives nothing and defers its findings to
+gate 2, so gate 2 runs. A gate 2 kept for that reason is an ordinary unlatched gate, since no
+verification failed: presets apply as in any task and no `gate2_approved` is recorded. Configured
+checks on either side still run.
 Gate 3 regenerates its diff, message and form. Earlier commit/message approval is not
 reused, and empty selection retains the existing staging and commit path.
 
@@ -634,6 +642,8 @@ guard: no task/type preset, prior-task reuse, saved synthetic answer, queue answ
 auto-submit variant can apply it. It keeps computed defaults and parks with
 `waiting_started_at`. Its answer requires the authenticated owner's matching
 `step.form_submitted` event for the row and generation, newer than `gate2_approved`.
+The route also refuses a stale form: a latched gate's answer must name the row and park its form
+was rendered for (see worker-restarts, form park marker).
 The requirement survives Retry, Resume and boot takeover until the gate-3 pass completes;
 a configured late editor introducing another round between the gates does not clear it.
 A warning note in the form explains that the refreshed changes need a new commit decision.

@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import { lstatNoFollow, readFileNoFollow, readLinkNoFollow } from '@haive/shared/fs-safe';
+import { TaskCancelledError } from '@haive/shared/step';
 import {
   FINGERPRINT_READ_BYTES,
   readChangedFiles,
@@ -30,12 +31,16 @@ export function validationSnapshotDigest(snapshot: ValidationSnapshot | null): {
   };
 }
 
+type SnapshotContext = Pick<StepContext, 'db' | 'taskId'> &
+  Partial<Pick<StepContext, 'throwIfCancelled'>>;
+
 export async function readValidationSnapshot(
-  ctx: Pick<StepContext, 'db' | 'taskId'>,
+  ctx: SnapshotContext,
   options: { requireComplete?: boolean; maxFileBytes?: number } = {},
 ): Promise<ValidationSnapshot | null> {
   // Retry the complete bounded read once: a transient Git/FS failure proves no equality.
   for (let attempt = 0; attempt < 2; attempt++) {
+    ctx.throwIfCancelled?.();
     const snapshot = await readValidationSnapshotOnce(ctx, options);
     if (snapshot !== null) return snapshot;
   }
@@ -43,7 +48,7 @@ export async function readValidationSnapshot(
 }
 
 async function readValidationSnapshotOnce(
-  ctx: Pick<StepContext, 'db' | 'taskId'>,
+  ctx: SnapshotContext,
   options: { requireComplete?: boolean; maxFileBytes?: number },
 ): Promise<ValidationSnapshot | null> {
   try {
@@ -60,6 +65,7 @@ async function readValidationSnapshotOnce(
     const { anchor, prefix } = workspaceAnchor(made.worktreePath);
     const snapshot: ValidationSnapshot = Object.create(null);
     for (const file of files) {
+      ctx.throwIfCancelled?.();
       const rel = `${prefix}${file.replace(/\/$/, '')}`;
       const entry = await lstatNoFollow(anchor, rel, { strict: true });
       const hash = createHash('sha256');
@@ -89,7 +95,8 @@ async function readValidationSnapshotOnce(
       snapshot[file] = hash.digest('hex');
     }
     return snapshot;
-  } catch {
+  } catch (err) {
+    if (err instanceof TaskCancelledError) throw err;
     // A failed read cannot establish equality; the routing boundary refuses it.
     return null;
   }

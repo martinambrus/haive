@@ -103,7 +103,14 @@ for (const legacy of [false, true]) {
     await expect(minutes).toHaveValue('21');
     await minutes.fill('35');
     await page.getByRole('button', { name: 'Confirm estimate', exact: true }).click();
-    await expect.poll(() => submitted).toEqual({ values: { estimatedHours: 35 / 60 } });
+    await expect
+      .poll(() => submitted)
+      .toEqual({
+        values: { estimatedHours: 35 / 60 },
+        // The submit names the row and park it answers, so a stale form is refused.
+        stepRowId: gate.stepRowId,
+        waitingStartedAt: expect.any(String),
+      });
     await expect(hours).toHaveValue('0');
     await expect(minutes).toHaveValue('35');
   });
