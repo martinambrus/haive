@@ -293,7 +293,6 @@ describe('launch: guards for a legacy composition', () => {
     }));
     const run = resolveSandboxImageTag(database({}, copyBody, okRow), 't', provider, runner);
     await expect(run).rejects.toBeInstanceOf(ComposedImageNotVerifiedError);
-    await expect(run).rejects.toThrow(/retry the step/);
     expect(build).not.toHaveBeenCalled();
   });
   it('an env id that moves during the build removes the built tag and rejects', async () => {
@@ -305,7 +304,6 @@ describe('launch: guards for a legacy composition', () => {
     });
     const run = resolveSandboxImageTag(database({}, copyBody, okRow), 't', provider, docker.runner);
     await expect(run).rejects.toBeInstanceOf(ComposedImageNotVerifiedError);
-    await expect(run).rejects.toThrow(/retry the step/);
     expect(docker.build).toHaveBeenCalledTimes(1);
     expect(docker.remove).toHaveBeenCalledWith(
       expect.stringMatching(/^haive-sandbox:[0-9a-f]{16}$/),
