@@ -101,11 +101,15 @@ describe('A composer from the environment image', () => {
       '19e600548bec918466786c07f989d8726d68528bba1246f798355fa20ee17152',
     );
   });
-  it('contract 1 ignores the field', () => {
-    const withField = compose({ lspInstallContractVersion: 1, environmentImage: env });
-    const without = compose({ lspInstallContractVersion: 1 });
-    expect(withField).toEqual(without);
-    expect(compose({ environmentImage: env })).toEqual(compose());
+  it('a legacy row builds FROM the env ref too, without the LSP marker', () => {
+    for (const lspInstallContractVersion of [undefined, 1]) {
+      const c = compose({ lspInstallContractVersion, environmentImage: env });
+      expect(
+        c.dockerfileBody.startsWith(`FROM ${ENV_TAG}\n# haive-environment-image: ${ENV_ID}\n`),
+      ).toBe(true);
+      expect(c.dockerfileBody).not.toContain(COPY_LINE);
+      expect(c.dockerfileBody).not.toContain('# haive-lsp-install-contract: 2');
+    }
   });
   it.each([
     ['ref newline', { ref: 'a\nRUN x', imageId: ENV_ID }],

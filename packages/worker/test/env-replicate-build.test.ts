@@ -170,7 +170,7 @@ describe('createBuildImageStep.detect', () => {
     const db = {
       query: {
         tasks: { findFirst: async () => ({ envTemplateId: row.id }) },
-        envTemplates: { findFirst: async () => row },
+        envTemplates: { findFirst: async () => row, findMany: async () => [] },
       },
     } as unknown as Database;
     return {

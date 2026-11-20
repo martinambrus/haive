@@ -126,8 +126,10 @@ export async function checkTaskComposedLspProvider(
  *
  * Step 02's relink onto a row with the same Dockerfile hash takes no lock: the hash covers the
  * declared deps, and so the contract key, so it moves a task only between rows of one contract.
- * Saved preferences are user-wide, so a remembered pick made on another task is not ordered
- * against this task's decision.
+ * Its fork of a row other tasks link (a changed body) takes none either: one transaction inserts
+ * the row and then links the task, as step 01 orders its inserts, and the fork carries the row's
+ * declared deps, so the task stays on one contract. Saved preferences are user-wide, so a
+ * remembered pick made on another task is not ordered against this task's decision.
  */
 export async function lockTaskForComposedLsp(
   tx: Pick<Database, 'select'>,

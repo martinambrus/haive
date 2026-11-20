@@ -11,6 +11,7 @@ import { stableStringify } from './01-declare-deps.js';
 import {
   DEFAULT_GO_VERSION,
   DEFAULT_RUST_VERSION,
+  deriveEnvTemplateName,
   findEnvTemplateByHash,
   getTaskEnvTemplate,
   hashDockerfile,
@@ -151,7 +152,7 @@ export const generateDockerfileStep: StepDefinition<
     // apply hashes the persisted detect output, so refuse when the row's LSP owner moved since.
     const owner = await ctx.db.query.envTemplates.findFirst({
       where: eq(schema.envTemplates.id, args.detected.envTemplateId),
-      columns: { declaredDeps: true },
+      columns: { declaredDeps: true, dockerfileHash: true, generatedDockerfile: true },
     });
     const ownerVersion = (owner?.declaredDeps as Record<string, unknown> | null | undefined)
       ?.lspInstallContractVersion;
@@ -190,11 +191,73 @@ export const generateDockerfileStep: StepDefinition<
       };
     }
 
+    // The row's image was built from the body its saved hash names; 01 clears the stored hash when
+    // it re-declares a row, and the text it keeps still names it. Another body is not that build,
+    // and 03 reuses any ready row whose image still exists: take the row back to 'pending' (what
+    // 01 does when it re-declares) so 03 builds it. builtImageId stays, so that build can remove
+    // the image it supersedes. The same body keeps the row ready.
+    const savedHash =
+      owner?.dockerfileHash ??
+      (owner?.generatedDockerfile
+        ? envTemplateHash(owner.generatedDockerfile, args.detected.declaredDeps)
+        : null);
+    const buildInvalidated = savedHash !== null && savedHash !== dockerfileHash;
+
+    // Other live tasks can link this row (the relink above puts tasks onto one another's rows), so
+    // it defines their environment too: a changed body written into it would hand them a
+    // Dockerfile they did not choose and, with the reset, take their image away until this task's
+    // build ends. Fork instead, as 01 does for a changed definition. The fork carries the declared
+    // deps the body was hashed with (the LSP contract included) and holds no image: 03 builds it
+    // under a tag of its own. The row is inserted before the task row is written, as 01 orders its
+    // inserts, and no task lock is taken because the contract does not change.
+    const sharedWith = buildInvalidated
+      ? await liveTasksSharingEnvTemplate(ctx.db, currentId, ctx.taskId)
+      : [];
+    if (sharedWith.length > 0) {
+      const task = await ctx.db.query.tasks.findFirst({
+        where: eq(schema.tasks.id, ctx.taskId),
+        columns: { repositoryId: true },
+      });
+      const fork = await ctx.db.transaction(async (tx) => {
+        const [created] = await tx
+          .insert(schema.envTemplates)
+          .values({
+            userId: ctx.userId,
+            repositoryId: task?.repositoryId ?? null,
+            name: deriveEnvTemplateName(ctx.taskId),
+            baseImage: args.detected.baseImage,
+            declaredDeps: args.detected.declaredDeps,
+            generatedDockerfile: dockerfile,
+            dockerfileHash,
+            status: 'pending',
+          })
+          .returning();
+        if (!created) throw new Error('failed to insert env_template row');
+        await linkTaskToEnvTemplate(tx, ctx.taskId, created.id);
+        return created;
+      });
+      ctx.logger.info(
+        {
+          envTemplateId: fork.id,
+          forkedFrom: currentId,
+          keptForTasks: sharedWith,
+          dockerfileLength: dockerfile.length,
+          dockerfileHash,
+        },
+        'dockerfile changed on a shared env template; forked a row for this task',
+      );
+      return {
+        envTemplateId: fork.id,
+        dockerfileLength: dockerfile.length,
+      };
+    }
+
     await ctx.db
       .update(schema.envTemplates)
       .set({
         generatedDockerfile: dockerfile,
         dockerfileHash,
+        ...(buildInvalidated ? { status: 'pending' as const } : {}),
         updatedAt: new Date(),
       })
       .where(eq(schema.envTemplates.id, currentId));
@@ -203,6 +266,7 @@ export const generateDockerfileStep: StepDefinition<
         envTemplateId: currentId,
         dockerfileLength: dockerfile.length,
         dockerfileHash,
+        buildInvalidated,
       },
       'dockerfile saved',
     );

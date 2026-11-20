@@ -3,7 +3,7 @@ import { imageRepo } from '@haive/shared';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { eq } from 'drizzle-orm';
+import { and, eq, ne } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import type { FormSchema } from '@haive/shared';
 import type { StepDefinition } from '../../step-definition.js';
@@ -19,6 +19,9 @@ export interface BuildImageDetect {
   status: string;
   /** The row's declared LSP install contract; absent in older cached detect output (legacy). */
   lspInstallContractVersion?: 1 | 2;
+  /** The tag this row's name defaults to belongs to another row: one holds it, or an older row
+   *  has the same name. Absent in older detect output. */
+  defaultTagHeld?: boolean;
 }
 
 export interface BuildImageApply {
@@ -36,6 +39,10 @@ function slugifyName(name: string): string {
     .toLowerCase()
     .replace(/[^a-z0-9-]+/g, '-')
     .replace(/^-+|-+$/g, '');
+}
+
+function defaultImageTag(name: string, idSuffix: string): string {
+  return `${DEFAULT_TAG_PREFIX}-${slugifyName(name)}${idSuffix}:latest`;
 }
 
 // ESC-built (not a literal control char) so it doesn't trip no-control-regex.
@@ -89,6 +96,27 @@ export function createBuildImageStep(
           status = 'pending';
         }
       }
+      // Template names are not unique: a fork is named for its task, so one forked from the row
+      // created for that task has that row's name and defaults to its tag, and building under it
+      // would move that tag onto this image. The oldest row of a name owns the name-only tag, so
+      // a younger one builds under its id even while the older row holds no saved tag (not built
+      // yet, or re-declared by 01) and whichever of their build forms is submitted first.
+      const holder = await ctx.db.query.envTemplates.findFirst({
+        where: and(
+          eq(schema.envTemplates.imageTag, defaultImageTag(row.name, '')),
+          ne(schema.envTemplates.id, row.id),
+        ),
+        columns: { id: true },
+      });
+      const sameName = await ctx.db.query.envTemplates.findMany({
+        where: and(eq(schema.envTemplates.name, row.name), ne(schema.envTemplates.id, row.id)),
+        columns: { id: true, createdAt: true },
+      });
+      const younger = sameName.some(
+        (o) =>
+          o.createdAt < row.createdAt ||
+          (o.createdAt.getTime() === row.createdAt.getTime() && o.id < row.id),
+      );
       return {
         envTemplateId: row.id,
         name: row.name,
@@ -99,13 +127,16 @@ export function createBuildImageStep(
         lspInstallContractVersion: (
           row.declaredDeps as { lspInstallContractVersion?: 1 | 2 } | null
         )?.lspInstallContractVersion,
+        defaultTagHeld: holder !== undefined || younger,
       };
     },
 
     form(_ctx, detected): FormSchema {
       const idSuffix =
-        detected.lspInstallContractVersion === 2 ? `-${detected.envTemplateId.slice(0, 8)}` : '';
-      const defaultTag = `${DEFAULT_TAG_PREFIX}-${slugifyName(detected.name)}${idSuffix}:latest`;
+        detected.lspInstallContractVersion === 2 || detected.defaultTagHeld
+          ? `-${detected.envTemplateId.slice(0, 8)}`
+          : '';
+      const defaultTag = defaultImageTag(detected.name, idSuffix);
       const alreadyBuilt = detected.currentImageId !== null && detected.status === 'ready';
       const fields: FormSchema['fields'] = [
         {

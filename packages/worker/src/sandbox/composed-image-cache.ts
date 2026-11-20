@@ -73,17 +73,18 @@ export async function withResolvedComposedImage<T>(
     if (inspected.exists) {
       log.info({ tag: composition.tag, hash: composition.hash }, 'composed image cache hit');
     } else {
+      const environment = composition.environmentImage;
       // Contract 2 builds only FROM the environment image; its pasted body needs a context.
-      if (composition.installContract === 2) {
-        const environment = composition.environmentImage;
-        if (!environment)
-          throw new Error(
-            'Contract-2 composed image cannot be built without its environment image',
-          );
+      if (composition.installContract === 2 && !environment)
+        throw new Error('Contract-2 composed image cannot be built without its environment image');
+      // The environment guards cover a legacy composition built on its environment image too.
+      if (environment) {
         // Re-inspected inside the tag turn: the id resolved earlier may have moved since.
         const current = await runner.inspect(environment.ref);
         if (!current.exists || current.imageId !== environment.imageId)
-          throw new ComposedImageNotVerifiedError(ENV_IMAGE_CHANGED);
+          throw new ComposedImageNotVerifiedError(
+            composition.installContract === 2 ? ENV_IMAGE_CHANGED : LEGACY_ENV_IMAGE_CHANGED,
+          );
       }
       log.info(
         { tag: composition.tag, hash: composition.hash },
@@ -93,12 +94,13 @@ export async function withResolvedComposedImage<T>(
       // The tag lock does not cover the environment tag, and docker resolves FROM by name
       // during the build: an environment that moved meanwhile may be the parent, so the
       // composed tag (named after the old id) is removed rather than served.
-      const environment = composition.installContract === 2 ? composition.environmentImage : null;
       if (environment) {
         const after = await runner.inspect(environment.ref);
         if (!after.exists || after.imageId !== environment.imageId) {
           await runner.remove(composition.tag, { force: true });
-          throw new ComposedImageNotVerifiedError(ENV_IMAGE_CHANGED);
+          throw new ComposedImageNotVerifiedError(
+            composition.installContract === 2 ? ENV_IMAGE_CHANGED : LEGACY_ENV_IMAGE_CHANGED,
+          );
         }
       }
     }
@@ -114,9 +116,11 @@ export interface ResolvedSandboxImageComposition extends SandboxImageComposition
 }
 
 const ENV_IMAGE_CHANGED = 'Environment image is missing or changed; Retry 03, then verify again';
+const LEGACY_ENV_IMAGE_CHANGED =
+  'Environment image changed while the sandbox image was being built; retry the step';
 
-/** The retained environment image a contract-2 composition builds FROM; null when it is
- * absent, has no id, or is not the image the environment build recorded. */
+/** The environment image a composition builds FROM; null when it is absent, has no id, or is
+ * not the image the environment build recorded. */
 export async function resolveEnvironmentImage(
   envTemplate: { imageTag?: string | null; builtImageId?: string | null },
   runner: DockerRunner,
@@ -227,14 +231,18 @@ export async function resolveSandboxImageComposition(
     rtkVersion = rtkCache?.versions?.[0] ?? rtkCache?.latestVersion ?? null;
   }
 
-  // A pinned launch/peek skips the environment image: it keeps the retained image id and
-  // must not depend on the environment still being there.
-  let environmentImage: EnvironmentImageRef | undefined;
-  if (contract === 2 && !options.verifiedProviderId) {
-    environmentImage =
-      options.environmentImage ?? (await resolveEnvironmentImage(envTemplate, runner)) ?? undefined;
-    if (!environmentImage) throw new ComposedImageNotVerifiedError(ENV_IMAGE_CHANGED);
-  }
+  // A pinned contract-2 launch/peek skips the environment image: it keeps the retained image id and
+  // must not depend on the environment still being there. Contract 2 otherwise requires it. A legacy
+  // composition builds on it when it is usable and pastes the saved body when it is not (no tag, image
+  // gone or replaced): the body is what it built from before, so a row that composes keeps composing.
+  const pinnedLaunch = contract === 2 && Boolean(options.verifiedProviderId);
+  const environmentImage = pinnedLaunch
+    ? undefined
+    : (options.environmentImage ??
+      (await resolveEnvironmentImage(envTemplate, runner)) ??
+      undefined);
+  if (contract === 2 && !pinnedLaunch && !environmentImage)
+    throw new ComposedImageNotVerifiedError(ENV_IMAGE_CHANGED);
 
   const baseImageId = pinned
     ? pinned.baseImageId
