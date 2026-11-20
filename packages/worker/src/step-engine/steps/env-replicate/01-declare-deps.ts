@@ -1363,7 +1363,6 @@ export async function scanRepoForDeps(repoPath: string): Promise<DeclareDepsDete
   }
 
   const composerJson = await readJsonIfExists(repoPath, 'composer.json');
-  let isCmsPhpProject = false;
   if (composerJson) {
     const requireField = (composerJson as Record<string, unknown>).require as
       Record<string, string> | undefined;
@@ -1374,7 +1373,6 @@ export async function scanRepoForDeps(repoPath: string): Promise<DeclareDepsDete
       source: 'composer.json',
       packageManager: 'composer',
     });
-    // Detect CMS frameworks that use non-standard PHP extensions (.inc, .module, etc.)
     const allDeps = Object.keys(requireField ?? {});
     // These apt packages provide both the native and PDO modules. Keep this
     // allowlist in the existing manifest reader rather than scanning again.
@@ -1391,14 +1389,7 @@ export async function scanRepoForDeps(repoPath: string): Promise<DeclareDepsDete
       const extension = databaseExtensions[dep];
       if (extension) phpDatabaseExtensions.add(extension);
     }
-    isCmsPhpProject = allDeps.some(
-      (dep) =>
-        dep.startsWith('drupal/') ||
-        dep === 'drupal/core' ||
-        dep === 'drupal/core-recommended' ||
-        dep === 'laravel/framework',
-    );
-    suggestedLsp.add(isCmsPhpProject ? 'intelephense-extended' : 'intelephense');
+    suggestedLsp.add('intelephense-extended');
   }
 
   const requirementsTxt = await fileExists(repoPath, 'requirements.txt');
@@ -1514,8 +1505,7 @@ export async function scanRepoForDeps(repoPath: string): Promise<DeclareDepsDete
         source: '.ddev/config.yaml',
         packageManager: null,
       });
-      // DDEV projects are typically Drupal/CMS — prefer extended
-      suggestedLsp.add(isCmsPhpProject || ddev.present ? 'intelephense-extended' : 'intelephense');
+      suggestedLsp.add('intelephense-extended');
     }
   }
 

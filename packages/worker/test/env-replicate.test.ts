@@ -81,7 +81,7 @@ describe('scanRepoForDeps', () => {
     const result = await scanRepoForDeps(tmpRoot);
     const php = result.runtimes.find((r) => r.language === 'php');
     expect(php?.version).toBe('8.2');
-    expect(result.suggestedLsp).toContain('intelephense');
+    expect(result.suggestedLsp).toContain('intelephense-extended');
   });
 
   it('detects ddev container tool and postgres database from .ddev/config.yaml', async () => {
