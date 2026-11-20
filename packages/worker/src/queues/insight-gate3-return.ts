@@ -1,4 +1,4 @@
-import { and, asc, desc, eq, gt, gte, lte, isNull, notInArray, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, gt, gte, inArray, lte, isNull, notInArray, sql } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
 import { lockOwnedStep, StepSupersededError } from '../step-engine/step-ownership.js';
 import { readInsightContinuation } from '../step-engine/steps/workflow/_insight-continuation.js';
@@ -140,6 +140,31 @@ export async function gate3InsightCycle(db: Database, taskId: string, round: num
   });
   if (gate?.status === 'done' || gate?.status === 'skipped') return null;
   return { request, verifyFailed: (await pendingInsightApproval(db, taskId)) !== null };
+}
+/** An accepted QA review waives nothing and defers its findings to gate 2, so gate 2 must still run. */
+export async function gate3QaDeferred(
+  db: Database,
+  taskId: string,
+  fromRound: number,
+  toRound: number,
+): Promise<boolean> {
+  const qa = await db.query.taskSteps.findFirst({
+    where: and(
+      eq(schema.taskSteps.taskId, taskId),
+      eq(schema.taskSteps.stepId, '08d2-adversarial-qa-review'),
+      inArray(schema.taskSteps.status, ['done', 'skipped']),
+      gte(schema.taskSteps.round, fromRound),
+      lte(schema.taskSteps.round, toRound),
+    ),
+    orderBy: [
+      desc(schema.taskSteps.round),
+      desc(schema.taskSteps.runSeq),
+      desc(schema.taskSteps.createdAt),
+    ],
+  });
+  return (
+    qa?.status === 'done' && (qa.output as { decision?: string } | null)?.decision === 'accept'
+  );
 }
 /** Required record before a failed verification can leave its row or an approval can advance. */
 export async function recordGate3Check(

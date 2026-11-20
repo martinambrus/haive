@@ -1,5 +1,5 @@
 import { ExecutionContractError } from '@haive/shared/modularity';
-import { gate3InsightCycle, recordGate3Check } from './insight-gate3-return.js';
+import { gate3InsightCycle, gate3QaDeferred, recordGate3Check } from './insight-gate3-return.js';
 import { isConditionalInsightStep, insightStepActive } from './run-list.js';
 import {
   InsightRunListError,
@@ -2425,7 +2425,9 @@ export async function handleResult(
           cycle &&
           !cycle.verifyFailed &&
           !successor.recheck &&
-          successor.next?.metadata.id === '09-gate-2-verify-approval'
+          successor.next?.metadata.id === '09-gate-2-verify-approval' &&
+          // An accepted QA review deferred its findings to gate 2: keep it.
+          !(await gate3QaDeferred(db, ctx.taskId, cycle.request.round, result.row.round))
         ) {
           successor = { next: steps[steps.indexOf(successor.next) + 1], round: result.row.round };
         } else if (

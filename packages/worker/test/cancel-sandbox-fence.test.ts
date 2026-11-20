@@ -2757,6 +2757,91 @@ describe.skipIf(!url)('manual insight batch journal on Postgres', () => {
       }
     },
   );
+  type QaRow = { status: 'done' | 'skipped'; round: number; decision?: 'accept' | 'fix' };
+  async function runInsightCheckWithQa(qa: QaRow[]) {
+    const { ctx, round } = await gateCheckRound();
+    const ids = routeSteps.map((s) => s.metadata.id);
+    ids.splice(ids.indexOf('08e-insights-triage'), 0, '08d2-adversarial-qa-review');
+    for (const row of qa)
+      await db.insert(schema.taskSteps).values({
+        taskId: ctx.taskId,
+        stepId: '08d2-adversarial-qa-review',
+        stepIndex: 8.92,
+        title: 'Adversarial QA review',
+        status: row.status,
+        round: row.round,
+        output: row.decision ? { decision: row.decision } : {},
+      });
+    await db
+      .update(schema.tasks)
+      .set({ currentStepId: '08e-insights-triage', currentRound: round, runListSnapshot: ids })
+      .where(eq(schema.tasks.id, ctx.taskId));
+    registerStepsOnce();
+    const result = await advanceStep({
+      db,
+      taskId: ctx.taskId,
+      userId,
+      repoPath: '/repo',
+      workspacePath: '/repo',
+      cliProviderId: null,
+      stepDef: insightsTriageStep,
+      epoch: ctx.orchestrationEpoch,
+      round,
+      moduleDeactivation: null,
+    });
+    expect(result.status).toBe('done');
+    testQueue.jobs = [];
+    try {
+      await handleResult(
+        db,
+        {
+          ...ctx,
+          workflowType: 'workflow',
+          runListStrategy: 'static',
+          runListSnapshot: ids,
+          currentStepId: '08e-insights-triage',
+          currentRound: round,
+        } as ResolvedTaskContext,
+        '08e-insights-triage',
+        result,
+      );
+      const task = await db.query.tasks.findFirst({ where: eq(schema.tasks.id, ctx.taskId) });
+      return { task, jobs: [...testQueue.jobs], round };
+    } finally {
+      await closeTaskQueue();
+    }
+  }
+  it('gate2 QA deferral: an accepted QA review this cycle keeps gate 2', async () => {
+    const { task, jobs, round } = await runInsightCheckWithQa([
+      { status: 'done', round: 2, decision: 'accept' },
+    ]);
+    expect(task).toMatchObject({ currentStepId: '09-gate-2-verify-approval', currentRound: round });
+    expect(jobs).toMatchObject([{ stepId: '09-gate-2-verify-approval', round }]);
+  });
+  it.each([
+    ['no QA row', []],
+    ['QA skipped this cycle', [{ status: 'skipped', round: 2 }]],
+    ['QA accepted before the cycle', [{ status: 'done', round: 0, decision: 'accept' }]],
+    [
+      'latest QA row skipped',
+      [
+        { status: 'done', round: 1, decision: 'accept' },
+        { status: 'skipped', round: 2 },
+      ],
+    ],
+  ] as [string, QaRow[]][])('gate2 QA deferral: still skips gate 2 with %s', async (_name, qa) => {
+    const { task, jobs, round } = await runInsightCheckWithQa(qa);
+    expect(task).toMatchObject({ currentStepId: '10-gate-3-commit', currentRound: round });
+    expect(jobs).toMatchObject([{ stepId: '10-gate-3-commit', round }]);
+  });
+  it('gate2 QA deferral: accept after an earlier fix round keeps gate 2', async () => {
+    const { task, jobs, round } = await runInsightCheckWithQa([
+      { status: 'done', round: 1, decision: 'fix' },
+      { status: 'done', round: 2, decision: 'accept' },
+    ]);
+    expect(task).toMatchObject({ currentStepId: '09-gate-2-verify-approval', currentRound: round });
+    expect(jobs).toMatchObject([{ stepId: '09-gate-2-verify-approval', round }]);
+  });
   it('PR5 gate pick is consumed once, resets the pending gate, and only then runs an editor', async () => {
     const { ctx, source, continuation } = await seedGatePick();
     const routes = await Promise.all([
