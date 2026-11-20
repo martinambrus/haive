@@ -447,6 +447,42 @@ describe.skipIf(!url)('the usage poller treats one login set as one usage connec
     await expectSetConverged();
   });
 
+  it.each([
+    ['is not a grant', () => `plain-${rnd()}`],
+    [
+      'has an empty access token',
+      () => JSON.stringify({ ...mkGrant({ live: false }), accessToken: '' }),
+    ],
+  ])(
+    'a top-ranked copy that %s is passed over, and the next live grant replaces it',
+    async (_n, make) => {
+      // An earlier manual write could store any value and leave the row's ok reading in place.
+      const bad = make();
+      const env = envelopeEncrypt(bad, KEK);
+      await db.insert(schema.cliProviderSecrets).values({
+        providerId: rows.A.id,
+        secretName: SECRET,
+        encryptedValue: env.encryptedValue,
+        encryptedDek: env.encryptedDek,
+        fingerprint: computeKeyFingerprint(bad),
+        createdAt: new Date(clock - 5 * MIN),
+        updatedAt: new Date(clock - 5 * MIN),
+      });
+      const gB = mkGrant();
+      await store(gB, ['B'], new Date(clock - 3 * HOUR));
+      await store(mkGrant({ live: false, refreshable: false }), ['C'], new Date(clock - 4 * HOUR));
+      await seed('A', 'ok', new Date(clock - 10 * MIN));
+      await seed('B', 'ok', new Date(clock - 2 * HOUR));
+      await seed('C', 'needs_reconnect');
+      await tick();
+      expect(vendor.usageCalls.filter((t) => t !== dGrant.accessToken)).toEqual([gB.accessToken]);
+      const b = sameGrant(await usageRow('B'));
+      expect(sameGrant(await usageRow('A'))).toEqual(b);
+      expect(sameGrant(await usageRow('C'))).toEqual(b);
+      expect(await statuses(['A', 'B', 'C'])).toEqual(['ok', 'ok', 'ok']);
+    },
+  );
+
   it('the copy whose fetch last proved it live is the holder, however newer another copy is stamped', async () => {
     const gA = mkGrant();
     await store(gA, ['A'], new Date(clock - 6 * HOUR));

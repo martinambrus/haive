@@ -29,12 +29,14 @@ type Tx = Pick<Database, 'select' | 'update' | 'insert'>;
 
 /** Holder: a member with an ok snapshot first, newest fetch first; then one whose snapshot is
  *  error; then one with no snapshot; then needs_reconnect. Within a tier (after the fetch time in
- *  the first): the newest secret, then the smallest id. Only the holder's grant is decrypted. Null when no member holds a usable grant. */
+ *  the first): the newest secret, then the smallest id. A member whose copy does not decode into
+ *  a grant with an access token is passed over for the next, so one bad copy cannot stop the
+ *  set; a live fetch then converges it. Null when no member holds a usable grant. */
 export async function pickGrantHolder(
   db: Pick<Database, 'select'>,
   rep: CliAuthProvider,
 ): Promise<GrantHolder | null> {
-  const [row] = await db
+  const rows = await db
     .select({
       providerId: schema.cliProviderSecrets.providerId,
       encryptedValue: schema.cliProviderSecrets.encryptedValue,
@@ -60,22 +62,25 @@ export async function pickGrantHolder(
       sql`case when ${schema.usageWindowSnapshots.status} = 'ok' then ${schema.usageWindowSnapshots.fetchedAt} end desc nulls last`,
       desc(schema.cliProviderSecrets.updatedAt),
       asc(schema.cliProviderSecrets.providerId),
-    )
-    .limit(1);
-  if (!row) return null;
-  let grant: ClaudeOauthTokens;
-  try {
-    grant = JSON.parse(
-      envelopeDecrypt(
-        { encryptedValue: row.encryptedValue, encryptedDek: row.encryptedDek },
-        await secretsService.getMasterKek(),
-      ),
-    ) as ClaudeOauthTokens;
-  } catch {
-    return null;
+    );
+  if (rows.length === 0) return null;
+  const kek = await secretsService.getMasterKek();
+  for (const row of rows) {
+    let grant: ClaudeOauthTokens;
+    try {
+      grant = JSON.parse(
+        envelopeDecrypt(
+          { encryptedValue: row.encryptedValue, encryptedDek: row.encryptedDek },
+          kek,
+        ),
+      ) as ClaudeOauthTokens;
+    } catch {
+      continue;
+    }
+    if (grant && typeof grant.accessToken === 'string' && grant.accessToken)
+      return { ...row, grant };
   }
-  if (!grant || typeof grant.accessToken !== 'string' || !grant.accessToken) return null;
-  return { ...row, grant };
+  return null;
 }
 
 /** Stores a rotated grant as ONE new encryption on every member that holds the holder's
