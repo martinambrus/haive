@@ -208,10 +208,40 @@ describe('the final changes affected since validation', () => {
   });
 });
 
+/**
+ * A worktree whose change list is faked: cancellation is control flow around the reads, not Git
+ * behaviour, so these tests start no Git process. The listed files exist on disk to be read.
+ */
+async function listedChanges(files: Record<string, string>) {
+  const dir = await mkdtemp(path.join(tmpdir(), 'haive-validation-snapshot-'));
+  dirs.push(dir);
+  for (const [name, body] of Object.entries(files)) await writeFile(path.join(dir, name), body);
+  const changed = vi.spyOn(changeReads, 'readChangedFiles').mockResolvedValue(Object.keys(files));
+  const fake = createFakeDb({ taskSteps: schema.taskSteps });
+  fake.insert(schema.taskSteps, {
+    taskId: '00000000-0000-4000-8000-000000000001',
+    stepId: '01-worktree-setup',
+    round: 0,
+    output: { worktreePath: dir, baseBranch: 'main' },
+  });
+  const read = (
+    options?: Parameters<typeof readValidationSnapshot>[1],
+    extraCtx: { throwIfCancelled?: () => void } = {},
+  ) =>
+    readValidationSnapshot(
+      {
+        db: fake.db as unknown as Database,
+        taskId: '00000000-0000-4000-8000-000000000001',
+        ...extraCtx,
+      },
+      options,
+    );
+  return { changed, read };
+}
+
 describe('cancellation', () => {
   it('rejects before any read when the step is already cancelled', async () => {
-    const w = await checkout();
-    const changed = vi.spyOn(changeReads, 'readChangedFiles');
+    const w = await listedChanges({ 'app.ts': 'implementation' });
     await expect(
       w.read(undefined, {
         throwIfCancelled: () => {
@@ -219,13 +249,11 @@ describe('cancellation', () => {
         },
       }),
     ).rejects.toBeInstanceOf(TaskCancelledError);
-    expect(changed).toHaveBeenCalledTimes(0);
+    expect(w.changed).toHaveBeenCalledTimes(0);
   });
 
   it('stops between files and does not turn the cancel into an unknown snapshot', async () => {
-    const w = await checkout();
-    await writeFile(path.join(w.dir, 'b.ts'), 'b');
-    await writeFile(path.join(w.dir, 'c.ts'), 'c');
+    const w = await listedChanges({ 'app.ts': 'implementation', 'b.ts': 'b', 'c.ts': 'c' });
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
     const controller = new AbortController();
     setTimeout(() => controller.abort(), 1000);
@@ -248,9 +276,9 @@ describe('cancellation', () => {
   });
 
   it('checks again before the retry attempt', async () => {
-    const w = await checkout();
+    const w = await listedChanges({ 'app.ts': 'implementation' });
     let calls = 0;
-    const changed = vi.spyOn(changeReads, 'readChangedFiles').mockResolvedValueOnce(null);
+    w.changed.mockResolvedValueOnce(null);
     await expect(
       w.read(undefined, {
         throwIfCancelled: () => {
@@ -258,13 +286,12 @@ describe('cancellation', () => {
         },
       }),
     ).rejects.toBeInstanceOf(TaskCancelledError);
-    expect(changed).toHaveBeenCalledTimes(1);
+    expect(w.changed).toHaveBeenCalledTimes(1);
   });
 
   it('does not swallow a cancel that lands during the last attempt', async () => {
-    const w = await checkout();
-    await writeFile(path.join(w.dir, 'b.ts'), 'b');
-    vi.spyOn(changeReads, 'readChangedFiles').mockResolvedValueOnce(null);
+    const w = await listedChanges({ 'app.ts': 'implementation', 'b.ts': 'b' });
+    w.changed.mockResolvedValueOnce(null);
     let cancelled = false;
     fsHooks.onReadFile = () => {
       cancelled = true;
@@ -279,7 +306,7 @@ describe('cancellation', () => {
   });
 
   it('still reads a snapshot when the context carries no cancel check', async () => {
-    const w = await checkout();
+    const w = await listedChanges({ 'app.ts': 'implementation' });
     expect(await w.read(undefined, {})).toHaveProperty('app.ts');
   });
 });
