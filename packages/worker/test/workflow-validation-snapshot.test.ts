@@ -5,6 +5,7 @@ import path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { schema, type Database } from '@haive/database';
 import { createFakeDb } from '@haive/database/testing';
+import { TaskCancelledError } from '@haive/shared/step';
 import {
   affectedValidationFiles,
   validationSnapshotDigest,
@@ -13,9 +14,29 @@ import {
 
 import * as changeReads from '../src/orchestrator/house-rules-dispatch.js';
 
+// Pass-through: behaviour is unchanged unless a test installs a hook.
+const fsHooks = vi.hoisted(() => ({
+  readFileCalls: 0,
+  onReadFile: null as null | (() => void),
+}));
+vi.mock('@haive/shared/fs-safe', async (importOriginal) => {
+  const original = await importOriginal<typeof import('@haive/shared/fs-safe')>();
+  return {
+    ...original,
+    readFileNoFollow: ((...args: Parameters<typeof original.readFileNoFollow>) => {
+      fsHooks.readFileCalls++;
+      fsHooks.onReadFile?.();
+      return original.readFileNoFollow(...args);
+    }) as typeof original.readFileNoFollow,
+  };
+});
+
 const dirs: string[] = [];
 afterEach(async () => {
   vi.restoreAllMocks();
+  vi.useRealTimers();
+  fsHooks.readFileCalls = 0;
+  fsHooks.onReadFile = null;
   for (const dir of dirs.splice(0)) await rm(dir, { recursive: true, force: true });
 });
 
@@ -39,11 +60,15 @@ async function checkout() {
     round: 0,
     output: { worktreePath: dir, baseBranch: 'main' },
   });
-  const read = (options?: Parameters<typeof readValidationSnapshot>[1]) =>
+  const read = (
+    options?: Parameters<typeof readValidationSnapshot>[1],
+    extraCtx: { throwIfCancelled?: () => void } = {},
+  ) =>
     readValidationSnapshot(
       {
         db: fake.db as unknown as Database,
         taskId: '00000000-0000-4000-8000-000000000001',
+        ...extraCtx,
       },
       options,
     );
@@ -180,6 +205,82 @@ describe('the final changes affected since validation', () => {
     const w = await checkout();
     w.git('branch', '-D', 'main');
     expect(await w.read()).toBeNull();
+  });
+});
+
+describe('cancellation', () => {
+  it('rejects before any read when the step is already cancelled', async () => {
+    const w = await checkout();
+    const changed = vi.spyOn(changeReads, 'readChangedFiles');
+    await expect(
+      w.read(undefined, {
+        throwIfCancelled: () => {
+          throw new TaskCancelledError();
+        },
+      }),
+    ).rejects.toBeInstanceOf(TaskCancelledError);
+    expect(changed).toHaveBeenCalledTimes(0);
+  });
+
+  it('stops between files and does not turn the cancel into an unknown snapshot', async () => {
+    const w = await checkout();
+    await writeFile(path.join(w.dir, 'b.ts'), 'b');
+    await writeFile(path.join(w.dir, 'c.ts'), 'c');
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const controller = new AbortController();
+    setTimeout(() => controller.abort(), 1000);
+    fsHooks.onReadFile = () => {
+      if (fsHooks.readFileCalls === 1) vi.advanceTimersByTime(1000);
+    };
+    const settled = await w
+      .read(undefined, {
+        throwIfCancelled: () => {
+          if (controller.signal.aborted) throw new TaskCancelledError();
+        },
+      })
+      .then(
+        (value) => ({ value }),
+        (error: unknown) => ({ error }),
+      );
+    expect(settled).toHaveProperty('error');
+    expect((settled as { error: unknown }).error).toBeInstanceOf(TaskCancelledError);
+    expect(fsHooks.readFileCalls).toBe(1);
+  });
+
+  it('checks again before the retry attempt', async () => {
+    const w = await checkout();
+    let calls = 0;
+    const changed = vi.spyOn(changeReads, 'readChangedFiles').mockResolvedValueOnce(null);
+    await expect(
+      w.read(undefined, {
+        throwIfCancelled: () => {
+          if (++calls === 2) throw new TaskCancelledError();
+        },
+      }),
+    ).rejects.toBeInstanceOf(TaskCancelledError);
+    expect(changed).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not swallow a cancel that lands during the last attempt', async () => {
+    const w = await checkout();
+    await writeFile(path.join(w.dir, 'b.ts'), 'b');
+    vi.spyOn(changeReads, 'readChangedFiles').mockResolvedValueOnce(null);
+    let cancelled = false;
+    fsHooks.onReadFile = () => {
+      cancelled = true;
+    };
+    await expect(
+      w.read(undefined, {
+        throwIfCancelled: () => {
+          if (cancelled) throw new TaskCancelledError();
+        },
+      }),
+    ).rejects.toBeInstanceOf(TaskCancelledError);
+  });
+
+  it('still reads a snapshot when the context carries no cancel check', async () => {
+    const w = await checkout();
+    expect(await w.read(undefined, {})).toHaveProperty('app.ts');
   });
 });
 
