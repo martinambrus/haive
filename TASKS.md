@@ -720,7 +720,7 @@ status: open · kind: design · found: agent-memory pilot pair 2 (the treatment 
 
 PRE-EXISTING, by design today. The step-11 learning review offers `writeFiles` (every planned op or none), the KB and skill sync switches, and an instruction. A planned insert or update can be vetoed alone by emptying its staged draft in the inline editor. A planned delete cannot: a delete op gets no `editPath` (`packages/worker/src/step-engine/steps/workflow/11-phase-8-learning.ts` `learningOpsToDiffFiles` ~:1103, pinned by `11-phase-8-learning.test.ts` ~:528-529). A reviewer who wants to keep one learning the recorder calls stale must reject every op or spend a re-roll through the instruction. Seen on a real run: the recorder planned 2 new, 2 updated and 1 removed learning, and the removal could only be refused by rejecting all five. Needs a decision: a per-op keep for deletes (for example a staged tombstone the reviewer can clear) or a per-op checklist for every op. Interacts with the deletion identity records (#1202) and the replay rules in T672.
 
-### T725 · FNF[translator-render] · Translator render step and artifact lows (+7)
+### T725 · FNF[translator-render] · Translator render step and artifact lows (+9)
 
 status: open · kind: bug · found: translator assembly milestone (module PR #7) · priority: P4
 
@@ -730,11 +730,13 @@ In `martinambrus/haive-module-translator`; all NEW with the render step, none bl
 2. `src/render/assemble.ts` (`mdLines`, `codeSpan`): a paragraph that is only a line break, a trailing line break, and a newline inside an inline code value differ between the Markdown and the HTML (the Markdown drops them or writes a space). Documented.
 3. `src/db/artifacts.ts:54`: coverage reads `jsonb_array_length(parsed->'blocks')`, which detoasts the parsed source on every detect; the unit inventory count would do.
 4. `src/db/artifacts.ts:43-46`: with no review row yet, an unfinished translation answers `review-incomplete`.
-5. `src/routes.ts` artifact list: one artifact recorded for another repository turns the whole list into a 404 (as specified). Same route as T726 item 1.
+5. FIXED module PR #9 (debb7f5, 2026-11-20): the per-task list leaves strays out. Was: `src/routes.ts` artifact list: one artifact recorded for another repository turns the whole list into a 404 (as specified). Same route as T726 item 1.
 6. `translation.md` in GFM viewers: bare `http://` runs become links (text only).
 7. Guards no control pins: the part-count cap throw in `src/routes.ts`; the review status check and the revision comparison between the two sessions in `src/db/artifacts.ts`; `fenceIn` parts other than blocks and invalidations; the store's marker-list check; manifest bytes in `accounted_bytes`.
+8. `src/migrations/0008_artifacts.sql:17`: no index serves the cross-task artifact order of `GET /artifacts` (module PR #9); measured fine at 5,000 artifacts for one owner, more needs a numbered migration. PRE-EXISTING.
+9. Translations page and routes (module PR #9): the Blob copy doubles a download's memory peak; `src/routes.ts:13` accepts `.` and `..` as part filenames (unreachable behind the part lookup); the server can return an empty page with a `nextCursor`, which only the page mitigates. PRE-EXISTING.
 
-### T726 · FNF[translator-retention] · Translator delete, orphan reconcile and operator leftovers (+9)
+### T726 · FNF[translator-retention] · Translator delete, orphan reconcile and operator leftovers (+11)
 
 status: open · kind: fix · found: translator retention milestone (module PR #8) · priority: P3
 
@@ -749,12 +751,16 @@ In `martinambrus/haive-module-translator`; all NEW with the delete and reconcile
 7. `src/db/retention.ts:129-150` (`remove()`) with the 0009 trigger: purging a very large task (60 units, 8.4 MB of parts, 30000 review blocks, 30000 seen and 30000 outcome rows) holds the owner advisory lock for about 5 s, mostly the per-row trigger on `pass_seen`, and the same user's other work waits that long. Bounded by the 10 s lock and 60 s statement timeouts. Measured, within limits.
 8. `src/db/passes.ts:39,367-392`: the operator view lists at most 200 intents, 200 unbound invocations and 200 audit rows (unresolved and unquarantined first), so thousands of stale invocations need several quarantine rounds to surface. Documented; the scale run belongs to a later slice.
 9. Tests: the fake-context unit tests print warn lines from `reconcileQuietly`, and no control pins `CANDIDATE_BOUND`.
+10. `src/db/passes.ts:127`: an ended run whose accounting text exceeds 16 KiB makes every later ledger call of that task throw, with no operator path. PRE-EXISTING.
+11. `src/steps/tr-render.ts:20`: `reconcileQuietly` writes during detect. PRE-EXISTING.
 
 ### T727 · Translator consent reserves no allowance for the rendered files
 
 status: open · kind: design · found: translator assembly milestone (module PR #7) · priority: P4
 
 In `martinambrus/haive-module-translator`, PRE-EXISTING design. Consent reserves allowance for model calls only, so the render step can fail on the allowance after the translation was paid for; each render of changed text stores another artifact, and the operator extension raises calls only. The same question as T718 (c) for review decisions: decide whether consent reserves byte headroom for later phases, or whether rendered files are exempt or replace the previous render.
+
+Related, measured 2026-11-20: `src/db/setup.ts:155-163` (`accountedStorage`) charges 2,048 B per seen row, so about 16,384 runs fill a 32 MiB allowance.
 
 ### T728 · FNF[composed-lsp-provider-lock] · composed LSP provider lock and template replacement leftovers (+14)
 
@@ -796,6 +802,18 @@ Step 01's detect still suggests `intelephense` for a PHP project that is neither
 status: open · kind: fix · found: legacy composed image fix (T712 build) 2026-11-20 · priority: P4
 
 1. A launch ensures the sandbox core image even when the composition does not build on it (`worker/src/sandbox/composed-image-cache.ts` ~:247-253 calling ~:283-291; hash rule `sandbox/image-composer.ts` ~:126-128). A composition built on its environment image (contract 2, and legacy with a usable environment image) never uses the core image, so that ensure is dead work at every launch. PRE-EXISTING. Fix direction: ensure the core image only when the composition's base is the core image.
+
+### T733 · FNF[translator-chunk-tail-units] · Translator chunking makes tiny units that each cost a full cycle (+1)
+
+status: open · kind: fix · found: translator scale and acceptance milestone (module PRs #9, #10) 2026-11-20 · priority: P3
+
+In `martinambrus/haive-module-translator`. 1. `src/chunking/group.ts:10-19`: there is no minimum unit size and a unit closes at every heading, so 7 of the 14 units of a 6,584-word book hold 3-6 words, and each still costs a full translate and review cycle of 4 calls, about half of the book's ~58 calls. PRE-EXISTING. Fix direction: merge a unit below a minimum size into its neighbour, so a heading starts a new unit only when the unit before it is large enough.
+
+### T734 · FNF[module-db-open] · The module database opener creates databases on request paths (+1)
+
+status: open · kind: fix · found: translator scale and acceptance milestone 2026-11-20 · priority: P4
+
+1. `openModuleDatabase` (`shared/src/module-db/index.ts` ~:32-48) creates the module's database when it is absent, and a module's request handlers call it per request (translator `src/db/passes.ts:87,379`, `src/db/retention.ts:67,79`, `src/db/setup.ts:18`). A GET can therefore run `CREATE DATABASE` when an active module's database is missing; the worker creates it at module load (`worker/src/modules/loader.ts:288`), so only after an out-of-band drop. Each call also builds a new two-connection pool that the caller must close. PRE-EXISTING. Fix direction: a create-free open for request paths, creating only at module load, and one cached pool per module.
 
 ### T721 · The Claude usage grant reaches sandbox environments
 
@@ -841,11 +859,13 @@ All PRE-EXISTING, none blocking the replacement series. Paths are under `package
 8. `composedLspImageRefs` of an abandoned contract-2 row keep pinning images after a rollback (`worker/src/lsp/composed-evidence.ts` ~:399-418).
 9. A template delete whose `docker image rm` fails because the image is already gone leaves the row behind (`worker/src/queues/task-queue.ts` ~:5011-5019, `worker/src/sandbox/docker-runner.ts` ~:440-448), and the reference count and the delete are not atomic (`task-queue.ts` ~:5001-5021). PRE-EXISTING, found with #1288.
 
-### T718 · Translator module lows (review and correction approval) (+4)
+### T718 · Translator module lows (review and correction approval) (+12)
 
 status: open · kind: bug · found: translator review milestone (module PRs #5, #6) · priority: P4
 
 In `martinambrus/haive-module-translator`. NEW = a limit of the review feature, none a regression. (a) `src/db/review-patches.ts:95,146`: `page` and `applyRound` load every block version and write about 2.4 statements per proposal. NEW. (b) `src/steps/tr-review.ts:167,178`: a stale or repeated submit after a reopen fails the step (Retry recovers), inherited from the `explicit` pattern in `src/db/setup.ts`. PRE-EXISTING. (c) `src/db/review.ts:32`: `acceptBytes` reserves nothing for decisions or the batch, so near the allowance they can fail after every unit was reviewed. NEW, documented in the README. (d) `src/db/review-patches.ts:174`: seam windows use the target language (equivalent for en and sk). NEW. (e) `src/protocol/patch.ts:87,105,127`: groups built by spread, O(k^2) per block. NEW. (f) `test/review-step.test.ts`: `FakeReviewStore` duplicates `test/support/patch-fakes.ts`. NEW. (g) Documented limits: corrections valid only as a pair are not applied, re-review after a batch needs a Retry, a rejected correction can be proposed again, decisions are final, the reason text is not shown on the page. PRE-EXISTING at `4a2efb8`: (h) `src/manifest.ts:7` `schemaVersion: 4` with 7 migrations; (i) milestone labels in test titles (`test/setup-gates.test.ts:6`, `pass-step.test.ts:12`, `manifest.test.ts:6`, `pass-store.test.ts:20`, `passes.test.ts:8,83`, `setup.test.ts:9`) and the `README.md:14` heading; (j) `src/db/passes.ts:100,105` bookkeeping inserts in read-only sessions; (k) `exactKeys` and duplicate-key pattern (`src/protocol/passes.ts:76,111-128`, `review.ts:88`), and `validateReply` does not check text well-formedness; (l) `test/pass-db.test.mjs:221-233` pins only the allow side of headroom. Added from the assembly and retention milestones (module PRs #7, #8), all PRE-EXISTING: (m) `src/protocol/passes.ts:135-141` `validateReply` does not constrain code or definition blocks or `open:a`/url adjacency, so a word inside a code block still fails `code-block` at the render step, after payment (same function as (k)); (n) `src/db/passes.ts` (session to lineage): the render step checks the live provider policy although it calls no model, while downloads do not; (o) `src/db/passes.ts:131-136` `session()` commits the seen and outcome rows of the task's runs even when the operator action or another `run` is refused (it rethrows after the commit; accounting facts only); (p) `src/db/passes.ts:149` `cap()` throws a plain `Error('Invalid operator extension')` on an unsafe stored total, which surfaces as a 500 instead of a refusal.
+
+From the scale and acceptance milestone (module PRs #9, #10), 2026-11-20: (q) `src/db/passes.ts:107-130`: a ledger call still reads every core run and hashes every ended one in memory, so its CPU grows with the task's runs (296 ms at 20,000 runs) while its statements stay constant. PRE-EXISTING. (r) `src/db/passes.ts:434` and `src/db/review.ts:64`: `rows.find` and `stored.filter` per unit and pass, so the work is O(units x rows). PRE-EXISTING. (s) `src/db/passes.ts:228`: the "Stale unbound intent; operator abandonment required" branch has no harness scenario. PRE-EXISTING. (t) `src/db/review-patches.ts:158-178`, `src/db/review.ts:98-101` and `src/db/artifacts.ts:122-125` run per-row INSERT loops inside ledger or step transactions, bounded by proposals or parts. PRE-EXISTING. (u) `test/support/seam-db-fixture.mjs:81-92`: `countStatements` reports the pass seen and outcome inserts apart from its counted total, which is how per-run recording stayed out of every existing count. PRE-EXISTING. (v) Docs and labels: `README.md:3,5,14,83` carry milestone labels; `README.md:798` says at most two Vitest workers while `package.json` uses `--maxWorkers=1`; `README.md:799` says migrations 0001-0004 are pinned while 0005-0009 exist; `scripts/test-ingest.mjs:13` names its container `translator-m3-`. PRE-EXISTING. (w) The acceptance run builds replies from store parts, so a dispatched prompt is checked but never read to produce the reply, and the review-specific cut points were hit only 3 times. A limit of the new test. (x) REGRESSION (test footprint of module PR #10): `test/scale.test.mjs` needs about 570 MiB of in-memory database and leaves about 125 MB of immutable module rows that later whole-table snapshot tests read in a whole-suite run (`test/artifact-list.test.mjs:53-60`, `test/operator-route.test.mjs:418`); a whole-suite run needs `TRANSLATOR_INGEST_MEMORY` of 1 GiB. Documented in the README, not trimmed. Fix direction: give the scale test its own database.
 
 ### T717 · The sandbox image's own uv is unpinned and unused by Haive
 
