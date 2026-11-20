@@ -1047,9 +1047,11 @@ status: open (item 1 DONE 2026-11-16 on the owner's decision: the four rows now 
 
 ### T690 · codex CLI version list never refreshes (full npm document times out)
 
-status: open · kind: fix · found: worker log 2026-11-15 · priority: P3
+status: done 2026-11-20 (#1293, 523880e5f, worker reloaded 15:59Z) · kind: fix · found: worker log 2026-11-15 · priority: P3
 
 `cli_package_versions` row `codex` keeps `fetch_error` "Unterminated string in JSON at position 214128" while every other CLI refreshes. `fetchNpmVersions` (`worker/src/cli-versions/fetcher.ts` ~:7-18, ~:62-75) requests the full npm document (`Accept: application/json`, 19.3 MB for `@openai/codex`, 8.4 s from the host) under a 15 s abort, and reads only the `versions` keys and `dist-tags`. Fix: `Accept: application/vnd.npm.install-v1+json` (abbreviated, 5.6 MB, 4.1 s, same two fields); control with a fetch stub asserting the header. Check the same pattern in `tool_package_versions` / runtime fetchers.
+
+Resolution: the diagnosis above did not hold for the live error. Codex read its GitHub releases, not npm, and `per_page=100` answered 504 after 11.3 s (each release carries some 330 KB of assets). #1293 points codex at the npm package it installs from, with an opt-in `releasesOnly` filter (codex republishes every release per platform as `X.Y.Z-<platform>`; amp keeps its hyphenated releases), and every npm source, CLI and tool alike through the shared `fetchVersionsFromSource`, now asks for the abbreviated document. Live 15:59Z: the codex row holds 200 versions, latest 0.171.0, no fetch error and no platform builds.
 
 ### T694 · FNF[insight-gate3] · insight-cycle approval exposures beside the gate-3 park (+4)
 
