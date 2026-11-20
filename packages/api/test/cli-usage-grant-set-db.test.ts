@@ -500,32 +500,14 @@ describe.skipIf(!url)('every writer of the Claude usage connection covers the lo
       expect(await outside(rest)).toEqual(before);
     });
 
-    it.each([
-      ['not JSON', () => `plain-${rnd()}`],
-      [
-        'missing the access token',
-        () => JSON.stringify({ ...JSON.parse(grant()), accessToken: undefined }),
-      ],
-      ['an empty access token', () => JSON.stringify({ ...JSON.parse(grant()), accessToken: '' })],
-      [
-        'missing the refresh token',
-        () => JSON.stringify({ ...JSON.parse(grant()), refreshToken: undefined }),
-      ],
-      ['a non-numeric expiry', () => JSON.stringify({ ...JSON.parse(grant()), expiresAt: 'soon' })],
-      [
-        'scopes that are not an array',
-        () => JSON.stringify({ ...JSON.parse(grant()), scopes: 'user:profile' }),
-      ],
-    ])('refuses a value that is %s and writes nothing', async (_n, make) => {
-      const value = make();
+    // The value variants are unit tests of isUsageGrantValue; this one proves the route's refusal.
+    it('refuses a value that is not a usage grant and writes nothing', async () => {
+      const value = JSON.stringify({ ...JSON.parse(grant()), accessToken: '' });
       const before = await world();
       const res = await postUsage(rows.B.id, value);
       expect(res.status).toBe(400);
       const body = await res.text();
-      for (const part of [
-        value,
-        ...Object.values(JSON.parse(value.startsWith('{') ? value : '{}')),
-      ])
+      for (const part of [value, ...Object.values(JSON.parse(value))])
         if (typeof part === 'string' && part) expect(body).not.toContain(part);
       expect(await world()).toEqual(before);
       expect(h.poll).not.toHaveBeenCalled();
