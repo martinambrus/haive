@@ -1,9 +1,9 @@
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Database } from '@haive/database';
-import { ONBOARDING_ENVIRONMENT_SCHEMA_VERSION } from '@haive/shared';
+import { ONBOARDING_ENVIRONMENT_SCHEMA_VERSION, validateFormValues } from '@haive/shared';
 import { declareDepsStep } from '../src/step-engine/steps/env-replicate/01-declare-deps.js';
 import type { StepContext } from '../src/step-engine/step-definition.js';
 
@@ -76,5 +76,62 @@ describe('01-declare-deps detect webserver precedence', () => {
     const ctx = makeCtx({ name: OWN_TEMPLATE_NAME, declaredDeps: { webserver: 'nginx-fpm' } });
     const detected = await declareDepsStep.detect!(ctx);
     expect(detected.webserver).toBe('nginx-fpm');
+  });
+});
+
+describe('01-declare-deps PHP language server suggestion', () => {
+  const lspField = (detected: Awaited<ReturnType<NonNullable<typeof declareDepsStep.detect>>>) => {
+    const schema = declareDepsStep.form!({} as never, detected)!;
+    const field = schema.fields.find((f) => f.id === 'lspServers');
+    if (!field || field.type !== 'multi-select') throw new Error('lspServers field missing');
+    return { schema, field };
+  };
+
+  // The language server field and its suggestion only exist for a provider that supports them.
+  const lspCtx = () => {
+    const ctx = makeCtx(null);
+    const rows = [{ name: 'claude-code' }];
+    // Every query builder step stays chainable and resolves to the one provider row.
+    const chain: unknown = new Proxy(() => undefined, {
+      get: (_t, prop) =>
+        prop === 'then' ? (resolve: (v: unknown) => void) => resolve(rows) : () => chain,
+    });
+    (ctx.db as unknown as { select: unknown }).select = () => chain;
+    (ctx.db.query as unknown as Record<string, unknown>).taskTypeDefinitions = {
+      findFirst: vi.fn(async () => undefined),
+    };
+    return { ...ctx, cliProviderId: 'provider-1' } as StepContext;
+  };
+
+  const expectSubmittable = (
+    detected: Awaited<ReturnType<NonNullable<typeof declareDepsStep.detect>>>,
+  ) => {
+    const { schema, field } = lspField(detected);
+    expect(field.defaults).toEqual(['intelephense-extended']);
+    const options = field.options.map((o) => o.value);
+    for (const value of field.defaults ?? []) expect(options).toContain(value);
+    // Only this field is validated: the other required fields need user input.
+    const result = validateFormValues(
+      { ...schema, fields: [field] },
+      { lspServers: field.defaults },
+    );
+    expect(result.success ? [] : result.issues).toEqual([]);
+  };
+
+  it('defaults a plain PHP repository to the surviving key', async () => {
+    await writeFile(
+      path.join(repoPath, 'composer.json'),
+      JSON.stringify({ require: { php: '^8.2', 'monolog/monolog': '^3.0' } }),
+    );
+    expectSubmittable(await declareDepsStep.detect!(lspCtx()));
+  });
+
+  it('keeps a DDEV project with no composer.json on the surviving key', async () => {
+    await mkdir(path.join(repoPath, '.ddev'));
+    await writeFile(
+      path.join(repoPath, '.ddev', 'config.yaml'),
+      'name: site\ntype: php\nphp_version: "8.2"\n',
+    );
+    expectSubmittable(await declareDepsStep.detect!(lspCtx()));
   });
 });
