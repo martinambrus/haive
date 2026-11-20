@@ -21,7 +21,8 @@ type Members = { id: string }[];
 export const isUsageGrantSecret = (providerName: string, secretName: string): boolean =>
   providerName === 'claude-code' && secretName === CLAUDE_USAGE_OAUTH_SECRET;
 
-/** The shape the poller reads: {accessToken, refreshToken, expiresAt (ms), scopes}. */
+/** The shape the poller reads: {accessToken, refreshToken, expiresAt (ms), scopes}. The access
+ *  token must be non-empty: the poller passes over a copy without one. */
 export function isUsageGrantValue(value: string): boolean {
   let parsed: unknown;
   try {
@@ -33,6 +34,7 @@ export function isUsageGrantValue(value: string): boolean {
   const g = parsed as Record<string, unknown>;
   return (
     typeof g.accessToken === 'string' &&
+    g.accessToken.length > 0 &&
     typeof g.refreshToken === 'string' &&
     typeof g.expiresAt === 'number' &&
     Number.isFinite(g.expiresAt) &&

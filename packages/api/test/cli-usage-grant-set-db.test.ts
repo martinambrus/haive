@@ -506,6 +506,7 @@ describe.skipIf(!url)('every writer of the Claude usage connection covers the lo
         'missing the access token',
         () => JSON.stringify({ ...JSON.parse(grant()), accessToken: undefined }),
       ],
+      ['an empty access token', () => JSON.stringify({ ...JSON.parse(grant()), accessToken: '' })],
       [
         'missing the refresh token',
         () => JSON.stringify({ ...JSON.parse(grant()), refreshToken: undefined }),
@@ -525,7 +526,7 @@ describe.skipIf(!url)('every writer of the Claude usage connection covers the lo
         value,
         ...Object.values(JSON.parse(value.startsWith('{') ? value : '{}')),
       ])
-        if (typeof part === 'string') expect(body).not.toContain(part);
+        if (typeof part === 'string' && part) expect(body).not.toContain(part);
       expect(await world()).toEqual(before);
       expect(h.poll).not.toHaveBeenCalled();
     });
