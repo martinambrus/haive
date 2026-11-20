@@ -791,12 +791,6 @@ status: open, in work 2026-11-20 · kind: fix · found: legacy template replacem
 
 Step 01's detect still suggests `intelephense` for a PHP project that is neither a CMS nor on DDEV (`worker/src/step-engine/steps/env-replicate/01-declare-deps.ts` ~:1401, ~:1518), but the PHP consolidation left `intelephense-extended` as the only option (`LSP_OPTIONS` ~:333-336; stored repository values were normalized by migration 0084, and none on the dev install holds the old key). The suggestion becomes the form default of every such repository without stored `lsp_servers` (83 of 85 on the dev install), the UI renders it as nothing ticked, and the submit fails "lspServers: invalid option intelephense"; ticking the visible option does not remove the hidden value. PRE-EXISTING. Fix: suggest the surviving key for every PHP project, and pin that the form's defaults pass its own validation.
 
-### T731 · A legacy environment with preinstalled dependencies cannot compose its CLI sandbox image
-
-status: open · kind: fix · found: legacy template replacement live check 2026-11-20 · priority: P3
-
-A task on a legacy template (contract absent or 1, from the opt-out or a stored row) with `preinstallDeps` on fails 01b: the composed sandbox build (`worker/src/sandbox/composed-image-cache.ts` `buildComposedImage`) pastes the environment Dockerfile body into a build context with no repository files, so `COPY composer.json composer.lock ./` fails, and 00b's call degrades on the same build error (live check task c858faec, `.claude/tmp/codex-run/LSPR-S/live/log.md` 05:22Z; passed after a resubmit with `preinstallDeps` off). #1274 moved contract-2 composed builds onto the environment image; the legacy path still pastes the body. No real task has failed this way on the dev install (no 01b error mentions composer.json), since new environments adopt contract 2 by default. Fix direction: build the legacy composition FROM the environment image as well, or give it the repository context. PRE-EXISTING.
-
 ### T721 · The Claude usage grant reaches sandbox environments
 
 status: open (items 2-9; item 1 done #1281) · kind: security · found: login-set design (T720) 2026-11-19 · priority: P3 (was P1 until #1281)
@@ -891,9 +885,11 @@ Leftovers, none blocking: (a) a dependent span re-entered in a later fix round f
 
 ### T712 · Legacy composed builds fail on an environment body that copies project files
 
-status: open · kind: design · found: composed LSP live check (#1274) · priority: P2
+status: open, decided 2026-11-20 · kind: fix · found: composed LSP live check (#1274) · priority: P2
 
 A legacy (absent/1) composed image still pastes the environment Dockerfile body into a build context that holds only the Dockerfile (`sandbox/image-composer.ts` ~:137-140 `resolveBase`, `sandbox/composed-image-cache.ts` ~:283-293 `buildComposedImage`), while `02-generate-dockerfile.ts` ~:941-988 emits a `COPY` of manifest files per package manager when dependencies are preinstalled. Such a legacy environment builds at 03 and then fails its composed build at task launch with "not found". PRE-EXISTING; reproduced through the real launch entry with a fake docker and with real docker (evidence `.claude/tmp/codex-run/LSPB-S/evidence/legacy-copy-launch-base.log`, `from-probe/h.log`). Not fixed with #1274 because moving legacy onto the environment image changes every existing legacy composed tag (a rebuild of each, readiness unaffected since legacy has none), and a body-text COPY heuristic is fragile. Decision needed: move legacy onto the environment image too (one-time rebuild of every legacy composed image) or give the composed build the repository context. Check first how many existing templates carry such a COPY.
+
+Seen again 2026-11-20 in the template replacement live check: a legacy template generated that day with `preinstallDeps` on carried `COPY composer.json composer.lock ./` and failed 01b at its composed build; 00b's call degraded on the same error (task c858faec, `.claude/tmp/codex-run/LSPR-S/live/log.md` 05:22Z; it passed after a resubmit with `preinstallDeps` off). Count 2026-11-20: none of the dev install's 9 legacy rows carries a project-file COPY (7 with `preinstallDeps` on, 49 task links, none of them on a live task), so the failure hits NEW legacy environments: a person's opt-out, or an adoption refused because the task's CLI is not Claude Code. Decision (coordinator, 2026-11-20): compose legacy on the environment image too, as #1274 did for contract 2. The environment image already holds the dependencies, installed with the repository present; a repository context would tie sandbox image tags to repository content. Accept one rebuild of each legacy composed image on its next launch.
 
 ### T709 · Composed LSP cutover: writer, template replacement, live check, lows
 
