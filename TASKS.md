@@ -853,7 +853,7 @@ OWNER DECISION 2026-11-19: one Claude login per user. A login saves the token fo
 
 OWNER DECISION 2026-11-19: the usage connection (`CLAUDE_USAGE_OAUTH`, refreshed per row by the usage poller) is shared the same way, as its own PR after the login PR. T590 items 32 and 33 are the same gap for the volume-login CLIs.
 
-### T719 · FNF[env-template-lifecycle] · environment template lifecycle leftovers (+9)
+### T719 · FNF[env-template-lifecycle] · environment template lifecycle leftovers (+15)
 
 status: open · kind: fix · found: legacy template replacement design (T709) 2026-11-19 · priority: P4
 
@@ -868,6 +868,12 @@ All PRE-EXISTING, none blocking the replacement series. Paths are under `package
 7. Deleting a user cascades `env_templates` rows without removing their images (`database/migrations/0000_baseline.sql` ~:1021; the delete hooks are unchecked).
 8. `composedLspImageRefs` of an abandoned contract-2 row keep pinning images after a rollback (`worker/src/lsp/composed-evidence.ts` ~:399-418).
 9. A template delete whose `docker image rm` fails because the image is already gone leaves the row behind (`worker/src/queues/task-queue.ts` ~:5011-5019, `worker/src/sandbox/docker-runner.ts` ~:440-448), and the reference count and the delete are not atomic (`task-queue.ts` ~:5001-5021). PRE-EXISTING, found with #1288.
+10. 02's relink onto a row with the same hash deletes the row it leaves without removing that row's built image (`worker/src/step-engine/steps/env-replicate/02-generate-dockerfile.ts` ~:171-176), and the env-template reaper lists no images, so the image stays with no row.
+11. 04 marks the row ready by id alone (`env-replicate/04-verify-environment.ts` ~:410-413), with no guard that the hash or image it verified is still the row's; a body 02 saved in between would be marked ready on the old image. Narrow.
+12. 03 detect probes a ready row's image only when `builtImageId` is set (`env-replicate/03-build-image.ts` ~:78-89); a ready row with a null `builtImageId` is trusted without an existence or identity check.
+13. PRE-EXISTING, the harm #1295 closes for 02: an unchanged re-declare of a shared row in 01 still resets it in place (`pending`, hash and `imageTag` null), so its other tasks lose readiness and their tag (`env-replicate/01-declare-deps.ts` ~:1087-1102; `sharedWith` is computed only when `staleDockerfile` is true, ~:1076-1079). Fix: skip the reset when the row is shared and unchanged.
+14. Narrow race: the sharer check in 02 (~:214, :221, :260 after #1295) and in 01 is not under a lock with the fork or the in-place write, so a task that relinks onto the row inside that window still has it rewritten; two tasks saving the same new body at once hit `UNIQUE (userId, dockerfileHash)`, and Retry resolves it.
+15. TEST-ONLY: the hand-rolled db mock in `worker/test/env-replicate-build.test.ts` ~:173 answers every `envTemplates.findFirst` with the row, so 03's held-tag query sees `defaultTagHeld` true there and nothing asserts it.
 
 ### T718 · Translator module lows (review and correction approval) (+12)
 
@@ -1053,14 +1059,20 @@ status: done 2026-11-20 (#1293, 523880e5f, worker reloaded 15:59Z) · kind: fix 
 
 Resolution: the diagnosis above did not hold for the live error. Codex read its GitHub releases, not npm, and `per_page=100` answered 504 after 11.3 s (each release carries some 330 KB of assets). #1293 points codex at the npm package it installs from, with an opt-in `releasesOnly` filter (codex republishes every release per platform as `X.Y.Z-<platform>`; amp keeps its hyphenated releases), and every npm source, CLI and tool alike through the shared `fetchVersionsFromSource`, now asks for the abbreviated document. Live 15:59Z: the codex row holds 200 versions, latest 0.171.0, no fetch error and no platform builds.
 
-### T694 · FNF[insight-gate3] · insight-cycle approval exposures beside the gate-3 park (+4)
+### T694 · FNF[insight-gate3] · insight-cycle approval exposures beside the gate-3 park (+10)
 
 status: open · kind: fix · found: review of the gate-3 park change 2026-11-16 · priority: P2
 
 1. Stale-tab attestation: the step submit body carries only `values` and targets the newest `waiting_form` row (`api/src/routes/tasks/steps.ts` ~:902-1017), so any stale tab of the same owner can attest a gate-2 or gate-3 answer for a form it never showed. Bind latched-gate submits to `stepRowId` + `waitingStartedAt`.
 2. A successful second insight cycle (no verify failure, gate 2 skipped) still lets a gate-3 preset commit the refreshed diff (`insight-gate3-return.ts` ~:54-66 settles on the prior done gate 3). Same exposure as the owner's park decision; owner call whether it should park too.
-3. Gate 1.5 (08d2) defaults to accept and accept defers to gate 2, but a successful insight cycle skips gate 2 (`task-queue.ts` ~:2410), so accepted QA findings reach no human in that cycle.
+3. Gate 1.5 (08d2) defaults to accept when nothing blocks (`detected.blocking` false), and accept defers to gate 2, but a successful insight cycle skips gate 2 (`task-queue.ts` ~:2410), so accepted QA findings reach no human in that cycle.
 4. `readValidationSnapshot` is not abortable and reads every changed file serially (up to 8 MiB each, two attempts); a cancel waits for it.
+5. PRE-EXISTING: `readValidationSnapshot({ db, taskId })` in `worker/src/queues/validation-recheck.ts` ~:127 passes no cancel source (`validationSuccessor` has no `StepContext`), so the queue-level recheck read cannot be cancelled.
+6. PRE-EXISTING, bounded: the git `readChangedFiles` call before the first per-file check, and a single in-flight file read of up to 8 MiB, are not interruptible (`worker/src/step-engine/steps/workflow/_validation-snapshot.ts`).
+7. BY DESIGN, from #1294: the api's latched-gate predicate (`api/src/routes/tasks/steps.ts` `insightGateLatched`) is a superset of the worker's, with no settled or `approvedRound` exemption, so a later gate-3 park the worker would not latch still refuses old tabs and non-web clients with 409 `step_form_stale` (the web always sends the fields). Fix if it bites: one latch predicate shared through `@haive/shared`.
+8. LOW, cosmetic, PRE-EXISTING: a second tab racing the same latched park can show `step_form_not_waiting` without a reload until the next poll (`web/src/app/(app)/tasks/[id]/page.tsx` ~:1372).
+9. COVERAGE: nothing pins what follows the approval of a gate 2 kept for deferred QA findings (depends on item 2), and no case covers the `run_seq` / `created_at` tie-break of `gate3QaDeferred` (`worker/src/queues/insight-gate3-return.ts`).
+10. PRE-EXISTING, decide with item 2: an unlatched gate 2 still honours `preAnswers['09-gate-2-verify-approval']` (`worker/src/step-engine/step-runner.ts` ~:3596; neither gate declares `humanOnlyFormFields`), so a task that pre-answered gate 2 auto-approves the gate 2 that #1294 keeps for deferred QA findings.
 
 ### T689 · Deep-analysis core runtime: guarded spans (P7) and custom fix target (P8)
 
@@ -1087,7 +1099,7 @@ Reviews in `.claude/tmp/codex-run/DGL-S/review-1.md` and `review-2.md`. The defa
 5. LOW, maintenance: `retryReviewer` (~:1666-1669) duplicates the two dispatch-branch predicates (~:1698, :1720); a drift restores the consume-before-throw hazard. Fix: one shared helper.
 6. NIT, docs: fix-loop.md "advisor, replanner and fix coder" means the section-C advisor-started fix coder; "path-scrubbed" covers only worker storage and host repo roots.
 
-### T687 · FNF[insight-loop] · insight loop lows, after #1215 (+29)
+### T687 · FNF[insight-loop] · insight loop lows, after #1215 (+30)
 
 status: open (lows; bundle with the next insight-loop change or park; owner decided 2026-11-16: item 19 gate 3 PARKS after a human gate-2 re-approval of a picked-insight cycle (presets ignored), item 24 all-`not_applied` gate-3 batches SHORT-CIRCUIT the checks with a recorded reason; both DONE 2026-11-16 in #1233 b457672e7; remaining items stay lows) · kind: fix · found: #1215 reviews 2026-11-15 · priority: P3
 
@@ -1122,6 +1134,7 @@ Reviews in `.claude/tmp/codex-run/INS3B-S/` (review-4.md, review-5.md).
 27. LOW: a worker pass holding an older row snapshot can re-park a latched gate 2 after the owner's submit (lost click, safe direction); the owner marker payload `{userId, generation, decision}` is duplicated in steps.ts, insight-gate3-return.ts and tests without a shared type (drift fails closed).
 28. NIT: two `composable-core.test.ts` titles (~:202, ~:213) say "requires" while asserting `[]`; composer copy (~:609-613) and the type-draft prompt (~:264-266) still describe the gate-3 loop as unconditional; dead `{limit: INSIGHTS_AT_GATE}` branch in `collectInsights` (08e ~:89-97); report back link unstyled; no `/events` paging test for `task.markdown_report`.
 29. LOW: `gate2_approved` is recorded before the gate-2 row is written done (`step-runner.ts` ~:4264); a Stop or Retry in between leaves the latch cleared on a real human approval. Narrow.
+30. LOW, gap left by #1294: `gate3QaDeferred` (`worker/src/queues/insight-gate3-return.ts` ~:145-167) counts a skipped 08d2 as no deferral, so unreviewed 08d findings stay open while gate 2 is skipped. 08d2 has no `allowSkip`, so only guard skips reach it.
 
 ### T680 · DeepPattern module (plan Part B): paused until a fresh 08c baseline
 
