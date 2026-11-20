@@ -795,11 +795,13 @@ Paths are under `packages/`. NEW means introduced by #1288.
 
 ### T729 · A CLI remembered on another task can be refused at dispatch for a composed LSP task
 
-status: open, explained to the owner 2026-11-20 (options a, b and c; recommendation a), waiting for the decision · kind: design · found: #1288 review 2026-11-20 · priority: P3
+status: open, decided by the owner 2026-11-20 (option a), queued · kind: fix · found: #1288 review 2026-11-20 · priority: P3
 
 Saved CLI preferences ("Also for my later tasks") are user-wide, so a pick remembered on another task is not ordered against this task's composed LSP decision, and `resolvePreferredCli` (`worker/src/step-engine/step-runner.ts` ~:377) applies none of the provider rule. A contract-2 task whose step later resolves a remembered CLI the lock refuses is stopped by the dispatch backstop, and the step fails. The task lock cannot cover it. PRE-EXISTING since #1272.
 
 Options: (a) at dispatch, skip a saved preference the rule refuses, use the task's own allowed CLI, and say so on the step; (b) refuse the remember-pick for tasks under the lock, which blocks a pick that is valid for other tasks; (c) keep refusing and name the remembered pick in the failure. Recommendation (a): the documented rule "work is refused, never moved to another CLI" protects a choice made for this task, and a user-wide remembered pick is a default. Needs the owner, since (a) relaxes that rule's wording.
+
+OWNER DECIDED 2026-11-20: option (a). A saved user-wide choice ("Also for my later tasks") that the lock refuses is skipped at dispatch: the step runs on a CLI the task allows and says so. A choice made for this task, and a fix-round or round choice, is still refused, never moved. The Provider lock text in `docs/architecture/sandbox.md` (~:1357-1370) states the exception.
 
 ### T730 · Step 01 suggests the retired PHP language server key, so its form cannot be submitted
 
@@ -1073,7 +1075,7 @@ Resolution: the diagnosis above did not hold for the live error. Codex read its 
 
 ### T694 · FNF[insight-gate3] · insight-cycle approval exposures beside the gate-3 park (+10)
 
-status: open; items 1, 3 and 4 done by #1294 (2c29b923a, deployed 2026-11-20 17:29Z); item 2 decided by the owner 2026-11-20; item 10 waits for the owner · kind: fix · found: review of the gate-3 park change 2026-11-16 · priority: P2
+status: open; items 1, 3 and 4 done by #1294 (2c29b923a, deployed 2026-11-20 17:29Z); items 2 and 10 decided by the owner 2026-11-20 (item 10: option B) and in work together · kind: fix · found: review of the gate-3 park change 2026-11-16 · priority: P2
 
 1. DONE #1294. Stale-tab attestation: the step submit body carries only `values` and targets the newest `waiting_form` row (`api/src/routes/tasks/steps.ts` ~:902-1017), so any stale tab of the same owner can attest a gate-2 or gate-3 answer for a form it never showed. Bind latched-gate submits to `stepRowId` + `waitingStartedAt`.
 2. A successful second insight cycle (no verify failure, gate 2 skipped) still lets a gate-3 preset commit the refreshed diff (`insight-gate3-return.ts` ~:54-66 settles on the prior done gate 3). Same exposure as the owner's park decision; owner call whether it should park too. OWNER DECIDED 2026-11-20: always park gate 3 after a gate-3 insight cycle, whether or not its verification failed; presets and pre-answers are ignored there. Scope: only cycles a person started by picking insights at a parked gate 3 (`10-gate-3-commit.ts` ~:639); automatic rounds (`autoActOnInsights`, `08e-insights-triage.ts` ~:247) stay as they are. Once the person answers that gate 3, Retry, Resume and worker takeover must not park it again, and the fresh-submission anchor (`freshInsightGateSubmission`, today the latest `gate2_approved` event) moves to the cycle.
@@ -1084,7 +1086,7 @@ status: open; items 1, 3 and 4 done by #1294 (2c29b923a, deployed 2026-11-20 17:
 7. BY DESIGN, from #1294: the api's latched-gate predicate (`api/src/routes/tasks/steps.ts` `insightGateLatched`) is a superset of the worker's, with no settled or `approvedRound` exemption, so a later gate-3 park the worker would not latch still refuses old tabs and non-web clients with 409 `step_form_stale` (the web always sends the fields). Fix if it bites: one latch predicate shared through `@haive/shared`.
 8. LOW, cosmetic, PRE-EXISTING: a second tab racing the same latched park can show `step_form_not_waiting` without a reload until the next poll (`web/src/app/(app)/tasks/[id]/page.tsx` ~:1372).
 9. COVERAGE: nothing pins what follows the approval of a gate 2 kept for deferred QA findings (depends on item 2), and no case covers the `run_seq` / `created_at` tie-break of `gate3QaDeferred` (`worker/src/queues/insight-gate3-return.ts`).
-10. PRE-EXISTING, decide with item 2: an unlatched gate 2 still honours `preAnswers['09-gate-2-verify-approval']` (`worker/src/step-engine/step-runner.ts` ~:3596; neither gate declares `humanOnlyFormFields`), so a task that pre-answered gate 2 auto-approves the gate 2 that #1294 keeps for deferred QA findings. Explained to the owner 2026-11-20 with four options: A keep; B in a gate-3 insight cycle, a gate 2 kept for deferred QA findings ignores its pre-answer (recommended); C every gate 2 with deferred QA findings ignores pre-answers; D gate 2 approves and gate 3 lists the findings. Waiting for the decision; it ships with item 2. On the dev install no task type (0 of 15) and no task (0 of 453) has pre-answered gate 2 or 3.
+10. PRE-EXISTING, decide with item 2: an unlatched gate 2 still honours `preAnswers['09-gate-2-verify-approval']` (`worker/src/step-engine/step-runner.ts` ~:3596; neither gate declares `humanOnlyFormFields`), so a task that pre-answered gate 2 auto-approves the gate 2 that #1294 keeps for deferred QA findings. Explained to the owner 2026-11-20 with four options: A keep; B in a gate-3 insight cycle, a gate 2 kept for deferred QA findings ignores its pre-answer (recommended); C every gate 2 with deferred QA findings ignores pre-answers; D gate 2 approves and gate 3 lists the findings. OWNER DECIDED 2026-11-20: option B; it ships with item 2. On the dev install no task type (0 of 15) and no task (0 of 453) has pre-answered gate 2 or 3.
 
 ### T689 · Deep-analysis core runtime: guarded spans (P7) and custom fix target (P8)
 
