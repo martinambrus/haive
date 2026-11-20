@@ -115,15 +115,19 @@ export async function checkTaskComposedLspProvider(
  *
  * Order, outermost first: 1 repository (its task key `lockRepositoryTasksKey`, then its row FOR
  * UPDATE: repository delete and task revival); 2 the task's step rows, one id-ordered batch
- * (`lockStepRows`);
- * 3 this lock, the task row; 4 leaf rows (provider rows and step rows through foreign keys as KEY
- * SHARE, saved preference rows, the template row, task events). Step 01 inserts its template row
- * (KEY SHARE on the repository row) before taking this lock so it never asks for the repository
- * after the task row. The provider-row writers (`lockLoginSet`, `markProvidersReady`) never take a
- * task or step row. One inversion, already true of the summary route's update: DELETE of a
- * provider holds the provider row and then needs the task rows its SET NULL rewrites, while a
- * holder of this lock needs that provider's KEY SHARE; Postgres aborts one of the two (40P01) and
- * the state stays consistent.
+ * (`lockStepRows`); 3 this lock, the task row; 4 leaf rows (provider rows and step rows through
+ * foreign keys as KEY SHARE, saved preference rows, the template row, task events). Step 01
+ * inserts its template row (KEY SHARE on the repository row) before taking this lock so it never
+ * asks for the repository after the task row. The provider-row writers (`lockLoginSet`,
+ * `markProvidersReady`) never take a task or step row. One inversion: DELETE of a provider holds
+ * the provider row and then needs the task rows its SET NULL rewrites, while a holder of this lock
+ * needs that provider's KEY SHARE (the choice inserts through their foreign key, the summary
+ * route's update); Postgres aborts one of the two (40P01) and the state stays consistent.
+ *
+ * Step 02's relink onto a row with the same Dockerfile hash takes no lock: the hash covers the
+ * declared deps, and so the contract key, so it moves a task only between rows of one contract.
+ * Saved preferences are user-wide, so a remembered pick made on another task is not ordered
+ * against this task's decision.
  */
 export async function lockTaskForComposedLsp(
   tx: Pick<Database, 'select'>,
