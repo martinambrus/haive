@@ -94,7 +94,9 @@ const rnd = () => randomBytes(16).toString('hex');
 const PAST = new Date('2020-01-01T00:00:00Z');
 const TOKEN = 'CLAUDE_CODE_OAUTH_TOKEN';
 const USAGE = 'CLAUDE_USAGE_OAUTH';
-const NAMES = [TOKEN, USAGE, 'ANTHROPIC_AUTH_TOKEN'];
+// Rows hold no usage connection by default: its set-wide rules are pinned in cli-usage-grant-set-db.test.ts.
+// A test that needs one seeds it with `seedGrants`.
+const NAMES = [TOKEN, 'ANTHROPIC_AUTH_TOKEN'];
 type Row = typeof schema.cliProviders.$inferSelect;
 type Key = 'A' | 'B' | 'C' | 'D' | 'E' | 'F';
 const SET_ACTION = 'cli_provider.secret.set';
@@ -176,6 +178,21 @@ describe.skipIf(!url)(
           onExisting: 'overwrite',
         });
       return g!;
+    };
+    const seedGrants = async (keys: Key[]) => {
+      for (const key of keys)
+        await upsertProviderSecret(db, {
+          providerId: rows[key].id,
+          name: USAGE,
+          value: JSON.stringify({
+            accessToken: rnd(),
+            refreshToken: rnd(),
+            expiresAt: Date.now() + 3_600_000,
+            scopes: ['user:profile'],
+          }),
+          masterKek: KEK,
+          onExisting: 'overwrite',
+        });
     };
     const setRowsFor = async (pids: string[]) =>
       (await byAction(SET_ACTION)).filter((a) => pids.includes(a.targetId!));
@@ -474,25 +491,93 @@ describe.skipIf(!url)(
       },
     );
 
-    it('keeps the usage connection and other secrets per row', async () => {
-      const before = await outside(['B', 'C', 'D', 'E', 'F']);
-      const usage = rnd();
+    it('writes the usage connection to every row of the set and deletes it from each', async () => {
+      await seedGrants(['A', 'B', 'C', 'D', 'E']);
+      const before = await outside(['C', 'D', 'E', 'F']);
+      const usage = JSON.stringify({
+        accessToken: rnd(),
+        refreshToken: rnd(),
+        expiresAt: Date.now() + 3_600_000,
+        scopes: ['user:profile'],
+      });
       expect((await post('A', USAGE, usage)).status).toBe(200);
-      expect((await plain(rows.A.id, USAGE)) === usage).toBe(true);
-      const a = await provider(rows.A.id);
+      const [a, b] = await Promise.all([provider(rows.A.id), provider(rows.B.id)]);
+      for (const key of ['A', 'B'] as const)
+        expect((await plain(rows[key].id, USAGE)) === usage, key).toBe(true);
       expect(a.authGeneration).not.toBe(rows.A.authGeneration);
-      expect(await outside(['B', 'C', 'D', 'E', 'F'])).toEqual(before);
+      expect(b.authGeneration).not.toBe(rows.B.authGeneration);
+      expect(b.authGeneration).toBe(a.authGeneration);
+      expect(await outside(['C', 'D', 'E', 'F'])).toEqual(before);
 
+      expect((await del('A', USAGE)).status).toBe(200);
+      for (const key of ['A', 'B'] as const)
+        expect(await plain(rows[key].id, USAGE), key).toBeUndefined();
+      expect(await outside(['C', 'D', 'E', 'F'])).toEqual(before);
+      expect((await provider(rows.A.id)).authGeneration).toBe(a.authGeneration);
+      expect((await provider(rows.B.id)).authGeneration).toBe(a.authGeneration);
+    });
+
+    it('leaves the usage connection and the usage snapshots of every row alone when it writes or deletes the login token', async () => {
+      const keys: Key[] = ['A', 'B', 'C', 'D', 'E', 'F'];
+      await seedGrants(keys);
+      await db.insert(schema.usageWindowSnapshots).values(
+        keys.map((k) => ({
+          providerId: rows[k].id,
+          userId: rows[k].userId,
+          providerName: rows[k].name,
+          status: 'ok',
+          fiveHourPct: 10,
+        })),
+      );
+      const usageState = async () => ({
+        secrets: await db
+          .select({
+            providerId: schema.cliProviderSecrets.providerId,
+            encryptedValue: schema.cliProviderSecrets.encryptedValue,
+            encryptedDek: schema.cliProviderSecrets.encryptedDek,
+            fingerprint: schema.cliProviderSecrets.fingerprint,
+            at: sql<string>`${schema.cliProviderSecrets.updatedAt}::text`,
+          })
+          .from(schema.cliProviderSecrets)
+          .where(
+            and(
+              inArray(
+                schema.cliProviderSecrets.providerId,
+                keys.map((k) => rows[k].id),
+              ),
+              eq(schema.cliProviderSecrets.secretName, USAGE),
+            ),
+          )
+          .orderBy(asc(schema.cliProviderSecrets.providerId)),
+        snapshots: await db
+          .select()
+          .from(schema.usageWindowSnapshots)
+          .where(
+            inArray(
+              schema.usageWindowSnapshots.providerId,
+              keys.map((k) => rows[k].id),
+            ),
+          )
+          .orderBy(asc(schema.usageWindowSnapshots.providerId)),
+      });
+      const before = await usageState();
+      expect(before.secrets).toHaveLength(keys.length);
+      expect(before.snapshots).toHaveLength(keys.length);
+      expect((await post('A', TOKEN, rnd())).status).toBe(200);
+      expect(await usageState()).toEqual(before);
+      expect((await patch('A', { envVars: { KEEP: 'yes', [TOKEN]: rnd() } })).status).toBe(200);
+      expect(await usageState()).toEqual(before);
+      expect((await del('A', TOKEN)).status).toBe(200);
+      expect(await usageState()).toEqual(before);
+    });
+
+    it('keeps a pasted secret that is not the login or the usage connection on its row', async () => {
+      const before = await outside(['B', 'C', 'D', 'E', 'F']);
       const other = rnd();
       expect((await post('A', 'ANTHROPIC_AUTH_TOKEN', other)).status).toBe(200);
       expect((await plain(rows.A.id, 'ANTHROPIC_AUTH_TOKEN')) === other).toBe(true);
-      expect((await provider(rows.A.id)).authGeneration).toBe(a.authGeneration);
+      expect((await provider(rows.A.id)).authGeneration).toBe(rows.A.authGeneration);
       expect(await outside(['B', 'C', 'D', 'E', 'F'])).toEqual(before);
-
-      expect((await del('A', USAGE)).status).toBe(200);
-      expect(await plain(rows.A.id, USAGE)).toBeUndefined();
-      expect(await outside(['B', 'C', 'D', 'E', 'F'])).toEqual(before);
-      expect((await provider(rows.A.id)).authGeneration).toBe(a.authGeneration);
     });
 
     it('deletes the token from every row of the set that has it', async () => {
@@ -772,15 +857,41 @@ describe.skipIf(!url)(
         expect(res.status).toBe(201);
         const id = ((await res.json()) as { provider: { id: string } }).provider.id;
         await expectJoined(id, 'B', 3);
-        for (const name of [USAGE, 'ANTHROPIC_AUTH_TOKEN'])
+        // No usage connection is seeded here (a clone never copies one from its source: see the next test).
+        for (const name of ['ANTHROPIC_AUTH_TOKEN'])
           expect((await plain(id, name)) === (await plain(rows.A.id, name)), name).toBe(true);
         expect(await cloneMetadata()).toEqual({
           sourceProviderId: rows.A.id,
-          secretCount: 2,
-          secretNames: ['ANTHROPIC_AUTH_TOKEN', USAGE],
+          secretCount: 1,
+          secretNames: ['ANTHROPIC_AUTH_TOKEN'],
         });
         expect((await byAction(SET_ACTION)).length).toBe(1);
         expect(await outside(['A', 'B', 'C', 'D', 'E', 'F'])).toEqual(before);
+      });
+
+      it('a clone of a member takes the usage connection of the set, not the copy of its source, and counts none', async () => {
+        await seedGrants(['A', 'B']);
+        // B holds the newest grant of the set; the source row A holds an older one.
+        for (const [key, stamp] of [
+          ['A', new Date('2021-01-01T00:00:00Z')],
+          ['B', new Date('2024-01-01T00:00:00Z')],
+        ] as const)
+          await db
+            .update(schema.cliProviderSecrets)
+            .set({ updatedAt: stamp })
+            .where(
+              and(
+                eq(schema.cliProviderSecrets.providerId, rows[key].id),
+                eq(schema.cliProviderSecrets.secretName, USAGE),
+              ),
+            );
+        const res = await cloneOf('A');
+        expect(res.status).toBe(201);
+        const id = ((await res.json()) as { provider: { id: string } }).provider.id;
+        const own = await plain(id, USAGE);
+        expect(own === (await plain(rows.B.id, USAGE))).toBe(true);
+        expect(own === (await plain(rows.A.id, USAGE))).toBe(false);
+        expect((await cloneMetadata()).secretNames).toEqual(['ANTHROPIC_AUTH_TOKEN']);
       });
 
       it('a clone of a row with a legacy environment token takes the login of the set instead', async () => {
@@ -812,11 +923,20 @@ describe.skipIf(!url)(
         expect(res.status).toBe(201);
         const id = ((await res.json()) as { provider: { id: string } }).provider.id;
         expect(await plain(id, TOKEN)).toBeUndefined();
-        for (const name of [USAGE, 'ANTHROPIC_AUTH_TOKEN'])
+        for (const name of ['ANTHROPIC_AUTH_TOKEN'])
           expect((await plain(id, name)) === (await plain(rows.C.id, name)), name).toBe(true);
-        expect((await cloneMetadata()).secretNames).toEqual(['ANTHROPIC_AUTH_TOKEN', USAGE]);
+        expect((await cloneMetadata()).secretNames).toEqual(['ANTHROPIC_AUTH_TOKEN']);
         expect(await byAction(SET_ACTION)).toEqual([]);
         expect(await outside(['A', 'B', 'D', 'E', 'F'])).toEqual(before);
+      });
+
+      it('a clone of an isolated subscription row gets no usage connection', async () => {
+        await seedGrants(['C']);
+        const res = await cloneOf('C');
+        expect(res.status).toBe(201);
+        const id = ((await res.json()) as { provider: { id: string } }).provider.id;
+        expect(await plain(id, USAGE)).toBeUndefined();
+        expect((await cloneMetadata()).secretNames).toEqual(['ANTHROPIC_AUTH_TOKEN']);
       });
 
       it('a clone of an isolated row with a legacy environment token gets no token', async () => {
@@ -832,13 +952,14 @@ describe.skipIf(!url)(
         expect(await byAction(SET_ACTION)).toEqual([]);
       });
 
-      it('a clone of an API-key row copies every secret as before', async () => {
+      it('a clone of an API-key row copies every secret as before, the usage connection included', async () => {
+        await seedGrants(['D']);
         const res = await cloneOf('D');
         expect(res.status).toBe(201);
         const id = ((await res.json()) as { provider: { id: string } }).provider.id;
-        for (const name of NAMES)
+        for (const name of [...NAMES, USAGE])
           expect((await plain(id, name)) === (await plain(rows.D.id, name)), name).toBe(true);
-        expect((await cloneMetadata()).secretNames).toEqual([...NAMES].sort());
+        expect((await cloneMetadata()).secretNames).toEqual([...NAMES, USAGE].sort());
         expect(await byAction(SET_ACTION)).toEqual([]);
       });
 

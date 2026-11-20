@@ -9,6 +9,7 @@ vi.mock('@haive/database', async (original) => ({
   ...(await original<typeof import('@haive/database')>()),
   tryCliAuthLock: authLock.acquire,
 }));
+import { randomBytes } from 'node:crypto';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const USER = vi.hoisted(() => '00000000-0000-4000-8000-0000000000a1');
@@ -530,7 +531,18 @@ describe('sign-out secret writers advance the generation under the auth lock', (
           method,
           `/${PROVIDER}${method === 'POST' ? '/secrets' : ''}`,
           method === 'POST'
-            ? { secretName, value: 'new-token' }
+            ? {
+                secretName,
+                value:
+                  secretName === 'CLAUDE_USAGE_OAUTH'
+                    ? JSON.stringify({
+                        accessToken: randomBytes(8).toString('hex'),
+                        refreshToken: randomBytes(8).toString('hex'),
+                        expiresAt: 1,
+                        scopes: ['user:profile'],
+                      })
+                    : 'new-token',
+              }
             : { envVars: { [secretName]: 'new-token' } },
         );
         expect([200, 201]).toContain(res.status);

@@ -34,6 +34,7 @@ import {
   Input,
 } from '@/components/ui';
 import { ActionMenu } from '@/components/action-menu';
+import { LOGIN_SET_NOTE } from '@/components/claude-usage-auth';
 import { CliUpgradeAll } from '@/components/cli-upgrade-all';
 import { cliUpgradeLatest, groupUpgradable } from '@/components/cli-upgrade-selection';
 import { runCliProbe, runCliSignOut, signOutSummary, type QueuedJobPhase } from '@/lib/cli-jobs';
@@ -405,7 +406,7 @@ export default function CliProvidersPage() {
   async function handleDisconnectUsage(p: CliProvider) {
     if (
       !confirm(
-        `Disconnect usage tracking for ${p.label}? The task header will stop showing its 5h/weekly windows until you reconnect.`,
+        `Disconnect usage tracking for ${p.label} and every row that shares its login? The task header will stop showing its 5h/weekly windows until you reconnect.`,
       )
     ) {
       return;
@@ -427,6 +428,7 @@ export default function CliProvidersPage() {
           error: null,
         },
       }));
+      void load();
     } catch (err) {
       setUsageStates((s) => ({
         ...s,
@@ -484,6 +486,9 @@ export default function CliProvidersPage() {
         <>
           <section className="flex flex-col gap-4">
             <h2 className="text-lg font-semibold text-neutral-100">Configured</h2>
+            {providers.some((p) => p.name === 'claude-code') && (
+              <p className="text-sm text-neutral-400">{LOGIN_SET_NOTE}</p>
+            )}
             <CliUpgradeAll
               groups={upgradeGroups}
               onUpgrade={(ids) => void handleUpgradeMany(ids)}
@@ -618,8 +623,8 @@ export default function CliProvidersPage() {
                                 onClick: () => handleDisconnectUsage(p),
                                 title:
                                   needsReconnect[p.id] === true
-                                    ? 'Stop tracking usage and delete the stored token (use this to drop a duplicate of the same account)'
-                                    : "Stop tracking Claude's subscription usage and delete the stored usage token",
+                                    ? 'Stop tracking usage and delete the stored usage token from every row that shares this login'
+                                    : "Stop tracking Claude's subscription usage and delete the stored usage token from every row that shares this login",
                               },
                             p.name === 'claude-code' &&
                               needsReconnect[p.id] !== true &&
