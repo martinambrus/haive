@@ -782,8 +782,10 @@ auth-strike gates of a Claude row are keyed by that scope (every other CLI keeps
 holder is the member holding a grant whose usage snapshot is `ok` with the newest `fetched_at`, else one
 whose snapshot is `error`, else one with no snapshot, else one that needs a reconnect (so a transient error
 on the live copy never hands the set to a dead copy stamped newer); within a tier, the newest grant
-`updated_at`, then the smallest id. A holder whose grant is unparsable or dead skips the set, with no
-fallback to another member. A refresh runs under the set's auth lock (try once;
+`updated_at`, then the smallest id. A copy that does not decode into a grant with an access token is
+passed over for the next member in that order, and a live fetch then overwrites it. A holder whose
+grant is known dead skips the set, with no fallback to another member. A refresh runs under the set's
+auth lock (try once;
 busy skips the tick) with the vendor call outside any transaction, and writes the rotated grant in one
 transaction to every member that held the holder's pre-refresh ciphertext, with one encryption and one
 `updated_at`.
