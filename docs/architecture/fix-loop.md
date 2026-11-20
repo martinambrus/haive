@@ -637,17 +637,21 @@ owned row/task fence before `gate2_approved` is written. Gate 2 without a latch 
 existing behavior. This task-wide latch survives
 Retry of the original request/source independently of continuation validity. Gate-3
 apply checks it before navigation, picks or Git and revises to gate 2 while pending.
-After that human gate-2 re-approval, the regenerated gate 3 uses the same runner approval
+After a gate-3 insight cycle, whether or not a check failed (a failed one also needs that human
+gate-2 re-approval first), the first regenerated gate 3 uses the same runner approval
 guard: no task/type preset, prior-task reuse, saved synthetic answer, queue answer or
 auto-submit variant can apply it. It keeps computed defaults and parks with
 `waiting_started_at`. Its answer requires the authenticated owner's matching
-`step.form_submitted` event for the row and generation, newer than `gate2_approved`.
+`step.form_submitted` event for the row and generation, newer than the cycle's
+`insight.continuation` event and than `gate2_approved`.
 The route also refuses a stale form: a latched gate's answer must name the row and park its form
 was rendered for (see worker-restarts, form park marker).
-The requirement survives Retry, Resume and boot takeover until the gate-3 pass completes;
-a configured late editor introducing another round between the gates does not clear it.
+The requirement survives Retry, Resume and boot takeover until a gate 3 at or after the cycle's
+first round completes (done or skipped) before the current round; a configured late editor
+introducing another round between the gates does not clear it.
 A warning note in the form explains that the refreshed changes need a new commit decision.
-Gate 3 without that re-approval retains ordinary auto-continue behavior.
+Gate 3 outside a gate-3 cycle, including after an automatic insight round, retains ordinary
+auto-continue behavior.
 A pinned list without that destination refuses instead of running off-list. The quick
 path now has a dormant gate 2 activated by the same latch. Insight work itself spends
 no fix round; actual blocking checks retain the ordinary fix loop and cap.

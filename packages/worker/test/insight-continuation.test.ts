@@ -29,7 +29,10 @@ it('holds the regenerated gate across later check rounds until a gate3 pass sett
   const latest = vi.fn().mockResolvedValue({ payload: approval });
   const settled = vi.fn().mockResolvedValue(undefined);
   const db = {
-    query: { taskEvents: { findFirst: latest }, taskSteps: { findFirst: settled } },
+    query: {
+      taskEvents: { findFirst: latest, findMany: async () => [] },
+      taskSteps: { findFirst: settled },
+    },
   } as unknown as Database;
   const row = {
     taskId: 'task',

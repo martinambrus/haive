@@ -2842,6 +2842,451 @@ describe.skipIf(!url)('manual insight batch journal on Postgres', () => {
     expect(task).toMatchObject({ currentStepId: '09-gate-2-verify-approval', currentRound: round });
     expect(jobs).toMatchObject([{ stepId: '09-gate-2-verify-approval', round }]);
   });
+  describe('gate 3 after a gate-3 insight cycle', () => {
+    const gateId = '10-gate-3-commit';
+    type Source =
+      | 'task preset'
+      | 'form autoSubmit'
+      | 'step defaults'
+      | 'saved synthetic'
+      | 'queue answer'
+      | 'persisted schema'
+      | 'prior reuse';
+    const SOURCES: Source[] = [
+      'task preset',
+      'form autoSubmit',
+      'step defaults',
+      'saved synthetic',
+      'queue answer',
+      'persisted schema',
+      'prior reuse',
+    ];
+    const CYCLE_AT = new Date('2026-01-02T00:00:00Z');
+    const ANSWER_AT = new Date('2026-01-03T00:00:00Z');
+    const STAMPED = {
+      stepId: gateId,
+      fieldCount: 1,
+    };
+
+    async function addContinuationEvent(
+      taskId: string,
+      sourceRowId: string,
+      round: number,
+      opts: { createdAt?: Date; automatic?: boolean; generation?: number } = {},
+    ) {
+      const [event] = await db
+        .insert(schema.taskEvents)
+        .values({
+          taskId,
+          taskStepId: sourceRowId,
+          eventType: 'insight.continuation',
+          ...(opts.createdAt ? { createdAt: opts.createdAt } : {}),
+          payload: {
+            continuation: {
+              version: 1,
+              kind: 'insight_revise',
+              batchId: randomUUID(),
+              sourceStepRow: sourceRowId,
+              generation: opts.generation ?? 0,
+              round,
+              ...(opts.automatic ? {} : { mode: 'gate3', stage: 'apply' }),
+            },
+            targetStepId: '08e-insights-triage',
+          },
+        })
+        .returning();
+      return event!;
+    }
+
+    async function addGate3Row(
+      taskId: string,
+      round: number,
+      status: 'done' | 'skipped' | 'pending',
+    ) {
+      const [row] = await db
+        .insert(schema.taskSteps)
+        .values({
+          taskId,
+          stepId: gateId,
+          stepIndex: 10,
+          title: 'Commit',
+          status,
+          round,
+          formValues: status === 'pending' ? null : { commit: true },
+          output: status === 'pending' ? null : { committed: true },
+        })
+        .returning();
+      return row!;
+    }
+
+    /** One gate-3 row at `round` with the pre-answer `source`, and the cycle the mode names. */
+    async function seedGate3(
+      source: Source,
+      mode: 'cycle' | 'none' | 'automatic',
+      round = 1,
+      eventAt?: Date,
+    ) {
+      const ctx = await seed();
+      const preset = { [gateId]: { commit: true, commitMessage: 'preset message' } };
+      const [repo] = await db
+        .insert(schema.repositories)
+        .values({
+          userId,
+          name: 'commit preset',
+          source: 'blank',
+          storagePath: '/unused',
+          localPath: '/unused',
+        })
+        .returning();
+      await db
+        .update(schema.tasks)
+        .set({
+          type: 'workflow',
+          repositoryId: repo!.id,
+          currentStepId: gateId,
+          currentRound: round,
+          autoContinue: source !== 'form autoSubmit',
+          preAnswers: source === 'task preset' ? preset : {},
+        })
+        .where(eq(schema.tasks.id, ctx.taskId));
+      const sourceRow = await addGate3Row(ctx.taskId, round - 1, 'done');
+      await db
+        .update(schema.taskSteps)
+        .set({
+          stepId: gateId,
+          round,
+          status: 'pending',
+          detectOutput: {},
+          formValues: source === 'saved synthetic' ? { commit: true } : null,
+        })
+        .where(eq(schema.taskSteps.id, ctx.taskStepId));
+      const event =
+        mode === 'none'
+          ? null
+          : await addContinuationEvent(ctx.taskId, sourceRow.id, round, {
+              createdAt: eventAt,
+              automatic: mode === 'automatic',
+            });
+      if (source === 'prior reuse') {
+        const [prior] = await db
+          .insert(schema.tasks)
+          .values({
+            userId,
+            repositoryId: repo!.id,
+            type: 'workflow',
+            title: 'prior',
+            status: 'completed',
+            completedAt: new Date(),
+          })
+          .returning();
+        await db.insert(schema.taskSteps).values({
+          taskId: prior!.id,
+          stepId: gateId,
+          stepIndex: 10,
+          title: 'Commit',
+          status: 'done',
+          formValues: { commit: true },
+        });
+      }
+      const apply = vi.fn(async () => ({ committed: true }));
+      const reconcile = vi.fn((_ctx, _detected, values) => values);
+      const stepDef: StepDefinition = {
+        metadata: {
+          id: gateId,
+          index: 10,
+          workflowType: 'workflow',
+          title: 'Commit',
+          description: '',
+          requiresCli: false,
+          reuseLastCompletedFormValues: source === 'prior reuse',
+          autoSubmitDefaults: source === 'step defaults',
+        },
+        reconcileReusedFormValues: reconcile,
+        form: () => ({
+          title: 'Commit',
+          autoSubmit: source === 'form autoSubmit',
+          fields: [
+            { id: 'commit', type: 'checkbox', label: 'Commit', default: true },
+            { id: 'commitMessage', type: 'textarea', label: 'Message', default: 'fresh message' },
+          ],
+        }),
+        apply,
+      };
+      if (source === 'persisted schema')
+        await db
+          .update(schema.taskSteps)
+          .set({ formSchema: { ...stepDef.form!(ctx, {}, null), autoSubmit: true } })
+          .where(eq(schema.taskSteps.id, ctx.taskStepId));
+      const params = {
+        db,
+        taskId: ctx.taskId,
+        userId,
+        repoPath: '/unused',
+        workspacePath: '/unused',
+        cliProviderId: null,
+        stepDef,
+        epoch: 0,
+        round,
+        moduleDeactivation: null,
+        ...(source === 'queue answer' ? { formValues: { commit: true } } : {}),
+      };
+      return { ctx, params, apply, reconcile, event, sourceRow };
+    }
+
+    const expectParked = (
+      result: Awaited<ReturnType<typeof advanceStep>>,
+      apply: ReturnType<typeof vi.fn>,
+      label?: string,
+    ) => {
+      expect(result.status, label).toBe('waiting_form');
+      expect(result.row.waitingStartedAt, label).not.toBeNull();
+      expect(result.row.formValues, label).toBeNull();
+      expect(result.row.formSchema, label).toMatchObject({
+        autoSubmit: false,
+        fields: expect.arrayContaining([
+          expect.objectContaining({ id: 'commit', default: true }),
+          expect.objectContaining({ id: 'reopenedFormNotice', type: 'note', variant: 'warning' }),
+        ]),
+      });
+      expect(apply, label).not.toHaveBeenCalled();
+    };
+
+    /** What the submit route writes in one transaction when the owner answers a gate-3 form. */
+    async function answerAsOwner(
+      rowId: string,
+      taskId: string,
+      payload: Record<string, unknown> = {},
+      createdAt = ANSWER_AT,
+    ) {
+      await db.transaction(async (tx) => {
+        await tx
+          .update(schema.taskSteps)
+          .set({ formValues: { commit: true }, waitingStartedAt: null })
+          .where(eq(schema.taskSteps.id, rowId));
+        await tx.insert(schema.taskEvents).values({
+          taskId,
+          taskStepId: rowId,
+          eventType: 'step.form_submitted',
+          createdAt,
+          payload: { ...STAMPED, userId, generation: 0, commit: true, ...payload },
+        });
+      });
+    }
+
+    it.each(SOURCES.flatMap((source) => [[source, true] as const, [source, false] as const]))(
+      'gate 3 after a clean cycle: %s (cycle=%s)',
+      async (source, cycle) => {
+        const { params, apply, reconcile } = await seedGate3(source, cycle ? 'cycle' : 'none');
+        const result = await advanceStep(params);
+        if (!cycle) {
+          expect(result.status).toBe('done');
+          expect(apply).toHaveBeenCalledOnce();
+          return;
+        }
+        expectParked(result, apply);
+        expect(reconcile).not.toHaveBeenCalled();
+      },
+    );
+
+    it('gate 3 parks after a clean cycle that went through the real handoff', async () => {
+      const { ctx, round } = await gateCheckRound();
+      const row = await addGate3Row(ctx.taskId, round, 'pending');
+      await db
+        .update(schema.tasks)
+        .set({
+          currentStepId: gateId,
+          currentRound: round,
+          autoContinue: true,
+          preAnswers: { [gateId]: { commit: true } },
+        })
+        .where(eq(schema.tasks.id, ctx.taskId));
+      const apply = vi.fn(async () => ({ committed: true }));
+      const result = await advanceStep({
+        db,
+        taskId: ctx.taskId,
+        userId,
+        repoPath: '/unused',
+        workspacePath: '/unused',
+        cliProviderId: null,
+        epoch: ctx.orchestrationEpoch,
+        round,
+        moduleDeactivation: null,
+        formValues: { commit: true },
+        stepDef: {
+          metadata: {
+            id: gateId,
+            index: 10,
+            workflowType: 'workflow',
+            title: 'Commit',
+            description: '',
+            requiresCli: false,
+            autoSubmitDefaults: true,
+          },
+          form: () => ({
+            title: 'Commit',
+            autoSubmit: true,
+            fields: [{ id: 'commit', type: 'checkbox', label: 'Commit', default: true }],
+          }),
+          apply,
+        },
+      });
+      expect(result.row.id).toBe(row.id);
+      expect(result.status).toBe('waiting_form');
+      expect(result.row.waitingStartedAt).not.toBeNull();
+      expect(result.row.formValues).toBeNull();
+      expect(apply).not.toHaveBeenCalled();
+    });
+
+    it('gate 3 parks after a second clean cycle whose first cycle was re-approved at gate 2', async () => {
+      const { ctx, params, apply, sourceRow } = await seedGate3('task preset', 'none', 3);
+      const at = (n: number) => new Date(Date.UTC(2026, 0, 1, 0, n));
+      const firstSource = await addGate3Row(ctx.taskId, 0, 'done');
+      await addContinuationEvent(ctx.taskId, firstSource.id, 1, { createdAt: at(1) });
+      await db.insert(schema.taskEvents).values([
+        {
+          taskId: ctx.taskId,
+          eventType: 'insight.check',
+          createdAt: at(2),
+          payload: { version: 1, batchId: 'first', kind: 'verify_failed', round: 1 },
+        },
+        {
+          taskId: ctx.taskId,
+          eventType: 'insight.check',
+          createdAt: at(3),
+          payload: { version: 1, batchId: 'first', kind: 'gate2_approved', round: 2 },
+        },
+      ]);
+      await addContinuationEvent(ctx.taskId, sourceRow.id, 3, { createdAt: at(5) });
+      expectParked(await advanceStep(params), apply);
+    });
+
+    describe('recovery', () => {
+      it('an unanswered gate 3 stays parked across Resume, boot re-entry and Retry', async () => {
+        const { ctx, params, apply } = await seedGate3('task preset', 'cycle');
+        expectParked(await advanceStep(params), apply);
+        for (const reentry of ['Resume', 'boot', 'Retry']) {
+          let epoch = 0;
+          if (reentry === 'Retry') {
+            const reset = await resetStepAndDownstream(db, ctx.taskId, gateId, 1, 0);
+            if (reset && reset !== 'superseded') epoch = reset.newEpoch;
+          }
+          const parked = await advanceStep({ ...params, epoch });
+          expect(parked.status, reentry).toBe('waiting_form');
+          expect(parked.row.waitingStartedAt, reentry).not.toBeNull();
+          expect(apply, reentry).not.toHaveBeenCalled();
+        }
+      });
+
+      it.each(['running', 'waiting_form'] as const)(
+        'an owner answer survives a %s row: apply runs once and a duplicate advance does nothing',
+        async (status) => {
+          const { ctx, params, apply } = await seedGate3('task preset', 'cycle', 1, CYCLE_AT);
+          await answerAsOwner(ctx.taskStepId, ctx.taskId);
+          await db
+            .update(schema.taskSteps)
+            .set({ status })
+            .where(eq(schema.taskSteps.id, ctx.taskStepId));
+          expect(await advanceStep(params)).toMatchObject({ status: 'done' });
+          expect(apply).toHaveBeenCalledOnce();
+          expect(await advanceStep(params)).toMatchObject({ status: 'done' });
+          expect(apply).toHaveBeenCalledOnce();
+        },
+      );
+    });
+
+    it.each([
+      'queue payload alone',
+      'saved values without an event',
+      'event older than the cycle',
+      'wrong user',
+      'wrong generation',
+      'commit mismatch',
+    ])('gate 3 stays parked after a cycle with invalid human evidence: %s', async (kind) => {
+      const { ctx, params, apply } = await seedGate3('task preset', 'cycle', 1, CYCLE_AT);
+      if (kind !== 'queue payload alone')
+        await db
+          .update(schema.taskSteps)
+          .set({ status: 'waiting_form', formValues: { commit: true }, waitingStartedAt: null })
+          .where(eq(schema.taskSteps.id, ctx.taskStepId));
+      if (kind !== 'queue payload alone' && kind !== 'saved values without an event')
+        await db.insert(schema.taskEvents).values({
+          taskId: ctx.taskId,
+          taskStepId: ctx.taskStepId,
+          eventType: 'step.form_submitted',
+          createdAt:
+            kind === 'event older than the cycle' ? new Date('2026-01-01T00:00:00Z') : ANSWER_AT,
+          payload: {
+            ...STAMPED,
+            userId: kind === 'wrong user' ? randomUUID() : userId,
+            generation: kind === 'wrong generation' ? 1 : 0,
+            commit: kind !== 'commit mismatch',
+          },
+        });
+      const result = await advanceStep({ ...params, formValues: { commit: true } });
+      expect(result.status).toBe('waiting_form');
+      expect(result.row.waitingStartedAt).not.toBeNull();
+      expect(result.row.formValues).toBeNull();
+      expect(apply).not.toHaveBeenCalled();
+    });
+
+    it.each(['task preset', 'queue answer'] as const)(
+      'gate 3 after an automatic round is not a cycle and commits: %s',
+      async (source) => {
+        const { params, apply } = await seedGate3(source, 'automatic');
+        expect(await advanceStep(params)).toMatchObject({ status: 'done' });
+        expect(apply).toHaveBeenCalledOnce();
+      },
+    );
+
+    it('after a failed verification gate 3 needs an answer newer than the gate-2 re-approval', async () => {
+      const outcomes: Record<string, string> = {};
+      for (const answerAt of ['2026-01-04T00:00:00Z', '2026-01-06T00:00:00Z']) {
+        const { ctx, params, apply } = await seedGate3('task preset', 'cycle', 1, CYCLE_AT);
+        await db.insert(schema.taskEvents).values([
+          {
+            taskId: ctx.taskId,
+            eventType: 'insight.check',
+            createdAt: new Date('2026-01-03T00:00:00Z'),
+            payload: { version: 1, batchId: 'failed', kind: 'verify_failed', round: 1 },
+          },
+          {
+            taskId: ctx.taskId,
+            eventType: 'insight.check',
+            createdAt: new Date('2026-01-05T00:00:00Z'),
+            payload: { version: 1, batchId: 'failed', kind: 'gate2_approved', round: 1 },
+          },
+        ]);
+        await db
+          .update(schema.taskSteps)
+          .set({ status: 'waiting_form' })
+          .where(eq(schema.taskSteps.id, ctx.taskStepId));
+        await answerAsOwner(ctx.taskStepId, ctx.taskId, {}, new Date(answerAt));
+        const result = await advanceStep(params);
+        outcomes[answerAt] = result.status;
+        if (result.status === 'waiting_form') expect(apply).not.toHaveBeenCalled();
+        else expect(apply).toHaveBeenCalledOnce();
+      }
+      expect(outcomes).toEqual({
+        '2026-01-04T00:00:00Z': 'waiting_form',
+        '2026-01-06T00:00:00Z': 'done',
+      });
+    });
+
+    it.each(['done', 'skipped'] as const)(
+      'a cycle settled by a %s gate-3 row does not latch the next gate-3 round',
+      async (status) => {
+        const { ctx, params, apply, sourceRow } = await seedGate3('task preset', 'none', 2);
+        const cycleSource = await addGate3Row(ctx.taskId, 0, 'done');
+        await addContinuationEvent(ctx.taskId, cycleSource.id, 1);
+        await db
+          .update(schema.taskSteps)
+          .set({ status })
+          .where(eq(schema.taskSteps.id, sourceRow.id));
+        expect(await advanceStep(params)).toMatchObject({ status: 'done' });
+        expect(apply).toHaveBeenCalledOnce();
+      },
+    );
+  });
   it('PR5 gate pick is consumed once, resets the pending gate, and only then runs an editor', async () => {
     const { ctx, source, continuation } = await seedGatePick();
     const routes = await Promise.all([

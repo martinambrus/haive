@@ -29,7 +29,7 @@ export async function pendingInsightApproval(db: Database, taskId: string): Prom
 
 /** Gate 2 advances to gate 3. Its durable re-approval keeps
  * that regenerated form human-only across Retry, Resume and worker takeover. */
-export async function insightGate3ReviewRequired(
+async function failedInsightGate3ReviewRequired(
   db: Database,
   row: typeof schema.taskSteps.$inferSelect,
 ): Promise<boolean> {
@@ -66,6 +66,17 @@ export async function insightGate3ReviewRequired(
   return !settled;
 }
 
+/** A gate-3 pick keeps its first gate 3 human-only, whether or not the cycle's verification failed. */
+export async function insightGate3ReviewRequired(
+  db: Database,
+  row: typeof schema.taskSteps.$inferSelect,
+): Promise<boolean> {
+  return (
+    (await failedInsightGate3ReviewRequired(db, row)) ||
+    (await openGate3Cycle(db, row.taskId, row.round)) !== null
+  );
+}
+
 /** Only the owner-authenticated submit route can attest an answer for this generation.
  * Saved defaults, queue payloads and legacy events are not human approval evidence. */
 export async function freshInsightGateSubmission(
@@ -83,6 +94,12 @@ export async function freshInsightGateSubmission(
       : decision !== 'approve' && decision !== 'reject')
   )
     return false;
+  const cycle = gate3 ? await openGate3Cycle(db, row.taskId, row.round) : null;
+  const checked = sql`(
+        select max(failed.created_at) from ${schema.taskEvents} failed
+        where failed.task_id = ${row.taskId} and failed.event_type = 'insight.check'
+          and failed.payload->>'kind' = ${gate3 ? 'gate2_approved' : 'verify_failed'}
+      )`;
   const submission = await db.query.taskEvents.findFirst({
     where: and(
       eq(schema.taskEvents.taskId, row.taskId),
@@ -91,11 +108,11 @@ export async function freshInsightGateSubmission(
       // Compare at PostgreSQL precision; JavaScript Dates truncate microseconds.
       gt(
         schema.taskEvents.createdAt,
-        sql`(
-        select max(failed.created_at) from ${schema.taskEvents} failed
-        where failed.task_id = ${row.taskId} and failed.event_type = 'insight.check'
-          and failed.payload->>'kind' = ${gate3 ? 'gate2_approved' : 'verify_failed'}
-      )`,
+        cycle
+          ? sql`greatest(${checked}, (
+        select started.created_at from ${schema.taskEvents} started where started.id = ${cycle.event.id}
+      ))`
+          : checked,
       ),
     ),
     orderBy: [desc(schema.taskEvents.createdAt), desc(schema.taskEvents.id)],
@@ -110,8 +127,8 @@ export async function freshInsightGateSubmission(
     return false;
   return true;
 }
-/** A gate-3 cycle outlives its triage checkpoint and ordinary blocking fix rounds. */
-export async function gate3InsightCycle(db: Database, taskId: string, round: number) {
+/** The latest gate-3 apply request at or before `round`, once its source row is still the one it named. */
+async function latestGate3Request(db: Pick<Database, 'query'>, taskId: string, round: number) {
   const events = await db.query.taskEvents.findMany({
     where: and(
       eq(schema.taskEvents.taskId, taskId),
@@ -129,6 +146,28 @@ export async function gate3InsightCycle(db: Database, taskId: string, round: num
     where: and(eq(schema.taskSteps.taskId, taskId), eq(schema.taskSteps.id, request.sourceStepRow)),
   });
   if (!source || source.rerunGeneration !== request.generation) return null;
+  return { event, request };
+}
+/** The gate-3 cycle whose first gate 3 is still owed to a person; null once an earlier gate-3 row settled it. */
+export async function openGate3Cycle(db: Pick<Database, 'query'>, taskId: string, round: number) {
+  const found = await latestGate3Request(db, taskId, round);
+  if (!found) return null;
+  const settled = await db.query.taskSteps.findFirst({
+    where: and(
+      eq(schema.taskSteps.taskId, taskId),
+      eq(schema.taskSteps.stepId, '10-gate-3-commit'),
+      gte(schema.taskSteps.round, found.request.round),
+      sql`${schema.taskSteps.round} < ${round}`,
+      inArray(schema.taskSteps.status, ['done', 'skipped']),
+    ),
+  });
+  return settled ? null : found;
+}
+/** A gate-3 cycle outlives its triage checkpoint and ordinary blocking fix rounds. */
+export async function gate3InsightCycle(db: Database, taskId: string, round: number) {
+  const found = await latestGate3Request(db, taskId, round);
+  if (!found) return null;
+  const { request } = found;
   const gate = await db.query.taskSteps.findFirst({
     where: and(
       eq(schema.taskSteps.taskId, taskId),
