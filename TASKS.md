@@ -702,7 +702,7 @@ Found with the shared usage connection (#1291 poller, #1292 api and web), 2026-1
 
 ### T723 · FNF[claude-login-set] · Claude login set leftovers (+17)
 
-status: open, in review as #1306 (2026-11-21: items 1, 12, 13, 14, 17 fixed; 3 and 16 pinned by controls; 9 and 11 were already on main; 2, 4-8, 10, 15 left: 2 test-only, 4 a large fake refactor, 5-6 end with the plaintext drop, 7 web form, 8 latent, 10 third-party, 15 a disclosed decision) · kind: fix · found: #1282 build and review 2026-11-19 · priority: P4
+status: open for items 18-20 and the left ones; #1306 DONE (9f4e22ed7, deployed 2026-11-21 15:43Z: items 1, 12, 13, 14, 17 fixed; 3 and 16 pinned by controls; 9 and 11 were already on main; 2, 4-8, 10, 15 left: 2 test-only, 4 a large fake refactor, 5-6 end with the plaintext drop, 7 web form, 8 latent, 10 third-party, 15 a disclosed decision) · kind: fix · found: #1282 build and review 2026-11-19 · priority: P4
 
 Paths are under `packages/`. Items 2 to 4 are PRE-EXISTING; item 1 is PRE-EXISTING for the clicked row and reaches the whole set since #1282. Items 5 to 10 were found with #1283: 5 to 7 and 10 are PRE-EXISTING, 8 is NEW and latent, 9 exists since #1282. Items 11 to 13 were found in #1283's review round (lock order against the image job) and are PRE-EXISTING.
 
