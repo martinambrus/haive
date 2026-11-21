@@ -940,9 +940,20 @@ status: open · kind: fix · found: #1305 driver 2026-11-21 · priority: P4
 
 ### T747 · FNF[claude-stream-error-codes] · only one of the Claude CLI's assistant error codes is read
 
-status: open · kind: fix · found: #1306 driver 2026-11-21 · priority: P4
+status: open, main item in review as #1308 (2026-11-21: codes mapped to auth / rate_limit / server_error, steered runs classify) · kind: fix · found: #1306 driver 2026-11-21 · priority: P4
 
 `worker/src/queues/cli-exec/stream.ts` ~:87 and `exec-core.ts` ~:1221 read only `authentication_failed` from the top-level assistant `error` field. Claude CLI 2.1.330 also stamps `oauth_org_not_allowed`, `account_on_hold`, `verification_required`, `cloud_credential_error`, `billing_error`, `rate_limit`, `overloaded`, `server_error`, `invalid_request`, `model_not_found`, `max_output_tokens` and `unknown`; map the ones with a failure class (auth, rate limit, provider outage) to it. A steered run whose later turn fails auth takes the result branch and carries no flag. PRE-EXISTING.
+
+Follow-ups found by the #1308 driver:
+
+1. A steered run's error detail quotes the first turn's answer tail (`exec-core.ts` ~:1284-1289, `formatCliErrorMessage` in the result branch): headline right, excerpt from the wrong turn. PRE-EXISTING, medium-low.
+2. The no-result branch still lets the text rules scan the raw stream, so a stamped `rate_limit`/`overloaded` token classifies even from a sub-agent or recovered turn (`exec-core.ts` ~:1022, ~:1358; `failure-class.ts` ~:279, ~:348, ~:359-377). PRE-EXISTING, low-medium.
+3. The auth hint says log in again, wrong for `account_on_hold`, `oauth_org_not_allowed`, `verification_required` (`exec-core.ts` ~:297-316); needs a hint variant. PRE-EXISTING, low.
+4. `authFailure` is now redundant with `streamFailureClass === 'auth'` (`_shared.ts` ~:99-101, `exec-core.ts` ~:195, ~:264-266). Low, cleanup.
+5. No class for `model_not_found` / `invalid_request`: ordinary exit-1 failures with ordinary retries. Design decision. PRE-EXISTING, low-medium.
+6. The sequential sub-agent path for amp and grok carries no stream flags (`sub-agent.ts` ~:226-257). PRE-EXISTING, low.
+7. `billing_error` files under `rate_limit`, whose watch assumes a resetting window (`task-queue.ts` ~:2022, `failure-class.ts` ~:296); bounded by notify mode and the auto-resume cap of 3. PRE-EXISTING for the text path, low.
+8. `api_error_status` on assistant and result events has no reader in `packages/*/src` (null for no-login, 401 for a rejected key): a possible second structural signal. PRE-EXISTING, low.
 
 ### T748 · FNF[empty-typed-secret] · the api stores a secret-named env var with an empty value
 
