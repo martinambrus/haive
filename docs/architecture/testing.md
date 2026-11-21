@@ -52,12 +52,16 @@ A new or changed test file runs in under 5 s locally (`pnpm --filter <pkg> exec 
 
 `pnpm typecheck` and `pnpm test` run through turbo, whose `typecheck` and `test` tasks depend on `^build`: every
 workspace package the target depends on is built first, `@haive/module-statistics` among them. A package-level run
-(`pnpm --filter @haive/worker typecheck`, or `pnpm --filter <pkg> exec vitest run <file>`) builds nothing, so in a
-fresh worktree, or after pulling a change to a dependency, a server package's generated `modules.generated.ts`
-cannot resolve `@haive/module-statistics/manifest`. Run the package's task through turbo instead
-(`pnpm exec turbo run typecheck --filter=@haive/worker`), or build its dependencies once first
-(`pnpm exec turbo run build --filter='@haive/worker^...'`, which builds database, shared, web-kit and the
-statistics module).
+(`pnpm --filter @haive/worker typecheck`) builds nothing, so in a fresh worktree, or after pulling a change to a
+dependency, a server package's generated `modules.generated.ts` cannot resolve `@haive/module-statistics/manifest`.
+Run the package's task through turbo instead (`pnpm exec turbo run typecheck --filter=@haive/worker`), or build its
+dependencies once first (`pnpm exec turbo run build --filter='@haive/worker^...'`, which builds database, shared,
+web-kit and the statistics module).
+
+A direct Vitest run (`pnpm --filter <pkg> exec vitest run <file>`) also skips the package's `test` script, the step
+that writes the api's and the worker's gitignored `modules.generated.ts`. After the dependency build, pass the file
+to the script instead (`pnpm --filter @haive/worker test <file>` runs `gen-modules.mjs`, then `vitest run <file>`),
+or run `node scripts/gen-modules.mjs` once from the repository root.
 
 ## How CI runs them
 
