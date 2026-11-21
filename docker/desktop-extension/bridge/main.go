@@ -73,6 +73,7 @@ type bridge struct {
 	rename    func(string, string) error
 	sleep     func(time.Duration)
 	readEnv   func(string) ([]byte, error)
+	lockCfg   lockConfig
 }
 
 func validateRequest(r request) error {
@@ -658,7 +659,7 @@ func (b bridge) checkUpgrade(ctx context.Context) error {
 		return err
 	}
 	if active {
-		return errors.New("An upgrade is running for this Haive Desktop install. Install, Start and Stop are refused to protect its database backup. Wait for the upgrade to finish, then refresh status. If the updater is hung, stop that updater container in Docker Desktop, then check the upgrade state before retrying.")
+		return errors.New(upgradeActiveMessage)
 	}
 	return nil
 }
@@ -751,6 +752,11 @@ func (b bridge) handle(ctx context.Context, r request) (s state, err error) {
 	if err != nil {
 		return s, errors.New("No complete Haive Desktop install was found. Refresh status before continuing.")
 	}
+	release, err := b.takeStackLock(ctx)
+	if err != nil {
+		return s, err
+	}
+	defer release()
 	notice := ""
 	action := []string{"stop"} // Keep containers, network and every data volume.
 	if r.Action == "start" {
@@ -767,7 +773,8 @@ func (b bridge) handle(ctx context.Context, r request) (s state, err error) {
 		return s, err
 	}
 	// Bundle checks and port probes can take time. Recheck immediately before
-	// changing services as well; released updaters cannot share our host lock.
+	// changing services as well: the shared install lock covers updaters that take it,
+	// and this check stays for older ones.
 	if err = b.checkUpgrade(ctx); err != nil {
 		return s, err
 	}
