@@ -263,6 +263,16 @@ describe('size cap', () => {
     expect((await readCapped(16))?.bytes).toHaveLength(17);
     expect((await readCapped(STACK_LOCK_MAX_BYTES))?.bytes).toHaveLength(STACK_LOCK_MAX_BYTES + 1);
   });
+  it('passes the cap on every read the lock makes: observe, tomb, beat and release', async () => {
+    const reads = vi.spyOn(install.InstallDirectory.prototype, 'read');
+    await writeFile(path, record(token(), 'extension', 1));
+    const lock = await held({ maxBytes: 123 });
+    await lock.beat();
+    await lock.release();
+    // First read, 5 polls, the tomb, one beat and the release.
+    expect(reads.mock.calls.length).toBeGreaterThanOrEqual(9);
+    for (const [, cap] of reads.mock.calls) expect(cap).toBe(123);
+  });
   it('reads a record in full when no cap is given (other callers unchanged)', async () => {
     await writeFile(path, Buffer.alloc(9000, 0x61));
     expect((await install.inInstall(dir, (d) => d.read(STACK_LOCK_NAME)))?.bytes).toHaveLength(

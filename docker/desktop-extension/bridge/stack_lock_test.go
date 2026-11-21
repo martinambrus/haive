@@ -813,6 +813,31 @@ func TestStackLockReadIsCapped(t *testing.T) {
 	}
 }
 
+// With a cap below the record's own length the holder cannot recognise its record: the beat and the release
+// both read only the capped prefix, so the beat reports a loss and the release removes nothing.
+func TestStackLockHolderReadsHonorTheCap(t *testing.T) {
+	b := fixture(t)
+	b.lockCfg = lockConfig{beat: time.Hour, maxBytes: 16}
+	l, err := b.acquireStackLock(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := l.beat(); got != "lost" {
+		t.Fatalf("the beat read past the cap: %s", got)
+	}
+	l.releaseLock()
+	b = fixture(t)
+	b.lockCfg = lockConfig{beat: time.Hour, maxBytes: 16}
+	l, err = b.acquireStackLock(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	l.releaseLock()
+	if !lockExists(b) {
+		t.Fatal("the release read past the cap and removed the file")
+	}
+}
+
 func TestStackLockOversizeFileIsStale(t *testing.T) {
 	b := fixture(t)
 	b.lockCfg = lockConfig{stale: 3 * time.Millisecond, poll: time.Millisecond, maxBytes: 16}
