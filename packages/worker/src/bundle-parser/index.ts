@@ -77,6 +77,16 @@ function decodeSkillByFormat(
   return decodeClaudeSkill(content, sourcePath, subSkillContents);
 }
 
+/** True when any string in the parsed spec holds U+0000. PostgreSQL text and jsonb cannot store
+ *  it, so one such item would fail the whole bundle's persist; it is dropped on its own instead.
+ *  It arrives as a raw byte in any format or as a decoded `\u0000` escape. */
+function holdsNul(value: unknown): boolean {
+  if (typeof value === 'string') return value.includes('\u0000');
+  if (Array.isArray(value)) return value.some(holdsNul);
+  if (value !== null && typeof value === 'object') return Object.values(value).some(holdsNul);
+  return false;
+}
+
 /** Stable hash over the canonical-form IR. JSON.stringify with sorted keys
  *  gives a deterministic byte stream so the same agent body always produces
  *  the same hash regardless of insertion order. */
@@ -281,6 +291,10 @@ export async function parseBundle(
       dropped.push({ sourcePath: keep.sourcePath, reason: 'schema validation failed' });
       continue;
     }
+    if (holdsNul(parsed.data)) {
+      dropped.push({ sourcePath: keep.sourcePath, reason: 'contains a NUL character' });
+      continue;
+    }
     items.push({
       kind: 'agent',
       sourceFormat: keep.sourceFormat,
@@ -334,6 +348,10 @@ export async function parseBundle(
         'bundle-parser: skill failed schema validation',
       );
       dropped.push({ sourcePath: keep.sourcePath, reason: 'schema validation failed' });
+      continue;
+    }
+    if (holdsNul(parsed.data)) {
+      dropped.push({ sourcePath: keep.sourcePath, reason: 'contains a NUL character' });
       continue;
     }
     items.push({

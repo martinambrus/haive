@@ -125,6 +125,47 @@ it.each(['stored root', 'source snapshot'])(
   },
 );
 
+it('drops an item holding a NUL on its own and keeps the rest of the bundle', async () => {
+  const dir = path.join(tmpRoot, 'user', 'bundle');
+  const extracted = path.join(dir, 'extracted');
+  await mkdir(path.join(extracted, '.codex', 'agents'), { recursive: true });
+  await mkdir(path.join(extracted, 'agents'), { recursive: true });
+  await writeFile(
+    path.join(extracted, '.codex', 'agents', 'escaped.toml'),
+    'name = "escaped"\ndescription = "checks\\u0000inputs"\ndeveloper_instructions = """body"""\n',
+  );
+  await writeFile(
+    path.join(extracted, 'agents', 'raw.md'),
+    '---\nname: raw\ndescription: raw byte\n---\n# Raw\nBefore\u0000after\n',
+  );
+  // Six literal characters, not a NUL: an agent that documents the escape keeps its file.
+  await writeFile(
+    path.join(extracted, 'agents', 'docs.md'),
+    '---\nname: docs\ndescription: explains escapes\n---\n# Docs\nWrite `\\u0000` for a NUL.\n',
+  );
+  const source = { storageRoot: extracted, repositoryId: 'repository' };
+  const db = {
+    query: { customBundles: { findFirst: async () => source } },
+    select: () => ({
+      from: () => ({
+        innerJoin: () => ({
+          where: () => ({
+            orderBy: () => ({ limit: async () => [] }),
+          }),
+        }),
+      }),
+    }),
+  } as unknown as Database;
+  const parsed = await parseBundle('bundle', db, { warn: () => undefined }, tmpRoot, source);
+  expect(parsed.items.map((item) => item.sourcePath)).toEqual(['agents/docs.md']);
+  expect(
+    parsed.dropped.map((d) => [d.sourcePath, d.reason]).sort((a, b) => a[0]!.localeCompare(b[0]!)),
+  ).toEqual([
+    ['.codex/agents/escaped.toml', 'contains a NUL character'],
+    ['agents/raw.md', 'contains a NUL character'],
+  ]);
+});
+
 describe('decoders', () => {
   it('decodeClaudeAgent extracts frontmatter into AgentSpec', () => {
     const md = [
