@@ -698,8 +698,9 @@ probe. A stored row that has the entry keeps loading and running: nothing valida
 `envVars` (in-worker HTTP probes, toolchain matching) are not builders. A new builder of a container
 env from `provider.envVars` calls `omitWorkerOnlyEnv`; `worker-only-env-strip.test.ts` runs every
 registered adapter, so an adapter that builds its env without `mergedEnv` and `buildShellEnv` fails
-it. A shell container created before this rule keeps its create-time env until it is recreated. Connecting usage stores a new grant on every row of the login set (below); that the
-vendor then retires the old one is unverified.
+it. A shell container created before this rule keeps its create-time env until it is recreated.
+Connecting usage stores a new grant on every row of the login set (below); that the vendor then
+retires the old one is unverified.
 
 Captured Claude OAuth credentials are verified before promotion. The login API envelope-encrypts
 its candidate with purpose, user and provider bindings before putting it on `cli-probe`; the
