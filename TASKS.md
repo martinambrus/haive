@@ -874,10 +874,17 @@ status: done 2026-11-21 (#1298, 655845a07, docs: `docs/architecture/testing.md` 
 
 ### T738 · FNF[step-warning-atomic-append] · a step warning written from the caller's row snapshot can drop one added since
 
-status: open · kind: fix · found: #1297 driver 2026-11-21 · priority: P4
+status: open, items 1-2 in review as #1307 (2026-11-21: nine snapshot sites and the codex fallback append through `appendStepWarning`; `addStepWarning` removed) · kind: fix · found: #1297 driver 2026-11-21 · priority: P4
 
 1. `addStepWarning` (`worker/src/step-engine/step-ownership.ts` ~:92-100) joins the caller's row snapshot and writes the whole column, so a warning another writer added after the caller read its row is lost. Sites: `merge-resolver.ts` ~:532, 557, 679, 897, 1123, 1598; `left-open-merge.ts` ~:521; `dag-executor.ts` ~:977; `project-state/branch-revert.ts` ~:611. Fix direction: route them through `appendStepWarning` (one UPDATE that adds the text once, added by #1297). PRE-EXISTING; #1297's notice was traced through these flows and is not overwritten.
 2. `queues/cli-exec/handlers.ts` ~:387 replaces `warning_message` for a codex app-server fallback. Unreachable on a composed-LSP task today (only claude-code can be in its set). Same fix. PRE-EXISTING.
+
+Follow-ups found by the #1307 driver:
+
+3. The converted merge sites (`merge-resolver.ts` ~:532/557/679/897/1123/1598, `left-open-merge.ts` ~:521, `dag-executor.ts` ~:977) are covered at the helper's fence only; `smoke:left-open-merge` covers one on a real database but was not run. LOW, coverage.
+4. `test/cli-exec-completion.test.ts` ~:711 pins that a superseded step still completes, but not the warn log. LOW, coverage.
+5. `appendStepWarning` (`step-ownership.ts` ~:100) dedupes by substring (`strpos`, as the old `includes` did), so a short note inside a longer existing sentence is dropped. No caller writes short notes. PRE-EXISTING, LOW.
+6. `test/support/step-warning-patch.ts` ~:7 throws a TypeError on an undefined patch; fails loudly, no caller passes one. #1307, harmless.
 
 ### T739 · FNF[cli-touched-vestigial] · the touched-CLI marker table has readers and no writer
 
@@ -942,6 +949,13 @@ status: open · kind: fix · found: #1306 driver 2026-11-21 · priority: P4
 status: open · kind: fix · found: #1306 driver 2026-11-21 · priority: P4
 
 `api/src/routes/cli-providers.ts` ~:557 (create) and ~:865 (PATCH), via `shared/src/schemas/cli-providers.ts` ~:98 and `shared/src/cli-providers/provider-secret.ts` ~:25, accept a secret-named env var with an empty value and store an encrypted empty string; `worker/src/secrets/provider-secrets.ts` ~:33 then injects it as an empty env var. The web form drops empties, so this is API-only. PRE-EXISTING.
+
+### T749 · FNF[step-warning-notes] · attempt-scoped warning writes and the codex fallback's fence
+
+status: open · kind: design · found: #1307 driver 2026-11-21 · priority: P4
+
+1. `retryWarning` (`worker/src/step-engine/step-runner.ts` ~:944, ~:3555, ~:4239) replaces the whole `warning_message`, wiping notes appended earlier in the attempt (the codex fallback, merge notes). Attempt-scoped on purpose, but the loss is real; decide whether a retry note should append or whether earlier notes belong to the attempt. PRE-EXISTING.
+2. The codex fallback write (`worker/src/queues/cli-exec/handlers.ts` ~:394) is fenced by status only: the cli-exec payload carries no generation, so a late invocation could annotate a retried attempt. The old write had no fence at all. PRE-EXISTING.
 
 ### T721 · The Claude usage grant reaches sandbox environments
 
