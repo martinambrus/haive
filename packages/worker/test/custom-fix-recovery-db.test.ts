@@ -1186,6 +1186,12 @@ describe.skipIf(!url)('recovery of a fix round on Postgres', () => {
       expect((await taskOf(id)).deadAt).toBeNull();
     });
 
+    it('leaves a task whose contract carries no pin and no span alone when its current step is registered', async () => {
+      const id = await seedPaths({ version: 1, guardedSpans: [] }, CURRENT);
+      expect(await reconcileDeadTasks(db, deps)).toMatchObject({ marked: 0, revived: 0 });
+      expect((await taskOf(id)).deadAt).toBeNull();
+    });
+
     it('keeps judging a static pinned task as before', async () => {
       const custom = LEGS[1]!;
       const id = await seedTask(custom);
