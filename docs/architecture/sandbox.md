@@ -1365,7 +1365,10 @@ Auto-continue therefore adopts. An environment that is not adopted writes no con
 template hash and image tag are those of the legacy path. Once the cheap checks pass, step 01 logs
 the decision with a closed reason: `run_list`, `providers`, or none when adopted. The decision is
 repeated inside the transaction that inserts and links the row, under the task row lock (see Provider
-lock): a choice or default CLI change that landed in between demotes the new row to the legacy
+lock), from the task row's CLI read under it. A task with no own CLI uses the oldest enabled provider
+among the provider rows that decision reads (`composedLspAdoptable`), never the CLI resolved when
+the step started: provider rows are written without the task lock, so that value can be stale. A
+choice, default CLI or provider change that landed in between demotes the new row to the legacy
 variant, stored without the key, and the log says so.
 
 Replacing a legacy template. A task linked to a stored absent/1 template (it ticked the opt-out,
@@ -1384,7 +1387,8 @@ form and never trusts detect. A refusal throws `ComposedLspReplacementRefusedErr
 the inserted row back.
 
 On acceptance one transaction inserts a NEW template row, takes the task row lock (see Provider
-lock) and decides again from the task's current CLI and choices, links only the acting task to the
+lock) and decides again from the task's current CLI (the oldest enabled provider when it has none)
+and choices, links only the acting task to the
 row and writes a `task_events` row `env_template.replaced` with `sourceTemplateId` and
 `candidateTemplateId`. The row holds the form's deps plus contract 2 and no Dockerfile, so 02
 renders it: the generator emits the installer block only when the contract is not 2, so no stored

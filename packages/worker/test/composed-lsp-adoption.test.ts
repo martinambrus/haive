@@ -426,3 +426,34 @@ describe('contract-2 writer: rollback switch', () => {
     }
   });
 });
+
+describe('contract-2 writer: provider read under the lock', () => {
+  it('decides on the provider read under the lock when the task has no default: refuses after an enable makes another provider the oldest', async () => {
+    const r = makeRun(
+      {
+        defaultProvider: CLAUDE,
+        providers: [
+          { id: CODEX, name: 'codex', enabled: false },
+          { id: CLAUDE, name: 'claude-code', enabled: true },
+        ],
+      },
+      null,
+    );
+    r.fake.hooks.beforeInsert = (table) => {
+      if (table === schema.envTemplates)
+        r.fake.patch(schema.cliProviders, CODEX, { enabled: true });
+    };
+    await r.apply();
+    expect(depsOf(r.fake)).not.toHaveProperty(KEY);
+  });
+
+  it('decides on the provider read under the lock when the task has no default: accepts after a disable makes another claude-code provider the oldest', async () => {
+    const r = makeRun({ defaultProvider: CLAUDE }, null);
+    r.fake.hooks.beforeInsert = (table) => {
+      if (table === schema.envTemplates)
+        r.fake.patch(schema.cliProviders, CLAUDE, { enabled: false });
+    };
+    await r.apply();
+    expect(depsOf(r.fake)[KEY]).toBe(2);
+  });
+});

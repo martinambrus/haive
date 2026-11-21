@@ -1030,7 +1030,7 @@ export const declareDepsStep: StepDefinition<DeclareDepsDetect, DeclareDepsApply
         const decision = await decideLegacyLspReplacement(tx, {
           taskId: ctx.taskId,
           userId: ctx.userId,
-          defaultProviderId: locked.cliProviderId ?? ctx.cliProviderId,
+          defaultProviderId: locked.cliProviderId,
           rolloutOn: COMPOSED_LSP_NEW_ENVIRONMENT_ADOPTION,
           cliSupportsLsp,
           lspServers,
@@ -1136,7 +1136,7 @@ export const declareDepsStep: StepDefinition<DeclareDepsDetect, DeclareDepsApply
         const decision = await composedLspAdoptable(tx, {
           taskId: ctx.taskId,
           userId: ctx.userId,
-          defaultProviderId: locked.cliProviderId ?? ctx.cliProviderId,
+          defaultProviderId: locked.cliProviderId,
         });
         if (!decision.ok) {
           // Demote: store exactly what the non-adopting path stores, no contract key.
