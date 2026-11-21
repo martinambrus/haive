@@ -821,9 +821,14 @@ Step 01's detect still suggests `intelephense` for a PHP project that is neither
 
 ### T732 · FNF[composed-image-launch] · composed sandbox image launch lows (+1)
 
-status: open · kind: fix · found: legacy composed image fix (T712 build) 2026-11-20 · priority: P4
+status: open for follow-ups 2-3; item 1 DONE in #1312 (21246ebb7, deployed 2026-11-21 20:02Z: one shared base rule with the composer, tags unchanged) · kind: fix · found: legacy composed image fix (T712 build) 2026-11-20 · priority: P4
 
 1. A launch ensures the sandbox core image even when the composition does not build on it (`worker/src/sandbox/composed-image-cache.ts` ~:247-253 calling ~:283-291; hash rule `sandbox/image-composer.ts` ~:126-128). A composition built on its environment image (contract 2, and legacy with a usable environment image) never uses the core image, so that ensure is dead work at every launch. PRE-EXISTING. Fix direction: ensure the core image only when the composition's base is the core image.
+
+Follow-ups found by the #1312 driver:
+
+2. A legacy Dockerfile with no usable environment image that builds on the core under another spelling (`FROM haive-cli-sandbox` without `:latest`) never got the core id in its hash (`worker/src/sandbox/image-composer.ts` ~:131-132 matches the literal tag) and, since #1312, also gets no launch ensure, so on a host whose core was pruned its build fails. Generated Dockerfiles never write that spelling (`02-generate-dockerfile.ts` ~:452). Widening the rule moves hashes. PRE-EXISTING (hash) / narrow REGRESSION (ensure), low.
+3. `composed-image-cache.ts` ~:293-295 swallows a core-image ensure failure even for a composition that builds on the core, so the later `docker build` error is what the user sees. PRE-EXISTING, low.
 
 ### T733 · FNF[translator-chunk-tail-units] · Translator chunking makes tiny units that each cost a full cycle (+1)
 
