@@ -36,6 +36,7 @@ import { resolveOllamaBaseUrl } from '../../cli-adapters/ollama-thinking-proxy.j
 import { log } from './_shared.js';
 import { createSandboxSpawner } from './exec-core.js';
 import { handleBuildSandboxImageJob } from './handlers.js';
+import { omitWorkerOnlyEnv } from '../../secrets/provider-secrets.js';
 
 /** How long a background caller waits for ANOTHER builder to finish the image it needs,
  *  and how often it re-checks. Giving up instantly instead turns a routine rebuild into a
@@ -324,7 +325,7 @@ export async function probeCliPath(
       {
         command: resolvedCommand,
         args: ['--version'],
-        env: provider.envVars ?? {},
+        env: omitWorkerOnlyEnv(provider.envVars),
       },
       { timeoutMs: 15_000 },
     );

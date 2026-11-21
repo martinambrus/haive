@@ -1,4 +1,5 @@
 import type { CliCommandSpec, CliProviderName, CliProviderRecord } from './types.js';
+import { omitWorkerOnlyEnv } from '../secrets/provider-secrets.js';
 
 export class CliSetupTokenUnsupportedError extends Error {
   readonly code = 'cli_setup_token_unsupported';
@@ -41,7 +42,7 @@ export function buildSetupTokenCommand(
   provider: CliProviderRecord,
   executable: string,
 ): CliCommandSpec {
-  const env = provider.envVars ?? {};
+  const env = omitWorkerOnlyEnv(provider.envVars);
   switch (provider.name) {
     case 'claude-code':
       return { command: executable, args: ['setup-token'], env };

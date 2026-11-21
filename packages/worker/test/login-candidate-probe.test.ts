@@ -199,4 +199,31 @@ describe('login candidate queue consumer and sandbox credential boundary', () =>
     const auth = h.spawn.mock.calls[1]?.[0];
     expect(auth.env.CLAUDE_CODE_OAUTH_TOKEN === stored).toBe(true);
   });
+
+  it.each(['stored', 'candidate'] as const)(
+    'keeps a usage grant typed into the plain env out of every spawn env of a %s probe',
+    async (kind) => {
+      const grant = randomBytes(16).toString('hex');
+      (provider.envVars as Record<string, string>).CLAUDE_USAGE_OAUTH = grant;
+      if (kind === 'stored') {
+        h.spawn.mockImplementation(async () => ({
+          exitCode: 0,
+          stdout: 'fixture version',
+          stderr: '',
+        }));
+      }
+      await handleProbeJob(
+        db,
+        kind === 'stored' ? { providerId: PROVIDER, userId: USER, targetMode: 'cli' } : payload(),
+      );
+      expect(h.spawn.mock.calls.length > 1).toBe(true);
+      for (const [spec] of h.spawn.mock.calls) {
+        expect(Object.keys(spec.env ?? {}).includes('CLAUDE_USAGE_OAUTH')).toBe(false);
+        expect(Object.values(spec.env ?? {}).includes(grant)).toBe(false);
+      }
+      expect(
+        Object.keys(provider.envVars as Record<string, string>).includes('CLAUDE_USAGE_OAUTH'),
+      ).toBe(true);
+    },
+  );
 });

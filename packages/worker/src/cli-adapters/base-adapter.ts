@@ -1,5 +1,6 @@
 import { spawn } from 'node:child_process';
 import { normalizeCliArgsArray } from '@haive/shared';
+import { omitWorkerOnlyEnv } from '../secrets/provider-secrets.js';
 import type {
   CliAuthMode,
   CliCommandSpec,
@@ -134,7 +135,7 @@ export abstract class BaseCliAdapter {
     extraEnv: Record<string, string> = {},
   ): Record<string, string> {
     const effort = this.resolveEffortEnv(provider, {});
-    return { ...(provider.envVars ?? {}), ...effort, ...secrets, ...extraEnv };
+    return { ...omitWorkerOnlyEnv(provider.envVars), ...effort, ...secrets, ...extraEnv };
   }
 
   protected resolveExecutable(provider: CliProviderRecord): string {
@@ -147,7 +148,7 @@ export abstract class BaseCliAdapter {
 
   protected mergedEnv(provider: CliProviderRecord, opts: InvokeOpts): Record<string, string> {
     const effort = this.resolveEffortEnv(provider, opts);
-    return { ...(provider.envVars ?? {}), ...effort, ...(opts.extraEnv ?? {}) };
+    return { ...omitWorkerOnlyEnv(provider.envVars), ...effort, ...(opts.extraEnv ?? {}) };
   }
 
   /** Resolution order: explicit InvokeOpts.effortLevel wins, then the

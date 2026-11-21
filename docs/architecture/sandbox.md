@@ -677,11 +677,30 @@ env. It skips every name in `WORKER_ONLY_SECRET_NAMES` before decrypting. Today 
 Code inside the worker that needs a secret by name calls `readProviderSecret`, which includes
 worker-only names; its result is never merged into an env. A new worker-only secret goes into the
 set, and any new env builder resolves secrets through `resolveProviderSecrets`, never by reading
-`cli_provider_secrets` itself. The grant is not secret-like by name (`SECRET_LIKE_ENV_NAME`) and no
-writer puts it in `envVars`, so the `provider.envVars` paths (login container, plugin install)
-carry nothing to skip. A shell container created before this rule keeps its create-time env until
-it is recreated. Connecting usage stores a new grant on every row of the login set (below); that the
-vendor then retires the old one is unverified.
+`cli_provider_secrets` itself. Two pins hold this (`worker-only-secret-pins.test.ts`,
+`decrypt-site-ratchet.test.ts`): the secret name of every `oauthRefresh` entry in the usage fetcher
+table (`usage-window/fetchers/index.ts`) must be in the set, and the decrypt primitives
+(`envelopeDecrypt`, `decryptDek`, `decrypt`, `tryDecrypt`, `createDecipheriv`) are named only in
+pinned worker source files, with exact per-file counts: `secrets/provider-secrets.ts`,
+`usage-window/usage-grant-set.ts` (the usage poller's read of the grant, never merged into an env)
+and `repo/credentials.ts` (repository credential rows, another table). A new decrypt site fails
+until it is pinned with the reason it cannot reach an env.
+
+The grant is not secret-like by name (`SECRET_LIKE_ENV_NAME`), so a hand-typed `provider.envVars`
+entry of that name would stay plaintext: the legacy env-secret move leaves it alone and the
+resolver never sees it. Every builder of a container env from `provider.envVars` therefore passes
+it through `omitWorkerOnlyEnv` (same file as the set), which returns a copy without the worker-only
+names: the run (`BaseCliAdapter.mergedEnv`), the shell (`buildShellEnv` and the no-adapter branch of
+`resolveProviderShellEnv`), `buildAuthProbeCommand`, `buildSetupTokenCommand` (the login container's
+env and the `containers` row it persists), the plugin install and the provider image's `--version`
+probe. A stored row that has the entry keeps loading and running: nothing validates or rewrites
+`envVars`, the builders copy, and the entry only never reaches a container. The other readers of
+`envVars` (in-worker HTTP probes, toolchain matching) are not builders. A new builder of a container
+env from `provider.envVars` calls `omitWorkerOnlyEnv`; `worker-only-env-strip.test.ts` runs every
+registered adapter, so an adapter that builds its env without `mergedEnv` and `buildShellEnv` fails
+it. A shell container created before this rule keeps its create-time env until it is recreated.
+Connecting usage stores a new grant on every row of the login set (below); that the vendor then
+retires the old one is unverified.
 
 Captured Claude OAuth credentials are verified before promotion. The login API envelope-encrypts
 its candidate with purpose, user and provider bindings before putting it on `cli-probe`; the

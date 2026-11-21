@@ -190,3 +190,11 @@ dead and asks its providers for a re-login; a changed token lifts the suppressio
 text mentioning that code, other OAuth codes, server failures and aborts remain retryable.
 `GrokOauthError` retains the HTTP status and an allowlisted OAuth code, never the vendor's
 raw body or description, which may echo credentials.
+
+`ClaudeOauthError` (`@haive/shared/claude-oauth`) follows the same rule: its message is
+`claude oauth <grant>: http <status>`, plus ` (<code>)` when the JSON `error` is a registered
+RFC 6749 code. Any other `error` value, the description and a plain-text body are dropped. The
+message reaches the Connect HTTP 400 and the usage poller's warn log, so callers key on `code`
+(`isClaudeRefreshRejected` reads `invalid_grant`), never on wording. A 200 body that is not JSON
+throws a fixed `claude oauth: invalid token response`, because the parser's SyntaxError quotes
+the body.

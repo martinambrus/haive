@@ -119,23 +119,37 @@ export function claudeTokenNeedsRefresh(expiresAt: number, now = Date.now()): bo
   return now >= expiresAt - CLAUDE_TOKEN_REFRESH_SKEW_MS;
 }
 
-/** A refusal from the token endpoint, with the RFC 6749 `error` code when the body carried one. */
+/** A refusal from the token endpoint. Only the status and a standard RFC 6749 `error` code are
+ * kept: descriptions and unknown error strings may echo credentials and must never reach a
+ * response or a log. */
 export class ClaudeOauthError extends Error {
   constructor(
     grantType: string,
     readonly status: number,
     readonly code: string | null,
-    body: string,
   ) {
-    super(`claude oauth ${grantType}: http ${status} ${body.slice(0, 200)}`);
+    super(`claude oauth ${grantType}: http ${status}${code ? ` (${code})` : ''}`);
     this.name = 'ClaudeOauthError';
   }
 }
 
+const OAUTH_ERROR_CODES = new Set([
+  'invalid_request',
+  'invalid_client',
+  'invalid_grant',
+  'unauthorized_client',
+  'unsupported_grant_type',
+  'invalid_scope',
+  'server_error',
+  'temporarily_unavailable',
+]);
+
 function oauthErrorCode(body: string): string | null {
   try {
     const parsed = JSON.parse(body) as { error?: unknown };
-    return typeof parsed.error === 'string' ? parsed.error : null;
+    return typeof parsed.error === 'string' && OAUTH_ERROR_CODES.has(parsed.error)
+      ? parsed.error
+      : null;
   } catch {
     return null;
   }
@@ -160,10 +174,17 @@ export async function postToken(
   });
   if (!res.ok) {
     const body = await res.text().catch(() => '');
-    throw new ClaudeOauthError(params.grant_type ?? '', res.status, oauthErrorCode(body), body);
+    throw new ClaudeOauthError(params.grant_type ?? '', res.status, oauthErrorCode(body));
   }
   const prior = params.grant_type === 'refresh_token' ? params.refresh_token : undefined;
-  return toTokens((await res.json()) as TokenResponse, prior);
+  let parsed: TokenResponse;
+  try {
+    parsed = (await res.json()) as TokenResponse;
+  } catch (err) {
+    if (err instanceof SyntaxError) throw new Error('claude oauth: invalid token response');
+    throw err;
+  }
+  return toTokens(parsed, prior);
 }
 
 /** Exchange the pasted authorization code for the first token pair. */
