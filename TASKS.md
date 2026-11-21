@@ -879,6 +879,15 @@ status: open · kind: fix · found: #1297 driver 2026-11-21, checked against the
 
 1. `task_step_cli_touched` is read (`worker/src/step-engine/step-runner.ts` ~:333-343 `isTouched`, `api/src/routes/tasks/_helpers.ts` ~:186-199) but never written. The CLI switch writes the per-task choice first (`api/src/lib/step-cli-choice.ts` ~:87), which the resolver reads before any saved row, so an in-task pick never depends on the marker; under `ignore_saved_step_clis` a saved row is simply never honoured. Dead code, no user-visible effect. Fix direction: drop the readers, then the table in a later two-phase migration, or document why it stays. PRE-EXISTING.
 
+### T740 · FNF[agent-description-render] · agent descriptions render wrong for some inputs
+
+status: open · kind: fix · found: #1302 driver 2026-11-21, checked against the code · priority: P4
+
+Either fix changes the rendered body, so the renderer pin (#1302) forces a renderer version bump with it.
+
+1. `tomlBasicString` (`worker/src/step-engine/steps/onboarding/_agent-templates.ts` ~:203) escapes backslashes and quotes but not newlines, so a multi-line description renders invalid TOML for Codex agents (confirmed with Python `tomllib`). PRE-EXISTING.
+2. `firstCharLower` (`_agent-templates.ts` ~:88) lowercases an acronym-led description (`API gateway` becomes `aPI gateway`). PRE-EXISTING.
+
 ### T721 · The Claude usage grant reaches sandbox environments
 
 status: open (items 2-5 and 10-12; item 1 done #1281; items 6-9 done by #1300, 9cc4e4382, deployed 2026-11-21 04:30Z) · kind: security · found: login-set design (T720) 2026-11-19 · priority: P3 (was P1 until #1281)
@@ -966,9 +975,17 @@ In vitest 5.0.3 `-u, --update [type]` takes an optional value, so `vitest run -u
 
 ### T713 · Custom-bundle agent hashes ignore the rendered body
 
-status: open · kind: design · found: LSP cold-start guidance driver (#1278) · priority: P3
+status: open, in review as #1302 (2026-11-21: version bumped 2 to 3 for six unbumped body changes, pin test ties the version to a rendered corpus; follow-ups 1-5 below) · kind: design · found: LSP cold-start guidance driver (#1278) · priority: P3
 
 A custom-bundle agent's manifest hash covers its parsed spec and `AGENT_RENDERER_VERSION`, not the rendered body (`shared/src/templates/manifest.ts:104`, `worker/src/step-engine/template-manifest.ts:468`, `api/src/routes/upgrades.ts:399`, `steps/onboarding/01-upgrade-plan.ts:247`), so a body-only generator change (a retrieval block edit) never reaches an installed custom-bundle agent file until the spec or renderer version moves. Built-in agents follow the render. PRE-EXISTING. Decision needed: hash the rendered body for custom bundles too (offers an upgrade on every generator change) or bump `AGENT_RENDERER_VERSION` whenever a shared block changes.
+
+Follow-ups found by the #1302 driver, all PRE-EXISTING:
+
+1. An unticked `user_deleted` entry in upgrade apply is never recorded (`worker/src/step-engine/steps/onboarding/02-upgrade-apply.ts` ~:180, form default ~:643), so the template reads changed until the file is reinstated. Each renderer bump re-offers it.
+2. The built-in agents' `schemaVersion` is `AGENT_RENDERER_VERSION` (`worker/src/step-engine/template-manifest.ts` ~:145), so every bump re-offers every built-in agent in every repository, even where the bytes are current; the built-in `contentHash` covers one reference rendering only (`REFERENCE_CONTEXT`, ~:98). Fix direction: hash every target's rendering, or a fixed version per built-in.
+3. Custom-bundle skills carry the bare IR hash with no renderer salt (`template-manifest.ts` ~:508, ~:518; `api/src/routes/upgrades.ts` ~:399), so a skill-renderer change never reaches installed bundle skills.
+4. Comment only: `template-manifest.ts` ~:453 says the custom item's hash is the IR hash, but agents use the salted hash (~:468).
+5. Untested: step 01 `adopt` and `conflict` for built-in agents, and the api with a bundle item whose own `schemaVersion` differs.
 
 ### T711 · Custom fix target lows
 
