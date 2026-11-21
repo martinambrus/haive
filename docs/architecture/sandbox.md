@@ -677,7 +677,12 @@ env. It skips every name in `WORKER_ONLY_SECRET_NAMES` before decrypting. Today 
 Code inside the worker that needs a secret by name calls `readProviderSecret`, which includes
 worker-only names; its result is never merged into an env. A new worker-only secret goes into the
 set, and any new env builder resolves secrets through `resolveProviderSecrets`, never by reading
-`cli_provider_secrets` itself. The grant is not secret-like by name (`SECRET_LIKE_ENV_NAME`) and no
+`cli_provider_secrets` itself. Two pins hold this (`worker-only-secret-pins.test.ts`,
+`decrypt-site-ratchet.test.ts`): the secret name of every `oauthRefresh` entry in the usage fetcher
+table (`usage-window/fetchers/index.ts`) must be in the set, and `envelopeDecrypt` is named in exactly
+two worker source files, `secrets/provider-secrets.ts` and `usage-window/usage-grant-set.ts` (the
+usage poller's read of the grant, never merged into an env), with exact per-file counts, so a new
+decrypt site fails until it is pinned with the reason it cannot reach an env. The grant is not secret-like by name (`SECRET_LIKE_ENV_NAME`) and no
 writer puts it in `envVars`, so the `provider.envVars` paths (login container, plugin install)
 carry nothing to skip. A shell container created before this rule keeps its create-time env until
 it is recreated. Connecting usage stores a new grant on every row of the login set (below); that the
