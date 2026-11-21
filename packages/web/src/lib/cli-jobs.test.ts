@@ -198,6 +198,24 @@ describe('superseded sign-out', () => {
   });
 });
 
+it('says a failed sign-out left the saved login and status as they were', () => {
+  const tail =
+    ' The saved login tokens and the recorded login status were left as they were; try again once that is resolved.';
+  expect(
+    signOutSummary({ ok: false, removed: [], failed: [{ name: 'vol-a', stderr: 'busy' }] }),
+  ).toBe(`Failed: vol-a (busy).${tail}`);
+  expect(
+    signOutSummary({
+      ok: false,
+      removed: [],
+      failed: [
+        { name: 'vol-a', stderr: 'busy' },
+        { name: 'vol-b', stderr: 'in use' },
+      ],
+    }),
+  ).toBe(`Failed: vol-a (busy); vol-b (in use).${tail}`);
+});
+
 it('shows the worker auth-contention failure text for sign-out', async () => {
   const error = 'A CLI sign-in or credential update kept this account busy. Nothing was removed.';
   h.get.mockResolvedValue({ status: 'failed', error });

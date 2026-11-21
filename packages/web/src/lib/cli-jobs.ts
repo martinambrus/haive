@@ -26,7 +26,7 @@ export function signOutSummary(result: SignOutResult): string {
   if (result.superseded)
     return 'Sign-out skipped because you signed in again. Your current login was kept.';
   if (!result.ok)
-    return `Failed: ${result.failed.map((f) => `${f.name} (${f.stderr})`).join('; ')}`;
+    return `Failed: ${result.failed.map((f) => `${f.name} (${f.stderr})`).join('; ')}. The saved login tokens and the recorded login status were left as they were; try again once that is resolved.`;
   return result.removed.length === 0
     ? 'Already signed out.'
     : `Removed: ${result.removed.join(', ')}`;
