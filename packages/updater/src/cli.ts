@@ -13,6 +13,13 @@ import { ensureEnvKeys } from './envkeys.js';
 import { BundleBackupError, readBundleState } from './bundle-swap.js';
 import { UpgradeRefusal } from './refusal.js';
 import { cleanupInstallTemps, requireRegularInstallFiles } from './install-files.js';
+import {
+  acquireStackLock,
+  describeBusy,
+  releaseOnSignal,
+  type StackLock,
+  type StackLockOptions,
+} from './stack-lock.js';
 import { attemptVersion } from './attempt-fields.js';
 import {
   ensureJournal,
@@ -196,7 +203,7 @@ async function rollbackFailed(ctx: UpgradeContext, err: unknown): Promise<number
   return EXIT.rollbackFailed;
 }
 
-export async function main(): Promise<number> {
+export async function main(options: { stackLock?: StackLockOptions } = {}): Promise<number> {
   if (flag('manifest') && flag('manifest-image')) {
     emit('error', { message: '--manifest and --manifest-image are mutually exclusive' });
     return EXIT.usage;
@@ -282,6 +289,8 @@ export async function main(): Promise<number> {
   }
 
   let locked = false;
+  let stackLock: StackLock | undefined;
+  let stopSignals: (() => void) | undefined;
   let hasRun = false;
   let fromVersion = 'unknown';
   let toVersion = attemptVersion(arg('version'));
@@ -331,6 +340,15 @@ export async function main(): Promise<number> {
     locked = true;
     const live = await findLiveRun(sql);
     hasRun = live !== null;
+    if (live || !flag('check')) {
+      const outcome = await acquireStackLock(installDir, { onEvent: emit, ...options.stackLock });
+      if (outcome.status === 'busy')
+        throw new UpgradeRefusal('install-locked', describeBusy(outcome));
+      if (outcome.status === 'held') {
+        stackLock = outcome.lock;
+        stopSignals = releaseOnSignal(stackLock);
+      }
+    }
     await requireRegularInstallFiles(installDir);
     if (live || !flag('check')) await cleanupInstallTemps(installDir);
     fromVersion = (await readEnvVar(envFile, 'HAIVE_VERSION')) ?? 'unknown';
@@ -582,6 +600,8 @@ export async function main(): Promise<number> {
         emit('attempt-record-failed', { message: safeErrorMessage(err) });
       }
     }
+    stopSignals?.();
+    await stackLock?.release();
     await sql.end({ timeout: 5 }).catch(() => {});
   }
 }

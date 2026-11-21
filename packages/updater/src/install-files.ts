@@ -191,6 +191,36 @@ export class InstallDirectory {
     }
   }
 
+  /** Create-or-fail: EEXIST propagates and is how a contender learns the name is taken. */
+  async createExclusive(name: string, bytes: Buffer): Promise<void> {
+    const file = await open(this.path(name), 'wx', 0o644);
+    try {
+      await preserveOwner(file, this.owner);
+      await file.writeFile(bytes);
+      await file.sync();
+      await file.close();
+    } catch (error) {
+      await file.close().catch(() => {});
+      await unlink(this.path(name)).catch(() => {});
+      throw error;
+    }
+  }
+
+  /** Rewrite an existing file in place; never creates it, never follows a link. */
+  async overwrite(name: string, bytes: Buffer): Promise<void> {
+    const file = await open(
+      this.path(name),
+      constants.O_WRONLY | constants.O_TRUNC | constants.O_NOFOLLOW | constants.O_NONBLOCK,
+    );
+    try {
+      if (!(await file.stat()).isFile())
+        throw new Error(`refusing non-regular install file: ${name}`);
+      await file.writeFile(bytes);
+    } finally {
+      await file.close();
+    }
+  }
+
   async remove(name: string): Promise<void> {
     if (await this.entry(name)) {
       await unlink(this.path(name));
