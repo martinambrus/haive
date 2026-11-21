@@ -42,8 +42,9 @@ one with its cursor on leading whitespace, and a model-free repro resolved the s
 0.6 s after `initialized` at full CPU and about 6.7 s at 0.2 CPU. Haive cannot wait on that server,
 since each CLI session spawns its own, so the lines tell the agent to send LSP calls one at a time
 with the cursor on the symbol and to retry an empty first answer. They name no CLI and no tool.
-The block also renders into on-disk agent files for LSP-capable targets, so this is a body-only
-template change ([Onboarding template versioning](onboarding-upgrades.md)): a built-in agent's
-`contentHash` follows the render on worker boot and no `schemaVersion` moves. A custom-bundle
-agent's hash covers its parsed spec and the renderer version, not the rendered body, so an
-installed one keeps the previous block until one of those changes.
+The block also renders into on-disk agent files for LSP-capable targets, so a change to it is a
+renderer change, not a body-only one: bump `AGENT_RENDERER_VERSION`, which
+`agent-renderer-pin.test.ts` enforces ([Onboarding template versioning](onboarding-upgrades.md),
+item 5). A custom-bundle agent's hash covers its parsed spec and the renderer version, not the
+rendered body, so an installed one keeps the previous block until the version moves; the bump also
+re-offers every installed built-in agent.
