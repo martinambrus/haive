@@ -888,7 +888,7 @@ Follow-ups found by the #1307 driver:
 
 ### T739 · FNF[cli-touched-vestigial] · the touched-CLI marker table has readers and no writer
 
-status: open for phase 2 (item 3) and item 4; phase 1 (readers removed) DONE in #1309 (21f6fceba, deployed 2026-11-21 17:58Z) · kind: fix · found: #1297 driver 2026-11-21, checked against the code · priority: P4
+status: open for item 4; phase 2 (item 3) in review as #1311 (migration 0248, runner skips dropped baseline tables, roll-forward-only undo once applied); phase 1 (readers removed) DONE in #1309 (21f6fceba, deployed 2026-11-21 17:58Z) · kind: fix · found: #1297 driver 2026-11-21, checked against the code · priority: P4
 
 1. `task_step_cli_touched` is read (`worker/src/step-engine/step-runner.ts` ~:333-343 `isTouched`, `api/src/routes/tasks/_helpers.ts` ~:186-199) but never written. The CLI switch writes the per-task choice first (`api/src/lib/step-cli-choice.ts` ~:87), which the resolver reads before any saved row, so an in-task pick never depends on the marker; under `ignore_saved_step_clis` a saved row is simply never honoured. Dead code, no user-visible effect. Fix direction: drop the readers, then the table in a later two-phase migration, or document why it stays. PRE-EXISTING.
 
@@ -982,6 +982,13 @@ status: open · kind: design · found: #1307 driver 2026-11-21 · priority: P4
 
 1. `retryWarning` (`worker/src/step-engine/step-runner.ts` ~:944, ~:3555, ~:4239) replaces the whole `warning_message`, wiping notes appended earlier in the attempt (the codex fallback, merge notes). Attempt-scoped on purpose, but the loss is real; decide whether a retry note should append or whether earlier notes belong to the attempt. PRE-EXISTING.
 2. The codex fallback write (`worker/src/queues/cli-exec/handlers.ts` ~:394) is fenced by status only: the cli-exec payload carries no generation, so a late invocation could annotate a retried attempt. The old write had no fence at all. PRE-EXISTING.
+
+### T750 · FNF[migration-rules-docs] · migration rules live only in code
+
+status: open · kind: docs · found: #1311 driver 2026-11-21 · priority: P4
+
+1. No doc says an applied migration must never be deleted or reverted (a database that applied a migration its code lacks is refused as a fork once a later one is pending); the rule lives only in `database/src/migrate/plan.ts` ~:33-36 and `migrate/index.ts` ~:274-281. Rollback after apply is roll-forward only. PRE-EXISTING.
+2. Dropping a baseline table needs a `DROPPED_SINCE_BASELINE` entry (`migrate/baseline.ts`, pinned by `baseline.test.ts`), or journal-less adoption refuses the database; documented only in code. AGENTS.md has 10 bytes spare, so this belongs in a new `docs/architecture/` topic file listed in its index (shrink an entry to make room). PRE-EXISTING.
 
 ### T721 · The Claude usage grant reaches sandbox environments
 
