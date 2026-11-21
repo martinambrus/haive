@@ -1,7 +1,7 @@
 import { randomBytes, randomUUID } from 'node:crypto';
 import { and, asc, eq } from 'drizzle-orm';
 import { DelayedError } from 'bullmq';
-import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createDatabase, schema, type Database } from '@haive/database';
 import { configService, TASK_JOB_NAMES, type WorkflowType } from '@haive/shared';
 import { ExecutionContractError } from '@haive/shared/modularity';
@@ -1021,6 +1021,91 @@ describe.skipIf(!url)('recovery of a fix round on Postgres', () => {
         ).toEqual(before);
         expect(h.adds).toEqual([]);
       });
+    });
+  });
+
+  describe('custom leg with the target module deactivated', () => {
+    const leg = LEGS[1]!;
+    const deactivate = () =>
+      db.insert(schema.modules).values({
+        moduleId: 'cfr-fix',
+        packageName: '@haive/module-cfr-fix',
+        name: 'cfr-fix',
+        installedVersion: '1.0.0',
+        deactivatedAt: new Date(),
+      });
+    afterEach(async () => {
+      await db.delete(schema.modules).where(eq(schema.modules.moduleId, 'cfr-fix'));
+    });
+    const loopBack = async (taskId: string, row: StepRow) =>
+      handleResult(db, await ctxFor(leg, taskId), row.stepId, {
+        status: 'loop_back',
+        row,
+        diagnosis: 'defect',
+        sourceStepId: row.stepId,
+      });
+    const refusedBefore = async (id: string) => {
+      const t = await taskOf(id);
+      expect(t.status).toBe('failed');
+      expect(t.orchestrationEpoch).toBe(BASE_EPOCH);
+      expect(t.errorMessage).toContain(`fix loop target ${customTarget}`);
+      expect(t.errorMessage).toContain('cfr-fix');
+      const types = (await eventsOf(id)).map((e) => e.eventType);
+      expect(types).toContain('fix_loop.unroutable');
+      expect(types).not.toContain('fix_loop.requested');
+      expect(types).not.toContain('fix_loop.started');
+      expect(types).not.toContain('fix_loop.continued');
+      expect(
+        await db
+          .select()
+          .from(schema.taskSteps)
+          .where(and(eq(schema.taskSteps.taskId, id), eq(schema.taskSteps.round, 1))),
+      ).toEqual([]);
+      expect(h.adds).toEqual([]);
+    };
+
+    it('fails the task by name on a loop_back before the round is entered', async () => {
+      await deactivate();
+      const id = await seedTask(leg);
+      const source = await seedRow(leg, id, 'REVIEW', 0, 'done');
+      await loopBack(id, source);
+      await refusedBefore(id);
+      expect((await eventsOf(id)).map((e) => e.eventType)).toContain('step.loop_back');
+    });
+
+    it('fails the task by name at the round-limit Continue', async () => {
+      await deactivate();
+      const id = await seedTask(leg, { status: 'waiting_user', currentRound: 1 });
+      const source = await seedRow(leg, id, 'REVIEW', 0, 'done');
+      const gateRow = await seedRow(leg, id, 'REVIEW', 1, 'waiting_form', {
+        waitingStartedAt: new Date(),
+      });
+      await recordFixLoopRequest(db, id, source.id, {
+        round: 2,
+        sourceStepId: leg.ids.REVIEW,
+        diagnosis: 'defect',
+      });
+      await resolveFixLoopGate(db, await ctxFor(leg, id), gateRow, 'continue', 1, '');
+      const t = await taskOf(id);
+      expect(t.status).toBe('failed');
+      expect(t.errorMessage).toContain(`fix loop target ${customTarget}`);
+      const types = (await eventsOf(id)).map((e) => e.eventType);
+      expect(types).toContain('fix_loop.unroutable');
+      expect(types).not.toContain('fix_loop.continued');
+      expect(h.adds).toEqual([]);
+    });
+
+    it('does not spend the round cap on a refused round', async () => {
+      await deactivate();
+      const id = await seedTask(leg, { maxFixRounds: 1 });
+      const source = await seedRow(leg, id, 'REVIEW', 0, 'done');
+      await loopBack(id, source);
+      await refusedBefore(id);
+      await db.delete(schema.modules).where(eq(schema.modules.moduleId, 'cfr-fix'));
+      await db.update(schema.tasks).set({ status: 'running' }).where(eq(schema.tasks.id, id));
+      await loopBack(id, source);
+      expect(await eventsOf(id, 'fix_loop.started')).toHaveLength(1);
+      expect((await taskOf(id)).currentStepId).toBe(customTarget);
     });
   });
 });

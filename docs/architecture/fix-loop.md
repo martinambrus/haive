@@ -31,7 +31,11 @@ nobody reads the defect.
 A task pin may name a module step as the fix target instead (see Task types); every gate
 still refuses such a pin. The router then resolves that step in place of 07 and fails the
 task before any reset when it is unregistered, is not a module step declaring the pinned
-`fixConsumer` version, or is off the run list. The step reads the defect through
+`fixConsumer` version, is off the run list, or belongs to a module that is deactivated or
+whose schema setup failed. The round is not entered then: a `loop_back` records no
+`fix_loop.requested` or `fix_loop.started`, a gate Continue no `fix_loop.continued`, and neither
+resets a step or spends a round of the cap. A module whose schema is still being set up routes,
+and the advance parks as it does for any module step. The step reads the defect through
 `ctx.host.loadFixLoopDiagnosis()`, which is null unless a request is recorded for its own
 round: `round > 0` is also true after a revise-loop fork, so it never decides a fix round.
 
