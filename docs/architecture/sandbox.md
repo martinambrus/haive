@@ -862,7 +862,8 @@ wait minutes, so a login completed in between must survive it. Two pieces do tha
   other writer of the login token (a manual POST, a settings save or a create that types it) advance
   every row they write with one new value, as do Connect and the manual POST of the usage token, while
   the boot copy advances its own row only and a row that joins a set takes the generation of the row it
-  copies. An abandoned attempt, a usage refresh or convergence, a grok refresh, a task's sync-back and
+  copies, unless its own settings save advanced it by typing a sign-out secret name (`keepGeneration`).
+  An abandoned attempt, a usage refresh or convergence, a grok refresh, a task's sync-back and
   the delete of a login or usage token never advance it. The sign-out job carries the
   value read at request time and, when the row's value differs, removes nothing and returns
   `{ ok: true, superseded: true }`; the poll route reports it as `done` and the page says the user
