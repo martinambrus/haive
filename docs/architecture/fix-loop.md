@@ -615,9 +615,15 @@ may hide a changed gitlink with `ignore=all` even though staging includes that m
 The owned checkpoint skips only
 gate 2, and only when verification never failed and the cycle's latest 08d2 row (rounds from the
 cycle's first round) is not a done `accept`. An accept waives nothing and defers its findings to
-gate 2, so gate 2 runs. A gate 2 kept for that reason is an ordinary unlatched gate, since no
-verification failed: presets apply as in any task and no `gate2_approved` is recorded. Configured
-checks on either side still run.
+gate 2, so gate 2 runs. A gate 2 kept for that reason inside an open gate-3 cycle is latched like
+the failed path's: it ignores task/type presets, prior-task reuse, saved answers, queue payloads
+and every auto-submit path, keeps the form's computed defaults and parks for the owner. Its answer
+needs the owner's matching `step.form_submitted` event for the row and generation, newer than the
+cycle's `insight.continuation` event, and the route binds it to the form's row and park stamp like
+every latched gate. No `gate2_approved` is recorded, since nothing failed. The requirement ends with
+the cycle (a gate 3 at or after its first round completed before the current round); outside a cycle
+gate 2 keeps honouring its presets, deferred findings or not. Configured checks on either side still
+run.
 Gate 3 regenerates its diff, message and form. Earlier commit/message approval is not
 reused, and empty selection retains the existing staging and commit path.
 
@@ -637,17 +643,21 @@ owned row/task fence before `gate2_approved` is written. Gate 2 without a latch 
 existing behavior. This task-wide latch survives
 Retry of the original request/source independently of continuation validity. Gate-3
 apply checks it before navigation, picks or Git and revises to gate 2 while pending.
-After that human gate-2 re-approval, the regenerated gate 3 uses the same runner approval
+After a gate-3 insight cycle, whether or not a check failed (a failed one also needs that human
+gate-2 re-approval first), the first regenerated gate 3 uses the same runner approval
 guard: no task/type preset, prior-task reuse, saved synthetic answer, queue answer or
 auto-submit variant can apply it. It keeps computed defaults and parks with
 `waiting_started_at`. Its answer requires the authenticated owner's matching
-`step.form_submitted` event for the row and generation, newer than `gate2_approved`.
+`step.form_submitted` event for the row and generation, newer than the cycle's
+`insight.continuation` event and than `gate2_approved`.
 The route also refuses a stale form: a latched gate's answer must name the row and park its form
 was rendered for (see worker-restarts, form park marker).
-The requirement survives Retry, Resume and boot takeover until the gate-3 pass completes;
-a configured late editor introducing another round between the gates does not clear it.
+The requirement survives Retry, Resume and boot takeover until a gate 3 at or after the cycle's
+first round completes (done or skipped) before the current round; a configured late editor
+introducing another round between the gates does not clear it.
 A warning note in the form explains that the refreshed changes need a new commit decision.
-Gate 3 without that re-approval retains ordinary auto-continue behavior.
+Gate 3 outside a gate-3 cycle, including after an automatic insight round, retains ordinary
+auto-continue behavior.
 A pinned list without that destination refuses instead of running off-list. The quick
 path now has a dormant gate 2 activated by the same latch. Insight work itself spends
 no fix round; actual blocking checks retain the ordinary fix loop and cap.

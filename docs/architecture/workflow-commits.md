@@ -119,17 +119,26 @@ unusable output: without a usable suggestion the form offers manual entry, never
 suggestion when the field is absent, and rejects an explicitly blank message before staging.
 The optional fallback also applies when the worker supplies an empty or entirely disabled
 provider list and dispatch returns no invocation; required LLM steps still fail in that case.
-The user can still skip committing. After failed picked-insight checks receive a human
-gate-2 re-approval, the regenerated gate 3 must park for a new human answer. The runner
-uses the existing latched approval guard to ignore every preset and auto-submit source,
-including prior-task reuse, while keeping the freshly computed form defaults. The submit
-route attests owner, generation and explicit commit choice atomically with the answer;
-only matching evidence newer than the re-approval can advance that pass. A stale tab cannot
-supply it: the answer must name the row and park its form was rendered for, else 409
-`step_form_stale` (worker-restarts, form park marker). Retry, Resume
-and boot re-entry keep an unanswered form parked. A warning note explains that the
-refreshed changes need review and a new commit decision. Ordinary gates retain their existing
-preset behavior.
+The user can still skip committing. After a gate-3 insight cycle (insights a person picked at a
+parked gate 3; an automatic insight round is not one) the first gate 3 must park for a new human
+answer, whether or not the cycle's checks failed. A failed cycle also needs the human gate-2
+re-approval before it. The runner uses the existing latched approval guard to ignore every
+preset and auto-submit source, including prior-task reuse, while keeping the freshly computed
+form defaults. The submit route attests owner, generation and explicit commit choice atomically
+with the answer; only matching evidence newer than the cycle's start (its `insight.continuation`
+event, written in the handoff that resets the cycle's rows) and than any gate-2 re-approval can
+advance that pass. A stale tab cannot supply it: the answer must name the row and park its form
+was rendered for, else 409 `step_form_stale` (worker-restarts, form park marker). The
+requirement ends once a gate 3 at or after the cycle's first round completed (done or skipped)
+before the current round. Until then Retry, Resume and boot re-entry keep an unanswered form
+parked; re-entry after the owner's answer (Resume, takeover, a duplicate advance) uses that
+answer and does not park again. A Retry of the gate itself resets its answer and generation, so
+it asks again. A Retry of the pick's own row, or of a step above it in the pick's round, ends the
+cycle: that row no longer holds the generation the cycle named (`gate3InsightCycle` reads it the
+same way), so the next gate 3 is an ordinary one. A warning note explains that the refreshed
+changes need review and a new commit decision. Inside the same cycle, a gate 2 kept because the
+accepted QA review deferred its findings parks for the owner the same way (fix-loop). Ordinary
+gates retain their existing preset behavior.
 Step-runner retains the invocation through form submission
 and recovery using its existing pre-form lifecycle.
 

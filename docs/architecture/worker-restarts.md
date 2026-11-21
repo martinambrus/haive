@@ -673,14 +673,17 @@ A form submit carries no epoch on purpose, so it cannot be fenced. `isStaleSubmi
 lands on a form parked after the job was queued, such as a form a `ReopenStepFormError` reopened,
 which would otherwise answer the new form with what was typed into the old one.
 
-A latched insight gate (gate 2 while a failed insight check awaits re-approval, gate 3 after that
-re-approval) also binds its answer to the form it was rendered for. The body carries `stepRowId`
-and `waitingStartedAt`; unless both equal the row the route found, and that row's marker is still
-set (an answered wait has none), the route answers 409 `step_form_stale` and writes nothing. The
-latch is read from the latest `insight.check` event and fails closed: an event it cannot read
-counts as latched, and gate 3's settled exemption is not repeated. Only these two steps require
-the fields; every other step ignores them, so older tabs and automation keep working there. The
-web sends them on every step submit and reloads the steps on this code. A client that omits them,
+A latched insight gate (gate 2 while a failed insight check awaits re-approval or inside a gate-3
+insight cycle where it is kept for deferred QA findings, gate 3 after that re-approval or after any
+gate-3 insight cycle) also binds its answer to the form it was rendered for. The body carries
+`stepRowId` and `waitingStartedAt`; unless both equal the row the route found, and that row's
+marker is still set (an answered wait has none), the route answers 409 `step_form_stale` and
+writes nothing. The latch is read from the latest `insight.check` event and, for both gates, from
+the task's `insight.continuation` events, and fails closed: an event it cannot read counts as
+latched, and the worker's settled exemption is not repeated, so gate 2 and gate 3 of a task that
+ever had a gate-3 insight cycle need the fields. Only these two steps require the fields; every
+other step ignores them, so older tabs and automation keep working there. The web sends them on
+every step submit and reloads the steps on this code. A client that omits them,
 such as an old tab, cannot answer a latched gate until it reloads.
 
 An LLM preparation hook may return `false` when refreshed inputs make the
@@ -1007,9 +1010,11 @@ this evidence under its existing row and task fences.
 Deploy the API and worker together for this change. An old API never sends the required
 owner/generation marker, so a latched gate 2 cannot be approved until both are current.
 Do not restore an older API while pending approvals can resume. The same attestation now
-covers the regenerated gate 3 after human gate-2 re-approval: the saved explicit `commit`
-choice, owner and rerun generation must match its submit event, newer than the approval.
-The durable approval event holds that pass across Retry, Resume and epoch takeover;
+covers the regenerated gate 3 after human gate-2 re-approval, the first gate 3 after any
+gate-3 insight cycle and a gate 2 kept for deferred QA findings inside one: the saved explicit
+`commit` or `decision`, owner and rerun generation must match its submit event, newer than the
+approval and than the cycle's `insight.continuation` event.
+The durable approval and cycle events hold that pass across Retry, Resume and epoch takeover;
 synthetic saved values or a job payload repark through the existing approval guard.
 Gate-3 batch intents carry a bounded SHA-256 digest plus an incomplete flag; outcomes carry
 the unchanged comparison. The continuation's original gate-3 intent remains the baseline

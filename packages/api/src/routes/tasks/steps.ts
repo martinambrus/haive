@@ -124,9 +124,25 @@ function formStale(): HttpError {
   );
 }
 
+/** Whether a gate-3 insight cycle was ever started for this task; a continuation that cannot be read counts as one. */
+async function hasGate3Cycle(db: ReturnType<typeof getDb>, taskId: string): Promise<boolean> {
+  const events = await db.query.taskEvents.findMany({
+    where: and(
+      eq(schema.taskEvents.taskId, taskId),
+      eq(schema.taskEvents.eventType, 'insight.continuation'),
+    ),
+    columns: { payload: true },
+  });
+  return events.some((e) => {
+    const c = e.payload?.continuation as { version?: unknown; mode?: unknown } | undefined;
+    return c?.version !== 1 || c.mode === 'gate3';
+  });
+}
+
 /**
  * Whether the answer to this gate is attested only by the route: gate 2 while the latest insight check is a
- * failed verify, gate 3 while it is a gate 2 approval. An event that cannot be read fails closed (latched).
+ * failed verify, gate 3 while it is a gate 2 approval, and both gates once any gate-3 insight cycle ran (a superset
+ * that fails closed). An event that cannot be read fails closed (latched).
  */
 async function insightGateLatched(
   db: ReturnType<typeof getDb>,
@@ -134,6 +150,7 @@ async function insightGateLatched(
   stepId: string,
 ): Promise<boolean> {
   if (stepId !== '09-gate-2-verify-approval' && stepId !== '10-gate-3-commit') return false;
+  if (await hasGate3Cycle(db, taskId)) return true;
   const latest = await db.query.taskEvents.findFirst({
     where: and(
       eq(schema.taskEvents.taskId, taskId),

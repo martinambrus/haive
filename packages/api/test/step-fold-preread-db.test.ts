@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { and, eq, sql, type SQL } from 'drizzle-orm';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createDatabase, schema, type Database } from '@haive/database';
@@ -752,6 +753,102 @@ describe.skipIf(!url)(
           }),
         ).toMatchObject({ status: 200 });
         expect(await submitted()).toHaveLength(1);
+      },
+      TEST_TIMEOUT,
+    );
+
+    it(
+      'a gate-3 answer after a clean insight cycle needs the park it was rendered for, and the worker then accepts it',
+      async () => {
+        // Runtime import keeps worker source outside the API TypeScript root, as in park-fold-db.
+        const workerPath = new URL('../../worker/src/step-engine/step-runner.ts', import.meta.url)
+          .pathname;
+        const { advanceStep } = await import(workerPath);
+        const gateId = '10-gate-3-commit';
+        const taskId = await seedTask('running', {
+          currentStepId: gateId,
+          currentRound: 1,
+          autoContinue: true,
+          preAnswers: { [gateId]: { commit: true } },
+        });
+        const source = await seedStep(taskId, {
+          id: randomUUID(),
+          stepId: gateId,
+          status: 'done',
+          round: 0,
+        });
+        await db.insert(schema.taskEvents).values({
+          taskId,
+          taskStepId: source.id,
+          eventType: 'insight.continuation',
+          payload: {
+            continuation: {
+              version: 1,
+              kind: 'insight_revise',
+              batchId: randomUUID(),
+              sourceStepRow: source.id,
+              generation: source.rerunGeneration,
+              round: 1,
+              mode: 'gate3',
+              stage: 'apply',
+            },
+            targetStepId: '08e-insights-triage',
+          },
+        });
+        const row = await seedStep(taskId, {
+          stepId: gateId,
+          status: 'pending',
+          round: 1,
+          detectOutput: {},
+        });
+        const apply = vi.fn(
+          async (_ctx: unknown, args: { formValues: Record<string, unknown> | null }) => ({
+            committed: args.formValues!.commit,
+          }),
+        );
+        const step: StepDefinition = {
+          metadata: {
+            id: gateId,
+            index: 10,
+            workflowType: 'workflow',
+            title: 'Commit',
+            description: '',
+            requiresCli: false,
+          },
+          form: () => ({
+            title: 'Commit',
+            fields: [{ id: 'commit', type: 'checkbox', label: 'Commit', default: true }],
+          }),
+          apply,
+        };
+        const params = {
+          db,
+          taskId,
+          userId: USER,
+          repoPath: '/unused',
+          workspacePath: '/unused',
+          cliProviderId: null,
+          stepDef: step,
+          epoch: 3,
+          round: 1,
+          moduleDeactivation: null,
+        };
+        expect((await advanceStep(params)).status).toBe('waiting_form');
+        expect(apply).not.toHaveBeenCalled();
+        await expect(
+          post(`/tasks/${taskId}/steps/${gateId}/submit`, { values: { commit: true } }),
+        ).rejects.toMatchObject({ status: 409, code: 'step_form_stale' });
+        expect((await wholeRow(row.id)).formValues).toBeNull();
+        expect(
+          await post(`/tasks/${taskId}/steps/${gateId}/submit`, {
+            values: { commit: true },
+            ...(await bindingOf(row.id)),
+          }),
+        ).toMatchObject({ status: 200 });
+        expect(await advanceStep({ ...params, formValues: { commit: true } })).toMatchObject({
+          status: 'done',
+        });
+        expect(apply).toHaveBeenCalledOnce();
       },
       TEST_TIMEOUT,
     );

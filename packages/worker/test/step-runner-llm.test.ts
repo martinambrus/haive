@@ -263,7 +263,7 @@ function makeMockDb(state: MockState, opts: MockDbOptions = {}, inTransaction = 
       // resolveTaskDispatch resolves the invocation's MCP surface so the prompt can
       // state it; that reads the step-04 tooling output and the env template.
       taskSteps: { findFirst: async () => undefined },
-      taskEvents: { findFirst: async () => undefined },
+      taskEvents: { findFirst: async () => undefined, findMany: async () => [] },
       envTemplates: { findFirst: async () => undefined },
       repositories: { findFirst: async () => undefined },
     },
