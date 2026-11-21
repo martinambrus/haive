@@ -11,7 +11,7 @@ import {
 
 /** Append-only: one hash of the whole rendered corpus per renderer version. */
 const RECORDED_RENDER_HASHES: Record<number, string> = {
-  3: '8cafda59577ad64aa7ecc3fe16c7937d0e8835f0ebba435996c4896451d59b9a',
+  3: 'da45695aba92efcf413c6779b13bab2e55466fa4441fce442772f9cfe4802531',
 };
 
 const FULL: AgentSpec = {
@@ -75,14 +75,40 @@ const YAML_EDGE: AgentSpec = {
   field: 'null',
   kbReferences: { patterns: '~', standards: '1e3', reference: '- item' },
 };
+const YES_ID: AgentSpec = { ...BARE, id: 'yes' };
+const PROSE: AgentSpec = {
+  ...BARE,
+  id: 'pin-prose',
+  description:
+    'API gateway reviewer (REST, gRPC) that checks routes, auth and rate limits, then reports findings with file and line references',
+};
+const MULTILINE: AgentSpec = {
+  ...BARE,
+  id: 'pin-multiline',
+  description: 'Prüft Änderungen\nZeile zwei\tmit Tab',
+};
 const EXEMPT: AgentSpec[] = [...RESPONSE_STYLE_EXEMPT_IDS].sort().map((id) => ({ ...BARE, id }));
-const SPECS: AgentSpec[] = [FULL, BARE, ONE_KB, EMPTY_KB, BLANK_KB, YAML_EDGE, ...EXEMPT];
+// The corpus pins bytes as rendered today, including output a TOML parser rejects (the multi-line
+// description in TOML); a fixture edit moves the hash like a renderer change.
+const SPECS: AgentSpec[] = [
+  FULL,
+  BARE,
+  ONE_KB,
+  EMPTY_KB,
+  BLANK_KB,
+  YAML_EDGE,
+  YES_ID,
+  PROSE,
+  MULTILINE,
+  ...EXEMPT,
+];
 
 const DIRS: { dir: string; format: AgentRenderTarget['format'] }[] = [
   { dir: '.claude/agents', format: 'markdown' },
   { dir: '.gemini/agents', format: 'markdown' },
   { dir: '.codex/agents', format: 'toml' },
   { dir: '.agents/agents', format: 'markdown' },
+  { dir: '.grok/agents', format: 'markdown' },
 ];
 const LSP: (boolean | undefined)[] = [true, false, undefined];
 const TARGETS: AgentRenderTarget[] = DIRS.flatMap(({ dir, format }) =>
@@ -115,7 +141,7 @@ describe('the rendered agent body is pinned to AGENT_RENDERER_VERSION', () => {
     const advice =
       recorded === undefined
         ? `AGENT_RENDERER_VERSION is ${AGENT_RENDERER_VERSION} but no hash is recorded for it: add \`${AGENT_RENDERER_VERSION}: '${hash}'\` to RECORDED_RENDER_HASHES in this file.`
-        : `the rendered agent body changed since version ${AGENT_RENDERER_VERSION} was recorded: bump AGENT_RENDERER_VERSION to ${next} in packages/shared/src/templates/manifest.ts, add \`${next}: '${hash}'\` to RECORDED_RENDER_HASHES in this file and rebuild @haive/shared. Never overwrite the entry for ${AGENT_RENDERER_VERSION}: installed custom-bundle agents were rendered from it.`;
+        : `the rendered corpus changed since version ${AGENT_RENDERER_VERSION} was recorded. If the renderer changed, bump AGENT_RENDERER_VERSION to ${next} in packages/shared/src/templates/manifest.ts, add \`${next}: '${hash}'\` to RECORDED_RENDER_HASHES in this file and rebuild @haive/shared; never overwrite the entry for ${AGENT_RENDERER_VERSION} once a release holds it: installed custom-bundle agents were rendered from it. If only this file's fixtures changed the same applies after a release; while version ${AGENT_RENDERER_VERSION} is in no release, re-record its entry instead.`;
     expect(hash, advice).toBe(recorded);
   });
 
@@ -180,6 +206,20 @@ describe('the pinned corpus exercises every conditional block', () => {
     const edge = frontmatterOf(render(YAML_EDGE, claude(true)));
     expect(edge).toContain('description: "2001-12-14"');
     expect(edge).toContain('field: "null"');
+  });
+
+  it('quotes a bundle id and a multi-line description, and leaves long prose plain', () => {
+    for (const target of [claude(true), { dir: '.gemini/agents', format: 'markdown' } as const]) {
+      expect(frontmatterOf(render(YES_ID, target))).toContain('name: "yes"');
+    }
+    const descOf = (spec: AgentSpec) =>
+      frontmatterOf(render(spec, claude(true))).filter((l) => l.startsWith('description:'));
+    const prose = descOf(PROSE);
+    expect(prose).toHaveLength(1);
+    expect(prose[0]).not.toMatch(/^description: "/);
+    const multi = descOf(MULTILINE);
+    expect(multi).toHaveLength(1);
+    expect(multi[0]).toMatch(/^description: ".*\\n.*"$/);
   });
 
   it('escapes a backslash, a double quote and a triple quote in TOML', () => {
