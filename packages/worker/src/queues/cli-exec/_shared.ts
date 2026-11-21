@@ -93,6 +93,9 @@ export interface ExecutionOutcome {
    *  (which streamLog includes) so a task spec mentioning "rate limit"/"401"
    *  cannot false-positive. Set on failure-capable branches only. */
   providerErrorScan?: string;
+  /** The CLI's own stream reported an authentication failure; the classifier reads it before any
+   *  text rule. Set only when true. */
+  authFailure?: boolean;
   /** antigravity only: the tail of agy's own `--log-file`, captured out of the
    *  sandbox. agy writes provider-fatal errors (quota/auth/5xx) ONLY here and exits
    *  0 with empty stdout, so this is the sole signal interpretCliFailure can classify

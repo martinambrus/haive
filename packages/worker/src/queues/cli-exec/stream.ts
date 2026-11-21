@@ -37,6 +37,10 @@ interface StreamJsonCollector {
    *  prefer getNoResultReason() (the binary's own error text) over the stdout tail,
    *  which for a stream-json CLI is raw NDJSON. */
   hadResultError: () => boolean;
+  /** True when the LAST top-level assistant event carried the CLI's own authentication error
+   *  code (see AUTH_FAILED_ERROR_CODE). A structured field, so it holds for a run whose wording
+   *  differs per provider or version. */
+  hadAuthFailure: () => boolean;
   /** Concatenation of every text block from assistant events. Lets us cross-check
    *  the result event's payload against the deltas claude-code actually streamed. */
   getAssistantText: () => string;
@@ -76,6 +80,11 @@ interface StreamJsonCollector {
    *  event finalizes as `coverage: 'none'`. */
   getToolUsage: () => InvocationToolUsage;
 }
+
+/** A field of the claude-family stream-json contract, not wording: the top-level `error` code
+ *  the binary stamps on an assistant event it authored for an API failure. Compared exactly,
+ *  never as text. */
+const AUTH_FAILED_ERROR_CODE = 'authentication_failed';
 
 export function createStreamJsonCollector(
   onProgress?: (message: string) => void,
@@ -123,6 +132,9 @@ export function createStreamJsonCollector(
   let resultIsError = false;
   let resultErrorText: string | null = null;
   let resultTerminalReason: string | null = null;
+  // `error` of the last top-level assistant event. Every top-level assistant event overwrites it,
+  // so a run that hit the error and then recovered does not carry it; a sub-agent turn is ignored.
+  let lastAssistantError: string | null = null;
   let resultUsage: CliTokenUsage | null = null;
   let resultCount = 0;
   let strictWholeRun: RequestUsage | null = null;
@@ -369,6 +381,9 @@ export function createStreamJsonCollector(
     // Always collect assistant text deltas — used as a cross-check against the
     // result event when downstream parsing fails.
     if (type === 'assistant') {
+      if (event.parent_tool_use_id == null) {
+        lastAssistantError = typeof event.error === 'string' ? event.error : null;
+      }
       const message = record(event.message);
       const id = typeof message?.id === 'string' && message.id.trim() ? message.id : null;
       const model =
@@ -529,6 +544,9 @@ export function createStreamJsonCollector(
     },
     hadResultError(): boolean {
       return resultIsError;
+    },
+    hadAuthFailure(): boolean {
+      return lastAssistantError === AUTH_FAILED_ERROR_CODE;
     },
     getAssistantText(): string {
       return assistantText;

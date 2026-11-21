@@ -1,0 +1,80 @@
+{
+  "provider": "claude-code",
+  "capturedAt": "2026-11-21T00:00:00.000Z",
+  "isStreamJson": true,
+  "result": null,
+  "noResultReason": "LLM run reported a failure (terminal_reason \"api_error\"): Invalid API key · Fix external API key",
+  "malformedLines": 0,
+  "tokenUsage": {
+    "inputTokens": 0,
+    "outputTokens": 0,
+    "totalTokens": 0,
+    "costUsd": 0
+  },
+  "streamModelIdentity": {
+    "requested": "claude-opus-5-5",
+    "served": null,
+    "billed": []
+  },
+  "toolUsage": {
+    "source": "stream",
+    "coverage": "full",
+    "reads": {
+      "version": 1,
+      "coverage": "full",
+      "turns": null,
+      "compactions": 0,
+      "resultSeen": true,
+      "results": {
+        "reads": 0,
+        "chars": 0,
+        "weightedChars": null
+      },
+      "fileReads": {
+        "reads": 0,
+        "chars": 0,
+        "weightedChars": null
+      },
+      "files": [],
+      "outside": {
+        "reads": 0,
+        "chars": 0,
+        "weightedChars": null
+      },
+      "multiFile": {
+        "reads": 0,
+        "chars": 0,
+        "weightedChars": null
+      },
+      "unattributed": {
+        "reads": 0,
+        "chars": 0,
+        "weightedChars": null
+      },
+      "overflow": {
+        "reads": 0,
+        "chars": 0,
+        "weightedChars": null,
+        "omitted": 0
+      },
+      "byTool": {}
+    },
+    "tools": {},
+    "mcp": [],
+    "subagents": [],
+    "skills": {
+      "invoked": [],
+      "read": []
+    },
+    "agents": {
+      "assigned": [],
+      "read": []
+    },
+    "loaded": {
+      "agents": ["Explore", "Plan", "claude", "general-purpose", "statusline-setup"],
+      "skills": ["dataviz", "deep-research", "update-config"],
+      "mcpServers": [],
+      "toolCount": 3
+    }
+  }
+}
