@@ -888,7 +888,7 @@ Follow-ups found by the #1307 driver:
 
 ### T739 · FNF[cli-touched-vestigial] · the touched-CLI marker table has readers and no writer
 
-status: open for item 4; phase 2 (item 3) in review as #1311 (migration 0248, runner skips dropped baseline tables, roll-forward-only undo once applied); phase 1 (readers removed) DONE in #1309 (21f6fceba, deployed 2026-11-21 17:58Z) · kind: fix · found: #1297 driver 2026-11-21, checked against the code · priority: P4
+status: open for item 4; phase 2 (item 3) DONE in #1311 (edd7a7586, migration 0248 applied on dev 2026-11-21 19:32Z, 12 rows dumped first to `.claude/tmp/codex-run/T739-S/dev-task_step_cli_touched-dump.sql`; runner skips dropped baseline tables, roll-forward-only undo once applied); phase 1 (readers removed) DONE in #1309 (21f6fceba, deployed 2026-11-21 17:58Z) · kind: fix · found: #1297 driver 2026-11-21, checked against the code · priority: P4
 
 1. `task_step_cli_touched` is read (`worker/src/step-engine/step-runner.ts` ~:333-343 `isTouched`, `api/src/routes/tasks/_helpers.ts` ~:186-199) but never written. The CLI switch writes the per-task choice first (`api/src/lib/step-cli-choice.ts` ~:87), which the resolver reads before any saved row, so an in-task pick never depends on the marker; under `ignore_saved_step_clis` a saved row is simply never honoured. Dead code, no user-visible effect. Fix direction: drop the readers, then the table in a later two-phase migration, or document why it stays. PRE-EXISTING.
 
