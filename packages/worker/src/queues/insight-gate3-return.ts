@@ -27,8 +27,11 @@ export async function pendingInsightApproval(db: Database, taskId: string): Prom
   return pending;
 }
 
-/** Gate 2 advances to gate 3. Its durable re-approval keeps
- * that regenerated form human-only across Retry, Resume and worker takeover. */
+/** Required while the latest insight check is a gate-2 approval. It settles once a completed
+ * gate-3 row at or after the approval's round and below this row's carries the owner's answer for
+ * its current generation, written after that approval. A row below the approval's round or at a
+ * later round never settles another; a Retry that re-runs the answered row, or a newer approval,
+ * withdraws the answer, so the form stays human-only across Retry, Resume and worker takeover. */
 async function failedInsightGate3ReviewRequired(
   db: Database,
   row: typeof schema.taskSteps.$inferSelect,
@@ -51,19 +54,24 @@ async function failedInsightGate3ReviewRequired(
   if (latest?.payload?.kind !== 'gate2_approved') return false;
   if (typeof approvedRound !== 'number' || !Number.isInteger(approvedRound) || approvedRound < 0)
     throw new Error('Unsupported insight approval round.');
-  if (approvedRound > row.round) return false;
-  // A configured late editor can introduce another check round between the gates.
-  // Only an already completed gate-3 pass settles this review requirement.
-  const settled = await db.query.taskSteps.findFirst({
+  const answered = await db.query.taskSteps.findFirst({
     where: and(
       eq(schema.taskSteps.taskId, row.taskId),
       eq(schema.taskSteps.stepId, '10-gate-3-commit'),
       gte(schema.taskSteps.round, approvedRound),
       sql`${schema.taskSteps.round} < ${row.round}`,
-      sql`${schema.taskSteps.status} in ('done', 'skipped')`,
+      inArray(schema.taskSteps.status, ['done', 'skipped']),
+      sql`exists (
+        select 1 from ${schema.taskEvents} submitted, ${schema.taskEvents} approved, ${schema.tasks} owned
+        where approved.id = ${latest.id} and owned.id = ${row.taskId} and submitted.task_id = ${row.taskId}
+          and submitted.task_step_id = ${schema.taskSteps.id} and submitted.event_type = ${'step.form_submitted'}
+          and submitted.payload->>'userId' = owned.user_id::text
+          and submitted.payload->>'generation' = ${schema.taskSteps.rerunGeneration}::text
+          and submitted.created_at > approved.created_at
+      )`,
     ),
   });
-  return !settled;
+  return !answered;
 }
 
 /** A gate-3 pick keeps its first gate 3 human-only, whether or not the cycle's verification failed. */

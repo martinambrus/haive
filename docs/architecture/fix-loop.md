@@ -654,8 +654,11 @@ The route also refuses a stale form: a latched gate's answer must name the row a
 was rendered for (see worker-restarts, form park marker).
 The requirement survives Retry (of the pick's own row or of a step above it included), Resume and
 boot takeover until a gate 3 completes after the cycle as workflow-commits describes (at or after
-the cycle's first round, or the pick row's own re-run, completed before the current round); a
-configured late editor introducing another round between the gates does not clear it.
+the cycle's first round, or the pick row's own re-run, completed before the current round); on the
+failed path it lasts until a completed gate-3 row at or after the approval's round and below the
+gate's own carries the owner's answer written after the latest `gate2_approved` (workflow-commits);
+a configured late editor introducing another
+round between the gates does not clear it.
 A warning note in the form explains that the refreshed changes need a new commit decision.
 Gate 3 outside a gate-3 cycle, including after an automatic insight round, retains ordinary
 auto-continue behavior.

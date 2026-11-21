@@ -3003,6 +3003,7 @@ describe.skipIf(!url)('manual insight batch journal on Postgres', () => {
       taskId: string,
       createdAt: Date | SQL = ANSWER_AT,
       generation = 0,
+      answeredBy = userId,
     ) {
       await db.transaction(async (tx) => {
         await tx
@@ -3014,7 +3015,7 @@ describe.skipIf(!url)('manual insight batch journal on Postgres', () => {
           taskStepId: rowId,
           eventType: 'step.form_submitted',
           createdAt,
-          payload: { ...STAMPED, userId, generation, commit: true },
+          payload: { ...STAMPED, userId: answeredBy, generation, commit: true },
         });
       });
     }
@@ -3620,6 +3621,286 @@ describe.skipIf(!url)('manual insight batch journal on Postgres', () => {
           '2026-01-05T00:00:00Z': 'done',
         });
       });
+    });
+
+    describe('after a re-approved failed verification', () => {
+      const APPROVED_AT = '2026-01-02T00:00:00.000500Z';
+      const ANSWER_CASES = [
+        [
+          '100 microseconds before the approval',
+          '2026-01-02T00:00:00.000400Z',
+          0,
+          'owner',
+          'waiting_form',
+        ],
+        ['100 microseconds after the approval', '2026-01-02T00:00:00.000600Z', 0, 'owner', 'done'],
+        ['by another user', '2026-01-02T00:00:00.000600Z', 0, 'other', 'waiting_form'],
+        ['for another generation', '2026-01-02T00:00:00.000600Z', 1, 'owner', 'waiting_form'],
+      ] as const;
+
+      async function addCheck(
+        taskId: string,
+        kind: 'verify_failed' | 'gate2_approved',
+        round: number,
+        createdAt: string,
+      ) {
+        await db.insert(schema.taskEvents).values({
+          taskId,
+          eventType: 'insight.check',
+          createdAt: microsecond(createdAt),
+          payload: { version: 1, batchId: 'failed', kind, round },
+        });
+      }
+
+      /** A gate-3 row a Retry pulled back to round 2, below the gate-2 approval's round 3. */
+      async function seedPulledBack(check: 'approved' | 'failed' | 'none' = 'approved', round = 2) {
+        const seeded = await seedGate3('none', round);
+        if (check === 'approved')
+          await addCheck(seeded.ctx.taskId, 'gate2_approved', 3, APPROVED_AT);
+        if (check === 'failed') await addCheck(seeded.ctx.taskId, 'verify_failed', 3, APPROVED_AT);
+        const retry = async () => {
+          const reset = await resetStepAndDownstream(db, seeded.ctx.taskId, gateId, round);
+          if (!reset || reset === 'superseded') throw new Error('the reset did not apply');
+          return reset.newEpoch;
+        };
+        const waitForAnswer = () =>
+          db
+            .update(schema.taskSteps)
+            .set({ status: 'waiting_form' })
+            .where(eq(schema.taskSteps.id, seeded.ctx.taskStepId));
+        return { ...seeded, retry, waitForAnswer };
+      }
+
+      it('parks a pulled-back gate 3 even with a preset', async () => {
+        const { params, apply } = await seedPulledBack();
+        expectParked(await advanceStep(params), apply);
+      });
+
+      it.each(ANSWER_CASES)(
+        'an owner answer %s',
+        async (_name, answerAt, generation, answeredBy, expected) => {
+          const { ctx, params, apply, waitForAnswer } = await seedPulledBack();
+          await waitForAnswer();
+          await answerAsOwner(
+            ctx.taskStepId,
+            ctx.taskId,
+            microsecond(answerAt),
+            generation,
+            answeredBy === 'owner' ? userId : randomUUID(),
+          );
+          expect((await advanceStep(params)).status).toBe(expected);
+          if (expected === 'waiting_form') expect(apply).not.toHaveBeenCalled();
+          else {
+            expect(apply).toHaveBeenCalledOnce();
+            expect(await advanceStep(params)).toMatchObject({ status: 'done' });
+            expect(apply).toHaveBeenCalledOnce();
+          }
+        },
+      );
+
+      it.each([
+        [
+          "is the owner's answer after the approval",
+          '2026-01-02T00:00:00.000600Z',
+          'owner',
+          0,
+          'form_submitted',
+          'gate3',
+          'done',
+        ],
+        [
+          "is the owner's answer before the approval",
+          '2026-01-02T00:00:00.000400Z',
+          'owner',
+          0,
+          'form_submitted',
+          'gate3',
+          'waiting_form',
+        ],
+        [
+          'is by another user',
+          '2026-01-02T00:00:00.000600Z',
+          'other',
+          0,
+          'form_submitted',
+          'gate3',
+          'waiting_form',
+        ],
+        [
+          'is stamped for another generation',
+          '2026-01-02T00:00:00.000600Z',
+          'owner',
+          1,
+          'form_submitted',
+          'gate3',
+          'waiting_form',
+        ],
+        [
+          'is an event of another type',
+          '2026-01-02T00:00:00.000600Z',
+          'owner',
+          0,
+          'skip',
+          'gate3',
+          'waiting_form',
+        ],
+        [
+          'sits on a gate-2 row',
+          '2026-01-02T00:00:00.000600Z',
+          'owner',
+          0,
+          'form_submitted',
+          'gate2',
+          'waiting_form',
+        ],
+        [
+          'sits on a gate-3 row that is not completed',
+          '2026-01-02T00:00:00.000600Z',
+          'owner',
+          0,
+          'form_submitted',
+          'open',
+          'waiting_form',
+        ],
+      ] as const)(
+        'a later gate 3 settles only on a proof row that %s',
+        async (_name, at, who, generation, kind, onRow, expected) => {
+          const { ctx, params, apply, sourceRow } = await seedGate3('none', 4);
+          await addCheck(ctx.taskId, 'gate2_approved', 3, APPROVED_AT);
+          let rowId = sourceRow.id;
+          if (onRow === 'gate2') {
+            const [gate2] = await db
+              .insert(schema.taskSteps)
+              .values({
+                taskId: ctx.taskId,
+                stepId: '09-gate-2-verify-approval',
+                stepIndex: 9,
+                title: 'Verify approval',
+                status: 'done',
+                round: 3,
+                formValues: { commit: true },
+                output: {},
+              })
+              .returning();
+            rowId = gate2!.id;
+          }
+          if (onRow === 'open')
+            await db
+              .update(schema.taskSteps)
+              .set({ status: 'waiting_form' })
+              .where(eq(schema.taskSteps.id, rowId));
+          await db.insert(schema.taskEvents).values({
+            taskId: ctx.taskId,
+            taskStepId: rowId,
+            eventType: kind === 'skip' ? 'step.skip' : 'step.form_submitted',
+            createdAt: microsecond(at),
+            payload: {
+              stepId: gateId,
+              fieldCount: 1,
+              userId: who === 'owner' ? userId : randomUUID(),
+              generation,
+              commit: true,
+            },
+          });
+          const result = await advanceStep(params);
+          if (expected === 'done') {
+            expect(result.status).toBe('done');
+            expect(apply).toHaveBeenCalledOnce();
+          } else expectParked(result, apply);
+        },
+      );
+
+      it('a later gate 3 settles only on an answer newer than the latest approval, not an earlier check', async () => {
+        const { ctx, params, apply, sourceRow } = await seedGate3('none', 4);
+        await addCheck(ctx.taskId, 'verify_failed', 3, '2026-01-02T00:00:00.000100Z');
+        await addCheck(ctx.taskId, 'gate2_approved', 3, APPROVED_AT);
+        await answerAsOwner(sourceRow.id, ctx.taskId, microsecond('2026-01-02T00:00:00.000400Z'));
+        expectParked(await advanceStep(params), apply);
+      });
+
+      it('an answered later-round gate 3 does not settle a pulled-back one', async () => {
+        const { ctx, params, apply, retry } = await seedPulledBack();
+        const later = await addGate3Row(ctx.taskId, 3, 'done');
+        await answerAsOwner(later.id, ctx.taskId, microsecond('2026-01-02T00:00:00.000600Z'));
+        const epoch = await retry();
+        expectParked(await advanceStep({ ...params, epoch }), apply);
+      });
+
+      it('an answer below the approval round settles no later gate 3', async () => {
+        const { ctx, params, apply, waitForAnswer } = await seedPulledBack();
+        await waitForAnswer();
+        await answerAsOwner(ctx.taskStepId, ctx.taskId, microsecond('2026-01-02T00:00:00.000600Z'));
+        expect(await advanceStep(params)).toMatchObject({ status: 'done' });
+        expect(apply).toHaveBeenCalledOnce();
+        await addGate3Row(ctx.taskId, 4, 'pending');
+        await db
+          .update(schema.tasks)
+          .set({ currentStepId: gateId, currentRound: 4 })
+          .where(eq(schema.tasks.id, ctx.taskId));
+        expect(await advanceStep({ ...params, round: 4 })).toMatchObject({
+          status: 'waiting_form',
+        });
+        expect(apply).toHaveBeenCalledOnce();
+      });
+
+      it('a later gate 3 commits with the preset until a newer approval latches it again', async () => {
+        const { ctx, params, apply, waitForAnswer } = await seedPulledBack('approved', 3);
+        await waitForAnswer();
+        await answerAsOwner(ctx.taskStepId, ctx.taskId, microsecond('2026-01-02T00:00:00.000600Z'));
+        expect(await advanceStep(params)).toMatchObject({ status: 'done' });
+        expect(apply).toHaveBeenCalledOnce();
+        const later = await addGate3Row(ctx.taskId, 4, 'pending');
+        await db
+          .update(schema.tasks)
+          .set({ currentStepId: gateId, currentRound: 4 })
+          .where(eq(schema.tasks.id, ctx.taskId));
+        const committed = await advanceStep({ ...params, round: 4 });
+        expect(committed.row.id).toBe(later.id);
+        expect(committed.status).toBe('done');
+        expect(apply).toHaveBeenCalledTimes(2);
+        await addCheck(ctx.taskId, 'gate2_approved', 5, '2026-01-02T00:00:01Z');
+        const next = await addGate3Row(ctx.taskId, 6, 'pending');
+        await db
+          .update(schema.tasks)
+          .set({ currentStepId: gateId, currentRound: 6 })
+          .where(eq(schema.tasks.id, ctx.taskId));
+        const parked = await advanceStep({ ...params, round: 6 });
+        expect(parked.row.id).toBe(next.id);
+        expect(parked.status).toBe('waiting_form');
+        expect(apply).toHaveBeenCalledTimes(2);
+      });
+
+      it('a Retry of the answered row asks again', async () => {
+        const { ctx, params, apply, waitForAnswer, retry } = await seedPulledBack();
+        await waitForAnswer();
+        await answerAsOwner(ctx.taskStepId, ctx.taskId, microsecond('2026-01-02T00:00:00.000600Z'));
+        expect(await advanceStep(params)).toMatchObject({ status: 'done' });
+        expect(apply).toHaveBeenCalledOnce();
+        apply.mockClear();
+        const epoch = await retry();
+        expectParked(await advanceStep({ ...params, epoch }), apply, 'after the Retry');
+      });
+
+      it('an unanswered pulled-back row stays parked across Resume, boot re-entry and a second Retry', async () => {
+        const { params, apply, retry } = await seedPulledBack();
+        let epoch = params.epoch;
+        for (const reentry of ['first', 'Resume', 'boot', 'Retry']) {
+          if (reentry === 'Retry') epoch = await retry();
+          const parked = await advanceStep({ ...params, epoch });
+          expect(parked.status, reentry).toBe('waiting_form');
+          expect(parked.row.waitingStartedAt, reentry).not.toBeNull();
+          expect(apply, reentry).not.toHaveBeenCalled();
+        }
+      });
+
+      it.each(['none', 'failed'] as const)(
+        'a pulled-back row commits with the preset when the check state is %s',
+        async (check) => {
+          const { params, apply } = await seedPulledBack(check);
+          expect(await advanceStep(params)).toMatchObject({ status: 'done' });
+          expect(apply).toHaveBeenCalledOnce();
+        },
+      );
     });
   });
   it('PR5 gate pick is consumed once, resets the pending gate, and only then runs an editor', async () => {

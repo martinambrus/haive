@@ -78,6 +78,15 @@ function gateRowLookup(world: GateWorld, cond: unknown): Record<string, unknown>
           (r.round as number) <= numbers[1]!,
       )
       .sort((a, b) => (b.round as number) - (a.round as number))[0];
+  if (values.includes('10-gate-3-commit') && values.includes('step.form_submitted'))
+    return world.rows.find(
+      (r) =>
+        r.stepId === '10-gate-3-commit' &&
+        settled(r) &&
+        r.ownerAnswered === true &&
+        (r.round as number) >= numbers[0]! &&
+        (r.round as number) < numbers[1]!,
+    );
   if (values.includes('10-gate-3-commit'))
     return world.rows.find(
       (r) =>
@@ -103,6 +112,8 @@ function tableNameOf(table: unknown): string {
 
 /** Values a drizzle condition binds, in order. */
 function conditionValues(node: unknown, acc: unknown[] = []): unknown[] {
+  // A value interpolated into a raw `sql` template sits in the chunks bare.
+  if (typeof node === 'string') acc.push(node);
   if (!node || typeof node !== 'object') return acc;
   if (Array.isArray(node)) {
     for (const item of node) conditionValues(item, acc);
@@ -2703,6 +2714,179 @@ describe('gates after a gate-3 insight cycle (database faked)', () => {
         { payload: { version: 1, batchId: 'failed', kind: 'gate2_approved', round: 1 } },
       ];
       await expectParked(run, 'commit');
+    });
+  });
+
+  describe('gate 3 after a re-approved failed verification', () => {
+    const APPROVAL_ROUND = 3;
+    const approved = (kind = 'gate2_approved') => [
+      { payload: { version: 1, batchId: 'b', kind, round: APPROVAL_ROUND } },
+    ];
+    /** A gate-3 row at `round` with the failed-path latch isolated (no cycle event). */
+    const seedFailedPath = (source: Source, opts: GateSeed = {}) => {
+      const run = seedGate(3, source, { cycle: 'none', ...opts });
+      run.state.gate!.checks = approved();
+      return run;
+    };
+    const answeredRow = (round: number, status: string, flagged = true) => ({
+      ...gateRow(GATE3, 'answered', round, status),
+      ...(flagged ? { ownerAnswered: true } : {}),
+    });
+
+    it.each(
+      SOURCES.flatMap((source) =>
+        [0, 1, 2, 3, 4].flatMap((round) =>
+          [0, 1].flatMap((generation) =>
+            [false, true].map((pauseForm) => [source, round, generation, pauseForm] as const),
+          ),
+        ),
+      ),
+    )(
+      'parks for a fresh answer: %s at round %i, generation %i, form held %s',
+      async (source, round, rowGeneration, pauseForm) => {
+        const run = seedFailedPath(source, { round, rowGeneration, pauseForm });
+        await expectParked(run, 'commit');
+      },
+    );
+
+    it.each([
+      ['queue payload alone', {}],
+      ['saved values without an event', { savedValues: { commit: true } }],
+      [
+        'wrong user',
+        { savedValues: { commit: true }, submission: ownerSubmission(3, { userId: 'other' }) },
+      ],
+      [
+        'wrong generation',
+        { savedValues: { commit: true }, submission: ownerSubmission(3, { generation: 1 }) },
+      ],
+      [
+        'commit mismatch',
+        { savedValues: { commit: true }, submission: ownerSubmission(3, { commit: false }) },
+      ],
+    ] as [string, GateSeed][])(
+      'below the approval round stays parked with invalid human evidence: %s',
+      async (_n, opts) => {
+        const run = seedFailedPath('queue answer', { ...opts, round: 2, status: 'waiting_form' });
+        await expectParked(run, 'commit');
+      },
+    );
+
+    it.each(
+      [0, 1].flatMap((g) => ['pending', 'running', 'waiting_form'].map((s) => [g, s] as const)),
+    )(
+      'an owner answer below the approval round (generation %i, %s row) applies once',
+      async (generation, status) => {
+        const run = seedFailedPath('task preset', {
+          round: 2,
+          rowGeneration: generation,
+          status,
+          savedValues: { commit: true },
+          submission: ownerSubmission(3, { generation }),
+        });
+        expect((await run.advance()).status).toBe('done');
+        expect(run.apply).toHaveBeenCalledOnce();
+        expect((await run.advance()).status).toBe('done');
+        expect(run.apply).toHaveBeenCalledOnce();
+      },
+    );
+
+    it.each(
+      ['done', 'skipped'].flatMap((status) => [3, 4].map((round) => [status, round] as const)),
+    )(
+      'a %s gate-3 row answered by the owner after the approval (round %i) settles the latch',
+      async (status, round) => {
+        const run = seedFailedPath('task preset', {
+          round: 5,
+          rows: [answeredRow(round, status)],
+        });
+        expect((await run.advance()).status).toBe('done');
+        expect(run.apply).toHaveBeenCalledOnce();
+      },
+    );
+
+    it.each(
+      ['done', 'skipped'].flatMap((status) => [0, 1, 2].map((round) => [status, round] as const)),
+    )(
+      'a gate-3 row answered below the approval round never settles a later one (%s, round %i)',
+      async (status, round) => {
+        const run = seedFailedPath('task preset', {
+          round: 5,
+          rows: [answeredRow(round, status)],
+        });
+        await expectParked(run, 'commit');
+      },
+    );
+
+    it.each(
+      ['done', 'skipped'].flatMap((status) =>
+        [2, 3].flatMap((current) =>
+          [3, 4, 6]
+            .filter((answered) => answered >= current)
+            .map((answered) => [status, answered, current] as const),
+        ),
+      ),
+    )(
+      'a later-round answer never settles an earlier-round gate 3 (%s answered at round %i, current round %i)',
+      async (status, answered, current) => {
+        const run = seedFailedPath('task preset', {
+          round: current,
+          rows: [answeredRow(answered, status)],
+        });
+        await expectParked(run, 'commit');
+      },
+    );
+
+    it.each(
+      ['done', 'skipped'].flatMap((status) => [3, 4].map((round) => [status, round] as const)),
+    )(
+      'a %s gate-3 row without the owner answer after the approval (round %i) does not settle',
+      async (status, round) => {
+        const run = seedFailedPath('task preset', {
+          round: 5,
+          rows: [answeredRow(round, status, false)],
+        });
+        await expectParked(run, 'commit');
+      },
+    );
+
+    it.each(['pending', 'running', 'waiting_form', 'failed'])(
+      'an answered gate-3 row that is %s again no longer settles the latch',
+      async (status) => {
+        const run = seedFailedPath('task preset', {
+          round: 5,
+          rows: [answeredRow(4, status)],
+        });
+        await expectParked(run, 'commit');
+      },
+    );
+
+    it('no gate-3 row at all does not settle the latch', async () => {
+      const run = seedFailedPath('task preset', { round: 2, source: { absent: true } });
+      await expectParked(run, 'commit');
+    });
+
+    it.each(['task preset', 'queue answer'] as const)(
+      'a latest verify_failed check commits with the preset: %s',
+      async (source) => {
+        const run = seedFailedPath(source, { round: 2 });
+        run.state.gate!.checks = approved('verify_failed');
+        expect((await run.advance()).status).toBe('done');
+        expect(run.apply).toHaveBeenCalledOnce();
+      },
+    );
+
+    it('no check event commits with the preset', async () => {
+      const run = seedFailedPath('task preset', { round: 2 });
+      run.state.gate!.checks = [];
+      expect((await run.advance()).status).toBe('done');
+      expect(run.apply).toHaveBeenCalledOnce();
+    });
+
+    it('an automatic round without an approval check commits with the preset', async () => {
+      const run = seedGate(3, 'task preset', { cycle: 'automatic', round: 2 });
+      expect((await run.advance()).status).toBe('done');
+      expect(run.apply).toHaveBeenCalledOnce();
     });
   });
 
