@@ -741,8 +741,9 @@ removed is deleted and reset with the rest; a volume that could not be removed l
 they were, and a retry finishes. Its
 supersede check reads the
 clicked row's generation alone, which is enough because the api writers of a login token all write the
-whole set and a row that joins one takes the set's generation (the boot copy of legacy environment
-values writes the row it finds and advances no other). A manual login-secret POST, a settings
+whole set and a row that joins one takes the set's generation, or keeps the one its own save advanced
+by typing a sign-out secret name (the boot copy of legacy environment values writes the row it finds and
+advances no other). A manual login-secret POST, a settings
 save that types the token and a create that types it do so in one transaction under the set's lock (`writeLoginTokenToSet`, `api/src/lib/cli-login-secret.ts`):
 the transaction's first lock on any provider row is `lockLoginSet` over every row it will touch, the clicked
 row included, in id order: no row lock, row update or secret write for a member may come before it (a new
@@ -782,8 +783,10 @@ before and refuses, before it writes or seeds, a row whose scope moved between i
 token with the newest secret `updated_at` (tie: smallest id), its token ciphertext, `auth_status`,
 `auth_message`, check stamp (read through text, so its microseconds survive) and `auth_generation`, and
 records one strict `cli_provider.secret.set` event on the joining row (`source` `join`, `viaProviderId`
-the row it copied from, `setSize`) in the same transaction. The set's login replaces a token the joining
-row had; a set where no other row holds a token seeds nothing, and the joining row keeps its own. A clone
+the row it copied from, `setSize`) in the same transaction. A settings save that also advanced the row's
+generation (it typed a sign-out secret name, even with an empty value) keeps that generation instead of
+copying the set's, so it still supersedes a sign-out queued through the row. The set's login replaces a token
+the joining row had; a set where no other row holds a token seeds nothing, and the joining row keeps its own. A clone
 of a claude-code subscription row leaves the login token and the usage token out of its secret copy (and
 the login token out of the copy of legacy environment values), so an isolated clone starts without
 either and a joining clone gets the set's; every other secret is copied as before, and a clone of an

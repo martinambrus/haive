@@ -201,9 +201,11 @@ export async function seedJoinerFromSet(
     joinerId: string;
     members: { id: string }[];
     assertHeld: () => Promise<void>;
+    /** The joiner keeps the generation it holds: the request advanced it, and the set's would undo that. */
+    keepGeneration?: boolean;
   },
 ): Promise<{ events: AuditEvent[]; row?: typeof schema.cliProviders.$inferSelect }> {
-  const { userId, joinerId, members, assertHeld } = opts;
+  const { userId, joinerId, members, assertHeld, keepGeneration } = opts;
   const others = members.filter((m) => m.id !== joinerId).map((m) => m.id);
   if (others.length === 0) return { events: [] };
   const [source] = await tx
@@ -264,7 +266,7 @@ export async function seedJoinerFromSet(
       authStatus: source.authStatus,
       authMessage: source.authMessage,
       authLastCheckedAt: sql`${source.authCheckedAt}::timestamp`,
-      authGeneration: source.authGeneration,
+      ...(keepGeneration ? {} : { authGeneration: source.authGeneration }),
     })
     .where(eq(schema.cliProviders.id, joinerId))
     .returning();

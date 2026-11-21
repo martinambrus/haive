@@ -895,7 +895,13 @@ cliProviderRoutes.patch('/:id', async (c) => {
           })),
         ];
       } else if (joinsSet) {
-        const seeded = await seedJoinerFromSet(tx, { userId, joinerId: id, members, assertHeld });
+        const seeded = await seedJoinerFromSet(tx, {
+          userId,
+          joinerId: id,
+          members,
+          assertHeld,
+          keepGeneration: authSecretNames.length > 0,
+        });
         setEvents = [...leaveEvents, ...seeded.events];
         loginSeeded = seeded.row;
       }

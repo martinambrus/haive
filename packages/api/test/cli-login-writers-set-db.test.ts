@@ -995,6 +995,54 @@ describe.skipIf(!url)(
         },
       );
 
+      it('a settings save joining a set whose members hold equal-age tokens takes the token of the smallest id', async () => {
+        await differ('B');
+        const same = new Date('2024-03-03T00:00:00Z');
+        await db
+          .update(schema.cliProviderSecrets)
+          .set({ updatedAt: same })
+          .where(
+            and(
+              inArray(schema.cliProviderSecrets.providerId, [rows.A.id, rows.B.id]),
+              eq(schema.cliProviderSecrets.secretName, TOKEN),
+            ),
+          );
+        expect((await plain(rows.A.id, TOKEN)) === (await plain(rows.B.id, TOKEN))).toBe(false);
+        const smallest = rows.A.id < rows.B.id ? 'A' : 'B';
+        expect((await patch('C', { isolateAuth: false })).status).toBe(200);
+        await expectJoined(rows.C.id, smallest, 3);
+      });
+
+      it.each([
+        ['an isolated row un-isolated', 'C', { isolateAuth: false }],
+        ['an API-key row set to subscription', 'D', { authMode: 'subscription' }],
+      ] as [string, Key, object][])(
+        'a settings save of %s that names the token empty keeps the generation it advanced',
+        async (_name, key, change) => {
+          await differ('B');
+          // The row carries the generation of the set it joins, as a sign-out queued through it would.
+          await db
+            .update(schema.cliProviders)
+            .set({ authGeneration: rows.B.authGeneration })
+            .where(eq(schema.cliProviders.id, rows[key].id));
+          const own = await plain(rows[key].id, TOKEN);
+          const setGenerations = async () =>
+            (await Promise.all([rows.A.id, rows.B.id].map(provider))).map((p) => p.authGeneration);
+          const setBefore = await setGenerations();
+          expect((await patch(key, { ...change, envVars: { [TOKEN]: '' } })).status).toBe(200);
+          const p = await provider(rows[key].id);
+          expect([p.authStatus, p.authMessage]).toEqual([rows.B.authStatus, rows.B.authMessage]);
+          expect(await plain(rows[key].id, TOKEN)).toBe(await plain(rows.B.id, TOKEN));
+          expect((await plain(rows[key].id, TOKEN)) === own).toBe(false);
+          expect(await stampText(rows[key].id)).toBe(await stampText(rows.B.id));
+          expect(p.authGeneration, 'the advance survives the join seed').not.toBe(
+            rows.B.authGeneration,
+          );
+          expect(await setGenerations()).toEqual(setBefore);
+          expect((await joinEvents()).map((a) => a.targetId)).toEqual([rows[key].id]);
+        },
+      );
+
       it.each([
         ['an isolated row un-isolated', 'C', { isolateAuth: false }],
         ['an API-key row set to subscription', 'D', { authMode: 'subscription' }],
