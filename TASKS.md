@@ -977,7 +977,7 @@ Follow-ups found by the #1308 driver:
 
 ### T748 · FNF[empty-typed-secret] · the api stores a secret-named env var with an empty value
 
-status: open, main item in review as #1313 (2026-11-21: shared schema 400 naming the key, worker skips stored empties; dev has 0 stored empties) · kind: fix · found: #1306 driver 2026-11-21 · priority: P4
+status: open for follow-ups 1-5; main item DONE in #1313 (7a7b0c0fd, deployed 2026-11-21: shared schema 400 naming the key, worker skips stored empties; dev has 0 stored empties) · kind: fix · found: #1306 driver 2026-11-21 · priority: P4
 
 `api/src/routes/cli-providers.ts` ~:557 (create) and ~:865 (PATCH), via `shared/src/schemas/cli-providers.ts` ~:98 and `shared/src/cli-providers/provider-secret.ts` ~:25, accept a secret-named env var with an empty value and store an encrypted empty string; `worker/src/secrets/provider-secrets.ts` ~:33 then injects it as an empty env var. The web form drops empties, so this is API-only. PRE-EXISTING.
 
