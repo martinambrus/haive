@@ -48,6 +48,17 @@ still gets its own copy when it writes.
 A new or changed test file runs in under 5 s locally (`pnpm --filter <pkg> exec vitest run <file>
 --reporter=json --outputFile=<tmp>` reports per-file time). A file over that states its reason in the PR.
 
+## Running one package
+
+`pnpm typecheck` and `pnpm test` run through turbo, whose `typecheck` and `test` tasks depend on `^build`: every
+workspace package the target depends on is built first, `@haive/module-statistics` among them. A package-level run
+(`pnpm --filter @haive/worker typecheck`, or `pnpm --filter <pkg> exec vitest run <file>`) builds nothing, so in a
+fresh worktree, or after pulling a change to a dependency, a server package's generated `modules.generated.ts`
+cannot resolve `@haive/module-statistics/manifest`. Run the package's task through turbo instead
+(`pnpm exec turbo run typecheck --filter=@haive/worker`), or build its dependencies once first
+(`pnpm exec turbo run build --filter='@haive/worker^...'`, which builds database, shared, web-kit and the
+statistics module).
+
 ## How CI runs them
 
 Unit tests run in their own matrix job, separate from lint and typecheck: `@haive/worker` as two vitest shards
