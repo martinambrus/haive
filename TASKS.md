@@ -975,7 +975,7 @@ In vitest 5.0.3 `-u, --update [type]` takes an optional value, so `vitest run -u
 
 ### T713 · Custom-bundle agent hashes ignore the rendered body
 
-status: open, in review as #1302 (2026-11-21: version bumped 2 to 3 for six unbumped body changes, pin test ties the version to a rendered corpus; follow-ups 1-5 below) · kind: design · found: LSP cold-start guidance driver (#1278) · priority: P3
+status: open for follow-ups 1-5; the hash itself DONE #1302 (976d9dd80, deployed 2026-11-21 09:00Z: version bumped 2 to 3 for six unbumped body changes, pin test ties the version to a rendered corpus; follow-ups 1-5 below) · kind: design · found: LSP cold-start guidance driver (#1278) · priority: P3
 
 A custom-bundle agent's manifest hash covers its parsed spec and `AGENT_RENDERER_VERSION`, not the rendered body (`shared/src/templates/manifest.ts:104`, `worker/src/step-engine/template-manifest.ts:468`, `api/src/routes/upgrades.ts:399`, `steps/onboarding/01-upgrade-plan.ts:247`), so a body-only generator change (a retrieval block edit) never reaches an installed custom-bundle agent file until the spec or renderer version moves. Built-in agents follow the render. PRE-EXISTING. Decision needed: hash the rendered body for custom bundles too (offers an upgrade on every generator change) or bump `AGENT_RENDERER_VERSION` whenever a shared block changes.
 
