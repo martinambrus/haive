@@ -72,9 +72,10 @@ Docker Hub repository that does not exist, which is what "pull access denied" me
 and not an auth problem. `ensureSandboxCoreImage` (`sandbox/sandbox-core-image.ts`) is the
 one builder: fire-and-forget at boot beside `ensureDdevCa` so a pruned host heals BEFORE
 the first task, and again at every site that needs the image — the two build entry points
-(`handleBuildSandboxImageJob`, `resolveBaseImageId`) plus the three that `docker run` the
-base DIRECTLY (`runInSandbox`'s no-derived-image fallback, `ensureTaskAuthVolumes`,
-`ensureIdeVolumes`). Deliberately NOT the three sites that swallow their own failure
+(`handleBuildSandboxImageJob`, and `resolveBaseImageId`, which a composition ensures only when
+its Dockerfile names the core image) plus the three that `docker run` the base DIRECTLY
+(`runInSandbox`'s no-derived-image fallback, `ensureTaskAuthVolumes`, `ensureIdeVolumes`).
+Deliberately NOT the three sites that swallow their own failure
 (`usage-window/token-source.ts`, `npm-cache.ts`, the login chown helper) — a throwing call
 inside a deliberately-silent path changes its contract, and they inherit the healed image
 anyway. The in-flight promise is load-bearing rather than a boolean flag: cli-exec runs at
@@ -1176,6 +1177,17 @@ image stands. Nothing retains a previous legacy tag (retained references are con
 only the boot reaper removes it, once it is older than its age limit and no container uses it.
 Undo: revert the change; legacy tags return to the body-based ones and rebuild once more unless
 the old image is still there. No schema, data or image rollback is needed.
+
+A legacy launch and a contract-2 verification build ensure the core image under that same rule,
+`composedImageReferencesSandboxBase` (`sandbox/image-composer.ts`), the one function the hash
+reads too. A composition on its environment image, or on a pasted body that does not name the
+core image, ensures nothing, so such a launch neither waits on nor rebuilds a core image it does
+not build on. A provider extra that names the core image brings it back under the rule, for the
+hash and the ensure alike. The core image is still inspected, without being built, for the id a
+retained reference records, and the pinned launch still reads its id from that reference. Every
+tag is unchanged. A body that names the core image in another spelling than
+`haive-cli-sandbox:latest` is outside the rule for the hash and the ensure alike. Undo: revert
+the change; no schema, data, tag or image rollback is needed.
 
 Verification separates runtime/client checks (the inspected environment image) from selected LSP
 servers (the exact inspected composed image ID). Bootstrap 04 and the final step below run the
