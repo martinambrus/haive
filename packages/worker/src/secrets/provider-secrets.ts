@@ -7,6 +7,16 @@ import { CLAUDE_USAGE_OAUTH_SECRET } from '@haive/shared/claude-oauth';
 // resolveProviderSecrets skips these; readProviderSecret reads them.
 export const WORKER_ONLY_SECRET_NAMES: ReadonlySet<string> = new Set([CLAUDE_USAGE_OAUTH_SECRET]);
 
+/** A worker-only name is a key of the encrypted store; a typed plain-env entry of the same
+ *  name must not become a container env var. Returns a new object; the input is not mutated. */
+export function omitWorkerOnlyEnv(
+  envVars: Record<string, string> | null | undefined,
+): Record<string, string> {
+  return Object.fromEntries(
+    Object.entries(envVars ?? {}).filter(([name]) => !WORKER_ONLY_SECRET_NAMES.has(name)),
+  );
+}
+
 /** The resolver for every env builder. */
 export async function resolveProviderSecrets(
   db: Database,

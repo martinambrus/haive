@@ -1,3 +1,4 @@
+import { randomBytes } from 'node:crypto';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import type { StepContext } from '../../step-definition.js';
 
@@ -435,5 +436,23 @@ describe('contract-2 plugin evidence binding', () => {
       }),
     ).rejects.toThrow(/changed since detection/);
     expect(runInSandbox).not.toHaveBeenCalled();
+  });
+  it('keeps a worker-only usage grant typed into the plain env out of the sandbox env', async () => {
+    const { c, provider } = composedContext();
+    const grant = randomBytes(16).toString('hex');
+    provider.envVars = { CLAUDE_USAGE_OAUTH: grant, KEEP_ME: 'k' };
+    const detected = await installPluginsStep.detect!(c);
+    await installPluginsStep.apply(c, {
+      detected,
+      formValues: {},
+      iteration: 0,
+      previousIterations: [],
+    });
+    expect(runInSandbox.mock.calls.length > 0).toBe(true);
+    const env = (runInSandbox.mock.calls[0]![0] as { env: Record<string, string> }).env;
+    expect(Object.keys(env).includes('CLAUDE_USAGE_OAUTH')).toBe(false);
+    expect(Object.values(env).includes(grant)).toBe(false);
+    expect(env.KEEP_ME).toBe('k');
+    expect(Object.keys(provider.envVars).includes('CLAUDE_USAGE_OAUTH')).toBe(true);
   });
 });

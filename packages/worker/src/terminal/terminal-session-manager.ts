@@ -38,7 +38,7 @@ import { SANDBOX_WORKDIR } from '../sandbox/sandbox-runner.js';
 import type { McpServerSpec } from '../sandbox/mcp-config.js';
 import { buildDefaultMcpServers } from '../sandbox/mcp-config.js';
 import { cliAdapterRegistry } from '../cli-adapters/registry.js';
-import { resolveProviderSecrets } from '../secrets/provider-secrets.js';
+import { omitWorkerOnlyEnv, resolveProviderSecrets } from '../secrets/provider-secrets.js';
 import { resolveGitEnv, type GitEnvScope } from '../secrets/user-git-identity.js';
 
 const log = logger.child({ module: 'terminal-session-manager' });
@@ -311,7 +311,7 @@ export class TerminalSessionManager {
       ? cliAdapterRegistry.get(provider.name)
       : null;
     if (!adapter) {
-      return { ...(provider.envVars ?? {}), ...secrets, ...gitEnv };
+      return { ...omitWorkerOnlyEnv(provider.envVars), ...secrets, ...gitEnv };
     }
     return adapter.buildShellEnv(provider, secrets, gitEnv);
   }

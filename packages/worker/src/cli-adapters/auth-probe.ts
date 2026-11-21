@@ -1,5 +1,6 @@
 import type { CliAuthStatus } from '@haive/shared';
 import type { CliCommandSpec, CliProviderName, CliProviderRecord } from './types.js';
+import { omitWorkerOnlyEnv } from '../secrets/provider-secrets.js';
 
 export class CliAuthProbeUnsupportedError extends Error {
   readonly code = 'cli_auth_probe_unsupported';
@@ -189,7 +190,7 @@ export function buildAuthProbeCommand(
   provider: CliProviderRecord,
   executable: string,
 ): CliCommandSpec {
-  const env = provider.envVars ?? {};
+  const env = omitWorkerOnlyEnv(provider.envVars);
   switch (provider.name) {
     case 'claude-code':
       return {
