@@ -901,6 +901,24 @@ status: open · kind: chore · found: custom fix recovery driver (#1303) · prio
 
 `scripts/test/ci-gated-list.test.mjs` ~:208 hard-codes the gated file count, and the gated step and job limits in `.github/workflows/ci.yml` (~:386 and ~:489) sit at exactly 1.5x the modelled row time, so every new row fails `ci-step-independence.test.mjs` until both are raised by hand. Derive the count, or give the limits headroom with the formula in one place. PRE-EXISTING.
 
+### T743 · FNF[extension-lock-recovery] · the extension's window lock has no stale recovery
+
+status: open · kind: fix · found: #1304 driver 2026-11-21 · priority: P4
+
+The sibling `<dir>.extension-lock` (`docker/desktop-extension/bridge/main.go` ~:718, an `os.Mkdir`) stays after a crashed or closed Desktop window and needs manual removal. Reuse the lease record from `stack_lock.go`. PRE-EXISTING.
+
+### T744 · FNF[orphan-children-vs-lease] · a lock holder's children outlive its lease
+
+status: open · kind: fix · found: #1304 driver 2026-11-21 · priority: P4
+
+A killed bridge leaves its Compose child running while the install lease lapses after 60 s (`docker/desktop-extension/bridge/main.go` ~:781), and an updater death can orphan the archive and migrate containers (`packages/updater/src/docker.ts` ~:163, ~:208), which no guard sees. PRE-EXISTING.
+
+### T745 · FNF[attempt-row-early-refusals] · early updater refusals record placeholder fields
+
+status: open · kind: fix · found: #1304 driver 2026-11-21 · priority: P4
+
+Refusals raised before `readInstall()` (`install-locked`, `install-file-linked`; `packages/updater/src/cli.ts` ~:243, ~:295, ~:354) record channel `public` and an unknown current version in the attempt row. `release.md` now says so. PRE-EXISTING.
+
 ### T721 · The Claude usage grant reaches sandbox environments
 
 status: open (items 2-5 and 10-12; item 1 done #1281; items 6-9 done by #1300, 9cc4e4382, deployed 2026-11-21 04:30Z) · kind: security · found: login-set design (T720) 2026-11-19 · priority: P3 (was P1 until #1281)
@@ -1044,9 +1062,16 @@ Small leftovers, none blocking: (a) `TestStatusAndStopDoNotRequireMailpitPort` a
 
 ### T705 · Updater and Desktop extension share one lock
 
-status: open · kind: feature · found: Greptile P1 on #1259 · priority: P3
+status: open, in review as #1304 (2026-11-21: lease file `<install>/.haive-stack-lock`, beat 5 s, stale after 60 s of unchanged bytes, break by rename; follow-ups below) · kind: feature · found: Greptile P1 on #1259 · priority: P3
 
 The extension refuses Install/Start/Stop while this install's updater container runs and re-checks right before `compose up`, but a window remains between that final check and the Compose call: an upgrade launched in that instant can still have PostgreSQL restarted during `phaseSnapshot` (`packages/updater/src/run.ts`). Closing it needs a lock both sides take (the updater and its launchers, plus the extension's `<install>.extension-lock`), honored by the updater from some release onward; older updaters keep today's container-identity guard. Design the lock location (the updater container must see it) and its recovery after a crash.
+
+Follow-ups found by the #1304 driver:
+
+1. `InstallDirectory.read()` (`packages/updater/src/install-files.ts` ~:154) is unbounded for every caller except the lock. PRE-EXISTING, LOW.
+2. Cosmetic: `stack-lock.ts` ~:309 emits `stack-lock-lost` also when a failed restore was only the holder re-creating its record. REGRESSION (cosmetic), from #1304.
+3. On Windows a delete-pending lock file makes the exclusive create fail with access denied (`docker/desktop-extension/bridge/stack_lock.go` ~:319), read as a transient refusal. Fails closed; reasoned, not run on Windows.
+4. Record only: the database advisory lock (`journal.ts` ~:171) is session-scoped and the snapshot's postgres stop severs it (`run.ts` ~:373-375); the file lock now covers this for new updaters. The updater image pull (`api/src/routes/maintenance.ts` ~:648-652, up to 300 s) has no container yet, so the identity guard cannot see it; a lock-aware updater closes it once it starts.
 
 ### T704 · Installer port probe matches only the first port of a published range
 
