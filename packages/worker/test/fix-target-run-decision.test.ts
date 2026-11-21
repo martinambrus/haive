@@ -109,7 +109,11 @@ function stepRow(): Record<string, unknown> {
   };
 }
 
-function stepDef(capable: boolean, id = TARGET): StepDefinition {
+function stepDef(
+  capable: boolean,
+  id = TARGET,
+  shouldRun: () => Promise<boolean> = async () => false,
+): StepDefinition {
   return {
     metadata: {
       id,
@@ -120,7 +124,7 @@ function stepDef(capable: boolean, id = TARGET): StepDefinition {
       requiresCli: false,
     },
     ...(capable ? { fixConsumer: { version: 1 }, editsCodeOrTests: true } : {}),
-    shouldRun: async () => false,
+    shouldRun,
     async apply() {
       return { ok: true };
     },
@@ -145,14 +149,23 @@ const params = (db: Database, def: StepDefinition) => ({
   },
 });
 
-const gates = async (contract: unknown, rounds: number[], capable = true) => {
+const undefinedShouldRun = (async () => undefined) as unknown as () => Promise<boolean>;
+
+const gates = async (
+  contract: unknown,
+  rounds: number[],
+  capable = true,
+  shouldRun?: () => Promise<boolean>,
+) => {
   const skipAtAdmission = makeDb(contract, rounds);
   const admission = await willSkipBeforeAdmission(
-    params(skipAtAdmission.db, stepDef(capable)) as never,
+    params(skipAtAdmission.db, stepDef(capable, TARGET, shouldRun)) as never,
     stepRow() as never,
   );
   const advance = makeDb(contract, rounds);
-  const result = await advanceStep(params(advance.db, stepDef(capable)) as never);
+  const result = await advanceStep(
+    params(advance.db, stepDef(capable, TARGET, shouldRun)) as never,
+  );
   return { admission, advanced: result.status, reads: advance.state.reads };
 };
 
@@ -193,5 +206,35 @@ describe('run decision of a pinned fix target', () => {
     const ctx = { db: probe.db, taskId: 'task-1', round: ROUND } as never;
     expect(await stepRunDecision(ctx, stepDef(false))).toBe(false);
     expect(probe.state.reads).toBe(0);
+  });
+
+  it('reads nothing to decide a capable step whose shouldRun returns true', async () => {
+    const probe = makeDb(pin(TARGET), [ROUND]);
+    const ctx = { db: probe.db, taskId: 'task-1', round: ROUND } as never;
+    expect(
+      await stepRunDecision(
+        ctx,
+        stepDef(true, TARGET, async () => true),
+      ),
+    ).toBe(true);
+    expect(probe.state.reads).toBe(0);
+  });
+
+  it.each([
+    ['a step without the capability', false],
+    ['the capable pinned target', true],
+  ])(
+    'skips %s whose shouldRun resolves undefined, with no recorded request',
+    async (_n, capable) => {
+      const r = await gates(pin(TARGET), [ROUND + 1], capable, undefinedShouldRun);
+      expect(r.admission).toBe(true);
+      expect(r.advanced).toBe('skipped');
+    },
+  );
+
+  it('still runs the capable pinned target whose shouldRun resolves undefined, at a recorded round', async () => {
+    const r = await gates(pin(TARGET), [ROUND], true, undefinedShouldRun);
+    expect(r.admission).toBe(false);
+    expect(r.advanced).toBe('done');
   });
 });
