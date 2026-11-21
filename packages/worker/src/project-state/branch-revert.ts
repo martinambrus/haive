@@ -17,7 +17,7 @@ import { workspaceAnchor } from '../repo/worktree-paths.js';
 import { resolveGitEnv } from '../secrets/user-git-identity.js';
 import { handBackAfterMove, isHaiveProjection, revParse } from '../step-engine/git-merge.js';
 import type { StepContext } from '../step-engine/step-definition.js';
-import { addStepWarning } from '../step-engine/step-ownership.js';
+import { appendStepWarning } from '../step-engine/step-ownership.js';
 
 /** The task event recorded each time a branch had its Haive files put back. */
 export const PROJECTIONS_PUT_BACK_EVENT = 'branch.projections_put_back';
@@ -604,9 +604,9 @@ export async function warnStep(
   notes: readonly string[],
 ): Promise<void> {
   if (notes.length === 0) return;
-  let row = await ctx.db.query.taskSteps.findFirst({
+  const row = await ctx.db.query.taskSteps.findFirst({
     where: eq(schema.taskSteps.id, ctx.taskStepId),
   });
   if (!row) return;
-  for (const note of notes) row = await addStepWarning(ctx.db, row, note);
+  for (const note of notes) await appendStepWarning(ctx.db, row.id, note);
 }

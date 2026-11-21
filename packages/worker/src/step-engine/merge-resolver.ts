@@ -92,7 +92,7 @@ import {
 } from './merge-projections.js';
 import { buildSquashCommitMessage } from './squash-message.js';
 import {
-  addStepWarning,
+  appendStepWarning,
   assertOwnsStep,
   insertOwnedRun,
   updateOwnedStep,
@@ -529,9 +529,9 @@ async function reachDone(
         { branch: state.baseBranch, upstreamError },
         'base branch pushed, but its upstream was not set',
       );
-      current = await addStepWarning(
+      current = await appendStepWarning(
         db,
-        current,
+        current.id,
         `'${state.baseBranch}' was pushed, but git could not set its upstream: ${upstreamError}`,
       );
     }
@@ -554,9 +554,9 @@ async function reachDone(
           { worktree: finished.mergeDir, reason: kept },
           'base worktree kept after merge',
         );
-        updated = await addStepWarning(
+        updated = await appendStepWarning(
           tx,
-          current,
+          current.id,
           `The base worktree ${relUnder(ctx.repoPath, finished.mergeDir)} was kept, since git would not remove it: ${kept}.`,
         );
       }
@@ -676,7 +676,7 @@ async function squashFeatureMerge(
       squashing.squashMergeSha,
     );
     if (skipped) {
-      updated = await addStepWarning(tx, current, skipped);
+      updated = await appendStepWarning(tx, current.id, skipped);
       await updateOwnedStep(tx, current.id, { statusMessage: skipped });
     }
     const squashed: MergeResolveState = {
@@ -894,9 +894,9 @@ async function noteOwnFileFallbacks(
 ): Promise<TaskStepRow> {
   if (warnings.length === 0) return current;
   ctx.logger.warn({ dir, warnings }, "merge fell back on a side of Haive's own files");
-  return addStepWarning(
+  return appendStepWarning(
     db,
-    current,
+    current.id,
     `Haive's own files in the merge fell back on a side: ${warnings.join('; ')}.`,
   );
 }
@@ -1120,7 +1120,7 @@ async function putBackBeforeFeatureMerge(
     };
   }
   let updated = current;
-  for (const note of notes) updated = await addStepWarning(db, updated, note);
+  for (const note of notes) updated = await appendStepWarning(db, updated.id, note);
   return { current: updated };
 }
 
@@ -1595,9 +1595,9 @@ async function resolveMergePhaseInMove(
       state = relocated.state;
       if (leftovers) {
         await recordFixerLeftovers(db, params.taskId, current.id, state.featureBranch, leftovers);
-        current = await addStepWarning(
+        current = await appendStepWarning(
           db,
-          current,
+          current.id,
           fixerLeftoversWarning(params.taskId, leftovers),
         );
       }

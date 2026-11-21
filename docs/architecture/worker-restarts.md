@@ -424,7 +424,10 @@ step itself rather than through an advance, so it takes that step's hold as well
 merge resolver set on it, and every merge-state write of the merge resolver (`saveMergeState`, in a dir section or out of one: a section's
 epoch check is made once, and a Retry writes its row before the epoch), goes through `updateOwnedStep` (`step-ownership.ts`), which lands only
 while the row is still the pass's own, not `pending` (a Retry), `skipped` (a Skip) or `failed` (a
-Stop, which fails the row without moving the task's epoch). A run a pass records for its row goes
+Stop, which fails the row without moving the task's epoch). A note added to a step's warning goes through
+`appendStepWarning` (same file): one such write that adds the text once, so a warning another writer added since the
+caller read its row is kept. A retry note, a RAG index banner and a reset set or clear the whole column on purpose.
+A run a pass records for its row goes
 the same way (`insertOwnedRun`, at every insert site in step-runner, the merge resolver and the DAG
 executor), and so does a fan-out's reservation: the row is locked while it is still the pass's own,
 in the transaction that inserts. The lock comes after the insert, the order a Retry takes them in

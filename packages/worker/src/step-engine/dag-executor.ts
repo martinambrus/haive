@@ -82,7 +82,7 @@ import {
   type OpenMerge,
 } from './left-open-merge.js';
 import {
-  addStepWarning,
+  appendStepWarning,
   assertOwnsStep,
   insertOwnedRun,
   updateOwnedStep,
@@ -974,9 +974,9 @@ async function runLevelMerge(
     }
     if (leftovers) {
       await recordFixerLeftovers(db, m.params.taskId, m.current.id, branch, leftovers);
-      m.current = await addStepWarning(
+      m.current = await appendStepWarning(
         db,
-        m.current,
+        m.current.id,
         fixerLeftoversWarning(m.params.taskId, leftovers),
       );
     }

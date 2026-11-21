@@ -23,6 +23,7 @@ import { failGit, type FakeGit } from '../../../../test/support/fake-git.js';
 import { killGit, type KilledGit } from '../../../../test/support/kill-git.js';
 import { gitPreview } from '../../../repo/git-preview.js';
 import { runAppReadyStep } from './99-run-app-ready.js';
+import { applyWarningPatch } from '../../../../test/support/step-warning-patch.js';
 
 const BRANCH_READ = ['rev-parse', '--abbrev-ref', 'HEAD'];
 
@@ -183,7 +184,7 @@ describe('run-app ready gate apply when a push is asked for', () => {
         set: (v: Record<string, unknown>) => ({
           where: () => ({
             returning: async () => {
-              warningMessage = v.warningMessage as string | null;
+              warningMessage = applyWarningPatch(warningMessage, v.warningMessage);
               return [{ id: 'step1', warningMessage }];
             },
           }),

@@ -9,6 +9,7 @@ import { gate3CommitStep } from './10-gate-3-commit.js';
 import type { StepContext } from '../../step-definition.js';
 import { failGit } from '../../../../test/support/fake-git.js';
 import { killGit } from '../../../../test/support/kill-git.js';
+import { applyWarningPatch } from '../../../../test/support/step-warning-patch.js';
 
 const exec = promisify(execFile);
 const GIT_ENV = {
@@ -68,7 +69,7 @@ function mkCtx(
         return {
           where: () => ({
             returning: async () => {
-              warningMessage = v.warningMessage as string | null;
+              warningMessage = applyWarningPatch(warningMessage, v.warningMessage);
               return [{ id: 'step1', warningMessage }];
             },
           }),

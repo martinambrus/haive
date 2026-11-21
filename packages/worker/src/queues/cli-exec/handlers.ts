@@ -51,6 +51,7 @@ import {
 import { resolvePause } from '../../orchestrator/pause.js';
 import { cleanupTaskScratchWorkspace } from '../../repo/scratch-workspace.js';
 import { LEDGER_SUMMARY_MAX_CHARS, recordLedgerEntry } from '../../step-engine/task-ledger.js';
+import { appendStepWarning } from '../../step-engine/step-ownership.js';
 import {
   refreshAllCliVersions,
   refreshAllToolVersions,
@@ -380,18 +381,6 @@ async function runCliExecJob(
             codexAppServerFailure,
             codexBinaryVersion,
           );
-          if (payload.taskStepId) {
-            await db
-              .update(schema.taskSteps)
-              .set({
-                warningMessage: codexAppServerFallbackWarning(
-                  codexAppServerFailure,
-                  codexBinaryVersion,
-                ),
-                updatedAt: new Date(),
-              })
-              .where(eq(schema.taskSteps.id, payload.taskStepId));
-          }
           log.warn(
             {
               invocationId: row.id,
@@ -401,6 +390,12 @@ async function runCliExecJob(
             },
             'codex app-server transport failed; the task continues on codex exec',
           );
+          if (payload.taskStepId)
+            await appendStepWarning(
+              db,
+              payload.taskStepId,
+              codexAppServerFallbackWarning(codexAppServerFailure, codexBinaryVersion),
+            );
         } else if (codexBinaryVersion) {
           const dropped = await forgetCodexAppServerVerdictForOtherBinary(
             db,

@@ -54,6 +54,7 @@ import { syncBaseStep } from './00a-sync-base.js';
 import { onboardingPushStep } from '../onboarding/13-onboarding-push.js';
 import { syncProjectStateFromCheckout } from '../../../project-state/sync.js';
 import { createFakeDb } from '@haive/database/testing';
+import { applyWarningPatch } from '../../../../test/support/step-warning-patch.js';
 
 // create_pr pushes with a stored credential and opens the PR on the forge; neither is the subject here.
 vi.mock('../../../repo/credentials.js', () => ({
@@ -351,7 +352,8 @@ function makeDb(
     }
     if ('status' in patch) status = patch.status as string;
     if ('errorMessage' in patch) errorMessage = (patch.errorMessage as string | null) ?? null;
-    if ('warningMessage' in patch) warningMessage = (patch.warningMessage as string | null) ?? null;
+    if ('warningMessage' in patch)
+      warningMessage = applyWarningPatch(warningMessage, patch.warningMessage);
   };
   const db = {
     transaction: async (fn: (tx: unknown) => unknown) => fn(db),

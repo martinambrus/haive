@@ -6,6 +6,7 @@ import { createFakeDb } from '@haive/database/testing';
 import { ensureDirNoFollow, removeNoFollow, writeFileNoFollow } from '@haive/shared/fs-safe';
 import { afterEach, expect, it, vi } from 'vitest';
 import { git } from '../../../../test/support/nested-repo.js';
+import { applyWarningPatch } from '../../../../test/support/step-warning-patch.js';
 import type { StepContext } from '../../step-definition.js';
 import { postOnboardingStep } from '../onboarding/12-post-onboarding.js';
 import { upgradeCommitStep } from '../onboarding-upgrade/03-upgrade-commit.js';
@@ -70,6 +71,6 @@ it.each(['12', '03'])(
     const warning = out.warnings.find((note) => note.includes('empty in task worktrees'));
     expect(warning).toContain('"nested"');
     const row = await fake.db.query.taskSteps.findFirst();
-    expect(row?.warningMessage).toBe(warning);
+    expect(applyWarningPatch(null, row?.warningMessage)).toBe(warning);
   },
 );

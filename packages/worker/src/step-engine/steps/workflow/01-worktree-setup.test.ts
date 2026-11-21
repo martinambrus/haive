@@ -6,6 +6,7 @@ import { promisify } from 'node:util';
 import { describe, it, expect, vi } from 'vitest';
 import { schema, type Database } from '@haive/database';
 import { createFakeDb } from '@haive/database/testing';
+import { applyWarningPatch } from '../../../../test/support/step-warning-patch.js';
 import { nextFreeBranchName, worktreeSetupStep } from './01-worktree-setup.js';
 import type { StepApplyArgs, StepContext } from '../../step-definition.js';
 
@@ -246,7 +247,7 @@ it.each([false, true])(
         malformed ? 'commit landed' : 'empty in task worktrees',
       );
       const row = await fake.db.query.taskSteps.findFirst();
-      const note = String(row?.warningMessage);
+      const note = String(applyWarningPatch(null, row?.warningMessage));
       expect(note).toContain(malformed ? 'commit landed' : 'empty in task worktrees');
       expect(note).not.toContain(root);
       expect(note).not.toMatch(/(?:^|[\s'"])(?:\/|[A-Za-z]:[\\/]|\\\\)/);

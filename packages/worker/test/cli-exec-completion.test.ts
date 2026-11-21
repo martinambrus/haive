@@ -36,6 +36,10 @@ vi.mock('node:fs/promises', async (original) => {
   };
 });
 
+vi.mock('../src/cli-adapters/codex-app-server-verdict.js', async (original) => ({
+  ...(await original<object>()),
+  recordCodexAppServerRuntimeFailure: async () => {},
+}));
 vi.mock('../src/orchestrator/house-rules-similarity.js', () => ({
   scoreHouseRulesInBackground: stubs.scoreHouseRules,
 }));
@@ -69,6 +73,8 @@ import { handleCliExecJob } from '../src/queues/cli-exec/handlers.js';
 import { repoGitDataBoundary } from '../src/queues/cli-exec/gitfile-mask.js';
 import { WORKER_REPO_STORAGE_ROOT } from '../src/repo/worktree-git-boundary.js';
 import { CliLoginRequiredError } from '../src/queues/cli-exec/_shared.js';
+import { codexAppServerFallbackWarning } from '../src/cli-adapters/codex-app-server-verdict.js';
+import { applyWarningPatch } from './support/step-warning-patch.js';
 
 function tableNameOf(table: unknown): string {
   const sym = Object.getOwnPropertySymbols(table as object).find(
@@ -109,6 +115,8 @@ function fakeDb(opts: {
   task?: { status: string; deadAt: Date | null };
   /** Rows the provider-secrets read returns. */
   providerSecrets?: unknown[];
+  /** The step row a task_steps update lands on; unset, the update finds no row. */
+  stepOwned?: boolean;
 }) {
   const writes: Write[] = [];
   let txSeq = 0;
@@ -136,9 +144,11 @@ function fakeDb(opts: {
             ? opts.supersededBeforeStart
               ? []
               : [{ id: RUN }]
-            : 'summary' in set && opts.summaryLands
-              ? [opts.summaryLands]
-              : [];
+            : tableNameOf(table) === 'task_steps' && opts.stepOwned
+              ? [{ id: STEP }]
+              : 'summary' in set && opts.summaryLands
+                ? [opts.summaryLands]
+                : [];
           return {
             then: (res: (v: unknown) => unknown, rej: (e: unknown) => unknown) =>
               Promise.resolve(undefined).then(res, rej),
@@ -672,4 +682,36 @@ it('preserves snapshot failure through the actual exec failure writer', async ()
   await expect(handleCliExecJob(db, base)).rejects.toBe(failure);
   const failed = miningWrites(writes).find((w) => w.set.status === 'failed');
   expect(isCommittedSnapshotFailure(failed?.set.errorMessage as string)).toBe(true);
+});
+
+describe('a codex run that fell back to codex exec', () => {
+  const failure = { stage: 'stream' as const, detail: 'transport closed' };
+  const fellBack = {
+    ...ok,
+    codexAppServer: { failure, binaryVersion: '1.2.3' },
+  };
+  const job = {
+    ...base,
+    kind: 'cli' as const,
+    cliProviderId: 'provider-1',
+    agentMiningId: undefined,
+  };
+
+  it('adds the fallback note to the step warning in one write', async () => {
+    const { db, writes } = fakeDb({ stepOwned: true });
+    stubs.executeByKind.mockResolvedValue(fellBack);
+    await handleCliExecJob(db, job);
+    const stepWrites = writes.filter((w) => w.table === 'task_steps' && 'warningMessage' in w.set);
+    expect(stepWrites).toHaveLength(1);
+    expect(applyWarningPatch('earlier note', stepWrites[0]!.set.warningMessage)).toBe(
+      `earlier note ${codexAppServerFallbackWarning(failure, '1.2.3')}`,
+    );
+  });
+
+  it('still completes when the step is no longer the job own', async () => {
+    const { db } = fakeDb({});
+    stubs.executeByKind.mockResolvedValue(fellBack);
+    const result = await handleCliExecJob(db, job);
+    expect(result).toMatchObject({ exitCode: 0, rawOutput: ok.rawOutput });
+  });
 });
