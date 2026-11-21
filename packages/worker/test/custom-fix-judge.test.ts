@@ -226,3 +226,30 @@ describe('deadTaskResolution with the real fence', () => {
     );
   });
 });
+
+describe('deadTaskResolution for a task with no run list snapshot', () => {
+  beforeEach(() => fence.assert.mockReset());
+  const noList = (over: Partial<Parameters<typeof deadTaskResolution>[0]> = {}) =>
+    task({ runListSnapshot: null, currentStepId: REVIEW, ...over });
+
+  it('lists an unregistered pinned target as unresolved', () => {
+    const registry = registryOf(stub(REVIEW, 1), stub(AFTER, 2));
+    expect(
+      deadTaskResolution(noList({ executionContract: pinOf(TARGET) }), 'workflow_paths', registry),
+    ).toEqual({ unresolved: [TARGET], outsideList: null });
+  });
+
+  it('answers a task with no pin exactly as before', () => {
+    const registry = registryOf(stub(REVIEW, 1), stub(AFTER, 2));
+    expect(
+      deadTaskResolution(noList({ executionContract: null }), 'workflow_paths', registry),
+    ).toEqual(ORDINARY);
+  });
+
+  it('leaves a registered capable pinned target alone', () => {
+    const registry = registryOf(stub(REVIEW, 1), stub(AFTER, 2), stub(TARGET, 0, capable));
+    expect(
+      deadTaskResolution(noList({ executionContract: pinOf(TARGET) }), 'workflow_paths', registry),
+    ).toEqual(ORDINARY);
+  });
+});

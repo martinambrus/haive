@@ -1108,4 +1108,90 @@ describe.skipIf(!url)('recovery of a fix round on Postgres', () => {
       expect((await taskOf(id)).currentStepId).toBe(customTarget);
     });
   });
+
+  describe('a live task with no run list snapshot that pins a fix target', () => {
+    const TYPE = 'cfr_paths_type';
+    const CURRENT = 'cfr-p-current';
+    const PLAIN = 'module.cfp-plain.target';
+    const GHOST = 'module.cfp-ghost.target';
+    const OK = 'module.cfp-ok.target';
+    const legPin = (stepId: string): Leg => ({
+      name: 'paths',
+      type: TYPE,
+      ids: { TARGET: stepId, REVIEW: CURRENT, AFTER: CURRENT },
+      pin: { version: 1, guardedSpans: [], fixTarget: { stepId, capabilityVersion: 1 } },
+    });
+    const deps: DeadTaskBootDeps = {
+      enqueueStart: async () => undefined,
+      enqueueAdvance: enqueueRedrive,
+      redriveRetryDelaysMs: [],
+    };
+    const seedPaths = async (pin: object | null, current: string) => {
+      const leg = legPin(PLAIN);
+      const id = await seedTask(leg, {
+        type: TYPE,
+        currentStepId: current,
+        runListSnapshot: null,
+        executionContract: pin,
+      });
+      await seedRow({ ...leg, ids: { ...leg.ids, REVIEW: current } }, id, 'REVIEW', 0, 'pending');
+      return id;
+    };
+
+    beforeAll(async () => {
+      await db.insert(schema.taskTypeDefinitions).values({
+        slug: TYPE,
+        displayName: TYPE,
+        source: 'test',
+        runListStrategy: 'workflow_paths',
+      });
+      stub(CURRENT, 0, TYPE);
+      stub(PLAIN, 1, TYPE);
+      stub(OK, 2, TYPE, { fixConsumer: { version: 1 }, editsCodeOrTests: true });
+    });
+    afterAll(async () => {
+      await db.delete(schema.tasks).where(eq(schema.tasks.userId, userId));
+      await db.delete(schema.taskTypeDefinitions).where(eq(schema.taskTypeDefinitions.slug, TYPE));
+    });
+
+    it('is marked dead when the pinned target is registered without the capability', async () => {
+      const id = await seedPaths(legPin(PLAIN).pin, CURRENT);
+      expect(await reconcileDeadTasks(db, deps)).toMatchObject({ marked: 1, failed: 0 });
+      const t = await taskOf(id);
+      expect(t.deadAt).not.toBeNull();
+      expect(t.deadReason).toContain(PLAIN);
+    });
+
+    it('is marked dead by name when the pinned target is unregistered, and revived once it is registered', async () => {
+      const id = await seedPaths(legPin(GHOST).pin, CURRENT);
+      expect(await reconcileDeadTasks(db, deps)).toMatchObject({ marked: 1, failed: 0 });
+      expect((await taskOf(id)).deadAt).not.toBeNull();
+      const [dead] = await eventsOf(id, 'task.dead');
+      expect((dead!.payload as { unresolved?: string[] }).unresolved).toContain(GHOST);
+      expect(h.adds).toEqual([]);
+      stub(GHOST, 3, TYPE, { fixConsumer: { version: 1 }, editsCodeOrTests: true });
+      expect(await reconcileDeadTasks(db, deps)).toMatchObject({ marked: 0, revived: 1 });
+      expect((await taskOf(id)).deadAt).toBeNull();
+    });
+
+    it('is left alone when the pinned target is registered and capable', async () => {
+      const id = await seedPaths(legPin(OK).pin, CURRENT);
+      expect(await reconcileDeadTasks(db, deps)).toMatchObject({ marked: 0, revived: 0 });
+      expect((await taskOf(id)).deadAt).toBeNull();
+    });
+
+    it('does not judge a task with no pin whose current step is unregistered', async () => {
+      const id = await seedPaths(null, 'cfr-p-unregistered');
+      expect(await reconcileDeadTasks(db, deps)).toMatchObject({ marked: 0, revived: 0 });
+      expect((await taskOf(id)).deadAt).toBeNull();
+    });
+
+    it('keeps judging a static pinned task as before', async () => {
+      const custom = LEGS[1]!;
+      const id = await seedTask(custom);
+      await seedRow(custom, id, 'REVIEW', 0, 'pending');
+      expect(await reconcileDeadTasks(db, deps)).toMatchObject({ marked: 0, revived: 0 });
+      expect((await taskOf(id)).deadAt).toBeNull();
+    });
+  });
 });
