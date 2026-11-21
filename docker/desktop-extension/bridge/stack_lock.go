@@ -41,6 +41,7 @@ type lockConfig struct {
 	remove            func(string) error
 	beforeBreak       func()
 	write             func(*os.File, []byte) error
+	newTicker         func(time.Duration) (<-chan time.Time, func())
 }
 
 type lockRecord struct {
@@ -207,13 +208,20 @@ func (l *stackLock) beat() string {
 
 func (l *stackLock) heartbeat() {
 	defer close(l.done)
-	ticker := time.NewTicker(l.cfg.beat)
-	defer ticker.Stop()
+	newTicker := l.cfg.newTicker
+	if newTicker == nil {
+		newTicker = func(period time.Duration) (<-chan time.Time, func()) {
+			ticker := time.NewTicker(period)
+			return ticker.C, ticker.Stop
+		}
+	}
+	ticks, stopTicks := newTicker(l.cfg.beat)
+	defer stopTicks()
 	for {
 		select {
 		case <-l.stop:
 			return
-		case <-ticker.C:
+		case <-ticks:
 			if l.beat() == "lost" {
 				return
 			}

@@ -16,6 +16,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -90,6 +91,23 @@ func stopReq() request { return request{Action: "stop", Engine: "desktop-engine"
 func lockExists(b bridge) bool {
 	_, err := os.Lstat(lockPathOf(b))
 	return err == nil
+}
+
+// tickerFake stands in for the heartbeat timer: it records the period asked for and the test sends
+// the ticks by hand, so no heartbeat test waits for time to pass.
+type tickerFake struct {
+	period  chan time.Duration
+	ticks   chan time.Time
+	stopped chan struct{}
+}
+
+func fakeTicker(b *bridge) *tickerFake {
+	f := &tickerFake{period: make(chan time.Duration, 1), ticks: make(chan time.Time), stopped: make(chan struct{})}
+	b.lockCfg.newTicker = func(period time.Duration) (<-chan time.Time, func()) {
+		f.period <- period
+		return f.ticks, func() { close(f.stopped) }
+	}
+	return f
 }
 
 func TestStackLockWindowHook(t *testing.T) {
@@ -498,16 +516,19 @@ func TestStackLockLostDetection(t *testing.T) {
 	for _, mode := range []string{"foreign"} {
 		t.Run(mode, func(t *testing.T) {
 			b := fixture(t)
-			b.lockCfg.beat = 2 * time.Millisecond
+			fake := fakeTicker(&b)
 			l, err := b.acquireStackLock(context.Background())
 			if err != nil {
 				t.Fatal(err)
 			}
 			os.WriteFile(lockPathOf(b), rawRecord(randomHex(t), "updater", 1), 0644)
+			fake.ticks <- time.Time{}
+			// The beat that finds the foreign token ends the heartbeat. One that kept running would
+			// take a second tick instead.
 			select {
 			case <-l.done:
-			case <-time.After(2 * time.Second):
-				t.Fatal("heartbeat did not stop after the lock was lost")
+			case fake.ticks <- time.Time{}:
+				t.Fatal("heartbeat kept running after the lock was lost")
 			}
 			if !l.isLost() {
 				t.Fatal("loss not recorded")
@@ -524,22 +545,36 @@ func TestStackLockLostDetection(t *testing.T) {
 
 func TestStackLockHeartbeatRuns(t *testing.T) {
 	b := fixture(t)
-	b.lockCfg.beat = 2 * time.Millisecond
+	b.lockCfg.beat = 7 * time.Millisecond
+	fake := fakeTicker(&b)
+	// The write hook reports every record the heartbeat writes. It stays disarmed until the lock is
+	// held, so the first record (the acquisition's own) is not reported.
+	var armed atomic.Bool
+	beats := make(chan struct{})
+	write := b.lockCfg.resolved().write
+	b.lockCfg.write = func(f *os.File, data []byte) error {
+		err := write(f, data)
+		if armed.Load() {
+			beats <- struct{}{}
+		}
+		return err
+	}
 	l, err := b.acquireStackLock(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
-	deadline := time.Now().Add(2 * time.Second)
-	for {
+	armed.Store(true)
+	if period := <-fake.period; period != 7*time.Millisecond {
+		t.Fatalf("heartbeat armed a %v timer, want the configured 7ms", period)
+	}
+	for want := 2; want <= 4; want++ {
+		fake.ticks <- time.Time{}
+		<-beats
 		data, _ := os.ReadFile(lockPathOf(b))
 		var record lockRecord
-		if json.Unmarshal(data, &record) == nil && record.Seq >= 3 {
-			break
+		if err := json.Unmarshal(data, &record); err != nil || record.Seq != want {
+			t.Fatalf("after tick %d the record is %q (%v), want seq %d", want-1, data, err, want)
 		}
-		if time.Now().After(deadline) {
-			t.Fatalf("heartbeat never reached seq 3: %q", data)
-		}
-		time.Sleep(time.Millisecond)
 	}
 	l.releaseLock()
 	select {
@@ -547,8 +582,31 @@ func TestStackLockHeartbeatRuns(t *testing.T) {
 	default:
 		t.Fatal("heartbeat still running after release")
 	}
+	select {
+	case <-fake.stopped:
+	default:
+		t.Fatal("heartbeat timer not stopped by release")
+	}
+	select {
+	case fake.ticks <- time.Time{}:
+		t.Fatal("heartbeat still takes ticks after release")
+	default:
+	}
 	if lockExists(b) {
 		t.Fatal("lock not removed")
+	}
+}
+
+func TestStackLockHeartbeatDefaultCadence(t *testing.T) {
+	b := fixture(t)
+	fake := fakeTicker(&b)
+	l, err := b.acquireStackLock(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.releaseLock()
+	if period, want := <-fake.period, b.lockCfg.resolved().beat; period != want {
+		t.Fatalf("default heartbeat period %v, want the resolved default %v", period, want)
 	}
 }
 
@@ -712,27 +770,28 @@ func TestStackLockSecondReleaseWaitsForFirst(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	first, second := make(chan struct{}), make(chan struct{})
+	first, second, started := make(chan struct{}), make(chan struct{}), make(chan struct{})
 	go func() { l.releaseLock(); close(first) }()
 	select {
 	case <-entered:
-	case <-time.After(2 * time.Second):
-		t.Fatal("release never reached removal")
+	case <-first:
+		t.Fatal("release returned without reaching the removal")
 	}
-	go func() { l.releaseLock(); close(second) }()
+	go func() { close(started); l.releaseLock(); close(second) }()
+	<-started
+	// Nothing here can be waited on: a release that returned early would do so at once, and one that
+	// waits is blocked for good. Give the scheduler many turns, then look.
+	for i := 0; i < 1000; i++ {
+		runtime.Gosched()
+	}
 	select {
 	case <-second:
 		t.Fatal("second release returned before the first finished")
-	case <-time.After(100 * time.Millisecond):
+	default:
 	}
 	close(proceed)
-	for _, done := range []chan struct{}{first, second} {
-		select {
-		case <-done:
-		case <-time.After(2 * time.Second):
-			t.Fatal("release did not finish")
-		}
-	}
+	<-first
+	<-second
 	if lockExists(b) {
 		t.Fatal("lock remains")
 	}
