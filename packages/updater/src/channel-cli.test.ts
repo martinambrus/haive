@@ -219,7 +219,7 @@ describe('bundle preflight', () => {
     const bundle = await backupBundle(compose, 'new-run', parseReleaseManifest(manifest));
     await writeFile(join(dir, 'docker-compose.yml'), 'changed');
     await rm(join(dir, bundle.backupDir), { recursive: true });
-    vi.mocked(journal.findLiveRun).mockResolvedValueOnce({
+    vi.mocked(journal.findLiveRun).mockResolvedValue({
       id: 'new-run',
       fromVersion: '1.0.0',
       toVersion: manifest.version,
@@ -295,7 +295,7 @@ describe('bundle preflight', () => {
   it('cleans stale temps before interrupted-run recovery without fetching a target', async () => {
     const name = `..env.${randomUUID()}`;
     await writeFile(join(dir, name), env);
-    vi.mocked(journal.findLiveRun).mockResolvedValueOnce({
+    vi.mocked(journal.findLiveRun).mockResolvedValue({
       id: 'live',
       fromVersion: '1.0.0',
       toVersion: manifest.version,
@@ -1141,7 +1141,7 @@ describe('existing runs do not gain terminal attempt rows', () => {
     expect(journal.recordAttempt).not.toHaveBeenCalled();
   });
   it('does not create a row when recovery throws', async () => {
-    vi.mocked(journal.findLiveRun).mockResolvedValueOnce({
+    vi.mocked(journal.findLiveRun).mockResolvedValue({
       id: 'live',
       fromVersion: '1.0.0',
       toVersion: '9.9.9',

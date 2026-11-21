@@ -85,7 +85,7 @@ its separate Dockerfile; the printed, shell-quoted recovery command rebuilds and
 The context is removed after success or a failure before the local manifest write. See
 [Modules](modules.md#publishing-a-channel-scriptspublish-channelmjs) for the channel gates.
 
-Under the upgrade lock, before reading install settings, pulling images or calling `startRun`,
+Under the upgrade lock and the install stack lock, before reading install settings, pulling images or calling `startRun`,
 normal upgrades and interrupted-run recovery check `.env`, all four allowlisted compose files and
 `.haive-bundle.json` with `lstat`. Every present file must be a regular file. A symlink refuses with
 `install-file-linked`, exit 3, and the filename only; another non-regular entry refuses with
@@ -408,8 +408,10 @@ did not happen, from the admin page or from `./haive upgrade`, after the api tha
 gone. When the updater held the database and the lock, then neither created nor resumed a run, and
 the start was not `--check` or a dry plan, its last step (`recordAttempt`) writes one row with
 phase `preflight`: status `refused` with `metadata.refusal` (channel-changed,
-rollback-images-missing, a preflight refusal), or `failed` for an error. `error` is capped at 2048
-characters, `channel` is the resolved one, and an unusable `--version` is stored as `unknown`. In
+rollback-images-missing, install-locked, a preflight refusal), or `failed` for an error. `error` is capped at 2048
+characters, `channel` is the resolved one, and an unusable `--version` is stored as `unknown`. A refusal
+raised before the install settings are read (`install-locked`, `install-file-linked`) records `public` and an
+unknown current version. In
 the same transaction, after the insert, it deletes the attempt rows beyond the newest 50 (ordered
 `started_at DESC, id DESC`, never the row it just wrote), so repeated refusals cannot grow the
 table. An attempt row is exactly `phase = 'preflight' AND status IN ('refused', 'failed')`; no real
@@ -418,7 +420,8 @@ run `running`). That predicate lives twice, as `attemptRow` in the api and in th
 and the two must change together. No
 reader of a run matches these rows: `findLiveRun` wants `running`, `lastDoneChannel` wants `done`,
 and the one-live index covers only `running`. A failed insert is reported as `attempt-record-failed`
-and changes neither the exit code nor the outcome. A busy lock writes nothing. A start that fails
+and changes neither the exit code nor the outcome. A busy database lock writes nothing; a busy install
+stack lock is the `install-locked` refusal and does write a row. A start that fails
 before the database or the lock (bad argv, missing `DATABASE_URL`/`REDIS_URL`), an updater killed
 before its last step, and a target release older than this updater all leave no row.
 
@@ -431,6 +434,78 @@ a banner (`upgradeAttemptBanner`, gated on status and time, the error rendered a
 replaces the launch box once it is newer than the launch, and History lists the rows. Every instant
 in that response is ISO 8601 with an offset: the columns are `timestamp` holding the session's wall
 clock, and a zone-less string would be parsed as browser-local time.
+
+## The install stack lock
+
+The updater and the Desktop extension exclude each other through one lock file, `.haive-stack-lock`, in the
+install directory: the `/install` mount every launcher gives the updater, and the one path the extension's
+host bridge shares with it. Neither older guard can do the job alone. The updater's database lock is a session
+lock on the database that the snapshot phase stops, so it ends there. The extension's
+`<install>.extension-lock` directory is a sibling of the install directory, outside the mount. The
+extension's container check sees only a running updater container, so an upgrade launched after its final
+check could still have PostgreSQL stopped by the snapshot while Compose was starting or stopping services.
+Advisory file locks (flock, LockFileEx) are not used: host and container are different kernels behind a
+file-sharing layer. Only exclusive create and rename are relied on.
+
+The file is a lease. Its single line is JSON in this field order: `v` (1), `token` (32 lowercase hex),
+`holder` (`updater` or `extension`), `startedAt` (informational, never compared with a clock) and `seq`. It is
+created exclusively at mode 0644 and rewritten in place by its holder every 5 s with `seq` plus one, after a
+check that the file still carries the holder's own token; a file that is gone is created again with the holder's
+own record, since a contender's break and restore leaves the name absent for a moment. While a failed write
+leaves a streak open, an empty or partial record of its own is rewritten instead of reported as a loss. A contender that finds the file reads its
+bytes, then polls every 1 s: a missing file is free, changed bytes mean a live holder (busy), and bytes
+unchanged across 60 s of polls mean the holder is gone. It counts the sleeps it requested and never reads a
+wall or monotonic clock, so host sleep and clock skew between host, VM and container cannot age a live lock;
+an empty or partial record is just another byte string, and so is a file longer than 4096 bytes (a record is
+about 150): every read takes at most 4097 bytes and those are what is compared. Breaking a stale lock renames
+it to a tomb beside it (exactly one breaker wins) and re-reads the tomb: bytes other than the observed ones
+mean a fresh lock was displaced, which is put back by exclusive create and reported as busy. A tomb that cannot
+be removed after an equal re-read does not stop the acquisition (the updater logs `stack-lock-tomb-left`); the
+leftover `.haive-stack-lock.stale.*` file is harmless. At most 3 rounds, then busy. A holder that finds another
+token in the file has lost the lock: the updater logs `stack-lock-lost` once (the bridge has no log for it), the
+holder stops beating and never removes another holder's file. Release removes the file only when it carries the holder's token, is shared by every
+caller, never throws, and a failed removal leaves a lock that the stale rule clears. A non-regular entry at the
+name (a directory or a link) is refused and never followed or deleted. A holder name read from a record reaches
+an operator only as a plain token, since the file is writable by anyone with access to the install and
+messages render as markdown.
+
+The updater takes it right after its database lock and a first live-run read, before the install-file checks,
+and holds it through rollback. That first read only decides whether a `--check` needs the lock. The wait can
+outlast the run the read saw: the snapshot's database restart ends the first updater's session lock, so a second
+updater can pass it, read the first one's live run and wait while the first finishes. Under the lock the updater
+reads the live run again and recovers, cleans and records attempts from that read alone, so a finished run is
+never resumed or rolled back. It releases the lock in `finally` on every exit path and on SIGTERM (exit 143). That handler is new: as PID 1
+the updater ignored SIGTERM, so `docker stop` waited out its grace period and then killed it, and now it exits
+at once and frees the lock. SIGINT stays unhandled, because Ctrl-C is ignored by PID 1 there today. A busy lock
+refuses with `install-locked`, exit 3, and an attempt row like any preflight refusal. A dry plan, a `--check`
+with no live run (read-only) and a missing install directory take no lock (the last logs `stack-lock-skipped`).
+The extension takes it for Start and Stop, after reading the install settings and its first container check,
+before the bundle check and the port repick, and holds it through the Compose call. Install never takes it (the
+installer refuses a non-empty directory) and Status is read-only. The launchers take nothing: they return
+before the dangerous phase and are older-release code for the very upgrade that matters. Both implementations
+share the file name, record, beat (5 s), stale window (60 s), poll (1 s), rounds (3) and size cap (4096 bytes)
+(`packages/updater/src/stack-lock.ts`, `docker/desktop-extension/bridge/stack_lock.go`); a script test pins
+them equal. Every count, size and time limit is an optional parameter defaulting to a named constant.
+
+No release floor is needed. An updater that predates the lock never takes it: the extension's container-identity
+check, kept as it was (both checks), is then the only protection, with the window it always had. An extension
+that predates the lock ignores the file, and the updater keeps only what it had. Deploy order is free; full
+protection needs the target release's updater image (it runs the upgrade) and the updated extension.
+
+A holder that dies leaves the file. The next contender clears it after 60 s without a change, logging
+`stack-lock-waiting` and then `stack-lock-broken` when it is the updater, so a crash never wedges the shared
+lock; a lock whose holder lives is never broken, since it changes at least every 5 s. Residual windows: a
+holder frozen for more than 60 s (SIGSTOP, a paused VM) while a contender is awake can lose the lock and learns
+of it at its next beat; between the rename and the restore of a displaced fresh lock the name is briefly
+absent, so the displaced holder's next beat creates it again and a third party creating it first keeps it. A
+holder whose beat cannot be written (a full disk, say) stops refreshing the lock, which then lapses after 60 s;
+the extension's container-identity check still covers that case. A bridge process killed in the middle of Start
+(the Desktop window closes) can leave its Compose child running while the lease lapses, unlike the sibling
+directory lock, which never lapses. A container the updater started (the volume archive, a migration
+one-shot) can outlive the updater, and neither the lock nor the container-identity check covers it then.
+Docker Desktop's file-sharing coherence is not verified: the create is exclusive and no decision rests on a
+negative lookup. Delete `.haive-stack-lock` by hand
+only when no updater container and no extension operation is running.
 
 ## Own-module images
 
@@ -658,18 +733,20 @@ volume archive and the API/journal cannot be queried. Other installs and stopped
 updaters do not block these actions. This is a check of the released container launch
 contract, not an atomic mutex with the updater: a new upgrade can still begin after
 the final check, a crashed updater's unfinished journal is not read, and a custom
-entrypoint or host-run updater is outside this detection contract. A shared host lock
-would need participation by the updater and its launchers; released updaters do not
-honor the extension's lock. Changing the updater entrypoint or its install
+entrypoint or host-run updater is outside this detection contract. An updater that
+includes the [install stack lock](#the-install-stack-lock) closes that window; released
+updaters do not take it, so for them this check remains the only protection. Changing the
+updater entrypoint or its install
 environment requires updating the extension in the same release. A script test pins
 the Dockerfile entrypoint to the extension guard and both install identity environment
 arguments in the API and generated POSIX/PowerShell upgrade launchers. The updater
-and its launch protocol are unchanged.
+launch protocol is unchanged.
 
 A cross-process directory lock serializes extension mutations. If a hard termination leaves
 `~/haive_desktop.extension-lock`, inspect this install's containers and ensure no
 operation remains before removing that lock directory. Normal completion and handled
-signals release it. Keep the tab open during long operations. Processes have a
+signals release it. Start and Stop also take the install stack lock inside it, which a
+crash clears by itself after 60 s. Keep the tab open during long operations. Processes have a
 30-minute deadline; a timeout or close can leave a completed install or partially
 started stack, so refresh status and inspect logs before retrying. Cancellation kills
 the direct child only; installer grandchildren can outlive it even after lock release. No automatic
@@ -787,6 +864,10 @@ live first-start check below on the owner's native Desktop version.
 6. During an in-app upgrade for this install, try Start and Stop: both must refuse
    with the upgrade message and leave services alone, including while the updater
    archives PostgreSQL. A direct Install request must also refuse before delegation.
+   Kill a running updater container of a release that includes the install stack lock:
+   Start and Stop must wait about a minute, until its lock is judged abandoned, then
+   work. While Start is in flight, an upgrade of this install must refuse with
+   `install-locked` instead of snapshotting.
    A Docker inspection failure that persists after one retry must refuse these
    actions, while another install's updater must not block this one. After the updater finishes, Stop; verify this
    project's services stop and its volumes survive. Start again and verify the
@@ -795,7 +876,9 @@ live first-start check below on the owner's native Desktop version.
    disappears while the directory and volumes remain. Reinstalling the extension
    must reattach to this same install rather than reinstall it.
 
-Rollback of this code is a git revert, with no database migration. Port values
+Rollback of this code is a git revert, with no database migration. A leftover
+`.haive-stack-lock` in an install directory is inert for the previous code; delete it
+only when no updater container and no extension operation is running. Port values
 selected by Start remain in the install's `.env` after rollback; retain those valid
 values, or privately restore only the three port lines while stopped after checking
 availability. Never replace the file with newly generated secrets. Viewer consent

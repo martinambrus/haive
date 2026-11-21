@@ -150,7 +150,11 @@ export class InstallDirectory {
     return info;
   }
 
-  async read(name: string): Promise<{ bytes: Buffer; owner: Owner } | undefined> {
+  /** With `maxBytes`, reads at most maxBytes + 1 bytes, so an oversize file never costs more than that. */
+  async read(
+    name: string,
+    maxBytes?: number,
+  ): Promise<{ bytes: Buffer; owner: Owner } | undefined> {
     const file = await open(
       this.path(name),
       constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK,
@@ -162,7 +166,16 @@ export class InstallDirectory {
     try {
       const owner = await file.stat();
       if (!owner.isFile()) throw new Error(`refusing non-regular install file: ${name}`);
-      return { bytes: await file.readFile(), owner };
+      if (maxBytes === undefined) return { bytes: await file.readFile(), owner };
+      const limit = maxBytes + 1;
+      const buffer = Buffer.alloc(limit);
+      let length = 0;
+      while (length < limit) {
+        const { bytesRead } = await file.read(buffer, length, limit - length, null);
+        if (bytesRead === 0) break;
+        length += bytesRead;
+      }
+      return { bytes: buffer.subarray(0, length), owner };
     } finally {
       await file.close();
     }
@@ -188,6 +201,36 @@ export class InstallDirectory {
       await unlink(this.path(temp)).catch((error: unknown) => {
         if (!absent(error)) throw error;
       });
+    }
+  }
+
+  /** Create-or-fail: EEXIST propagates and is how a contender learns the name is taken. */
+  async createExclusive(name: string, bytes: Buffer): Promise<void> {
+    const file = await open(this.path(name), 'wx', 0o644);
+    try {
+      await preserveOwner(file, this.owner);
+      await file.writeFile(bytes);
+      await file.sync();
+      await file.close();
+    } catch (error) {
+      await file.close().catch(() => {});
+      await unlink(this.path(name)).catch(() => {});
+      throw error;
+    }
+  }
+
+  /** Rewrite an existing file in place; never creates it, never follows a link. */
+  async overwrite(name: string, bytes: Buffer): Promise<void> {
+    const file = await open(
+      this.path(name),
+      constants.O_WRONLY | constants.O_TRUNC | constants.O_NOFOLLOW | constants.O_NONBLOCK,
+    );
+    try {
+      if (!(await file.stat()).isFile())
+        throw new Error(`refusing non-regular install file: ${name}`);
+      await file.writeFile(bytes);
+    } finally {
+      await file.close();
     }
   }
 

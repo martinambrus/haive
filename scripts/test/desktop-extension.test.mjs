@@ -259,6 +259,54 @@ test('upgrade guard identity matches the updater image and every launcher', () =
   }
 });
 
+test('install stack lock wire contract matches in the updater and the bridge', () => {
+  const read = (path) => readFileSync(new URL(`../../${path}`, import.meta.url), 'utf8');
+  const fix =
+    'Change packages/updater/src/stack-lock.ts and docker/desktop-extension/bridge/stack_lock.go together';
+  const ts = read('packages/updater/src/stack-lock.ts');
+  const go = read('docker/desktop-extension/bridge/stack_lock.go');
+  const tsConst = (name) => {
+    const value = ts.match(new RegExp(`^export const ${name} = ('[^'\\n]*'|\\d+);$`, 'm'))?.[1];
+    assert.ok(value, `Cannot parse ${name} in stack-lock.ts. ${fix}.`);
+    return value.startsWith("'") ? value.slice(1, -1) : Number(value);
+  };
+  const goConst = (name) => {
+    const value = go.match(new RegExp(`^const ${name} = ("[^"\\n]*"|\\d+)$`, 'm'))?.[1];
+    assert.ok(value, `Cannot parse ${name} in stack_lock.go. ${fix}.`);
+    return value.startsWith('"') ? value.slice(1, -1) : Number(value);
+  };
+  for (const [tsName, goName] of [
+    ['STACK_LOCK_NAME', 'stackLockName'],
+    ['STACK_LOCK_BEAT_MS', 'stackLockBeatMs'],
+    ['STACK_LOCK_STALE_MS', 'stackLockStaleMs'],
+    ['STACK_LOCK_POLL_MS', 'stackLockPollMs'],
+    ['STACK_LOCK_ROUNDS', 'stackLockRounds'],
+    ['STACK_LOCK_MAX_BYTES', 'stackLockMaxBytes'],
+  ]) {
+    assert.equal(goConst(goName), tsConst(tsName), `${tsName} and ${goName} drifted. ${fix}.`);
+  }
+
+  const written = ts.match(/JSON\.stringify\(\{([^}]*)\}\)/)?.[1];
+  assert.ok(written, `Cannot parse the record the updater writes. ${fix}.`);
+  const record = go.match(/type lockRecord struct \{([^}]*)\}/)?.[1];
+  assert.ok(record, `Cannot parse the Go lockRecord. ${fix}.`);
+  assert.deepEqual(
+    [...record.matchAll(/json:"([^"]+)"/g)].map((tag) => tag[1]),
+    written.split(',').map((field) => field.split(':')[0].trim()),
+    `The lock record fields or their order drifted. ${fix}.`,
+  );
+
+  for (const [source, pattern, what] of [
+    [ts, /options\.holder \?\? 'updater'/, 'the updater holder name'],
+    [ts, /outcome\.holder === 'extension'/, 'the extension holder name'],
+    [go, /case "updater":/, 'the updater holder name'],
+    [go, /case "extension":/, 'the extension holder name'],
+    [go, /Holder: "extension"/, 'the record the extension writes'],
+  ]) {
+    assert.match(source, pattern, `Cannot find ${what}. ${fix}.`);
+  }
+});
+
 test('install failures render folder recovery advice from resolved and rejected host results', async () => {
   const directory = '/home/test/haive_desktop';
   for (const reason of [
