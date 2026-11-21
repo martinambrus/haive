@@ -39,7 +39,7 @@
     "bullmq": "^6.3.11",
     "dockerode": "^5.0.1",
     "drizzle-orm": "0.45.2",
-    "hono": "^4.13.12",
+    "hono": "^4.13.16",
     "ioredis": "^6.0.0",
     "jsonwebtoken": "^9.0.2",
     "nodemailer": "10.5.0",
