@@ -37,10 +37,29 @@ export interface FlatTomlFields {
   developer_instructions?: string;
 }
 
+const TOML_SHORT_ESCAPES: Record<string, string> = {
+  b: '\b',
+  t: '\t',
+  n: '\n',
+  f: '\f',
+  r: '\r',
+};
+
+/** Decode TOML 1.0 string escapes. A malformed or non-scalar \u / \U keeps the
+ *  character after the backslash, as does any unknown escape. */
+function decodeTomlEscapes(raw: string): string {
+  return raw.replace(/\\(?:u([0-9A-Fa-f]{4})|U([0-9A-Fa-f]{8})|([\s\S]))/g, (m, u4, u8, ch) => {
+    if (ch !== undefined) return TOML_SHORT_ESCAPES[ch] ?? ch;
+    const code = parseInt(u4 ?? u8, 16);
+    const isScalar = code <= 0x10ffff && !(code >= 0xd800 && code <= 0xdfff);
+    return isScalar ? String.fromCodePoint(code) : m.slice(1);
+  });
+}
+
 /** Hand-rolled TOML parser that handles the three keys Haive's emitter
  *  produces: `name = "…"`, `description = "…"`, and
- *  `developer_instructions = """…"""`. Quoted strings unescape `\"`, `\\`,
- *  and triple-quoted blocks unescape `\"""`. Anything else is ignored — TOML
+ *  `developer_instructions = """…"""`. Both quoted and triple-quoted strings
+ *  decode the TOML 1.0 escape set. Anything else is ignored — TOML
  *  files with extra keys still parse, but lossily. */
 export function parseFlatToml(text: string): FlatTomlFields {
   const out: FlatTomlFields = {};
@@ -65,22 +84,15 @@ export function parseFlatToml(text: string): FlatTomlFields {
       pos += 3;
       const endIdx = text.indexOf('"""', pos);
       if (endIdx < 0) break;
-      const raw = text.slice(pos, endIdx);
-      value = raw
-        .replace(/\\"\\"\\"/g, '"""')
-        .replace(/\\\\/g, '\\')
-        .replace(/^\n/, '');
+      value = decodeTomlEscapes(text.slice(pos, endIdx).replace(/^\n/, ''));
       pos = endIdx + 3;
     } else if (text[pos] === '"') {
       pos += 1;
-      let collected = '';
+      let raw = '';
       while (pos < text.length) {
         const ch = text[pos]!;
         if (ch === '\\' && text[pos + 1] !== undefined) {
-          const next = text[pos + 1]!;
-          if (next === 'n') collected += '\n';
-          else if (next === 't') collected += '\t';
-          else collected += next;
+          raw += ch + text[pos + 1]!;
           pos += 2;
           continue;
         }
@@ -88,10 +100,10 @@ export function parseFlatToml(text: string): FlatTomlFields {
           pos += 1;
           break;
         }
-        collected += ch;
+        raw += ch;
         pos += 1;
       }
-      value = collected;
+      value = decodeTomlEscapes(raw);
     } else {
       // Bare value — read until newline.
       const nlIdx = text.indexOf('\n', pos);

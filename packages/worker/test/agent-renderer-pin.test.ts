@@ -12,6 +12,7 @@ import {
 /** Append-only: one hash of the whole rendered corpus per renderer version. */
 const RECORDED_RENDER_HASHES: Record<number, string> = {
   3: 'da45695aba92efcf413c6779b13bab2e55466fa4441fce442772f9cfe4802531',
+  4: 'cc60435b284943bd72b2b7d2f94ea8769c746d02b20b19fa7c9f212be19d9a85',
 };
 
 const FULL: AgentSpec = {
@@ -87,9 +88,13 @@ const MULTILINE: AgentSpec = {
   id: 'pin-multiline',
   description: 'Prüft Änderungen\nZeile zwei\tmit Tab',
 };
+const CONTROLS: AgentSpec = {
+  ...BARE,
+  id: 'pin-controls',
+  description: 'Reads CR\r, U+0001\u0001, DEL\u007f, BS\u0008, a "quote" and a back\\slash',
+};
 const EXEMPT: AgentSpec[] = [...RESPONSE_STYLE_EXEMPT_IDS].sort().map((id) => ({ ...BARE, id }));
-// The corpus pins bytes as rendered today, including output a TOML parser rejects (the multi-line
-// description in TOML); a fixture edit moves the hash like a renderer change.
+// Multi-line and control-character descriptions render as TOML escapes; a fixture edit moves the hash like a renderer change.
 const SPECS: AgentSpec[] = [
   FULL,
   BARE,
@@ -100,6 +105,7 @@ const SPECS: AgentSpec[] = [
   YES_ID,
   PROSE,
   MULTILINE,
+  CONTROLS,
   ...EXEMPT,
 ];
 
@@ -227,6 +233,23 @@ describe('the pinned corpus exercises every conditional block', () => {
     expect(toml).toContain('back\\\\slash');
     expect(toml).toContain('\\"quote\\"');
     expect(toml).toContain('\\"\\"\\"text\\"\\"\\"');
+  });
+
+  it('escapes newlines and control characters in TOML and keeps the sentence rule', () => {
+    const toml = (spec: AgentSpec) =>
+      render(spec, { dir: '.codex/agents', format: 'toml', supportsLsp: false });
+    const multi = toml(MULTILINE);
+    expect(multi).toContain('Zeile zwei\\tmit Tab');
+    expect(multi).toContain('Prüft Änderungen\\nZeile zwei');
+    const controls = toml(CONTROLS);
+    for (const escape of ['\\r', '\\u0001', '\\u007F', '\\b']) {
+      expect(controls).toContain(escape);
+    }
+    const claudeControls = frontmatterOf(render(CONTROLS, claude(true))).join('\n');
+    expect(claudeControls).toContain('\\u007f');
+    expect(claudeControls).not.toContain('\u007F');
+    expect(render(PROSE, claude(true))).toContain('that API gateway reviewer');
+    expect(render(BARE, claude(true))).toContain('that does little');
   });
 
   it('keeps two keys in the Gemini frontmatter', () => {

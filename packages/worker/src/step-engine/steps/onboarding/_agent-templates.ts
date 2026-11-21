@@ -85,7 +85,9 @@ const SCOPE_FENCE_SECURITY_STEP = {
   body: SCOPE_FENCE_IN_SCOPE_FLAG.join('\n'),
 };
 
+// A first word with a later capital or digit (API, GitHub, S3) keeps its first character.
 function firstCharLower(s: string): string {
+  if (/^\S\S*[\p{Lu}\p{N}]/u.test(s)) return s;
   return s.length === 0 ? s : s.charAt(0).toLowerCase() + s.slice(1);
 }
 
@@ -200,12 +202,30 @@ export function buildAgentFileForTarget(spec: AgentSpec, target: AgentRenderTarg
   return buildAgentFileMarkdown(spec, { supportsLsp });
 }
 
+const TOML_SHORT_ESCAPES: Record<string, string> = {
+  '\\': '\\\\',
+  '"': '\\"',
+  '\b': '\\b',
+  '\t': '\\t',
+  '\n': '\\n',
+  '\f': '\\f',
+  '\r': '\\r',
+};
+
+function tomlEscape(ch: string): string {
+  return (
+    TOML_SHORT_ESCAPES[ch] ?? `\\u${ch.charCodeAt(0).toString(16).toUpperCase().padStart(4, '0')}`
+  );
+}
+
 function tomlBasicString(value: string): string {
-  return `"${value.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`;
+  return `"${value.replace(/[\\"\u0000-\u001F\u007F]/g, tomlEscape)}"`;
 }
 
 function tomlMultilineBasicString(value: string): string {
-  const escaped = value.replace(/\\/g, '\\\\').replace(/"""/g, '\\"\\"\\"');
+  const escaped = value.replace(/[\\\u0000-\u0008\u000B-\u001F\u007F]|"""/g, (m) =>
+    m === '"""' ? '\\"\\"\\"' : tomlEscape(m),
+  );
   return `"""\n${escaped}\n"""`;
 }
 

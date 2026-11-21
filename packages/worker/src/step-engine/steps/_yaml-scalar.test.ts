@@ -70,6 +70,48 @@ describe('yamlScalar', () => {
   });
 });
 
+describe('yamlScalar with characters YAML forbids in a stream', () => {
+  const FORBIDDEN = /[\u0000-\u001F\u007F-\u009F\u2028\u2029\uFFFE\uFFFF]/;
+  const CHARS = [
+    '\u0000',
+    '\u0001',
+    '\u0008',
+    '\t',
+    '\u000B',
+    '\f',
+    '\r',
+    '\n',
+    '\u001F',
+    '\u007F',
+    '\u0080',
+    '\u0085',
+    '\u009F',
+    '\u2028',
+    '\u2029',
+    '\uFFFE',
+    '\uFFFF',
+  ];
+  for (const ch of CHARS) {
+    const label = `U+${ch.charCodeAt(0).toString(16).toUpperCase().padStart(4, '0')}`;
+    it(`quotes and escapes ${label}`, () => {
+      const value = `a${ch}b`;
+      const out = yamlScalar(value);
+      expect(out.startsWith('"')).toBe(true);
+      expect(out).not.toMatch(FORBIDDEN);
+      for (const version of ['1.1', '1.2'] as const) {
+        expect(parse(`description: ${out}`, { version }).description).toBe(value);
+      }
+      expect(unquoteYamlScalar(out)).toBe(value);
+    });
+  }
+
+  it('keeps printable non-ASCII plain and unchanged', () => {
+    for (const value of ['é', '日本語', 'a \u{1F600} b', 'a\u00A0b', 'a\uFEFFb']) {
+      expect(yamlScalar(value)).toBe(value);
+    }
+  });
+});
+
 describe('unquoteYamlScalar', () => {
   it('is the inverse of yamlScalar', () => {
     for (const value of TRICKY) {
