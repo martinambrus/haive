@@ -288,7 +288,7 @@ it('retries a rejected-refresh snapshot after losing the auth lock', async () =>
       first = false;
       h.release.assertHeld.mockRejectedValue(new Error('lock lost'));
     }
-    throw new ClaudeOauthError('refresh_token', 400, 'invalid_grant', 'rejected');
+    throw new ClaudeOauthError('refresh_token', 400, 'invalid_grant');
   });
   await runUsagePollTick(fake.db as unknown as Database);
   expect(fake.rows(schema.usageWindowSnapshots)).toHaveLength(0);

@@ -1,3 +1,4 @@
+import { randomBytes } from 'node:crypto';
 import { createServer } from 'node:http';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
@@ -48,13 +49,74 @@ describe('a refused Claude token refresh', () => {
     expect(isClaudeRefreshRejected(await refusal())).toBe(false);
   });
 
-  it('keeps the message it had, status and body excerpt included', async () => {
+  it('keeps the status in its message', async () => {
     respond(400, JSON.stringify({ error: 'invalid_grant' }));
     expect(String(await refusal())).toContain('claude oauth refresh_token: http 400');
   });
 
   it('is not a rejection for an error that is not a token refusal', () => {
     expect(isClaudeRefreshRejected(new Error('invalid_grant'))).toBe(false);
+  });
+});
+
+describe('a refused Claude token exchange never carries the endpoint text', () => {
+  const tok = randomBytes(16).toString('hex');
+  const echoes: [string, number, string][] = [
+    [
+      'an error_description',
+      400,
+      JSON.stringify({ error: 'invalid_grant', error_description: tok }),
+    ],
+    ['an error field that is itself the text', 400, JSON.stringify({ error: tok })],
+    ['a plain-text body', 400, `denied ${tok}`],
+    ['a server error', 503, `upstream ${tok}`],
+  ];
+  const surfaces = (err: unknown) => {
+    const e = err as Error;
+    return [
+      String(err),
+      e.message,
+      e.stack ?? '',
+      JSON.stringify(Object.fromEntries(Object.entries(e))),
+    ];
+  };
+
+  it.each(echoes)('drops the text of %s', async (_name, status, body) => {
+    respond(status, body);
+    const err = await refusal();
+    for (const surface of surfaces(err)) expect(surface).not.toContain(tok);
+    expect(String(err)).toContain(`http ${status}`);
+  });
+
+  it('keeps invalid_grant as the code and still reads as a rejection', async () => {
+    respond(400, echoes[0]![2]);
+    const err = (await refusal()) as { code: string | null };
+    expect(err.code).toBe('invalid_grant');
+    expect(String(err)).toContain('(invalid_grant)');
+    expect(isClaudeRefreshRejected(err)).toBe(true);
+  });
+
+  it('has no code for an error value outside the standard set', async () => {
+    respond(400, echoes[1]![2]);
+    expect(((await refusal()) as { code: string | null }).code).toBeNull();
+    respond(400, JSON.stringify({ error: 'made_up_code' }));
+    expect(((await refusal()) as { code: string | null }).code).toBeNull();
+  });
+
+  it('rejects a success body that is not JSON with a fixed message', async () => {
+    respond(200, `${tok} not json`);
+    const err = await refusal();
+    for (const surface of surfaces(err)) expect(surface).not.toContain(tok);
+    expect((err as Error).message).toBe('claude oauth: invalid token response');
+  });
+
+  it('rethrows a network failure unchanged', async () => {
+    const boom = new TypeError('fetch failed');
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => Promise.reject(boom)),
+    );
+    expect(await refusal()).toBe(boom);
   });
 });
 

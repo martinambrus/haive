@@ -9,7 +9,7 @@ vi.mock('@haive/database', async (original) => ({
   ...(await original<typeof import('@haive/database')>()),
   tryCliAuthLock: authLock.acquire,
 }));
-import { createHash, randomUUID } from 'node:crypto';
+import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { Redis } from 'ioredis';
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -228,6 +228,23 @@ describe('POST /:providerId/usage-auth/complete', () => {
     const retry = await post('complete', { code: `${CODE}#${state}` });
     expect(retry.status).toBe(200);
     expect(exchanges()).toHaveLength(1);
+  });
+
+  it('answers a refused exchange with its status and code, never the endpoint text', async () => {
+    const tok = randomBytes(16).toString('hex');
+    h.fetch.mockImplementation(
+      async () =>
+        new Response(JSON.stringify({ error: 'invalid_grant', error_description: tok }), {
+          status: 400,
+        }),
+    );
+    const { state } = await startAuthorization();
+    const res = await post('complete', { code: `${CODE}#${state}` });
+    expect(res.status).toBe(400);
+    const text = await res.text();
+    expect(text).not.toContain(tok);
+    expect(text).toContain('http 400');
+    expect(text).toContain('invalid_grant');
   });
 });
 
