@@ -351,6 +351,23 @@ func TestStackLockReleaseRetries(t *testing.T) {
 	}
 }
 
+func TestStackLockReleasePauseIsConfigurable(t *testing.T) {
+	b := fixture(t)
+	b.os = "windows"
+	var pauses []time.Duration
+	b.sleep = func(d time.Duration) { pauses = append(pauses, d) }
+	b.lockCfg.releasePause = 7 * time.Millisecond
+	b.lockCfg.remove = func(string) error { return os.ErrPermission }
+	l, err := b.acquireStackLock(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	l.releaseLock()
+	if !reflect.DeepEqual(pauses, []time.Duration{7 * time.Millisecond, 7 * time.Millisecond, 7 * time.Millisecond}) {
+		t.Fatalf("pauses %v, want three of 7ms", pauses)
+	}
+}
+
 func TestStackLockBreakRenameFailureIsBusy(t *testing.T) {
 	b := fixture(t)
 	b.lockCfg = lockConfig{stale: 3 * time.Millisecond, poll: time.Millisecond}
@@ -768,7 +785,7 @@ func TestStackLockObservationHonorsContext(t *testing.T) {
 
 func TestStackLockDefaultsMatchWireContract(t *testing.T) {
 	c := lockConfig{}.resolved()
-	if c.beat != 5*time.Second || c.stale != 60*time.Second || c.poll != time.Second || c.rounds != 3 || stackLockName != ".haive-stack-lock" {
+	if c.beat != 5*time.Second || c.stale != 60*time.Second || c.poll != time.Second || c.rounds != 3 || c.releasePause != 50*time.Millisecond || stackLockName != ".haive-stack-lock" {
 		t.Fatalf("%+v", c)
 	}
 }

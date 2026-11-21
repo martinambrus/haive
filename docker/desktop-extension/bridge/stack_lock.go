@@ -34,6 +34,7 @@ type lockConfig struct {
 	beat, stale, poll time.Duration
 	rounds            int
 	releaseTries      int
+	releasePause      time.Duration
 	remove            func(string) error
 	beforeBreak       func()
 	write             func(*os.File, []byte) error
@@ -78,6 +79,9 @@ func (c lockConfig) resolved() lockConfig {
 	}
 	if c.rounds == 0 {
 		c.rounds = stackLockRounds
+	}
+	if c.releasePause <= 0 {
+		c.releasePause = lockReleasePause
 	}
 	if c.remove == nil {
 		c.remove = os.Remove
@@ -229,7 +233,7 @@ func (l *stackLock) releaseLock() {
 				return
 			}
 			if attempt < tries {
-				sleep(lockReleasePause)
+				sleep(l.cfg.releasePause)
 			}
 		}
 	})
