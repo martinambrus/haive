@@ -26,6 +26,8 @@ const RECORDING = readFileSync(
 );
 
 const NEUTRAL = 'The request could not be completed.';
+const OUTPUT_CAP_TEXT =
+  "API Error: Claude's response exceeded the 32000 output token maximum. To configure this behavior, set the CLAUDE_CODE_MAX_OUTPUT_TOKENS environment variable.";
 
 /** The recording with the assistant event's `error` code and text block, and the result event's
  *  text, replaced. Nothing else changes. */
@@ -227,6 +229,12 @@ describe('a run with no result event is classified by the stream error code', ()
     expectClass(outcome, message, cls);
     if (cls === 'auth') expect(message).toContain('claude /login');
   });
+
+  it('a final mapped code on exit 0 is not classified', async () => {
+    const { message, outcome } = await run(withCode('server_error', NEUTRAL), 0);
+    expect(message).toBe(outcome.errorMessage ?? null);
+    expect(fatalClassFromMessage(message)).toBeNull();
+  });
 });
 
 describe('a steered run whose later turn fails is classified by the stream error code', () => {
@@ -249,6 +257,12 @@ describe('a steered run whose later turn fails is classified by the stream error
   it.each([137, 130, 143])('exit %i returns the stopped sentence', async (exitCode) => {
     const { message } = await run(steered(turnOf('server_error', NEUTRAL)), exitCode);
     expect(message).toBe('CLI process was stopped before it finished (cancelled or timed out).');
+  });
+
+  it('a failing later turn on exit 0 is not classified', async () => {
+    const { message, outcome } = await run(steered(turnOf('server_error', NEUTRAL)), 0);
+    expect(message).toBe(outcome.errorMessage ?? null);
+    expect(fatalClassFromMessage(message)).toBeNull();
   });
 
   it('a later turn that errored and recovered is not classified', async () => {
@@ -315,9 +329,7 @@ describe('unmapped codes keep the text classifier path', () => {
   });
 
   it('max_output_tokens still reaches its capability class by the env-var name', async () => {
-    const text =
-      "API Error: Claude's response exceeded the 32000 output token maximum. To configure this behavior, set the CLAUDE_CODE_MAX_OUTPUT_TOKENS environment variable.";
-    const { outcome, message } = await run(withCode('max_output_tokens', text), 1);
+    const { outcome, message } = await run(withCode('max_output_tokens', OUTPUT_CAP_TEXT), 1);
     expect(outcome.streamFailureClass).toBeUndefined();
     expect(capabilityClassFromMessage(message)).toBe('output_cap_reached');
   });
@@ -337,5 +349,19 @@ describe('the structural code wins over disagreeing text', () => {
     const text = 'Request failed: 401 Unauthorized';
     const { outcome, message } = await run(withCode('rate_limit', text), 1);
     expectClass(outcome, message, 'rate_limit');
+  });
+
+  it('server_error with a rate-limit text is a server error', async () => {
+    const { outcome, message } = await run(withCode('server_error', 'API Error: 429 Too Many Requests'), 1);
+    expectClass(outcome, message, 'server_error');
+  });
+});
+
+describe('the capability class is read before the stream code', () => {
+  it('a mapped code with the output-cap text is the capability class, not the fatal one', async () => {
+    const { outcome, message } = await run(withCode('server_error', OUTPUT_CAP_TEXT), 1);
+    expect(outcome.streamFailureClass).toBe('server_error');
+    expect(capabilityClassFromMessage(message)).toBe('output_cap_reached');
+    expect(fatalClassFromMessage(message)).toBeNull();
   });
 });
