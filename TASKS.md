@@ -900,7 +900,7 @@ Notes from the #1309 driver:
 
 ### T740 · FNF[agent-description-render] · agent descriptions render wrong for some inputs
 
-status: open, items 1-2 in review as #1310 (2026-11-21: full TOML and YAML escape sets, first-word case rule, renderer v4) · kind: fix · found: #1302 driver 2026-11-21, checked against the code · priority: P4
+status: open for follow-ups 3-8; items 1-2 DONE in #1310 (70ce4c200, deployed 2026-11-21 18:56Z; a bundle item holding a NUL is now dropped on its own; full TOML and YAML escape sets, first-word case rule, renderer v4) · kind: fix · found: #1302 driver 2026-11-21, checked against the code · priority: P4
 
 Either fix changes the rendered body, so the renderer pin (#1302) forces a renderer version bump with it.
 
