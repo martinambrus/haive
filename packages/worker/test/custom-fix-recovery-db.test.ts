@@ -636,6 +636,120 @@ describe.skipIf(!url)('recovery of a fix round on Postgres', () => {
         });
         expect(await eventsOf(id, 'fix_loop.started')).toHaveLength(1);
       });
+
+      describe('agent work behind the target row', () => {
+        const startedRound = async (over: Partial<typeof schema.taskSteps.$inferInsert> = {}) => {
+          const id = await seedTask(leg, { currentStepId: leg.ids.TARGET, currentRound: 1 });
+          await entered(id, (await seedRow(leg, id, 'REVIEW', 0, 'done')).id);
+          const row = await seedRow(leg, id, 'TARGET', 1, 'running', {
+            startedAt: new Date(),
+            ...over,
+          });
+          return { id, row };
+        };
+        const seedInvocation = async (
+          taskId: string,
+          taskStepId: string,
+          over: Partial<typeof schema.cliInvocations.$inferInsert> = {},
+        ) => {
+          const [made] = await db
+            .insert(schema.cliInvocations)
+            .values({ taskId, taskStepId, mode: 'cli', prompt: 'fix', ...over })
+            .returning();
+          return made!;
+        };
+        const invocationsOf = (taskId: string) =>
+          db
+            .select()
+            .from(schema.cliInvocations)
+            .where(eq(schema.cliInvocations.taskId, taskId))
+            .orderBy(asc(schema.cliInvocations.createdAt));
+        // A cli-exec job carries the invocation it owes a run; an advance does not.
+        const cliExecJobs = () => h.adds.filter((a) => 'invocationId' in a.data);
+        // Boot with agent work behind the row: it is a parked step, so each boot fences the task and
+        // re-drives it again (the earlier advance is left stale by the epoch bump). What must hold is
+        // that no boot records a run or queues one.
+        const bootTwice = async (taskId: string) => {
+          const before = await invocationsOf(taskId);
+          await boot();
+          expect(await invocationsOf(taskId)).toHaveLength(before.length);
+          expect(cliExecJobs()).toEqual([]);
+          await boot();
+          expect(await invocationsOf(taskId)).toHaveLength(before.length);
+          expect(cliExecJobs()).toEqual([]);
+          expect(h.adds.every((a) => a.name === TASK_JOB_NAMES.ADVANCE_STEP)).toBe(true);
+        };
+        const parkedGolden = {
+          task: { step: 'TARGET', round: 1, status: 'running', epoch: 2, dead: false },
+          rows: ['REVIEW@0:done', 'TARGET@1:waiting_cli'],
+          events: ['fix_loop.requested', 'fix_loop.started'],
+          jobs: ['advance-step:TARGET@1+1', 'advance-step:TARGET@1+2'],
+          applies: {},
+        };
+
+        it('a running row with a live run is demoted and recovered, its run ended, never replaced', async () => {
+          const { id, row } = await startedRound();
+          const run = await seedInvocation(id, row.id, { startedAt: new Date() });
+          await bootTwice(id);
+          verdict('S6-live-run', leg, await trace(leg, id), parkedGolden);
+          const [after] = await invocationsOf(id);
+          expect(after!.id).toBe(run.id);
+          expect(after!.endedAt).not.toBeNull();
+          expect(after!.supersededAt).toBeNull();
+          expect(after!.consumedAt).toBeNull();
+          const kept = await rowOf(row.id);
+          expect(kept.startedAt).not.toBeNull();
+          expect(kept.endedAt).toBeNull();
+        });
+
+        it('a running row whose loop pass finished and has no run is kept, not reset', async () => {
+          const { id, row } = await startedRound({ iterationCount: 2 });
+          await bootTwice(id);
+          expect(await invocationsOf(id)).toEqual([]);
+          verdict('S6-finished-pass', leg, await trace(leg, id), parkedGolden);
+          const kept = await rowOf(row.id);
+          expect(kept.iterationCount).toBe(2);
+          expect(kept.startedAt).not.toBeNull();
+        });
+
+        it('a running row whose only run was superseded has no CLI work: reset, one advance', async () => {
+          const { id, row } = await startedRound();
+          const now = new Date();
+          await seedInvocation(id, row.id, {
+            startedAt: now,
+            endedAt: now,
+            supersededAt: now,
+            errorMessage: 'superseded by an earlier reset',
+          });
+          const before = await invocationsOf(id);
+          await twice();
+          expect(cliExecJobs()).toEqual([]);
+          verdict('S6-superseded-run', leg, await trace(leg, id), {
+            task: { step: 'TARGET', round: 1, status: 'running', epoch: 1, dead: false },
+            rows: ['REVIEW@0:done', 'TARGET@1:pending'],
+            events: ['fix_loop.requested', 'fix_loop.started'],
+            jobs: ['advance-step:TARGET@1+1'],
+            applies: {},
+          });
+          expect(await invocationsOf(id)).toEqual(before);
+        });
+
+        it('a parked row whose run ended with its result unconsumed is re-driven, the run untouched', async () => {
+          const { id, row } = await startedRound({ status: 'waiting_cli' });
+          const now = new Date();
+          await seedInvocation(id, row.id, {
+            startedAt: now,
+            endedAt: now,
+            exitCode: 0,
+            parsedOutput: { done: true },
+          });
+          const before = await invocationsOf(id);
+          await bootTwice(id);
+          verdict('S6-ended-unconsumed', leg, await trace(leg, id), parkedGolden);
+          expect(await invocationsOf(id)).toEqual(before);
+          expect(before[0]!.consumedAt).toBeNull();
+        });
+      });
     });
 
     describe('resets', () => {
