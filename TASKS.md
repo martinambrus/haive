@@ -930,9 +930,18 @@ status: open · kind: fix · found: custom fix recovery driver (#1303), code rea
 
 ### T742 · FNF[ci-gated-row-bookkeeping] · adding a gated test row needs two hand edits
 
-status: open · kind: chore · found: custom fix recovery driver (#1303) · priority: P4
+status: open for follow-ups 1-6; main item DONE in #1314 (2026-11-21: derived row check, one limit formula with 25 rows of headroom, limits 50/52 min; accepted by the session, not the owner: a gated file deleted with its row is no longer flagged, a hung run is cancelled 6 min later) · kind: chore · found: custom fix recovery driver (#1303) · priority: P4
 
 `scripts/test/ci-gated-list.test.mjs` ~:208 hard-codes the gated file count, and the gated step and job limits in `.github/workflows/ci.yml` (~:386 and ~:489) sit at exactly 1.5x the modelled row time, so every new row fails `ci-step-independence.test.mjs` until both are raised by hand. Derive the count, or give the limits headroom with the formula in one place. PRE-EXISTING.
+
+Follow-ups found by the #1314 driver:
+
+1. `scripts/test/ci-gated-list.test.mjs` ~:12 `gatedEnvironment` misses a destructured `process.env`, a ternary `describe` choice and a guard inside a function (7 blind idioms in all, same on base). PRE-EXISTING, low.
+2. `ci-gated-list.test.mjs` ~:97-98 reads only a row's package and file; the env var, database and image columns are never checked, so a wrong value surfaces only in the 40+ minute CI run. PRE-EXISTING, low.
+3. Board text elsewhere in this file still describes hand-bumping the count and limits (the entries that cite `ci-gated-list.test.mjs` counts). Board-only; tidy when next edited.
+4. `scripts/test/ci-step-independence.test.mjs` ~:321: the crowding failure message does not name the minutes to raise. NEW, nit.
+5. `ci-step-independence.test.mjs` ~:290-294: `rowHeadroom` has no default or guard, so a second gated budget without it prints `NaN`. No such budget exists. NEW, latent.
+6. Design: shard the postgres-gated job into a matrix. The serial list grows about 3 rows a day and every limit raise lengthens the hung-run bound.
 
 ### T743 · FNF[extension-lock-recovery] · the extension's window lock has no stale recovery
 
