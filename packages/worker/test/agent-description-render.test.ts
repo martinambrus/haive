@@ -33,7 +33,7 @@ const render = (description: string, target: AgentRenderTarget) =>
 const bodyOf = (md: string) => md.slice(md.indexOf('\n---\n') + 5);
 
 const CASES: [string, string][] = [
-  ...Array.from({ length: 128 }, (_, code): [string, string] => [
+  ...Array.from({ length: 256 }, (_, code): [string, string] => [
     `U+${code.toString(16).toUpperCase().padStart(4, '0')}`,
     `a${String.fromCharCode(code)}b`,
   ]),
@@ -52,12 +52,27 @@ const BASIC_STRING =
 const lineOf = (toml: string, key: string) =>
   toml.split('\n').find((l) => l.startsWith(`${key} = `)) ?? '';
 
+const frontmatterOf = (md: string) => md.split('\n---\n')[0]!;
+const YAML_FORBIDDEN = /[\u0000-\u0009\u000B-\u001F\u007F-\u009F\u2028\u2029\uFFFE\uFFFF]/;
+const TOML_BODY_FORBIDDEN = /[\u0000-\u0008\u000B-\u001F\u007F]/;
+const tomlInstructions = (toml: string) => {
+  const open = toml.indexOf('"""\n');
+  const close = toml.lastIndexOf('\n"""');
+  return toml.slice(open + 4, close);
+};
+
 describe('the Codex TOML renders every description losslessly', () => {
   for (const [label, description] of CASES) {
     it(`renders ${label} as TOML a parser reads back`, () => {
       const toml = render(description, TOML_TARGET);
       expect(lineOf(toml, 'name').slice('name = '.length)).toMatch(BASIC_STRING);
       expect(lineOf(toml, 'description').slice('description = '.length)).toMatch(BASIC_STRING);
+      for (const target of [CLAUDE_TARGET, GEMINI_TARGET]) {
+        expect(frontmatterOf(render(description, target))).not.toMatch(YAML_FORBIDDEN);
+      }
+      const instructions = tomlInstructions(toml);
+      expect(instructions).not.toMatch(TOML_BODY_FORBIDDEN);
+      expect(instructions).not.toContain('"""');
       const parsed = parseFlatToml(toml);
       expect(parsed.name).toBe('probe');
       expect(parsed.description).toBe(description);
@@ -138,6 +153,11 @@ describe('the description sentence keeps or lowers its first character', () => {
     ['A reviewer', 'a reviewer'],
     ['Handles things', 'handles things'],
     ['Builds API gateways', 'builds API gateways'],
+    ['Über reviewer', 'über reviewer'],
+    ['ΑΒΓ reviewer', 'ΑΒΓ reviewer'],
+    ['日本語 reviewer', '日本語 reviewer'],
+    ['3D renderer', '3D renderer'],
+    ['\u{10400}bc', '\u{10400}bc'],
   ];
   for (const [description, expected] of WANTED) {
     it(`renders "${description}" as "${expected}" in every format`, () => {

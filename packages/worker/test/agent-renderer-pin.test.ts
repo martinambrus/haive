@@ -12,7 +12,7 @@ import {
 /** Append-only: one hash of the whole rendered corpus per renderer version. */
 const RECORDED_RENDER_HASHES: Record<number, string> = {
   3: 'da45695aba92efcf413c6779b13bab2e55466fa4441fce442772f9cfe4802531',
-  4: '2fcd2d3be1dd5618ebda7db1c73a2791ac4cb368ff4bef2e4db83be9338d5864',
+  4: 'cc60435b284943bd72b2b7d2f94ea8769c746d02b20b19fa7c9f212be19d9a85',
 };
 
 const FULL: AgentSpec = {
@@ -245,6 +245,9 @@ describe('the pinned corpus exercises every conditional block', () => {
     for (const escape of ['\\r', '\\u0001', '\\u007F', '\\b']) {
       expect(controls).toContain(escape);
     }
+    const claudeControls = frontmatterOf(render(CONTROLS, claude(true))).join('\n');
+    expect(claudeControls).toContain('\\u007f');
+    expect(claudeControls).not.toContain('\u007F');
     expect(render(PROSE, claude(true))).toContain('that API gateway reviewer');
     expect(render(BARE, claude(true))).toContain('that does little');
   });

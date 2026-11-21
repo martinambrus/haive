@@ -60,7 +60,11 @@ is version-bound vendor behaviour: re-capture after a CLI bump before trusting i
 **Agent and skill frontmatter has to parse in every CLI's YAML, not just claude's.** Every value
 goes through `yamlScalar` (`steps/_yaml-scalar.ts`): plain when it reads back as itself under
 YAML 1.1 and 1.2, double-quoted otherwise, so a value that was always valid keeps its bytes and
-no template hash moves. MEASURED with a plain `description:` holding `: ` (four baseline agents,
+no template hash moves. `yamlScalar` also double-quotes a value holding a C0 control (a tab too),
+DEL, a C1 control (NEL included), U+2028/2029 or U+FFFE/FFFF and writes each as `\uXXXX`: YAML
+allows only printable characters in a stream, and YAML 1.1 parsers read NEL, LS and PS as line
+breaks (MEASURED with PyYAML's SafeLoader and libyaml loader). MEASURED with a plain
+`description:` holding `: ` (four baseline agents,
 and LLM-written ones on live repos): claude 2.1.270 listed the agent, grok 1.0.34 left it out of
 `spawn_subagent` without a word, and gemini 0.60.0 refused it ("YAML frontmatter parsing
 failed"). A claude-only check therefore never shows the breakage. Haive's own line readers

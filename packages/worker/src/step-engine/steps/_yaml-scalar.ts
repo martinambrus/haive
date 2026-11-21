@@ -13,22 +13,38 @@
 import { parse } from 'yaml';
 
 /**
+ * Never written raw in a value: C0 (a plain tab trips PyYAML's Python loader), DEL, C1 (NEL
+ * included), LS, PS, U+FFFE and U+FFFF.
+ */
+const YAML_FORBIDDEN = /[\u0000-\u001F\u007F-\u009F\u2028\u2029\uFFFE\uFFFF]/g;
+
+/**
  * `value` as a YAML scalar that every parser reads back as exactly `value`. It stays PLAIN when
  * it already round-trips under both YAML 1.1 and 1.2 — so a value that was always valid keeps
  * its bytes and no template hash moves — and is double-quoted otherwise. 1.1 matters because it
  * also resolves `yes`/`no`/`on`/`off` and timestamps, which a string field must not become.
- * JSON's string escapes are a subset of YAML's double-quoted ones, so JSON.stringify is exact.
+ * A value holding a character in `YAML_FORBIDDEN` is always quoted: YAML allows only printable
+ * characters in a stream, and YAML 1.1 parsers read NEL, LS and PS as line breaks. JSON's string
+ * escapes are a subset of YAML's double-quoted ones, so JSON.stringify is exact once the
+ * characters it leaves raw (DEL, C1, LS, PS, U+FFFE, U+FFFF) are written as `\uXXXX` too.
  */
 export function yamlScalar(value: string): string {
   const doc = `v: ${value}`;
-  const plain = (['1.1', '1.2'] as const).every((version) => {
-    try {
-      return parse(doc, { version, logLevel: 'error' })?.v === value;
-    } catch {
-      return false;
-    }
-  });
-  return plain ? value : JSON.stringify(value);
+  const plain =
+    value.search(YAML_FORBIDDEN) < 0 &&
+    (['1.1', '1.2'] as const).every((version) => {
+      try {
+        return parse(doc, { version, logLevel: 'error' })?.v === value;
+      } catch {
+        return false;
+      }
+    });
+  return plain
+    ? value
+    : JSON.stringify(value).replace(
+        YAML_FORBIDDEN,
+        (ch) => `\\u${ch.charCodeAt(0).toString(16).padStart(4, '0')}`,
+      );
 }
 
 /**
