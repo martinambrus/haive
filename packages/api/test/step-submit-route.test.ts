@@ -217,6 +217,7 @@ function gateFixture(opts: {
   stepId: string;
   kinds?: Array<Record<string, unknown>>;
   waitingStartedAt?: Date | null;
+  round?: number;
 }) {
   const fake = createFakeDb({
     tasks: schema.tasks,
@@ -228,7 +229,7 @@ function gateFixture(opts: {
     taskId: TASK,
     stepId: opts.stepId,
     status: 'waiting_form',
-    round: 0,
+    round: opts.round ?? 0,
     rerunGeneration: 1,
     idleMs: 0,
     waitingStartedAt: opts.waitingStartedAt === undefined ? PARK : opts.waitingStartedAt,
@@ -325,6 +326,31 @@ it('binds a latched gate-3 answer the same way', async () => {
   await expectRefused(refused, stale.fake, before);
   h.add.mockReset();
   const ok = gateFixture({ stepId: GATE3, kinds: [check('gate2_approved')] });
+  const res = await postGate(GATE3, {
+    stepRowId: ok.stepRowId(),
+    waitingStartedAt: PARK.toISOString(),
+  });
+  expect(res.status).toBe(200);
+  expect(ok.fake.rows(schema.taskEvents).at(-1)).toMatchObject({
+    eventType: 'step.form_submitted',
+    payload: expect.objectContaining({ commit: true }),
+  });
+});
+
+it('binds a gate-3 answer below the approval round the same way', async () => {
+  const kinds = [check('gate2_approved', { round: 3 })];
+  const stale = gateFixture({ stepId: GATE3, kinds, round: 2 });
+  const before = snap(stale.fake);
+  const unbound = await postGate(GATE3, {});
+  await expectRefused(unbound, stale.fake, before);
+  h.add.mockReset();
+  const refused = await postGate(GATE3, {
+    stepRowId: stale.stepRowId(),
+    waitingStartedAt: STALE_PARK.toISOString(),
+  });
+  await expectRefused(refused, stale.fake, before);
+  h.add.mockReset();
+  const ok = gateFixture({ stepId: GATE3, kinds, round: 2 });
   const res = await postGate(GATE3, {
     stepRowId: ok.stepRowId(),
     waitingStartedAt: PARK.toISOString(),

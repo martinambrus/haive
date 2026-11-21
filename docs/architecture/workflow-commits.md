@@ -146,8 +146,18 @@ gate 3 at an earlier round than the current one, so a gate 3 at or below the pic
 even when a person already answered a later-round gate 3 (a Retry above the pick after the
 post-cycle gate 3 was answered parks the re-run once more); that fails closed, and a later-round
 row never settles it. Routing is the exception: `gate3InsightCycle` still reads the pick row's
-round and generation, so such a Retry ends the cycle for routing only. A warning note explains
-that the refreshed changes need review and a new commit decision. Inside the same cycle, a gate 2 kept because the accepted QA
+round and generation, so such a Retry ends the cycle for routing only. The failed path has its own
+requirement, read from the task's latest `insight.check` event (`failedInsightGate3ReviewRequired`):
+while that event is a gate-2 re-approval, gate 3 parks for a new human answer whatever its round, so a
+Retry that re-runs gate 3 below the approval's round (round numbers grow, and a Retry re-runs a lower
+one) still parks it; round order proves nothing about what came after the approval. The requirement
+ends once a gate-3 row that is still done or skipped carries the authenticated owner's
+`step.form_submitted` answer for that row's current generation, created after that approval (event
+against event, compared in PostgreSQL). That one answered row ends it for a gate 3 at any round, below
+or above its own. A Retry that re-runs the answered row, or a newer gate-2 re-approval, withdraws the
+proof and the gate asks again; a completion with no stamped owner answer (an engine skip, an older
+record) ends nothing, so the next gate 3 asks once. Either requirement parks the gate. A warning note
+explains that the refreshed changes need review and a new commit decision. Inside the same cycle, a gate 2 kept because the accepted QA
 review deferred its findings parks for the owner the same way (fix-loop). Ordinary gates retain
 their existing preset behavior.
 Step-runner retains the invocation through form submission
