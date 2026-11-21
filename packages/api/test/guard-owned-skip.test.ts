@@ -10,10 +10,19 @@ const h = vi.hoisted(() => ({
   db: undefined as unknown,
   add: vi.fn(async (..._args: unknown[]) => undefined),
   kill: vi.fn(async (_taskId: string) => 0),
+  realFence: true,
 }));
 vi.mock('../src/db.js', () => ({ getDb: () => h.db }));
 vi.mock('../src/queues.js', () => ({ getTaskQueue: () => ({ add: h.add }) }));
 vi.mock('../src/lib/sandbox-kill.js', () => ({ killTaskSandboxes: h.kill }));
+vi.mock('../src/lib/execution-contract-admission.js', async (importOriginal) => {
+  const real = await importOriginal<typeof import('../src/lib/execution-contract-admission.js')>();
+  return {
+    assertExecutionContractUsable: (raw: unknown) => {
+      if (h.realFence) real.assertExecutionContractUsable(raw);
+    },
+  };
+});
 vi.mock('../src/middleware/auth.js', () => ({
   requireAuth: async (c: { set: (key: string, value: string) => void }, next: () => unknown) => {
     c.set('userId', USER);
@@ -60,6 +69,7 @@ beforeEach(() => {
   vi.spyOn(configService, 'getFresh').mockResolvedValue('normal');
   h.add.mockClear();
   h.kill.mockClear();
+  h.realFence = true;
 });
 
 type Rows = { entry?: Record<string, unknown>; member?: Record<string, unknown> };
@@ -275,6 +285,52 @@ describe('a span entry is not user-skippable', () => {
       })),
     );
     expect(enriched.find((r) => r.stepId === ENTRY_STEP)?.canSkip).toBe(true);
+  });
+});
+
+describe('a pinned fix target is not user-skippable', () => {
+  const parked = { entry: { status: 'waiting_form', guardState: null } };
+  const fixPin = (stepId: string) => ({
+    version: 1,
+    guardedSpans: [],
+    fixTarget: { stepId, capabilityVersion: 1 },
+  });
+
+  it('Skip on the target is refused with 409, no row update and no job', async () => {
+    h.realFence = false;
+    const t = setup(parked, fixPin(ENTRY_STEP));
+    const before = t.snapshot();
+    const res = await t.act(ENTRY_STEP, 'skip');
+    expect(res.status, await res.clone().text()).toBe(409);
+    expect(await res.json()).toMatchObject({ error: 'This step cannot be skipped' });
+    expect(t.snapshot()).toBe(before);
+    expect(t.events()).toEqual([]);
+    expect(h.add).not.toHaveBeenCalled();
+  });
+
+  it('Skip on another skippable step stays allowed', async () => {
+    h.realFence = false;
+    const t = setup(parked, fixPin(OTHER_SKIPPABLE));
+    const res = await t.act(ENTRY_STEP, 'skip');
+    expect(res.status, await res.clone().text()).toBe(200);
+    expect(t.step(ENTRY)).toMatchObject({ status: 'skipped' });
+  });
+
+  it('canSkip is false for the target row only', async () => {
+    const t = setup(parked, fixPin(ENTRY_STEP));
+    const task = t.fake.rows(schema.tasks)[0]!;
+    const flags = await loadTaskStepFlags(t.fake.db as never, task as never);
+    const enriched = await enrichStepsWithSkipFlag(
+      t.fake.db as never,
+      flags,
+      TASK,
+      [ENTRY_STEP, OTHER_SKIPPABLE].map((stepId, i) => ({
+        id: String(i),
+        status: 'waiting_form',
+        stepId,
+      })),
+    );
+    expect(enriched.map((r) => r.canSkip)).toEqual([false, true]);
   });
 });
 

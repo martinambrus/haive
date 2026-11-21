@@ -1027,11 +1027,10 @@ export function isStepSkippable(
     executionContract?: unknown;
   },
 ): boolean {
-  if (
-    task.executionContract != null &&
-    !executionContractSchema.safeParse(task.executionContract).success
-  )
-    return false;
+  if (task.executionContract != null) {
+    const parsed = executionContractSchema.safeParse(task.executionContract);
+    if (!parsed.success || parsed.data.fixTarget?.stepId === stepId) return false;
+  }
   if (spanEntryIds(task.executionContract).has(stepId)) return false;
   if (stepId === '00-triage' && task.derivedRunPlan != null && task.executionPath == null)
     return false;

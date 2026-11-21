@@ -43,6 +43,8 @@ export function hasConflictingReplacementHooks(step: Declaration): boolean {
 export function assertStepOutputDeclaration(step: Declaration): void {
   if (step.fixConsumer !== undefined && !fixConsumerSchema.safeParse(step.fixConsumer).success)
     throw new Error('fix-consumer-invalid');
+  if (step.fixConsumer !== undefined && step.metadata?.allowSkip === true)
+    throw new Error('fix-consumer-skippable');
   if (!rolePortDeclarationsSchema.safeParse(step).success)
     throw new Error('step-data-role-invalid');
   if (step.outputContract !== undefined && !parseStepOutputContractRef(step.outputContract)) {

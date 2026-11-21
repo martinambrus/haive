@@ -832,7 +832,9 @@ An executable fix consumer declares `fixConsumer: {version: 1}` on its
 forged or mismatched capability metadata; the existing catalog entry JSON
 carries the validated version for API admission. This capability grants no
 output-contract replacement or host role policy. A capable step must also declare
-`editsCodeOrTests: true`; boot rejects it otherwise (`fix-consumer-edits-code-required`).
+`editsCodeOrTests: true`; boot rejects it otherwise (`fix-consumer-edits-code-required`). It must
+not set `metadata.allowSkip`: boot rejects the combination (`fix-consumer-skippable`), since a
+fix target the user could skip leaves a fix round with nothing to repair.
 A fan-out step (`agentMining`) is not capable: repair evidence is captured only on the LLM
 phase, so the worker refuses a pin naming one rather than let it repair without snapshots.
 Every gate still refuses a pin that selects a fix target until the existing reset/epoch
