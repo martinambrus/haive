@@ -1062,7 +1062,7 @@ Small leftovers, none blocking: (a) `TestStatusAndStopDoNotRequireMailpitPort` a
 
 ### T705 · Updater and Desktop extension share one lock
 
-status: open, in review as #1304 (2026-11-21: lease file `<install>/.haive-stack-lock`, beat 5 s, stale after 60 s of unchanged bytes, break by rename; follow-ups below) · kind: feature · found: Greptile P1 on #1259 · priority: P3
+status: open for follow-ups 1-4; the lock itself DONE #1304 (718dfd7d4, 2026-11-21: lease file `<install>/.haive-stack-lock`, beat 5 s, stale after 60 s of unchanged bytes, break by rename; follow-ups below) · kind: feature · found: Greptile P1 on #1259 · priority: P3
 
 The extension refuses Install/Start/Stop while this install's updater container runs and re-checks right before `compose up`, but a window remains between that final check and the Compose call: an upgrade launched in that instant can still have PostgreSQL restarted during `phaseSnapshot` (`packages/updater/src/run.ts`). Closing it needs a lock both sides take (the updater and its launchers, plus the extension's `<install>.extension-lock`), honored by the updater from some release onward; older updaters keep today's container-identity guard. Design the lock location (the updater container must see it) and its recovery after a crash.
 
