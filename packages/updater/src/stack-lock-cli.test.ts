@@ -37,12 +37,14 @@ vi.mock('./run.js', async (original) => ({
   phaseCommit: vi.fn(),
 }));
 import { main } from './cli.js';
+import { STACK_LOCK_BEAT_MS, StackLock } from './stack-lock.js';
 import * as images from './images.js';
 import * as dk from './docker.js';
 import * as journal from './journal.js';
 import * as run from './run.js';
 
-// The other party is simulated at protocol level on purpose: no import of the lock module.
+// The other party is simulated at protocol level on purpose. The lock module is imported only to
+// watch the updater's own beats.
 const LOCK = '.haive-stack-lock';
 const manifest = {
   manifestVersion: 1,
@@ -162,6 +164,7 @@ beforeEach(async () => {
 });
 afterEach(async () => {
   process.argv = argv;
+  vi.useRealTimers();
   vi.restoreAllMocks();
   vi.clearAllMocks();
   vi.unstubAllEnvs();
@@ -234,21 +237,21 @@ describe('race, other direction: the updater lock is exclusive for the whole run
 
 describe('a long phase keeps the lock live', () => {
   it('rewrites the record on its own timer while a phase runs, with the default heartbeat', async () => {
-    let seen = 0;
+    // Only the heartbeat's interval is faked; the lock's file operations stay real and are awaited.
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
+    const beat = vi.spyOn(StackLock.prototype, 'beat');
+    const seqs: number[] = [];
     vi.mocked(run.phaseSnapshot).mockImplementation(async () => {
-      const deadline = Date.now() + 2000;
-      while (seen < 3 && Date.now() < deadline) {
-        await new Promise((resolve) => setTimeout(resolve, 5));
-        try {
-          seen = (JSON.parse(await readFile(lock, 'utf8')) as { seq: number }).seq;
-        } catch {
-          // A read between the truncate and the write is a legal torn record.
-        }
+      for (let tick = 0; tick < 3; tick++) {
+        await vi.advanceTimersByTimeAsync(STACK_LOCK_BEAT_MS);
+        // The tick starts one beat; wait for that beat, then read what it wrote.
+        await beat.mock.results.at(-1)!.value;
+        seqs.push((JSON.parse(await readFile(lock, 'utf8')) as { seq: number }).seq);
       }
       return 'dump.sql';
     });
-    expect(await main({ stackLock: { sleep: idleSleep, beatMs: 5 } })).toBe(0);
-    expect(seen).toBeGreaterThanOrEqual(3);
+    expect(await main({ stackLock: { sleep: idleSleep } })).toBe(0);
+    expect(seqs).toEqual([2, 3, 4]);
     expect(await heldBy()).toBeNull();
   });
 });

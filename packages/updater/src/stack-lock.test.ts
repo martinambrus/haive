@@ -37,6 +37,7 @@ beforeEach(async () => {
   path = join(dir, STACK_LOCK_NAME);
 });
 afterEach(async () => {
+  vi.useRealTimers();
   vi.restoreAllMocks();
   await rm(dir, { recursive: true, force: true });
 });
@@ -334,20 +335,29 @@ describe('release', () => {
     const gate = new Promise<void>((resolve) => {
       open = resolve;
     });
+    let reached!: () => void;
+    const entered = new Promise<void>((resolve) => {
+      reached = resolve;
+    });
     vi.spyOn(install.InstallDirectory.prototype, 'remove').mockImplementation(async function (
       this: install.InstallDirectory,
       name: string,
     ) {
+      reached();
       await gate;
       return real.call(this, name);
     });
     const first = lock.release();
+    // The first release is now stopped inside its removal, so the second can only wait for it.
+    await entered;
     const second = lock.release();
-    const early = await Promise.race([
-      second.then(() => 'resolved'),
-      new Promise((resolve) => setTimeout(() => resolve('pending'), 50)),
-    ]);
-    expect(early).toBe('pending');
+    let resolved = false;
+    void second.then(() => {
+      resolved = true;
+    });
+    // One event-loop turn runs every promise that can settle without the gate; no time passes.
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(resolved).toBe(false);
     open();
     await Promise.all([first, second]);
     expect(await readdir(dir)).toEqual([]);
@@ -525,20 +535,27 @@ describe('heartbeat', () => {
     await lock.release();
     expect(await readFile(path, 'utf8')).toBe('');
   });
-  it('advances seq on a real timer and stops after release', async () => {
-    const lock = await held({ heartbeat: true, beatMs: 5 });
-    // A read can land between the truncate and the write; that is a legal torn record.
-    const seqOf = async () => ((await parse().catch(() => ({ seq: 0 }))).seq as number) ?? 0;
-    const deadline = Date.now() + 2000;
-    let seen = 0;
-    while (seen < 3 && Date.now() < deadline) {
-      seen = await seqOf();
-      if (seen < 3) await new Promise((r) => setTimeout(r, 5));
+  it('beats once per beatMs and stops beating after release', async () => {
+    // Only the heartbeat's interval is faked; the file operations stay real and are awaited.
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
+    const lock = await held({ heartbeat: true, beatMs: 7 });
+    const beat = vi.spyOn(lock, 'beat');
+    await vi.advanceTimersByTimeAsync(6);
+    expect(beat).not.toHaveBeenCalled();
+    // The tick starts one beat; its result is the promise the interval callback did not await.
+    for (const [seq, advance] of [
+      [2, 1],
+      [3, 7],
+      [4, 7],
+    ] as const) {
+      await vi.advanceTimersByTimeAsync(advance);
+      expect(await beat.mock.results.at(-1)!.value).toBe('ok');
+      expect(await parse()).toMatchObject({ seq });
     }
-    expect(seen).toBeGreaterThanOrEqual(3);
+    expect(beat).toHaveBeenCalledTimes(3);
     await lock.release();
-    expect(await readdir(dir)).toEqual([]);
-    await new Promise((r) => setTimeout(r, 40));
+    await vi.advanceTimersByTimeAsync(10 * 7);
+    expect(beat).toHaveBeenCalledTimes(3);
     expect(await readdir(dir)).toEqual([]);
   });
 });
