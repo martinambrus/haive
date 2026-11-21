@@ -1433,34 +1433,35 @@ export async function handleSignOutJob(
     // volumes alone leaves the provider authenticated and the next login skips browser auth.
     // Delete the login token and the usage grant and snapshot of every row sharing the login
     // to log out for real. A user-entered BYOK key (apiKeyEnvName, e.g. ANTHROPIC_AUTH_TOKEN)
-    // is not a login artifact -> kept.
+    // is not a login artifact -> kept. A volume that could not be removed leaves the login and
+    // its status as they were, so a retry finishes the whole sign-out.
     await release.assertHeld();
     const target = provider;
-    await db.transaction(async (tx) => {
-      const ids = (await lockLoginSet(tx, target)).map((m) => m.id);
-      if (target.name === 'claude-code') {
-        await tx
-          .delete(schema.cliProviderSecrets)
-          .where(
-            and(
-              inArray(schema.cliProviderSecrets.providerId, ids),
-              eq(schema.cliProviderSecrets.secretName, 'CLAUDE_CODE_OAUTH_TOKEN'),
-            ),
-          );
-        await tx
-          .delete(schema.cliProviderSecrets)
-          .where(
-            and(
-              inArray(schema.cliProviderSecrets.providerId, ids),
-              eq(schema.cliProviderSecrets.secretName, CLAUDE_USAGE_OAUTH_SECRET),
-            ),
-          );
-        await tx
-          .delete(schema.usageWindowSnapshots)
-          .where(inArray(schema.usageWindowSnapshots.providerId, ids));
-      }
-      await release.assertHeld();
-      if (failed.length === 0) {
+    if (failed.length === 0) {
+      await db.transaction(async (tx) => {
+        const ids = (await lockLoginSet(tx, target)).map((m) => m.id);
+        if (target.name === 'claude-code') {
+          await tx
+            .delete(schema.cliProviderSecrets)
+            .where(
+              and(
+                inArray(schema.cliProviderSecrets.providerId, ids),
+                eq(schema.cliProviderSecrets.secretName, 'CLAUDE_CODE_OAUTH_TOKEN'),
+              ),
+            );
+          await tx
+            .delete(schema.cliProviderSecrets)
+            .where(
+              and(
+                inArray(schema.cliProviderSecrets.providerId, ids),
+                eq(schema.cliProviderSecrets.secretName, CLAUDE_USAGE_OAUTH_SECRET),
+              ),
+            );
+          await tx
+            .delete(schema.usageWindowSnapshots)
+            .where(inArray(schema.usageWindowSnapshots.providerId, ids));
+        }
+        await release.assertHeld();
         await tx
           .update(schema.cliProviders)
           .set({
@@ -1471,9 +1472,9 @@ export async function handleSignOutJob(
             updatedAt: new Date(),
           })
           .where(inArray(schema.cliProviders.id, ids));
-      }
-      await release.assertHeld();
-    });
+        await release.assertHeld();
+      });
+    }
 
     log.info(
       { providerId: provider.id, removedCount: removed.length, failedCount: failed.length },

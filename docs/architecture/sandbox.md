@@ -734,10 +734,11 @@ it to every row of the set. Inside the promotion transaction `lockLoginSet` (`@h
 set's rows in id order, before any of their secrets; each row in turn gets its strict
 `cli_provider.secret.set` audit, the secret upsert and the legacy-env cleanup; then one update gives all
 of them one new `auth_generation`, status `ok` and a later check stamp. A login through any row
-therefore supersedes a sign-out queued from any row of the set. The sign-out job deletes the login
-token of every row of the set and, when no volume failed, resets their status, in one transaction that
-reads the set once, so a row that joined while the volumes were being removed is deleted and reset
-with the rest; it also deletes the usage token and the usage snapshot of every row of the set. Its
+therefore supersedes a sign-out queued from any row of the set. When no volume failed, the sign-out job
+deletes the login token, the usage token and the usage snapshot of every row of the set and resets their
+status, in one transaction that reads the set once, so a row that joined while the volumes were being
+removed is deleted and reset with the rest; a volume that could not be removed leaves all of them as
+they were, and a retry finishes. Its
 supersede check reads the
 clicked row's generation alone, which is enough because the api writers of a login token all write the
 whole set and a row that joins one takes the set's generation (the boot copy of legacy environment
