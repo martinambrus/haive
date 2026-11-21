@@ -782,11 +782,11 @@ Related, measured 2026-11-20: `src/db/setup.ts:155-163` (`accountedStorage`) cha
 
 ### T728 · FNF[composed-lsp-provider-lock] · composed LSP provider lock and template replacement leftovers (+16)
 
-status: open · kind: fix · found: legacy template replacement build and review (#1288) 2026-11-20 · priority: P4
+status: open; items 1 and 16 DONE in #1315 (da1f5ed69, deployed 2026-11-21 22:28Z: locked task CLI read under the lock, `resolvePreferredProvider` shared by dispatch and hold) · kind: fix · found: legacy template replacement build and review (#1288) 2026-11-20 · priority: P4
 
 Paths are under `packages/`. NEW means introduced by #1288.
 
-1. Step 01's locked decision falls back to the provider resolved before the lock when the task has no default: `locked.cliProviderId ?? ctx.cliProviderId` (`worker/src/step-engine/steps/env-replicate/01-declare-deps.ts` ~:1033, ~:1139). Provider writes never take the task lock. NEW, low.
+1. DONE (#1315). Step 01's locked decision falls back to the provider resolved before the lock when the task has no default: `locked.cliProviderId ?? ctx.cliProviderId` (`worker/src/step-engine/steps/env-replicate/01-declare-deps.ts` ~:1033, ~:1139). Provider writes never take the task lock. NEW, low.
 2. The lock controls pin that the lock is held at each write, not that the summary route and the fix-round path read after it (`api/test/composed-lsp-provider-lock-held.test.ts`, `worker/test/composed-lsp-fix-round-lock-held.test.ts`); the fake database has no read hook. Coverage only.
 3. No contention test on a real Postgres for `lockTaskForComposedLsp` (`shared/src/composed-lsp-provider-lock.ts`); the fake database's row-lock model has no isolation levels. Coverage only.
 4. Deleting a provider while a holder of the task lock needs that provider's KEY SHARE ends in `40P01` and aborts one side (the summary route PRE-EXISTING, the choice inserts NEW). The state stays consistent; what the aborted request or step shows is unchecked. Fix direction: retry once on `40P01`.
@@ -801,7 +801,13 @@ Paths are under `packages/`. NEW means introduced by #1288.
 13. The task page's CLI pickers still list every provider for a contract-2 task; the lock answers 409 `composed_lsp_provider_locked` only when a choice is written. Disable or annotate the refused providers in the pickers. Found by the replacement live check. PRE-EXISTING since #1272.
 14. A Retry of step 01 on a contract-2 task rebuilt its image in step 03 with a new id although the row's tag and Dockerfile were unchanged (live check task c858faec, step 7); a legacy row in the same check reused its image. Whether the contract-2 tag rule (#1288) or the contract-2 path causes the rebuild is unchecked.
 15. The step card's CLI mirrors still name the saved CLI on a locked task, though dispatch skips a saved pick the lock refuses (#1297): `api/src/routes/tasks/_helpers.ts` ~:524-545 and `web/src/lib/step-cli-providers.ts` ~:33-47. Show the CLI that dispatch will run. PRE-EXISTING.
-16. `providerHoldFor` (`worker/src/queues/task-queue.ts` ~:1720-1747) holds only on the resolver's id. With an enabled saved pick outside the lock's set and a disabled task CLI inside it, the step fails with "is disabled" instead of parking as it does with nothing saved; a disabled saved pick keeps the disabled refusal and hold although the lock would skip it. Mirror the dispatcher's skip in the hold. PRE-EXISTING (the step failed on the lock before #1297). Checked against the code 2026-11-21.
+16. DONE (#1315). `providerHoldFor` (`worker/src/queues/task-queue.ts` ~:1720-1747) holds only on the resolver's id. With an enabled saved pick outside the lock's set and a disabled task CLI inside it, the step fails with "is disabled" instead of parking as it does with nothing saved; a disabled saved pick keeps the disabled refusal and hold although the lock would skip it. Mirror the dispatcher's skip in the hold. PRE-EXISTING (the step failed on the lock before #1297). Checked against the code 2026-11-21.
+
+17. The api's disable-impact preview (`api/src/lib/provider-disable-impact.ts` ~:101) never modelled the lock's skip of a saved pick, so on a composed task with a saved pick outside the lock it over-counts when the skipped pick is disabled and under-counts when the task CLI is. With item 15 this needs the pure `resolvePreferredProvider` decision (`worker/src/orchestrator/dispatcher.ts`) moved to a shared home. PRE-EXISTING.
+18. Step 01's `cliSupportsLsp` still derives from the pre-lock `ctx.cliProviderId` (`01-declare-deps.ts` ~:806, ~:910, ~:1035); a stale flag can only refuse, never wrongly accept. PRE-EXISTING, low.
+19. The persona pin check names the saved CLI, not the substitute the dispatcher runs (`worker/src/queues/task-queue.ts` ~:3270-3290, `providerNameFor`); advisory event only. PRE-EXISTING, low.
+20. Coverage: no hold-versus-dispatch parity test; no hold cases for a fix-round choice, ignored saved CLIs or non-default roles; step 01's locked decision has no real-Postgres control. Low.
+21. Design: a composed task with nothing saved, no own CLI and no enabled provider in the lock's set fails with the lock reason (`dispatcher.ts` ~:789), while a disabled own CLI parks. Whether that should park set-wide is a choice.
 
 ### T729 · A CLI remembered on another task can be refused at dispatch for a composed LSP task
 
