@@ -67,3 +67,9 @@ failed"). A claude-only check therefore never shows the breakage. Haive's own li
 (`_agent-loader`, `parseSkillMarkdown`, the bundle parser's `splitFrontmatter`) decode through
 `unquoteYamlScalar`. Haive's own gemini runs never load `.gemini/agents` (`enableAgents:false`
 returns first), but the files are committed to the repository, where gemini runs with agents on.
+The Codex agent TOML follows the same rule: `name` and `description` are TOML basic strings with
+every character TOML 1.0 requires escaped (`\b \t \n \f \r \" \\`, other control characters and
+U+007F as `\uXXXX`), the body a multi-line basic string with control characters escaped, and
+`parseFlatToml` decodes the same set. MEASURED with Python `tomllib` over U+0000 to U+00FF. The
+body sentence "a specialized agent that <description>" lowercases the description's first character
+unless its first word has a later capital or a digit (`API gateway`, `S3 bucket auditor`).
