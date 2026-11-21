@@ -888,9 +888,15 @@ Follow-ups found by the #1307 driver:
 
 ### T739 · FNF[cli-touched-vestigial] · the touched-CLI marker table has readers and no writer
 
-status: open · kind: fix · found: #1297 driver 2026-11-21, checked against the code · priority: P4
+status: open, phase 1 (readers removed) in review as #1309 (2026-11-21) · kind: fix · found: #1297 driver 2026-11-21, checked against the code · priority: P4
 
 1. `task_step_cli_touched` is read (`worker/src/step-engine/step-runner.ts` ~:333-343 `isTouched`, `api/src/routes/tasks/_helpers.ts` ~:186-199) but never written. The CLI switch writes the per-task choice first (`api/src/lib/step-cli-choice.ts` ~:87), which the resolver reads before any saved row, so an in-task pick never depends on the marker; under `ignore_saved_step_clis` a saved row is simply never honoured. Dead code, no user-visible effect. Fix direction: drop the readers, then the table in a later two-phase migration, or document why it stays. PRE-EXISTING.
+
+Notes from the #1309 driver:
+
+2. Correction: the table had two writers until 2026-10-01 (the step CLI-provider PATCH route, `433b9c0eb`..`2c7086ec7`, and the 09_6 gate, `ec5c6ae18`..`b5ea25427`), both removed then. The dev install holds 12 rows, all on completed or cancelled tasks (9 with `ignore_saved_step_clis`).
+3. Phase 2, after #1309 is deployed: a numbered migration `DROP TABLE IF EXISTS "task_step_cli_touched"` (dump the rows first), drop `taskStepCliTouched` from the schema, the two leftover-row pins and their registrations, the `step-summaries.md` sentence and the schema comment. Rollback text in `.claude/tmp/codex-run/T739-S/ledger.md`.
+4. Test gaps, low: no mixed-flag batched listing case, no enrich case with a null taskId and the flag on, no round choice under the flag; the worker fake in `resolve-preferred-cli.test.ts` ~:30-56 keys by role only. `_helpers.ts` ~:1394 still says "any untouched step otherwise" (cosmetic).
 
 ### T740 · FNF[agent-description-render] · agent descriptions render wrong for some inputs
 
