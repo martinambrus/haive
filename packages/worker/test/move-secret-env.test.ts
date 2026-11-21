@@ -18,6 +18,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Database } from '@haive/database';
 import { schema } from '@haive/database';
 import { cliAuthScope } from '@haive/shared/cli-auth-state';
+import { CLAUDE_USAGE_OAUTH_SECRET } from '@haive/shared/claude-oauth';
 import { createFakeDb } from '@haive/database/testing';
 import { envelopeDecrypt, envelopeEncrypt, secretsService } from '@haive/shared';
 import {
@@ -124,6 +125,20 @@ describe('copySecretLikeProviderEnv (boot)', () => {
     kek.mockClear();
     await copySecretLikeProviderEnv(db);
     expect(kek).not.toHaveBeenCalled();
+  });
+
+  // The usage grant is not secret-like by name, so neither half may move or drop a hand-typed
+  // entry of that name: a copy would put an arbitrary value in the grant's own secret, and the
+  // auth lock and login generation are keyed on the login token alone.
+  it('leaves an envVars entry named like the usage grant alone in both halves', async () => {
+    const { fake, db } = setup();
+    const envVars = { [CLAUDE_USAGE_OAUTH_SECRET]: 'typed-by-hand', ANTHROPIC_BASE_URL: 'u' };
+    addProvider(fake, P1, envVars);
+    await copySecretLikeProviderEnv(db);
+    await dropCopiedSecretLikeProviderEnv(db);
+    expect(fake.rows(schema.cliProviders).find((r) => r.id === P1)!.envVars).toEqual(envVars);
+    expect(fake.rows(schema.cliProviderSecrets)).toHaveLength(0);
+    expect(authLock.acquire).not.toHaveBeenCalled();
   });
 });
 

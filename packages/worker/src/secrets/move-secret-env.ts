@@ -1,6 +1,5 @@
 import { randomUUID } from 'node:crypto';
 import { cliAuthScope } from '@haive/shared/cli-auth-state';
-import { CLAUDE_USAGE_OAUTH_SECRET } from '@haive/shared/claude-oauth';
 import { and, eq } from 'drizzle-orm';
 import { schema, type CliAuthLock, type Database } from '@haive/database';
 import { logger, secretsService, splitSecretLikeEnv, upsertProviderSecret } from '@haive/shared';
@@ -8,8 +7,7 @@ import { waitForCliAuthLock } from '../sandbox/cli-auth-lock.js';
 
 const log = logger.child({ module: 'move-secret-env' });
 const SECRET_ENV_AUTH_LOCK_WAIT_MS = 30_000;
-const isAuthSecret = (name: string) =>
-  name === 'CLAUDE_CODE_OAUTH_TOKEN' || name === CLAUDE_USAGE_OAUTH_SECRET;
+const isAuthSecret = (name: string) => name === 'CLAUDE_CODE_OAUTH_TOKEN';
 
 type Tx = Parameters<Parameters<Database['transaction']>[0]>[0];
 
