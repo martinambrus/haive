@@ -874,7 +874,7 @@ status: done 2026-11-21 (#1298, 655845a07, docs: `docs/architecture/testing.md` 
 
 ### T738 · FNF[step-warning-atomic-append] · a step warning written from the caller's row snapshot can drop one added since
 
-status: open, items 1-2 in review as #1307 (2026-11-21: nine snapshot sites and the codex fallback append through `appendStepWarning`; `addStepWarning` removed) · kind: fix · found: #1297 driver 2026-11-21 · priority: P4
+status: open for follow-ups 3-6; items 1-2 DONE in #1307 (7fc70f310, deployed 2026-11-21 16:31Z: nine snapshot sites and the codex fallback append through `appendStepWarning`; `addStepWarning` removed) · kind: fix · found: #1297 driver 2026-11-21 · priority: P4
 
 1. `addStepWarning` (`worker/src/step-engine/step-ownership.ts` ~:92-100) joins the caller's row snapshot and writes the whole column, so a warning another writer added after the caller read its row is lost. Sites: `merge-resolver.ts` ~:532, 557, 679, 897, 1123, 1598; `left-open-merge.ts` ~:521; `dag-executor.ts` ~:977; `project-state/branch-revert.ts` ~:611. Fix direction: route them through `appendStepWarning` (one UPDATE that adds the text once, added by #1297). PRE-EXISTING; #1297's notice was traced through these flows and is not overwritten.
 2. `queues/cli-exec/handlers.ts` ~:387 replaces `warning_message` for a codex app-server fallback. Unreachable on a composed-LSP task today (only claude-code can be in its set). Same fix. PRE-EXISTING.
