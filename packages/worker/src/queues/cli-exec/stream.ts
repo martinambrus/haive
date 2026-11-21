@@ -12,7 +12,11 @@ import {
 } from '../../cli-executor/request-usage.js';
 import { normalizeClaudeUsage, sumTokenUsage } from '../../cli-executor/usage-extract.js';
 import { createToolUsageTally, type ToolUsageTally } from '../../cli-executor/tool-usage.js';
-import { buildOutputTruncationMessage, classifyStreamFailure } from './failure-class.js';
+import {
+  AUTH_FAILED_ERROR_CODE,
+  buildOutputTruncationMessage,
+  classifyStreamFailure,
+} from './failure-class.js';
 import { isPlaceholderModel, type StreamModelReport } from './model-identity.js';
 
 /** One `api_retry` event, carried verbatim. `errorStatus` is null when no HTTP response arrived
@@ -41,6 +45,8 @@ interface StreamJsonCollector {
    *  code (see AUTH_FAILED_ERROR_CODE). A structured field, so it holds for a run whose wording
    *  differs per provider or version. */
   hadAuthFailure: () => boolean;
+  /** The `error` string of the last top-level assistant event, or null. Call after getResult(). */
+  getAssistantErrorCode: () => string | null;
   /** Concatenation of every text block from assistant events. Lets us cross-check
    *  the result event's payload against the deltas claude-code actually streamed. */
   getAssistantText: () => string;
@@ -80,11 +86,6 @@ interface StreamJsonCollector {
    *  event finalizes as `coverage: 'none'`. */
   getToolUsage: () => InvocationToolUsage;
 }
-
-/** A field of the claude-family stream-json contract, not wording: the top-level `error` code
- *  the binary stamps on an assistant event it authored for an API failure. Compared exactly,
- *  never as text. */
-const AUTH_FAILED_ERROR_CODE = 'authentication_failed';
 
 export function createStreamJsonCollector(
   onProgress?: (message: string) => void,
@@ -547,6 +548,9 @@ export function createStreamJsonCollector(
     },
     hadAuthFailure(): boolean {
       return lastAssistantError === AUTH_FAILED_ERROR_CODE;
+    },
+    getAssistantErrorCode(): string | null {
+      return lastAssistantError;
     },
     getAssistantText(): string {
       return assistantText;

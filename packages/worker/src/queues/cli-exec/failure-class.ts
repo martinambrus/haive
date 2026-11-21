@@ -216,6 +216,42 @@ export function cliTimeoutBudgetMinutes(errorMessage: string | null | undefined)
  *  - server_error: provider 5xx / overloaded / service unavailable. */
 export type ProviderFatalClass = 'rate_limit' | 'auth' | 'server_error' | 'content_filter';
 
+/** A field of the claude-family stream-json contract, not wording: the top-level `error` code
+ *  the binary stamps on an assistant event it authored for an API failure. Compared exactly,
+ *  never as text. */
+export const AUTH_FAILED_ERROR_CODE = 'authentication_failed';
+
+// The stream error codes that name a fatal class. A Map so `constructor` and `__proto__` cannot
+// match. Unmapped on purpose: invalid_request is per request, model_not_found has no class,
+// max_output_tokens already reaches its capability class through the env-var name (that class
+// writes provider limits), unknown is the CLI's own "unclassified", cloud_credential_error is
+// Bedrock/Vertex only.
+const STREAM_ERROR_CODE_CLASS: ReadonlyMap<string, ProviderFatalClass> = new Map<
+  string,
+  ProviderFatalClass
+>([
+  // auth: the account or org cannot be used until a person acts, so fail fast, never retried or
+  // waited out.
+  [AUTH_FAILED_ERROR_CODE, 'auth'],
+  ['oauth_org_not_allowed', 'auth'],
+  ['account_on_hold', 'auth'],
+  ['verification_required', 'auth'],
+  // rate_limit: billing_error because the text rules already file credit exhaustion there
+  // (BILLING_EXHAUSTED_RE).
+  ['rate_limit', 'rate_limit'],
+  ['billing_error', 'rate_limit'],
+  // server_error: 5xx and 529.
+  ['server_error', 'server_error'],
+  ['overloaded', 'server_error'],
+]);
+
+/** The fatal class the CLI's own stream error code names, or null. Exact string compare. */
+export function fatalClassFromStreamErrorCode(
+  code: string | null | undefined,
+): ProviderFatalClass | null {
+  return code == null ? null : (STREAM_ERROR_CODE_CLASS.get(code) ?? null);
+}
+
 /** Stable headline per fatal class. Used to BUILD the invocation errorMessage
  *  (exec-core's interpretCliFailure) and to DETECT it downstream
  *  (isFatalProviderFailure) without a DB column — an internal contract we own
