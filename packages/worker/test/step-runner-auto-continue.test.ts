@@ -292,7 +292,6 @@ function makeMockDb(state: MockState): Database {
     query: {
       userStepCliPreferences: { findFirst: async () => undefined },
       userStepCliRolePreferences: { findFirst: async () => undefined },
-      taskStepCliTouched: { findFirst: async () => undefined },
       taskAttachments: { findMany: async () => [] },
       taskStepCliChoices: { findFirst: async () => undefined },
       tasks: {

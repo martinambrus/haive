@@ -183,30 +183,6 @@ async function loadStepCliPrefRows(
   return out;
 }
 
-/** `task_step_cli_touched` as taskId -> stepId -> roles. Loaded only for tasks that set
- *  ignore_saved_step_clis: under that flag a saved pref is honored only where the user
- *  explicitly (re)set it WITHIN this task, and everything else falls back to the task
- *  provider. */
-async function loadTouchedRoles(
-  db: ReturnType<typeof getDb>,
-  taskIds: string[],
-): Promise<Map<string, Map<string, Set<string>>>> {
-  const out = new Map<string, Map<string, Set<string>>>();
-  if (taskIds.length === 0) return out;
-  const touched = await db
-    .select()
-    .from(schema.taskStepCliTouched)
-    .where(inArray(schema.taskStepCliTouched.taskId, taskIds));
-  for (const t of touched) {
-    const byStep = out.get(t.taskId) ?? new Map<string, Set<string>>();
-    const set = byStep.get(t.stepId) ?? new Set<string>();
-    set.add(t.role);
-    byStep.set(t.stepId, set);
-    out.set(t.taskId, byStep);
-  }
-  return out;
-}
-
 interface TaskCliChoice {
   cliProviderId: string | null;
   effortLevel: string | null;
@@ -347,12 +323,6 @@ export async function enrichStepsWithCliPreferences<T extends { stepId: string; 
     stepIds,
     miningSeats,
   );
-  // When the task opted out of saved per-step prefs (ignore_saved_step_clis), gate each
-  // surfaced pref by its (step, role) marker; untouched steps fall back to the task provider.
-  const touchedByStep =
-    ignoreSaved && stepIds.length > 0 && taskId !== null
-      ? ((await loadTouchedRoles(db, [taskId])).get(taskId) ?? new Map<string, Set<string>>())
-      : new Map<string, Set<string>>();
   const choicesByStep =
     stepIds.length > 0 && taskId !== null
       ? ((await loadTaskCliChoices(db, [taskId])).get(taskId) ??
@@ -381,23 +351,18 @@ export async function enrichStepsWithCliPreferences<T extends { stepId: string; 
         : miningSeats[s.stepId];
     const roleProviders = roleByStep.get(s.stepId) ?? new Map<string, string>();
     const roleEfforts = roleEffortByStep.get(s.stepId) ?? new Map<string, string | null>();
-    const touchedRoles = touchedByStep.get(s.stepId);
     const choices = choicesByStep.get(s.stepId);
-    // Under ignoreSaved a saved pref surfaces only where a marker exists for that
-    // exact role; gating the 'default' read by its own marker stops a flagged
-    // multi-role step from leaking a pre-existing default pref via fallthrough.
-    const honor = (role: string, value: string | null): string | null =>
-      !ignoreSaved || touchedRoles?.has(role) ? value : null;
+    const honor = (value: string | null): string | null => (ignoreSaved ? null : value);
     const provider = (role: string, saved: string | null): string | null => {
       const choice = taskCliSlot(choices, s.stepId, role, s.round ?? round, fixTarget);
-      return choice ? choice.cliProviderId : honor(role, saved);
+      return choice ? choice.cliProviderId : honor(saved);
     };
     // A cleared slot has no effort, including one whose chosen provider was deleted since:
     // SET NULL clears the provider and leaves the effort that went with it.
     const effort = (role: string, saved: string | null): string | null => {
       const choice = taskCliSlot(choices, s.stepId, role, s.round ?? round, fixTarget);
       if (choice) return choice.cliProviderId ? choice.effortLevel : null;
-      return honor(role, saved);
+      return honor(saved);
     };
     return {
       ...s,
@@ -486,10 +451,6 @@ export async function resolveCurrentStepCliProviderIds(
   const listed = new Set(providerRows.map((p) => p.id));
   const miningSeats = await resolveMiningSeats(db);
   const prefs = await loadStepCliPrefRows(db, flags, userId, stepIds, miningSeats);
-  const touched = await loadTouchedRoles(
-    db,
-    tasks.filter((t) => t.ignoreSavedStepClis).map((t) => t.id),
-  );
   const choices = await loadTaskCliChoices(
     db,
     tasks.map((t) => t.id),
@@ -504,7 +465,6 @@ export async function resolveCurrentStepCliProviderIds(
 
   for (const task of tasks) {
     const stepId = task.currentStepId;
-    const touchedRoles = stepId ? touched.get(task.id)?.get(stepId) : undefined;
     const stepChoices = stepId ? choices.get(task.id)?.get(stepId) : undefined;
     if (
       unavailableRoundChoice(
@@ -521,8 +481,8 @@ export async function resolveCurrentStepCliProviderIds(
       out.set(task.id, []);
       continue;
     }
-    const honor = (role: string, value: string | null): string | null =>
-      !task.ignoreSavedStepClis || touchedRoles?.has(role) ? value : null;
+    const honor = (value: string | null): string | null =>
+      task.ignoreSavedStepClis ? null : value;
     const slot = (role: string, saved: string | null): string | null => {
       const choice = taskCliSlot(
         stepChoices,
@@ -531,7 +491,7 @@ export async function resolveCurrentStepCliProviderIds(
         task.currentRound,
         fixTargets.get(task.id),
       );
-      return choice ? choice.cliProviderId : honor(role, saved);
+      return choice ? choice.cliProviderId : honor(saved);
     };
     const usable = (id: string | null): string | null => (id && listed.has(id) ? id : null);
     const roleProviders =

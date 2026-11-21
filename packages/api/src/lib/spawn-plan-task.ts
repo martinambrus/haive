@@ -27,7 +27,7 @@ export async function spawnPlanTask(args: {
   /** True when the caller named the CLI — a plan page picker. A saved per-step preference would
    *  otherwise run instead of the pick: MEASURED, a plan chat whose picker named codex ran on
    *  Claude, through an explicit `01-plan-chat` preference saved days earlier. A CLI changed on the
-   *  running task still wins, through the touched-marker rule the New Task form's switch uses. */
+   *  running task still wins, through its task_step_cli_choices row. */
   ignoreSavedStepClis?: boolean;
   /** Runs after the task row exists and BEFORE the job is enqueued, in the creating transaction
    *  `tx`, where the row is invisible to every other handle until it commits. Anything a

@@ -36,7 +36,6 @@ beforeEach(() => {
     userStepCliPreferences: schema.userStepCliPreferences,
     userStepCliRolePreferences: schema.userStepCliRolePreferences,
     taskStepCliChoices: schema.taskStepCliChoices,
-    taskStepCliTouched: schema.taskStepCliTouched,
   });
   h.db = fake.db;
   fake.insert(schema.cliProviders, { id: providerId, userId: h.userId, enabled: true });

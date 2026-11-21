@@ -376,7 +376,6 @@ describe('skillVerificationStep.apply CLI write', () => {
   it("runs the fix on the gate's pick in this task, over the task's earlier pick, and no later", async () => {
     const fake = createFakeDb({
       taskStepCliChoices: schema.taskStepCliChoices,
-      taskStepCliTouched: schema.taskStepCliTouched,
       userStepCliPreferences: schema.userStepCliPreferences,
       userStepCliRolePreferences: schema.userStepCliRolePreferences,
     });

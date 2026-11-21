@@ -33,7 +33,6 @@ function setup(contract?: unknown, withTasks = true) {
     ...(withTasks ? { tasks: schema.tasks } : {}),
     cliProviders: schema.cliProviders,
     taskStepCliChoices: schema.taskStepCliChoices,
-    taskStepCliTouched: schema.taskStepCliTouched,
     userStepCliPreferences: schema.userStepCliPreferences,
     userStepCliRolePreferences: schema.userStepCliRolePreferences,
   });

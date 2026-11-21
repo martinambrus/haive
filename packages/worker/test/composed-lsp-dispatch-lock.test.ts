@@ -284,7 +284,6 @@ describe('a saved CLI the composed-LSP lock refuses', () => {
   }): Database {
     const fake = createFakeDb({
       taskStepCliChoices: schema.taskStepCliChoices,
-      taskStepCliTouched: schema.taskStepCliTouched,
       userStepCliRolePreferences: schema.userStepCliRolePreferences,
       userStepCliPreferences: schema.userStepCliPreferences,
     });

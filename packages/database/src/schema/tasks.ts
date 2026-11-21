@@ -900,14 +900,12 @@ export const taskStepAgentMinings = pgTable(
   ],
 );
 
-// --- Per-task "CLI touched" markers --------------------------------------
-// Records which (step, role) the user explicitly set a CLI for WITHIN a task
-// that has ignore_saved_step_clis=true. Under that flag the resolver + UI ignore
-// pre-existing global per-step prefs EXCEPT where a marker exists, so a mid-task
-// manual change still takes effect while the auto-applied default stays the
-// task's cli_provider_id. Keyed per task_id => no cross-task bleed. No longer
-// written: a mid-task change is a task_step_cli_choices row now, and these are
-// still read for the tasks that predate it.
+// --- Per-task "CLI touched" markers (retired) ----------------------------
+// Once recorded which (step, role) the user explicitly set a CLI for WITHIN a task
+// that has ignore_saved_step_clis=true, so that task honoured the saved per-step
+// pref there. Neither written nor read any more: a mid-task change is a
+// task_step_cli_choices row, and such a task honours no saved pref. A row left
+// from before has no effect. The table stays until a later migration drops it.
 export const taskStepCliTouched = pgTable(
   'task_step_cli_touched',
   {
