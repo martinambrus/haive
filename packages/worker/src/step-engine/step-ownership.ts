@@ -1,4 +1,4 @@
-import { and, eq, notInArray } from 'drizzle-orm';
+import { and, eq, notInArray, sql } from 'drizzle-orm';
 import type { PgUpdateSetSource } from 'drizzle-orm/pg-core';
 import { CLEAR_STEP_USAGE_STAMP, schema, type Database } from '@haive/database';
 import { currentBuildStamp } from '../build-stamp.js';
@@ -97,6 +97,19 @@ export async function addStepWarning(
   if (row.warningMessage?.includes(note)) return row;
   return updateOwnedStep(db, row.id, {
     warningMessage: [row.warningMessage, note].filter(Boolean).join(' '),
+  });
+}
+
+/** Add `note` to the step's warning in one statement, so a write that replaced the column since the
+ *  caller read its row is not overwritten (`addStepWarning` joins the caller's snapshot). */
+export async function appendStepWarning(
+  db: Database | DbHandle,
+  id: string,
+  note: string,
+): Promise<TaskStepRow> {
+  const w = schema.taskSteps.warningMessage;
+  return updateOwnedStep(db, id, {
+    warningMessage: sql`CASE WHEN strpos(coalesce(${w}, ''), ${note}::text) > 0 THEN ${w} ELSE concat_ws(' ', nullif(${w}, ''), ${note}::text) END`,
   });
 }
 

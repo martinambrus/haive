@@ -352,6 +352,7 @@ describe.each(TARGETS)('resolvePreferredCli precedence, %s', (_name, stepId, con
     expect(await resolve([], { cliProviderId: original.id, effortLevel: 'low' })).toEqual({
       cliProviderId: original.id,
       effortLevel: 'low',
+      savedPreference: { taskProviderId: 'fallback' },
     });
   });
 

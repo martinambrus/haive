@@ -90,7 +90,11 @@ describe('next-round CLI', () => {
       'task',
     );
     expect(await resolve(db, 2)).toEqual(today);
-    expect(today).toEqual({ cliProviderId: original.id, effortLevel: 'low' });
+    expect(today).toEqual({
+      cliProviderId: original.id,
+      effortLevel: 'low',
+      savedPreference: { taskProviderId: null },
+    });
   });
 
   it('uses the choice for its target round and default role, then expires', async () => {
@@ -102,10 +106,12 @@ describe('next-round CLI', () => {
     expect(await resolve(database(picked.id), 3)).toEqual({
       cliProviderId: original.id,
       effortLevel: 'low',
+      savedPreference: { taskProviderId: null },
     });
     expect(await resolve(database(picked.id), 2, 'task', '08b-test-management')).toEqual({
       cliProviderId: original.id,
       effortLevel: 'low',
+      savedPreference: { taskProviderId: null },
     });
   });
 

@@ -105,6 +105,7 @@ import {
 } from '../queues/cli-exec/failure-class.js';
 import { taskSecretMaskPolicy } from '../queues/cli-exec/secret-mask.js';
 import { parseJsonLooseValidated } from './steps/_fenced-json.js';
+import { noteSavedCliSkip } from './saved-cli-skip.js';
 import { resolvePreferredCli, TRUNCATION_RETRY_NOTICE } from './step-runner.js';
 import { augmentPromptWithTerseness } from './terseness-context.js';
 import { overrideOr } from './dispatch-timeout.js';
@@ -936,7 +937,11 @@ async function dispatchFixAgent(
     }) + FIX_RESULT_CONTRACT,
   );
   const prompt = afterTruncation ? `${augmented}\n\n${TRUNCATION_RETRY_NOTICE}` : augmented;
-  const { cliProviderId: preferred, effortLevel: preferredEffort } = await resolvePreferredCli(
+  const {
+    cliProviderId: preferred,
+    effortLevel: preferredEffort,
+    savedPreference,
+  } = await resolvePreferredCli(
     db,
     params.userId,
     stepDef.metadata.id,
@@ -949,6 +954,7 @@ async function dispatchFixAgent(
   const plan = await resolveTaskDispatch(db, params.taskId, {
     providers: params.providers!,
     preferredProviderId: preferred,
+    savedPreference,
     worktreeRel,
     input: { kind: 'prompt', prompt, capabilities: spec.requiredCapabilities },
     houseRules: houseRulesOptOut(
@@ -992,6 +998,7 @@ async function dispatchFixAgent(
     spec: plan.invocation.spec,
     timeoutMs: overrideOr(current, spec.timeoutMs ?? MERGE_FIX_TIMEOUT_MS),
   });
+  await noteSavedCliSkip(db, current.id, plan);
   return { kind: 'ok', invId };
 }
 

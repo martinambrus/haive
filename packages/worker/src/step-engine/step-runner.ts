@@ -92,10 +92,15 @@ import type {
 } from '@haive/shared';
 import { currentBuildStamp } from '../build-stamp.js';
 import { disabledProvider } from '../orchestrator/provider-hold.js';
+import { noteSavedCliSkip } from './saved-cli-skip.js';
 import { resolveModelLimits } from '../cli-adapters/model-capabilities.js';
 import { ProviderBuildError } from '../cli-adapters/prompt-delivery.js';
 import type { CliProviderRecord } from '../cli-adapters/types.js';
-import { resolveTaskDispatch, type DispatchPlan } from '../orchestrator/dispatcher.js';
+import {
+  resolveTaskDispatch,
+  type DispatchPlan,
+  type SavedPreferenceSource,
+} from '../orchestrator/dispatcher.js';
 import { resolveFixRoundCli } from './steps/workflow/_fix-round-cli.js';
 import { houseRulesFor, houseRulesOptOut } from '../orchestrator/house-rules.js';
 import type { IntegrationBinding } from '@haive/shared/integrations';
@@ -295,7 +300,9 @@ async function loadLastCompletedFormValues(
  *  chosen id has no provider row (a deleted provider). A provider that is switched off is
  *  still an explicit pick: the step hold parks on it and the dispatcher refuses it, so it
  *  is never swapped for another CLI here. Legacy auto-recorded rows (explicit=false) are
- *  ignored so the task provider wins. */
+ *  ignored so the task provider wins. `savedPreference` is set only on a pick read from the
+ *  user's saved rows (not one made in this task, nor a saved row this task touched), so the
+ *  dispatcher may skip it where it must refuse the others. */
 export async function resolvePreferredCli(
   db: Database,
   userId: string,
@@ -310,6 +317,7 @@ export async function resolvePreferredCli(
   cliProviderId: string | null;
   effortLevel: string | null;
   roundProvider?: CliProviderRecord;
+  savedPreference?: SavedPreferenceSource;
 }> {
   const roundProvider = await resolveFixRoundCli(db, userId, taskId, stepId, role, round);
   if (roundProvider) return { cliProviderId: roundProvider.id, effortLevel: null, roundProvider };
@@ -362,7 +370,11 @@ export async function resolvePreferredCli(
       if (roleRow) {
         const p = providers.find((p) => p.id === roleRow.cliProviderId);
         if (p && (!ignoreSaved || (await isTouched(role)))) {
-          return { cliProviderId: roleRow.cliProviderId, effortLevel: roleRow.effortLevel };
+          return {
+            cliProviderId: roleRow.cliProviderId,
+            effortLevel: roleRow.effortLevel,
+            ...(ignoreSaved ? {} : { savedPreference: { taskProviderId: fallback } }),
+          };
         }
       }
     }
@@ -387,7 +399,11 @@ export async function resolvePreferredCli(
   // leak a pre-existing default pref via the role->default fallthrough above.
   if (ignoreSaved && !(await isTouched('default')))
     return { cliProviderId: fallback, effortLevel: null };
-  return { cliProviderId: row.cliProviderId, effortLevel: row.effortLevel };
+  return {
+    cliProviderId: row.cliProviderId,
+    effortLevel: row.effortLevel,
+    ...(ignoreSaved ? {} : { savedPreference: { taskProviderId: fallback } }),
+  };
 }
 
 export interface WorkerDeps {
@@ -1172,6 +1188,7 @@ async function resolveLlmPhase(
     cliProviderId: preferredProviderId,
     effortLevel: preferredEffort,
     roundProvider,
+    savedPreference,
   } = await resolvePreferredCli(
     db,
     params.userId,
@@ -1188,6 +1205,7 @@ async function resolveLlmPhase(
   const plan = await resolveTaskDispatch(db, params.taskId, {
     providers: roundProvider ? [roundProvider] : params.providers,
     preferredProviderId,
+    savedPreference,
     steeringRequested,
     worktreeRel,
     ...(llmSpec.promptBudget
@@ -1388,7 +1406,7 @@ async function resolveLlmPhase(
     taskStepId: current.id,
     userId: params.userId,
     cliProviderId: plan.providerId,
-    effortLevel: preferredEffort ?? undefined,
+    effortLevel: plan.skippedSavedPreference ? undefined : (preferredEffort ?? undefined),
     kind: payloadKind,
     toolProfile: llmSpec.toolProfile,
     ...(custom ? { customTools: custom.names } : {}),
@@ -1396,6 +1414,7 @@ async function resolveLlmPhase(
     spec: plan.invocation.spec,
     timeoutMs: budget.timeoutMs,
   });
+  await noteSavedCliSkip(db, current.id, plan);
   const updated = await updateRow(db, current.id, {
     status: 'waiting_cli',
     statusMessage: 'Waiting for AI analysis...',
@@ -1495,6 +1514,7 @@ async function resolveAiFixPhase(
     cliProviderId: preferredProviderId,
     effortLevel: preferredEffort,
     roundProvider,
+    savedPreference,
   } = await resolvePreferredCli(
     db,
     params.userId,
@@ -1509,6 +1529,7 @@ async function resolveAiFixPhase(
   const plan = await resolveTaskDispatch(db, params.taskId, {
     providers: roundProvider ? [roundProvider] : params.providers,
     preferredProviderId,
+    savedPreference,
     input: { kind: 'prompt', prompt, capabilities: ['tool_use', 'file_write'] },
     // Same step, so the same declared surface: a fix agent for a report-only step
     // must not be told it has tools the step never gets.
@@ -1580,7 +1601,7 @@ async function resolveAiFixPhase(
     taskStepId: current.id,
     userId: params.userId,
     cliProviderId: plan.providerId,
-    effortLevel: preferredEffort ?? undefined,
+    effortLevel: plan.skippedSavedPreference ? undefined : (preferredEffort ?? undefined),
     kind: payloadKind,
     // The profile the dispatcher was given above, carried onto the payload too. Without it
     // cli-exec wires the FULL MCP surface while the prompt it runs describes the step's
@@ -1589,6 +1610,7 @@ async function resolveAiFixPhase(
     spec: plan.invocation.spec,
     timeoutMs: fixBudget.timeoutMs,
   });
+  await noteSavedCliSkip(db, current.id, plan);
   const updated = await updateRow(db, current.id, {
     status: 'waiting_cli',
     statusMessage: 'AI diagnosing the failure…',
@@ -2534,10 +2556,7 @@ async function dispatchMiningAgents(
     //
     // A dispatch with no roleKey resolves 'default', which is byte-for-byte the call this
     // replaced — an un-opted-in step is unchanged.
-    const seatCache = new Map<
-      string,
-      { cliProviderId: string | null; effortLevel: string | null }
-    >();
+    const seatCache = new Map<string, Awaited<ReturnType<typeof resolvePreferredCli>>>();
     const resolveSeat = async (roleKey: string) => {
       const hit = seatCache.get(roleKey);
       if (hit) return hit;
@@ -2598,8 +2617,11 @@ async function dispatchMiningAgents(
       const replaysNotice = dispatch.replayVerbatim === true && target.noticed === true;
       const appendNotice = target.truncated === true && !replaysNotice;
       const prompt = appendNotice ? `${augmented}\n\n${TRUNCATION_RETRY_NOTICE}` : augmented;
-      const { cliProviderId: preferredProviderId, effortLevel: preferredEffort } =
-        await resolveSeat(dispatch.roleKey ?? 'default');
+      const {
+        cliProviderId: preferredProviderId,
+        effortLevel: preferredEffort,
+        savedPreference,
+      } = await resolveSeat(dispatch.roleKey ?? 'default');
       const requirements = dispatchRequirements(dispatch);
       let plan: Awaited<ReturnType<typeof resolveTaskDispatch>> | undefined;
       let buildFailure: string | null = null;
@@ -2610,6 +2632,7 @@ async function dispatchMiningAgents(
           {
             providers: params.providers!,
             preferredProviderId,
+            savedPreference,
             steeringRequested,
             ...(classifier
               ? {
@@ -2795,6 +2818,7 @@ async function dispatchMiningAgents(
       linking = null;
       targets.delete(dispatch.agentId);
       enqueued++;
+      await noteSavedCliSkip(db, current.id, plan);
     }
     return { sent: enqueued, lost, refused: refusedRows };
   } catch (err) {
@@ -4714,8 +4738,12 @@ async function maybeEnqueueStepSummary(
     const summaryProvider = task?.summaryCliProviderId
       ? providers.find((p) => p.id === task.summaryCliProviderId && p.enabled)
       : undefined;
-    const { cliProviderId: preferredProviderId, effortLevel: preferredEffort } = summaryProvider
-      ? { cliProviderId: summaryProvider.id, effortLevel: null }
+    const {
+      cliProviderId: preferredProviderId,
+      effortLevel: preferredEffort,
+      savedPreference,
+    } = summaryProvider
+      ? { cliProviderId: summaryProvider.id, effortLevel: null, savedPreference: undefined }
       : await resolvePreferredCli(
           db,
           params.userId,
@@ -4742,6 +4770,7 @@ async function maybeEnqueueStepSummary(
     const plan = await resolveTaskDispatch(db, params.taskId, {
       providers,
       preferredProviderId,
+      savedPreference,
       toolProfile: 'none',
       skipAgentRules: true,
       houseRules: houseRulesOptOut('the recap compacts agent text and writes no code'),

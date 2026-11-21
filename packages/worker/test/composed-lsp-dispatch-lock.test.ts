@@ -1,5 +1,7 @@
+import { randomUUID } from 'node:crypto';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import type { Database } from '@haive/database';
+import { schema, type Database } from '@haive/database';
+import { createFakeDb } from '@haive/database/testing';
 import { configService } from '@haive/shared';
 import type { CliProviderRecord } from '../src/cli-adapters/types.js';
 
@@ -39,6 +41,8 @@ import {
   resolveTaskDispatch,
   type DispatchInput,
 } from '../src/orchestrator/dispatcher.js';
+import { ProviderBuildError } from '../src/cli-adapters/prompt-delivery.js';
+import { resolvePreferredCli } from '../src/step-engine/step-runner.js';
 
 function provider(id: string, name: string, createdAt: number): CliProviderRecord {
   return {
@@ -60,9 +64,9 @@ function provider(id: string, name: string, createdAt: number): CliProviderRecor
   } as unknown as CliProviderRecord;
 }
 
-const B = provider('prov-b', 'codex', 1);
-const A = provider('prov-a', 'claude-code', 2);
-const C = provider('prov-c', 'gemini', 3);
+const B = provider(randomUUID(), 'codex', 1);
+const A = provider(randomUUID(), 'claude-code', 2);
+const C = provider(randomUUID(), 'gemini', 3);
 const prompt: DispatchInput = { kind: 'prompt', prompt: 'work', capabilities: [] };
 const base = { providers: [A, B], input: prompt, invokeOpts: {} };
 
@@ -265,5 +269,241 @@ describe('legacy contracts dispatch as before', () => {
     expect([task.mock.calls.length, env.mock.calls.length, step.mock.calls.length]).toEqual([
       1, 1, 2,
     ]);
+  });
+});
+
+describe('a saved CLI the composed-LSP lock refuses', () => {
+  const userId = randomUUID();
+  const taskId = randomUUID();
+  const stepId = '07-phase-2-implement';
+  const PROVIDERS = [A, B, C];
+
+  function savedAndChosen(opts: {
+    saved?: { role: string; provider: CliProviderRecord; effort?: string };
+    choice?: { role: string; provider: CliProviderRecord };
+  }): Database {
+    const fake = createFakeDb({
+      taskStepCliChoices: schema.taskStepCliChoices,
+      taskStepCliTouched: schema.taskStepCliTouched,
+      userStepCliRolePreferences: schema.userStepCliRolePreferences,
+      userStepCliPreferences: schema.userStepCliPreferences,
+    });
+    if (opts.saved && opts.saved.role === 'default') {
+      fake.insert(schema.userStepCliPreferences, {
+        userId,
+        stepId,
+        cliProviderId: opts.saved.provider.id,
+        effortLevel: opts.saved.effort ?? null,
+        explicit: true,
+      });
+    } else if (opts.saved) {
+      fake.insert(schema.userStepCliRolePreferences, {
+        userId,
+        stepId,
+        role: opts.saved.role,
+        cliProviderId: opts.saved.provider.id,
+        effortLevel: opts.saved.effort ?? null,
+        explicit: true,
+      });
+    }
+    if (opts.choice) {
+      fake.insert(schema.taskStepCliChoices, {
+        taskId,
+        stepId,
+        role: opts.choice.role,
+        cliProviderId: opts.choice.provider.id,
+        effortLevel: null,
+      });
+    }
+    return fake.db as unknown as Database;
+  }
+
+  async function run(
+    prefs: Database,
+    taskDb: Database,
+    role = 'default',
+    taskCli: CliProviderRecord | null = A,
+  ) {
+    const resolved = await resolvePreferredCli(
+      prefs,
+      userId,
+      stepId,
+      taskCli?.id ?? null,
+      PROVIDERS,
+      role,
+      taskId,
+    );
+    const plan = await resolveTaskDispatch(taskDb, 't', {
+      providers: PROVIDERS,
+      preferredProviderId: resolved.cliProviderId,
+      savedPreference: resolved.savedPreference,
+      input: prompt,
+      invokeOpts: { effortLevel: resolved.effortLevel ?? undefined },
+      toolProfile: 'none',
+    });
+    return { resolved, plan };
+  }
+
+  it.each(['default', 'reviewer'])('runs a saved %s pick on the task CLI instead', async (role) => {
+    vi.spyOn(configService, 'getBoolean').mockResolvedValue(false);
+    const { plan } = await run(
+      savedAndChosen({ saved: { role, provider: B, effort: 'high' } }),
+      fakeDb(2, refs).db,
+      role,
+    );
+    expect(plan.mode).toBe('cli');
+    expect(plan.providerId).toBe(A.id);
+    expect(plan.skippedSavedPreference?.providerId).toBe(B.id);
+    expect(plan.effort?.source).not.toBe('step');
+  });
+
+  it('runs it before any image is effective, on the verified provider', async () => {
+    vi.spyOn(configService, 'getBoolean').mockResolvedValue(false);
+    const { plan } = await run(
+      savedAndChosen({ saved: { role: 'default', provider: B } }),
+      fakeDb(2, {}).db,
+    );
+    expect(plan.mode).toBe('cli');
+    expect(plan.providerId).toBe(A.id);
+    expect(plan.skippedSavedPreference?.providerId).toBe(B.id);
+  });
+
+  it('floats inside the set when the task CLI is outside it or unset', async () => {
+    vi.spyOn(configService, 'getBoolean').mockResolvedValue(false);
+    for (const taskCli of [C, null]) {
+      const { plan } = await run(
+        savedAndChosen({ saved: { role: 'default', provider: B } }),
+        fakeDb(2, refs).db,
+        'default',
+        taskCli,
+      );
+      expect(plan.providerId).toBe(A.id);
+      expect(plan.skippedSavedPreference?.providerId).toBe(B.id);
+    }
+  });
+
+  it('never moves a pick made in this task', async () => {
+    vi.spyOn(configService, 'getBoolean').mockResolvedValue(false);
+    const { resolved, plan } = await run(
+      savedAndChosen({
+        saved: { role: 'default', provider: C },
+        choice: { role: 'default', provider: B },
+      }),
+      fakeDb(2, refs).db,
+    );
+    expect(resolved.cliProviderId).toBe(B.id);
+    expect(resolved.savedPreference).toBeUndefined();
+    expect(plan.mode).toBe('skip');
+    expect(plan.skippedSavedPreference).toBeUndefined();
+  });
+
+  it('honours the same saved pick when nothing is locked', async () => {
+    vi.spyOn(configService, 'getBoolean').mockResolvedValue(false);
+    const { plan } = await run(
+      savedAndChosen({ saved: { role: 'default', provider: B } }),
+      fakeDb(1, {}).db,
+    );
+    expect(plan.providerId).toBe(B.id);
+    expect(plan.skippedSavedPreference).toBeUndefined();
+  });
+
+  it('honours a saved pick inside the set', async () => {
+    vi.spyOn(configService, 'getBoolean').mockResolvedValue(false);
+    const { plan } = await run(
+      savedAndChosen({ saved: { role: 'default', provider: A, effort: 'high' } }),
+      fakeDb(2, refs).db,
+      'default',
+      C,
+    );
+    expect(plan.providerId).toBe(A.id);
+    expect(plan.skippedSavedPreference).toBeUndefined();
+    expect(plan.effort?.source).toBe('step');
+  });
+});
+
+describe('resolveDispatch with a saved preference outside the set', () => {
+  const locked = { ...base, providers: [A, B, C], composedLspProviderIds: [A.id] };
+
+  it('keeps the refusal when the caller does not say the pick is saved', () => {
+    const plan = resolveDispatch({ ...locked, preferredProviderId: B.id });
+    expect(plan.mode).toBe('skip');
+    expect(plan.skippedSavedPreference).toBeUndefined();
+  });
+
+  it('keeps the disabled refusal for a disabled saved pick', () => {
+    const off = { ...B, enabled: false } as CliProviderRecord;
+    const plan = resolveDispatch({
+      ...locked,
+      providers: [A, off, C],
+      preferredProviderId: B.id,
+      savedPreference: { taskProviderId: A.id },
+    });
+    expect(plan.mode).toBe('skip');
+    expect(plan.reason).toContain('is disabled');
+  });
+
+  it('refuses a disabled task CLI as disabled rather than floating past it', () => {
+    const off = { ...A, enabled: false } as CliProviderRecord;
+    const plan = resolveDispatch({
+      ...locked,
+      providers: [off, B, C],
+      preferredProviderId: B.id,
+      composedLspProviderIds: [A.id, C.id],
+      savedPreference: { taskProviderId: A.id },
+    });
+    expect(plan.mode).toBe('skip');
+    expect(plan.reason).toContain('is disabled');
+  });
+
+  it('floats to the set when the task CLI is outside it', () => {
+    const plan = resolveDispatch({
+      ...locked,
+      preferredProviderId: B.id,
+      savedPreference: { taskProviderId: C.id },
+    });
+    expect(plan.providerId).toBe(A.id);
+    expect(plan.skippedSavedPreference).toEqual({ providerId: B.id, label: B.label });
+  });
+
+  it('runs the task CLI, not the oldest provider, when it is the newer of two in the set', () => {
+    const plan = resolveDispatch({
+      ...locked,
+      composedLspProviderIds: [A.id, B.id],
+      preferredProviderId: C.id,
+      savedPreference: { taskProviderId: A.id },
+    });
+    expect(plan.providerId).toBe(A.id);
+    expect(plan.skippedSavedPreference).toEqual({ providerId: C.id, label: C.label });
+  });
+
+  it('floats inside the set, not as a disabled skip, when the task CLI is outside it and disabled', () => {
+    const off = { ...C, enabled: false } as CliProviderRecord;
+    const plan = resolveDispatch({
+      ...locked,
+      providers: [A, B, off],
+      preferredProviderId: B.id,
+      savedPreference: { taskProviderId: C.id },
+    });
+    expect(plan.mode).toBe('cli');
+    expect(plan.providerId).toBe(A.id);
+    expect(plan.skippedSavedPreference).toEqual({ providerId: B.id, label: B.label });
+  });
+
+  it('rethrows a build failure of the task CLI it substituted, and skips a floated one', () => {
+    const O = provider(randomUUID(), 'ollama', 0);
+    const inSet = { ...locked, providers: [O, A, B], composedLspProviderIds: [O.id, A.id] };
+    expect(() =>
+      resolveDispatch({
+        ...inSet,
+        preferredProviderId: B.id,
+        savedPreference: { taskProviderId: O.id },
+      }),
+    ).toThrow(ProviderBuildError);
+    const floated = resolveDispatch({
+      ...inSet,
+      preferredProviderId: B.id,
+      savedPreference: { taskProviderId: null },
+    });
+    expect(floated.providerId).toBe(A.id);
   });
 });
