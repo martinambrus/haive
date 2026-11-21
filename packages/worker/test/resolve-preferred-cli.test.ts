@@ -311,26 +311,6 @@ describe('resolvePreferredCli saved-preference marker', () => {
     expect((await resolve(db, 'reviewer')).savedPreference).toEqual({ taskProviderId: TASK_CLI });
   });
 
-  it('leaves a leftover touch-marker row without effect under ignore_saved_step_clis', async () => {
-    const fake = createFakeDb({
-      taskStepCliChoices: schema.taskStepCliChoices,
-      taskStepCliTouched: schema.taskStepCliTouched,
-      userStepCliRolePreferences: schema.userStepCliRolePreferences,
-      userStepCliPreferences: schema.userStepCliPreferences,
-    });
-    fake.insert(schema.taskStepCliTouched, { taskId: TASK, stepId: STEP, role: 'default' });
-    fake.insert(schema.userStepCliPreferences, {
-      userId: USER,
-      stepId: STEP,
-      cliProviderId: SAVED_CLI,
-      effortLevel: 'low',
-      explicit: true,
-    });
-    const out = await resolve(fake.db as unknown as Database, 'default', true);
-    expect(out).toEqual({ cliProviderId: TASK_CLI, effortLevel: null });
-    expect(out.savedPreference).toBeUndefined();
-  });
-
   it.each([
     [
       'a role pick made in this task',

@@ -2,7 +2,7 @@
 import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import type { Sql } from 'postgres';
-import { baselineColumns, baselineTableNames } from './baseline.js';
+import { baselineColumns, baselineTableNames, DROPPED_SINCE_BASELINE } from './baseline.js';
 import { classifyDatabase, columnDrift } from './adoption.js';
 import { checksum } from './checksum.js';
 import {
@@ -172,7 +172,7 @@ async function main(): Promise<number> {
 
     // Classification happens BEFORE the journal table is created. Creating it first would make
     // every database look managed and destroy the classifier outright.
-    const expectedTables = baselineTableNames(baseline.text);
+    const expectedTables = baselineTableNames(baseline.text, DROPPED_SINCE_BASELINE);
     const existingJournalColumns = await journalColumns(sql);
     const classification = classifyDatabase({
       expectedTables,
@@ -207,7 +207,10 @@ async function main(): Promise<number> {
     }
 
     if (classification.kind === 'legacy') {
-      const drift = columnDrift(baselineColumns(baseline.text), await presentColumns(sql));
+      const drift = columnDrift(
+        baselineColumns(baseline.text, DROPPED_SINCE_BASELINE),
+        await presentColumns(sql),
+      );
       if (drift.missing.length > 0) {
         const shown = drift.missing.slice(0, 15);
         throw new FatalError(
