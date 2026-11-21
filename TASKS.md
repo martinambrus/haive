@@ -798,7 +798,7 @@ Paths are under `packages/`. NEW means introduced by #1288.
 
 ### T729 · A CLI remembered on another task can be refused at dispatch for a composed LSP task
 
-status: open, decided by the owner 2026-11-20 (option a), in review as #1297 (2026-11-21) · kind: fix · found: #1288 review 2026-11-20 · priority: P3
+status: done 2026-11-21 (#1297, 91a9a9d7f, worker deployed 02:48Z); decided by the owner 2026-11-20 (option a) · kind: fix · found: #1288 review 2026-11-20 · priority: P3
 
 Saved CLI preferences ("Also for my later tasks") are user-wide, so a pick remembered on another task is not ordered against this task's composed LSP decision, and `resolvePreferredCli` (`worker/src/step-engine/step-runner.ts` ~:377) applies none of the provider rule. A contract-2 task whose step later resolves a remembered CLI the lock refuses is stopped by the dispatch backstop, and the step fails. The task lock cannot cover it. PRE-EXISTING since #1272.
 
@@ -832,7 +832,7 @@ status: open · kind: fix · found: translator scale and acceptance milestone 20
 
 ### T735 · Translator first paid run and its prerequisites
 
-status: open, in work 2026-11-20 (the owner approved the first paid run and runs it, guided); the free-step walk waits on the owner's admin switch (item 4) and the consent fix (item 7) · kind: feature · found: owner decisions 2026-11-20 · priority: P2
+status: open, in work 2026-11-20 (the owner approved the first paid run and runs it, guided); the free-step walk waits on the owner's admin switch (item 4); items 6 and 7 done 2026-11-21 · kind: feature · found: owner decisions 2026-11-20 · priority: P2
 
 In `martinambrus/haive-module-translator`.
 
@@ -841,8 +841,8 @@ In `martinambrus/haive-module-translator`.
 3. DONE 2026-11-21: T733 merged (module PR #12, 3493a9e), the module loads on the dev stack, its database exists and the type is listed (local uncommitted `selectable: true`). Original item: before the run: T733 merged; the module installed on the dev stack (`external-modules/translator`, `pnpm module add translator`, install, build, `pnpm docker rebuild` while nothing runs); the task type made startable on that install only, by an uncommitted `selectable: true` in `src/manifest.ts`, until the owner's quality sign-off.
 4. A walkthrough for the owner, written after walking the free steps (upload, source approval, consent screen) in the browser. Written 2026-11-21 from the code and README (`.claude/tmp/codex-run/T735/owner-walkthrough.md`); the browser walk waits on the owner ticking Admin "Allow tasks of module-seeded types" (a global config switch the run may not change). Writing it found item 7.
 5. After the owner's quality sign-off: unhide in a module PR (`selectable: true`, and the README's hidden-type text).
-6. The README's download memory figure ("about twice the bound plus one part, roughly 70 MiB") is low by 2.5 to 2.8 times (item 2). Correct it in a module docs PR.
-7. Setup consent blockers, fixed in module PR #13 (in review 2026-11-21): `providers()` (`src/db/setup.ts`) threw for more than 50 enabled CLI rows (the owner has 78), so the consent form never opened; and it never offered a Claude Code row, whose provider form hides and nulls Model (the model is the last `--model` argument). The fix lists up to 200 rows and offers Claude Code rows by that argument, with the consent fingerprint unchanged. Same PR: a reopened consent form pre-selects its providers (`defaults`, not `default`). Deploy: pull the live clone, `pnpm docker libs`.
+6. DONE module PR #14 (6b73db6). The README's download memory figure ("about twice the bound plus one part, roughly 70 MiB") is low by 2.5 to 2.8 times (item 2). Correct it in a module docs PR.
+7. DONE module PR #13 (c7f7147, deployed 2026-11-21 02:24Z; live probe, counts only: no error, 66 of the owner's 78 enabled rows offered, all 41 Claude Code rows among them). Setup consent blockers: `providers()` (`src/db/setup.ts`) threw for more than 50 enabled CLI rows (the owner has 78), so the consent form never opened; and it never offered a Claude Code row, whose provider form hides and nulls Model (the model is the last `--model` argument). The fix lists up to 200 rows and offers Claude Code rows by that argument, with the consent fingerprint unchanged. Same PR: a reopened consent form pre-selects its providers (`defaults`, not `default`). Deploy: pull the live clone, `pnpm docker libs`.
 
 ### T736 · FNF[translator-grouping] · Translator unit grouping and calibration envelope leftovers (+8)
 
@@ -861,9 +861,9 @@ In `martinambrus/haive-module-translator`.
 
 ### T737 · FNF[fresh-worktree-typecheck] · A fresh worktree's worker typecheck fails until the statistics module is built
 
-status: open · kind: fix · found: gate-3 parking build (#1296) 2026-11-20 · priority: P4
+status: done 2026-11-21 (#1298, 655845a07, docs: `docs/architecture/testing.md` "Running one package") · kind: fix · found: gate-3 parking build (#1296) 2026-11-20 · priority: P4
 
-1. PRE-EXISTING: in a fresh worktree, `pnpm --filter @haive/worker typecheck` fails on `packages/worker/src/modules.generated.ts` until `@haive/module-statistics` is built (`pnpm --filter @haive/module-statistics build`), and `packages/worker/test/step-integrations-boot.test.ts` failed while `modules.generated.ts` was absent. Fix direction: make the worker's typecheck and test tasks build the generated modules first (a dependency turbo's `^build` follows), or say so in `docs/architecture/testing.md`.
+1. DONE #1298. PRE-EXISTING: in a fresh worktree, `pnpm --filter @haive/worker typecheck` fails on `packages/worker/src/modules.generated.ts` until `@haive/module-statistics` is built (`pnpm --filter @haive/module-statistics build`), and `packages/worker/test/step-integrations-boot.test.ts` failed while `modules.generated.ts` was absent. Fix direction: make the worker's typecheck and test tasks build the generated modules first (a dependency turbo's `^build` follows), or say so in `docs/architecture/testing.md`.
 
 ### T738 · FNF[step-warning-atomic-append] · a step warning written from the caller's row snapshot can drop one added since
 
@@ -980,7 +980,7 @@ Leftovers, none blocking: (a) a dependent span re-entered in a later fix round f
 
 ### T712 · Legacy composed builds fail on an environment body that copies project files
 
-status: done 2026-11-20 (#1295, 5385c14ba, worker deployed 17:29Z); live check owed: a workflow task on ledger-export-cli-lsp with the legacy opt-out and preinstall passes 01b and 00b · kind: fix · found: composed LSP live check (#1274) · priority: P2
+status: done 2026-11-20 (#1295, 5385c14ba, worker deployed 17:29Z); live check passed 2026-11-21 (task 8e6866b6, cancelled after): a legacy template with `preinstallDeps` on, whose body copies `composer.json composer.lock`, composed its sandbox image on the environment image (the environment image's layers are a prefix of the composed image's), 00b's call ran clean and 01b passed; evidence `.claude/tmp/codex-run/T712L/log.md` · kind: fix · found: composed LSP live check (#1274) · priority: P2
 
 A legacy (absent/1) composed image still pastes the environment Dockerfile body into a build context that holds only the Dockerfile (`sandbox/image-composer.ts` ~:137-140 `resolveBase`, `sandbox/composed-image-cache.ts` ~:283-293 `buildComposedImage`), while `02-generate-dockerfile.ts` ~:941-988 emits a `COPY` of manifest files per package manager when dependencies are preinstalled. Such a legacy environment builds at 03 and then fails its composed build at task launch with "not found". PRE-EXISTING; reproduced through the real launch entry with a fake docker and with real docker (evidence `.claude/tmp/codex-run/LSPB-S/evidence/legacy-copy-launch-base.log`, `from-probe/h.log`). Not fixed with #1274 because moving legacy onto the environment image changes every existing legacy composed tag (a rebuild of each, readiness unaffected since legacy has none), and a body-text COPY heuristic is fragile. Decision needed: move legacy onto the environment image too (one-time rebuild of every legacy composed image) or give the composed build the repository context. Check first how many existing templates carry such a COPY.
 
