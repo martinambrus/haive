@@ -301,8 +301,9 @@ async function loadLastCompletedFormValues(
  *  still an explicit pick: the step hold parks on it and the dispatcher refuses it, so it
  *  is never swapped for another CLI here. Legacy auto-recorded rows (explicit=false) are
  *  ignored so the task provider wins. `savedPreference` is set only on a pick read from the
- *  user's saved rows (not one made in this task, nor a saved row this task touched), so the
- *  dispatcher may skip it where it must refuse the others. */
+ *  user's saved rows (not one made in this task), so the dispatcher may skip it where it must
+ *  refuse the others. A task that set `ignoreSaved` honours no saved row, only its own choices,
+ *  else the task provider. */
 export async function resolvePreferredCli(
   db: Database,
   userId: string,
@@ -333,22 +334,6 @@ export async function resolvePreferredCli(
           ),
         })
       : Promise.resolve(undefined);
-  // When the task set ignore_saved_step_clis, a saved pref is honored only where
-  // the user explicitly (re)set it WITHIN this task (a task_step_cli_touched
-  // marker for that exact role); otherwise the step falls back to the task
-  // provider. ignoreSaved=false (the default) makes every check below a no-op,
-  // preserving the original resolution behavior.
-  const isTouched = async (r: string): Promise<boolean> => {
-    if (!taskId) return false;
-    const m = await db.query.taskStepCliTouched.findFirst({
-      where: and(
-        eq(schema.taskStepCliTouched.taskId, taskId),
-        eq(schema.taskStepCliTouched.stepId, stepId),
-        eq(schema.taskStepCliTouched.role, r),
-      ),
-    });
-    return !!m;
-  };
   // Named roles (e.g. reviewer/corrector) first consult the per-role table; an
   // unset/disabled role falls through to the step's single 'default' pref, then
   // to the task provider, so partially-configured multi-CLI steps still run.
@@ -369,11 +354,11 @@ export async function resolvePreferredCli(
       });
       if (roleRow) {
         const p = providers.find((p) => p.id === roleRow.cliProviderId);
-        if (p && (!ignoreSaved || (await isTouched(role)))) {
+        if (p && !ignoreSaved) {
           return {
             cliProviderId: roleRow.cliProviderId,
             effortLevel: roleRow.effortLevel,
-            ...(ignoreSaved ? {} : { savedPreference: { taskProviderId: fallback } }),
+            savedPreference: { taskProviderId: fallback },
           };
         }
       }
@@ -395,14 +380,11 @@ export async function resolvePreferredCli(
   if (!row) return { cliProviderId: fallback, effortLevel: null };
   const provider = providers.find((p) => p.id === row.cliProviderId);
   if (!provider) return { cliProviderId: fallback, effortLevel: null };
-  // Gate the 'default' read by its own marker so a flagged multi-role step can't
-  // leak a pre-existing default pref via the role->default fallthrough above.
-  if (ignoreSaved && !(await isTouched('default')))
-    return { cliProviderId: fallback, effortLevel: null };
+  if (ignoreSaved) return { cliProviderId: fallback, effortLevel: null };
   return {
     cliProviderId: row.cliProviderId,
     effortLevel: row.effortLevel,
-    ...(ignoreSaved ? {} : { savedPreference: { taskProviderId: fallback } }),
+    savedPreference: { taskProviderId: fallback },
   };
 }
 
@@ -419,7 +401,7 @@ export interface AdvanceStepParams {
   cliProviderId: string | null;
   /** Per-task "ignore saved per-step CLIs" toggle (tasks.ignore_saved_step_clis).
    *  Threaded into resolvePreferredCli so a flagged task defaults each step to
-   *  cliProviderId unless the user touched that step within the task. */
+   *  cliProviderId unless a choice was recorded for that step within the task. */
   ignoreSavedStepClis?: boolean;
   stepDef: StepDefinition;
   /** Fix-loop round to materialize/run the step at (default 0 = original pass). */

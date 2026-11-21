@@ -108,7 +108,7 @@ describe("a step card's CLI", () => {
     expect(steps.map((s) => s.preferredCliProviderId)).toEqual([null, SAVED_CLI]);
   });
 
-  it("shows this task's pick under ignore_saved_step_clis with no touch marker", async () => {
+  it("shows this task's pick under ignore_saved_step_clis", async () => {
     const { db, save, choose } = setup();
     save('08c-code-review', SAVED_CLI);
     save('08d-adversarial-qa', SAVED_CLI);
@@ -371,6 +371,193 @@ describe('active fix-round CLI readers', () => {
   });
 });
 
+describe('a slot with and without ignore_saved_step_clis', () => {
+  const UNLISTED = '00000000-0000-4000-8000-0000000000b9';
+  const SEAT = STEP_MINING_SEATS['08c-code-review']![0]!.id;
+  type Setup = ReturnType<typeof setup>;
+  type Target = { stepId: string; role: string };
+  const dflt: Target = { stepId: '08d-adversarial-qa', role: 'default' };
+  const roleT: Target = { stepId: '08a-browser-verify', role: 'fixer' };
+  const seatT: Target = { stepId: '08c-code-review', role: SEAT };
+  // [name, target, arrange, [card off, listing off], [card on, listing on]]
+  type Row = [
+    string,
+    Target,
+    (s: Setup, t: Target) => void,
+    [string | null, string[]],
+    [string | null, string[]],
+  ];
+  const cleared = (s: Setup, t: Target, role = t.role) => s.choose(t.stepId, null, role);
+  const rows: Row[] = [
+    [
+      'default: task pick over a saved row',
+      dflt,
+      (s, t) => {
+        s.save(t.stepId, SAVED_CLI);
+        s.choose(t.stepId, PICKED_CLI);
+      },
+      [PICKED_CLI, [PICKED_CLI]],
+      [PICKED_CLI, [PICKED_CLI]],
+    ],
+    [
+      'default: cleared task pick with a saved row',
+      dflt,
+      (s, t) => {
+        s.save(t.stepId, SAVED_CLI);
+        cleared(s, t);
+      },
+      [null, [TASK_CLI]],
+      [null, [TASK_CLI]],
+    ],
+    [
+      'default: task pick on an unlisted provider',
+      dflt,
+      (s, t) => {
+        s.save(t.stepId, SAVED_CLI);
+        s.choose(t.stepId, UNLISTED);
+      },
+      [UNLISTED, [TASK_CLI]],
+      [UNLISTED, [TASK_CLI]],
+    ],
+    [
+      'default: saved row only',
+      dflt,
+      (s, t) => s.save(t.stepId, SAVED_CLI),
+      [SAVED_CLI, [SAVED_CLI]],
+      [null, [TASK_CLI]],
+    ],
+    [
+      'default: saved row on a disabled provider',
+      dflt,
+      (s, t) => {
+        s.save(t.stepId, SAVED_CLI);
+        s.fake.patch(schema.cliProviders, SAVED_CLI, { enabled: false });
+      },
+      [SAVED_CLI, [SAVED_CLI]],
+      [null, [TASK_CLI]],
+    ],
+    [
+      'default: saved row on an unlisted provider',
+      dflt,
+      (s, t) => s.save(t.stepId, UNLISTED),
+      [UNLISTED, [TASK_CLI]],
+      [null, [TASK_CLI]],
+    ],
+    ['default: nothing', dflt, () => {}, [null, [TASK_CLI]], [null, [TASK_CLI]]],
+    ...(
+      [
+        ['08a role', roleT],
+        ['08c seat', seatT],
+      ] as [string, Target][]
+    ).flatMap(([label, t]): Row[] => [
+      [
+        `${label}: role pick`,
+        t,
+        (s) => {
+          s.save(t.stepId, SAVED_CLI, t.role);
+          s.save(t.stepId, SAVED_CLI);
+          s.choose(t.stepId, PICKED_CLI, t.role);
+        },
+        [PICKED_CLI, [SAVED_CLI, PICKED_CLI]],
+        [PICKED_CLI, [TASK_CLI, PICKED_CLI]],
+      ],
+      [
+        `${label}: cleared role pick with a default pick`,
+        t,
+        (s) => {
+          s.save(t.stepId, SAVED_CLI, t.role);
+          cleared(s, t);
+          s.choose(t.stepId, PICKED_CLI);
+        },
+        [null, [PICKED_CLI]],
+        [null, [PICKED_CLI]],
+      ],
+      [
+        `${label}: role saved only`,
+        t,
+        (s) => s.save(t.stepId, SAVED_CLI, t.role),
+        [SAVED_CLI, [TASK_CLI, SAVED_CLI]],
+        [null, [TASK_CLI]],
+      ],
+      [
+        `${label}: role saved plus default saved`,
+        t,
+        (s) => {
+          s.save(t.stepId, PICKED_CLI, t.role);
+          s.save(t.stepId, SAVED_CLI);
+        },
+        [PICKED_CLI, [SAVED_CLI, PICKED_CLI]],
+        [null, [TASK_CLI]],
+      ],
+      [
+        `${label}: default saved only`,
+        t,
+        (s) => s.save(t.stepId, SAVED_CLI),
+        [null, [SAVED_CLI]],
+        [null, [TASK_CLI]],
+      ],
+    ]),
+  ];
+
+  const cardValue = (card: Record<string, unknown>, t: Target) =>
+    t.role === 'default'
+      ? card.preferredCliProviderId
+      : t === roleT
+        ? (card.cliRoleProviders as Record<string, string | null>)[t.role]
+        : (card.miningSeatProviders as Record<string, string | null>)[t.role];
+
+  it.each(rows)('%s', async (_name, t, arrange, off, on) => {
+    for (const [flag, [card, ids]] of [
+      [false, off],
+      [true, on],
+    ] as const) {
+      const s = setup();
+      arrange(s, t);
+      const [enriched] = await enrichStepsWithCliPreferences(
+        s.db,
+        flags,
+        USER,
+        [{ stepId: t.stepId }],
+        TASK,
+        flag,
+      );
+      expect(cardValue(enriched as Record<string, unknown>, t)).toBe(card);
+      const listing = await resolveCurrentStepCliProviderIds(s.db, flags, USER, [
+        {
+          id: TASK,
+          currentStepId: t.stepId,
+          cliProviderId: TASK_CLI,
+          ignoreSavedStepClis: flag,
+        },
+      ]);
+      expect(listing.get(TASK)).toEqual(ids);
+    }
+  });
+
+  it('leaves a leftover touch-marker row without effect', async () => {
+    const s = setup();
+    s.fake.insert(schema.taskStepCliTouched, {
+      taskId: TASK,
+      stepId: dflt.stepId,
+      role: 'default',
+    });
+    s.save(dflt.stepId, SAVED_CLI);
+    const [card] = await enrichStepsWithCliPreferences(
+      s.db,
+      flags,
+      USER,
+      [{ stepId: dflt.stepId }],
+      TASK,
+      true,
+    );
+    expect(card?.preferredCliProviderId).toBeNull();
+    const listing = await resolveCurrentStepCliProviderIds(s.db, flags, USER, [
+      { id: TASK, currentStepId: dflt.stepId, cliProviderId: TASK_CLI, ignoreSavedStepClis: true },
+    ]);
+    expect(listing.get(TASK)).toEqual([TASK_CLI]);
+  });
+});
+
 describe("the listing's usage strip", () => {
   const task = (currentStepId: string) => ({
     id: TASK,
@@ -441,7 +628,6 @@ describe("the listing's usage strip for a task with no CLI of its own", () => {
     const fake = createFakeDb({
       cliProviders: schema.cliProviders,
       taskStepCliChoices: schema.taskStepCliChoices,
-      taskStepCliTouched: schema.taskStepCliTouched,
       userStepCliPreferences: schema.userStepCliPreferences,
       userStepCliRolePreferences: schema.userStepCliRolePreferences,
     });

@@ -280,7 +280,6 @@ function makeMockDb(state: MockState, opts: MockDbOptions = {}, inTransaction = 
             : undefined,
       },
       cliProviders: { findFirst: async () => state.roundChoice },
-      taskStepCliTouched: { findFirst: async () => undefined },
       tasks: {
         findFirst: async (opts?: { columns?: { customSteps?: boolean } }) =>
           opts?.columns?.customSteps && state.customSteps !== undefined

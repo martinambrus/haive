@@ -219,7 +219,6 @@ function makeMockDb(state: MockState, opts: MockDbOptions = {}, inTransaction = 
             : undefined,
       },
       cliProviders: { findFirst: async () => state.roundChoice },
-      taskStepCliTouched: { findFirst: async () => undefined },
       tasks: {
         findFirst: async (opts?: { columns?: Record<string, boolean> }) =>
           opts?.columns?.executionContract ||

@@ -1400,8 +1400,8 @@ the user's saved user-wide choice (`user_step_cli_preferences` and `user_step_cl
 saved on another task after this task locked: adoption refuses a task whose saved picks name a CLI
 the lock does not allow, and the lock refuses a switch here, which is where a pick is remembered.
 `resolvePreferredCli` returns `savedPreference` (`{ taskProviderId }`, the
-task's own CLI) on those two saved returns only, and not when the task sets `ignore_saved_step_clis`
-(a row honoured there was set within the task and counts as a task pick). A task choice
+task's own CLI) on those two saved returns only. A task that sets `ignore_saved_step_clis` honours
+no saved row, so none carries it. A task choice
 (`task_step_cli_choices`), a fix-round choice, a round provider and the task's own CLI never carry
 it, so they stay refused, never moved. Every dispatching caller passes it on as
 `DispatchRequest.savedPreference`; a request that does not say where its pick came from keeps the

@@ -56,7 +56,6 @@ async function setup() {
     taskEvents: schema.taskEvents,
     cliProviders: schema.cliProviders,
     taskStepCliChoices: schema.taskStepCliChoices,
-    taskStepCliTouched: schema.taskStepCliTouched,
     userStepCliPreferences: schema.userStepCliPreferences,
     userStepCliRolePreferences: schema.userStepCliRolePreferences,
     stepCatalog: schema.stepCatalog,

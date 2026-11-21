@@ -30,7 +30,6 @@ interface Choice {
 function fakeDb(opts: {
   choices?: Record<string, Choice>;
   saved?: Record<string, Choice & { cliProviderId: string }>;
-  touched?: string[];
 }): Database {
   const dialect = new PgDialect();
   const roleOf = (where: SQL, fallback?: string): string | undefined => {
@@ -44,10 +43,6 @@ function fakeDb(opts: {
     query: {
       taskStepCliChoices: {
         findFirst: async ({ where }: { where: SQL }) => opts.choices?.[roleOf(where)!],
-      },
-      taskStepCliTouched: {
-        findFirst: async ({ where }: { where: SQL }) =>
-          opts.touched?.includes(roleOf(where)!) ? { role: roleOf(where) } : undefined,
       },
       userStepCliRolePreferences: {
         findFirst: async ({ where }: { where: SQL }) => {
@@ -118,7 +113,7 @@ describe('resolvePreferredCli', () => {
     });
   });
 
-  it('leaves a disabled saved preference out under ignore_saved_step_clis with no touch marker', async () => {
+  it('leaves a disabled saved preference out under ignore_saved_step_clis', async () => {
     const db = fakeDb({ saved: { default: { cliProviderId: DISABLED_CLI, effortLevel: 'low' } } });
     expect(await resolve(db, 'default', true)).toEqual({
       cliProviderId: TASK_CLI,
@@ -142,7 +137,7 @@ describe('resolvePreferredCli', () => {
     });
   });
 
-  it("honours this task's choice under ignore_saved_step_clis with no touch marker", async () => {
+  it("honours this task's choice under ignore_saved_step_clis", async () => {
     const db = fakeDb({ choices: { default: { cliProviderId: PICKED_CLI, effortLevel: null } } });
     expect(await resolve(db, 'default', true)).toEqual({
       cliProviderId: PICKED_CLI,
@@ -180,6 +175,134 @@ describe('resolvePreferredCli', () => {
   });
 });
 
+const savedRow = (cliProviderId: string, effortLevel: string | null = 'low') => ({
+  cliProviderId,
+  effortLevel,
+});
+const taskOnly = { cliProviderId: TASK_CLI, effortLevel: null };
+const withMarker = (cliProviderId: string, effortLevel: string | null = 'low') => ({
+  cliProviderId,
+  effortLevel,
+  savedPreference: { taskProviderId: TASK_CLI },
+});
+
+describe('resolvePreferredCli with and without ignore_saved_step_clis', () => {
+  // [name, role, fake options, result with the flag off, result with the flag on]
+  const cases: [string, string, Parameters<typeof fakeDb>[0], object, object][] = [
+    [
+      'default: task pick over a saved row',
+      'default',
+      {
+        choices: { default: savedRow(PICKED_CLI, 'high') },
+        saved: { default: savedRow(SAVED_CLI) },
+      },
+      savedRow(PICKED_CLI, 'high'),
+      savedRow(PICKED_CLI, 'high'),
+    ],
+    [
+      'default: cleared task pick with a saved row',
+      'default',
+      {
+        choices: { default: { cliProviderId: null, effortLevel: null } },
+        saved: { default: savedRow(SAVED_CLI) },
+      },
+      taskOnly,
+      taskOnly,
+    ],
+    [
+      'default: task pick on an unlisted provider',
+      'default',
+      {
+        choices: { default: savedRow(UNLISTED_CLI, 'max') },
+        saved: { default: savedRow(SAVED_CLI) },
+      },
+      taskOnly,
+      taskOnly,
+    ],
+    [
+      'default: saved row only',
+      'default',
+      { saved: { default: savedRow(SAVED_CLI) } },
+      withMarker(SAVED_CLI),
+      taskOnly,
+    ],
+    [
+      'default: saved row on a disabled provider',
+      'default',
+      { saved: { default: savedRow(DISABLED_CLI) } },
+      withMarker(DISABLED_CLI),
+      taskOnly,
+    ],
+    [
+      'default: saved row on an unlisted provider',
+      'default',
+      { saved: { default: savedRow(UNLISTED_CLI) } },
+      taskOnly,
+      taskOnly,
+    ],
+    ['default: nothing', 'default', {}, taskOnly, taskOnly],
+    [
+      'role: role pick',
+      'reviewer',
+      {
+        choices: { reviewer: savedRow(PICKED_CLI, 'high') },
+        saved: { reviewer: savedRow(SAVED_CLI), default: savedRow(SAVED_CLI) },
+      },
+      savedRow(PICKED_CLI, 'high'),
+      savedRow(PICKED_CLI, 'high'),
+    ],
+    [
+      'role: cleared role pick with a default pick',
+      'reviewer',
+      {
+        choices: {
+          reviewer: { cliProviderId: null, effortLevel: null },
+          default: savedRow(PICKED_CLI, 'high'),
+        },
+        saved: { reviewer: savedRow(SAVED_CLI) },
+      },
+      savedRow(PICKED_CLI, 'high'),
+      savedRow(PICKED_CLI, 'high'),
+    ],
+    [
+      'role: role saved only',
+      'reviewer',
+      { saved: { reviewer: savedRow(SAVED_CLI) } },
+      withMarker(SAVED_CLI),
+      taskOnly,
+    ],
+    [
+      'role: role saved plus default saved',
+      'reviewer',
+      { saved: { reviewer: savedRow(SAVED_CLI), default: savedRow(PICKED_CLI) } },
+      withMarker(SAVED_CLI),
+      taskOnly,
+    ],
+    [
+      'role: default saved only',
+      'reviewer',
+      { saved: { default: savedRow(PICKED_CLI) } },
+      withMarker(PICKED_CLI),
+      taskOnly,
+    ],
+  ];
+
+  it.each(cases)('%s', async (_name, role, opts, flagOff, flagOn) => {
+    expect(await resolve(fakeDb(opts), role, false)).toEqual(flagOff);
+    expect(await resolve(fakeDb(opts), role, true)).toEqual(flagOn);
+  });
+
+  it.each([
+    [false, withMarker(SAVED_CLI)],
+    [true, taskOnly],
+  ])('with a saved row and no task id, ignore_saved_step_clis %s', async (flag, expected) => {
+    const db = fakeDb({ saved: { default: savedRow(SAVED_CLI) } });
+    expect(
+      await resolvePreferredCli(db, USER, STEP, TASK_CLI, PROVIDERS, 'default', undefined, flag),
+    ).toEqual(expected);
+  });
+});
+
 describe('resolvePreferredCli saved-preference marker', () => {
   it('marks a saved default and a saved named role, naming the task CLI', async () => {
     const saved = { cliProviderId: SAVED_CLI, effortLevel: 'low' };
@@ -188,13 +311,23 @@ describe('resolvePreferredCli saved-preference marker', () => {
     expect((await resolve(db, 'reviewer')).savedPreference).toEqual({ taskProviderId: TASK_CLI });
   });
 
-  it('marks a saved pick honoured under ignore_saved_step_clis only as a task pick', async () => {
-    const db = fakeDb({
-      saved: { default: { cliProviderId: SAVED_CLI, effortLevel: null } },
-      touched: ['default'],
+  it('leaves a leftover touch-marker row without effect under ignore_saved_step_clis', async () => {
+    const fake = createFakeDb({
+      taskStepCliChoices: schema.taskStepCliChoices,
+      taskStepCliTouched: schema.taskStepCliTouched,
+      userStepCliRolePreferences: schema.userStepCliRolePreferences,
+      userStepCliPreferences: schema.userStepCliPreferences,
     });
-    const out = await resolve(db, 'default', true);
-    expect(out.cliProviderId).toBe(SAVED_CLI);
+    fake.insert(schema.taskStepCliTouched, { taskId: TASK, stepId: STEP, role: 'default' });
+    fake.insert(schema.userStepCliPreferences, {
+      userId: USER,
+      stepId: STEP,
+      cliProviderId: SAVED_CLI,
+      effortLevel: 'low',
+      explicit: true,
+    });
+    const out = await resolve(fake.db as unknown as Database, 'default', true);
+    expect(out).toEqual({ cliProviderId: TASK_CLI, effortLevel: null });
     expect(out.savedPreference).toBeUndefined();
   });
 
@@ -236,7 +369,6 @@ describe('resolvePreferredCli saved-preference marker', () => {
 it('resolves a module dimension seat from its task choice while an unset seat inherits the step default', async () => {
   const fake = createFakeDb({
     taskStepCliChoices: schema.taskStepCliChoices,
-    taskStepCliTouched: schema.taskStepCliTouched,
     userStepCliRolePreferences: schema.userStepCliRolePreferences,
     userStepCliPreferences: schema.userStepCliPreferences,
   });
