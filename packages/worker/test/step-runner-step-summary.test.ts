@@ -63,6 +63,10 @@ interface MockState {
   /** What db.query.tasks.findFirst returns. undefined = no row, which must read as
    *  inherit/enabled — the shape every pre-existing step-runner suite relies on. */
   taskRow: Record<string, unknown> | undefined;
+  /** What db.query.envTemplates.findFirst returns (undefined = no template). */
+  envTemplateRow?: Record<string, unknown>;
+  /** What db.query.userStepCliPreferences.findFirst returns: the user's saved per-step CLI. */
+  savedPrefRow?: Record<string, unknown>;
   inserts: { table: string; row: Record<string, unknown> }[];
 }
 
@@ -139,13 +143,13 @@ function makeMockDb(state: MockState): Database {
       };
     },
     query: {
-      userStepCliPreferences: { findFirst: async () => undefined },
+      userStepCliPreferences: { findFirst: async () => state.savedPrefRow },
       taskStepCliChoices: { findFirst: async () => undefined },
       userStepCliRolePreferences: { findFirst: async () => undefined },
       tasks: { findFirst: async () => state.taskRow },
       taskSteps: { findFirst: async () => undefined },
       taskEvents: { findFirst: async () => undefined, findMany: async () => [] },
-      envTemplates: { findFirst: async () => undefined },
+      envTemplates: { findFirst: async () => state.envTemplateRow },
       repositories: { findFirst: async () => undefined },
     },
   } as unknown as Database;
@@ -235,8 +239,9 @@ function makeProvider(over: Partial<CliProviderRecord> = {}): CliProviderRecord 
 async function runToDone(
   taskRow: Record<string, unknown> | undefined,
   providers: CliProviderRecord[],
+  extra: Partial<MockState> = {},
 ): Promise<{ enqueued: CliExecJobPayload[]; state: MockState }> {
-  const state = freshState(taskRow);
+  const state = { ...freshState(taskRow), ...extra };
   const db = makeMockDb(state);
   const enqueued: CliExecJobPayload[] = [];
   const result = await advanceStep({
@@ -281,6 +286,47 @@ describe('per-step summarizer provider choice', () => {
     } finally {
       warn.mockRestore();
     }
+  });
+
+  describe('on a composed task whose lock skips the saved pick', () => {
+    const SKIPPED = 'step summary skipped: the resolved CLI provider is disabled';
+    const task = { envTemplateId: 'tpl-1', summaryCliProviderId: null, summaryLlmEnabled: true };
+    const composed = {
+      envTemplateRow: { declaredDeps: { lspInstallContractVersion: 2 } },
+      savedPrefRow: { cliProviderId: 'prov-saved', effortLevel: null, explicit: true },
+    };
+    const saved = (over: Partial<CliProviderRecord> = {}) =>
+      makeProvider({ id: 'prov-saved', name: 'codex', enabled: false, ...over });
+    const skipWarnings = (warn: { mock: { calls: unknown[][] } }) =>
+      warn.mock.calls.filter(([, msg]) => msg === SKIPPED);
+
+    it('blames the task CLI that is refused, not the saved pick that was skipped', async () => {
+      const warn = vi.spyOn(logger, 'warn');
+      try {
+        const { enqueued } = await runToDone(
+          task,
+          [makeProvider({ enabled: false }), saved()],
+          composed,
+        );
+        expect(summaries(enqueued)).toHaveLength(0);
+        expect(skipWarnings(warn)).toEqual([
+          [expect.objectContaining({ providerId: 'prov-1' }), expect.any(String)],
+        ]);
+      } finally {
+        warn.mockRestore();
+      }
+    });
+
+    it('does not blame the skipped saved pick when the lock set has no enabled provider', async () => {
+      const warn = vi.spyOn(logger, 'warn');
+      try {
+        const { enqueued } = await runToDone(task, [saved()], composed);
+        expect(summaries(enqueued)).toHaveLength(0);
+        expect(skipWarnings(warn)).toEqual([]);
+      } finally {
+        warn.mockRestore();
+      }
+    });
   });
 
   it('inherits the step CLI when the task names no summary provider', async () => {
