@@ -676,7 +676,7 @@ status: open · kind: docs · found: guarded span prerequisites docs (#1268) · 
 
 `docs/architecture/task-types.md` (~:780 heading "Pinned execution declarations (P6; admission only)", ~:786, ~:851) and `docs/architecture/worker-restarts.md` (~:766) name an internal plan phase ("P6") in product text. Replace with the behaviour and the PR number (#1222). Docs-only; ride with the next change touching either file.
 
-### T722 · FNF[claude-usage-connection] · Claude usage connection leftovers (+13)
+### T722 · FNF[claude-usage-connection] · Claude usage connection leftovers (+14)
 
 status: open · kind: fix · found: login-set design (T720) 2026-11-19 · priority: P4
 
@@ -698,6 +698,7 @@ Found with the shared usage connection (#1291 poller, #1292 api and web), 2026-1
 11. The auth-strike count is keyed per set and carries over a holder change (`worker/src/queues/usage-poll-queue.ts` ~:75-119, ~:444); the dead-token gates compare the exact token and lift on their own. The fetch context comes from the polled row, not the holder (~:451-457), which for Claude picks only the transport guard. NEW with #1291, minor.
 12. Disconnect's confirm says "every row that shares its login" for an isolated row too (`web/src/app/(app)/cli-providers/page.tsx` ~:409-411). NEW with #1292, nit.
 13. Test strength, each shown by a surviving mutation: the seed-path lost-lock sweeps do not pin the last check (`api/test/cli-usage-grant-set-db.test.ts` ~:1165-1205; removing it at `usage-grant-set.ts:244` or `:272` stays green); the Claude-only guard is pinned for `DELETE usage-auth` but not the secrets routes; the holder's no-snapshot tier and tie breaks are unpinned in the worker tests (`worker/src/usage-window/usage-grant-set.ts` ~:57-60); the Claude-name check lives at the call sites, not in the library. Test only.
+14. Claude's `oauthErrorCode` (`shared/src/cli-providers/claude-oauth.ts` ~:147) reads the `error` code on any refused status, so a gateway 5xx carrying `invalid_grant` would count as a refusal; Grok's `oauthRejectionCode` (`worker/src/cli-adapters/grok-oauth.ts:146`) reads it on 400 and 401 only. Fix direction: the same gate. PRE-EXISTING, low; found by the #1300 driver.
 
 ### T723 · FNF[claude-login-set] · Claude login set leftovers (+17)
 
@@ -880,7 +881,7 @@ status: open · kind: fix · found: #1297 driver 2026-11-21, checked against the
 
 ### T721 · The Claude usage grant reaches sandbox environments
 
-status: open (items 2-9; item 1 done #1281) · kind: security · found: login-set design (T720) 2026-11-19 · priority: P3 (was P1 until #1281)
+status: open (items 2-5 and 10-12; item 1 done #1281; items 6-9 in review as #1300, 2026-11-21) · kind: security · found: login-set design (T720) 2026-11-19 · priority: P3 (was P1 until #1281)
 
 `resolveProviderSecrets` returns every secret of a provider row (`worker/src/secrets/provider-secrets.ts:5-22`). The run path merges them into the container environment (`worker/src/queues/cli-exec/handlers.ts` ~:350-354, `exec-core.ts:732`, `sandbox/docker-runner.ts:474-475`), and so do the probe, the terminal and the image checks. A claude-code row with a usage connection therefore hands `CLAUDE_USAGE_OAUTH`, an OAuth refresh token whose scope includes `org:create_api_key` (`shared/src/cli-providers/claude-oauth.ts:35`), to every sandbox run, where repository code can read it. Only the worker's usage poller needs it. PRE-EXISTING. Live proof on the dev install 2026-11-19, names only: before the fix the env resolver returned `CLAUDE_CODE_OAUTH_TOKEN` and `CLAUDE_USAGE_OAUTH` for the run row; after it, `CLAUDE_CODE_OAUTH_TOKEN` alone, and the poller's by-name read still returned the grant.
 
@@ -889,10 +890,13 @@ status: open (items 2-9; item 1 done #1281) · kind: security · found: login-se
 3. Disconnect and sign-out delete the stored grant but never revoke it at the vendor (`api/src/routes/cli-providers.ts` ~:1346-1382, `handlers.ts` ~:1436-1448).
 4. OWNER: reconnect usage once now that item 1 is deployed, so a grant a sandbox could read is replaced. A refresh rotates the token, which should retire the old one; the vendor's behaviour is unverified.
 5. Same seam: an api-key claude row that still stores a login token injects it too (`provider-secrets.ts:5-22`, `worker/src/cli-adapters/base-adapter.ts` ~:127-137). Decide which credential such a row should carry.
-6. `WORKER_ONLY_SECRET_NAMES` is a hand-kept list: nothing ties it to the `oauthRefresh` entry in `worker/src/usage-window/fetchers/index.ts:53`, and no test pins that `provider-secrets.ts` is the only place in the worker that decrypts `cli_provider_secrets`. A new worker-only secret, or a second decrypt site, would pass the rule by silently.
-7. `ClaudeOauthError` embeds up to 200 characters of the token endpoint's error body (`shared/src/cli-providers/claude-oauth.ts:130`, `:163`). The text reaches the Connect HTTP 400 (`api/src/routes/cli-providers.ts` ~:1277-1280) and the poller's warn log (`worker/src/queues/usage-poll-queue.ts` ~:253-256). Whether that body can echo a token is unverified. PRE-EXISTING.
-8. A hand-typed `envVars` entry named `CLAUDE_USAGE_OAUTH` is not secret-like by name (`shared/src/schemas/cli-providers.ts:98`), stays plaintext and reaches containers. No Haive writer puts the real grant there. PRE-EXISTING, low.
-9. `isAuthSecret` (`worker/src/secrets/move-secret-env.ts:11-12`) names the usage secret, which can never reach it; that half is dead. PRE-EXISTING, cosmetic.
+6. `WORKER_ONLY_SECRET_NAMES` is a hand-kept list: nothing ties it to the `oauthRefresh` entry in `worker/src/usage-window/fetchers/index.ts:53`, and no test pins that `provider-secrets.ts` is the only place in the worker that decrypts `cli_provider_secrets`. A new worker-only secret, or a second decrypt site, would pass the rule by silently. In review as #1300 (2026-11-21): a test ties every `oauthRefresh` secret name to the set, and a source ratchet pins the decrypt primitives per worker file with exact counts. The premise was stale: `worker/src/usage-window/usage-grant-set.ts:72` decrypts the grant too (the poller's read, never merged into an env); it is pinned beside `provider-secrets.ts` and `repo/credentials.ts`.
+7. `ClaudeOauthError` embeds up to 200 characters of the token endpoint's error body (`shared/src/cli-providers/claude-oauth.ts:130`, `:163`). The text reaches the Connect HTTP 400 (`api/src/routes/cli-providers.ts` ~:1277-1280) and the poller's warn log (`worker/src/queues/usage-poll-queue.ts` ~:253-256). Whether that body can echo a token is unverified. PRE-EXISTING. In review as #1300: the message keeps the status and a registered RFC 6749 code only; a 200 body that is not JSON throws a fixed message, since the parser's SyntaxError quotes the body.
+8. A hand-typed `envVars` entry named `CLAUDE_USAGE_OAUTH` is not secret-like by name (`shared/src/schemas/cli-providers.ts:98`), stays plaintext and reaches containers. No Haive writer puts the real grant there. PRE-EXISTING, low. In review as #1300: stripped at every builder of a container env (`omitWorkerOnlyEnv`), stored rows untouched; no save-time refusal (item 10).
+9. `isAuthSecret` (`worker/src/secrets/move-secret-env.ts:11-12`) names the usage secret, which can never reach it; that half is dead. PRE-EXISTING, cosmetic. In review as #1300: the dead half is removed.
+10. LOW, follows #1300: a typed `CLAUDE_USAGE_OAUTH` entry still saves, shows in the provider form and feeds the composed-LSP provider identity (`worker/src/lsp/composed-evidence.ts:55`), yet is inert, with no feedback. Fix direction: refuse the name at save with a clear validation message. PRE-EXISTING (before #1300 it reached containers).
+11. LOW, test: `worker/test/connected-error-params.test.ts:45` mocks `secrets/provider-secrets.js` with `resolveProviderSecrets` only, so a path it loads that calls `omitWorkerOnlyEnv` would throw a mock error. Passes today. Fix direction: spread the original module into the mock.
+12. LOW, gap: the decrypt ratchet scans worker source only, so the shared wrappers `decryptCliLoginCandidate` (`shared/src/cli-providers/login-candidate.ts:21`, used at `worker/src/queues/cli-exec/handlers.ts` ~:720 for the login token) and `decryptConnectionTokens` (`shared/src/integrations/connection-tokens.ts:27`) open envelopes outside it. Neither reads `cli_provider_secrets`. Fix direction: pin the wrapper names too. PRE-EXISTING.
 
 ### T720 · A Claude login reaches one provider row, its sign-out resets them all
 
