@@ -839,7 +839,8 @@ join. Disconnect refuses a row that is not Claude Code. The readers stay per row
 `credentialRepairedAt` and GET `usage-auth` read the row's own grant. Where a transaction writes more
 than one provider's rows, the order is the set's advisory auth lock, then `lockLoginSet` over the set's
 provider rows in id order as the first row lock, then the secret and snapshot writes: the image job
-locks provider rows in id order without the auth lock.
+locks provider rows in id order without the auth lock. The grok credential refresh writes the re-login
+status of the rows sharing a volume the same way, after `lockLoginSet`.
 
 ## CLI sign-out and newer logins
 
@@ -1431,8 +1432,8 @@ Lock order, outermost first: the repository (its task key, then its row), the ta
 one id-ordered batch, the task row, then leaf rows (provider rows and step rows through foreign keys,
 saved preference rows, the template row, task events). Step 01 inserts its template row before it
 takes the task row: the insert takes a share lock on the repository row, and a repository delete
-holds that row and then asks for task rows. The writers of provider rows (`lockLoginSet`,
-`markProvidersReady`) never take a task or step row. One inversion remains: deleting a provider
+holds that row and then asks for task rows. The writers of provider rows (`lockLoginSet`, the grok
+credential refresh status write, `markProvidersReady`) never take a task or step row. One inversion remains: deleting a provider
 holds its row and then needs the task rows its SET NULL rewrites, while a holder of the task row
 needs that provider's share lock (the choice inserts through their foreign key, the summary
 route's update); Postgres aborts one of them (`40P01`) and the state stays consistent. Saved

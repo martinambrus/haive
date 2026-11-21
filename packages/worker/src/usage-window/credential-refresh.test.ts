@@ -85,11 +85,17 @@ function refreshFixture() {
   const where = vi.fn(async () => undefined);
   const set = vi.fn(() => ({ where }));
   const update = vi.fn(() => ({ set }));
+  const lock = { for: vi.fn(async () => []) };
+  const tx = {
+    update,
+    select: () => ({ from: () => ({ where: () => ({ orderBy: () => lock }) }) }),
+  };
   const db = {
     query: {
       cliProviders: { findMany: vi.fn(async () => [row, { ...row, id: 'shared-provider' }]) },
     },
     update,
+    transaction: async (fn: (t: typeof tx) => Promise<unknown>) => fn(tx),
   } as unknown as Database;
   const raw = (refreshToken: string) =>
     JSON.stringify({
