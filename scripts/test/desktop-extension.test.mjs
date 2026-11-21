@@ -281,6 +281,7 @@ test('install stack lock wire contract matches in the updater and the bridge', (
     ['STACK_LOCK_STALE_MS', 'stackLockStaleMs'],
     ['STACK_LOCK_POLL_MS', 'stackLockPollMs'],
     ['STACK_LOCK_ROUNDS', 'stackLockRounds'],
+    ['STACK_LOCK_MAX_BYTES', 'stackLockMaxBytes'],
   ]) {
     assert.equal(goConst(goName), tsConst(tsName), `${tsName} and ${goName} drifted. ${fix}.`);
   }

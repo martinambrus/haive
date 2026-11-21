@@ -16,6 +16,7 @@ import { join } from 'node:path';
 import * as install from './install-files.js';
 import {
   STACK_LOCK_BEAT_MS,
+  STACK_LOCK_MAX_BYTES,
   STACK_LOCK_NAME,
   STACK_LOCK_POLL_MS,
   STACK_LOCK_RELEASE_PAUSE_MS,
@@ -60,6 +61,7 @@ describe('constants and defaults', () => {
     expect(STACK_LOCK_STALE_MS).toBe(60000);
     expect(STACK_LOCK_POLL_MS).toBe(1000);
     expect(STACK_LOCK_ROUNDS).toBe(3);
+    expect(STACK_LOCK_MAX_BYTES).toBe(4096);
     expect(STACK_LOCK_RELEASE_TRIES).toBe(3);
     expect(STACK_LOCK_RELEASE_PAUSE_MS).toBe(100);
   });
@@ -192,6 +194,24 @@ describe('acquire and release', () => {
       expect(await tombs()).toEqual([]);
     },
   );
+  it('a tomb that cannot be removed after the equal re-read is left behind, not busy', async () => {
+    await writeFile(path, record(token(), 'extension', 1));
+    const real = install.InstallDirectory.prototype.remove;
+    vi.spyOn(install.InstallDirectory.prototype, 'remove').mockImplementation(async function (
+      this: install.InstallDirectory,
+      name: string,
+    ) {
+      if (name.includes('.stale.')) throw Object.assign(new Error('busy'), { code: 'EBUSY' });
+      return real.call(this, name);
+    });
+    const events: Array<[string, Record<string, unknown> | undefined]> = [];
+    const lock = await held({ onEvent: (event, fields) => void events.push([event, fields]) });
+    expect(events).toContainEqual(['stack-lock-tomb-left', { code: 'EBUSY' }]);
+    expect(events.map(([event]) => event)).toContain('stack-lock-broken');
+    expect(await tombs()).toHaveLength(1);
+    expect((await parse()).token).toBe(lock.token);
+    await lock.release();
+  });
   it('refuses a directory at the name and never deletes it', async () => {
     await mkdir(path);
     await expect(acquireStackLock(dir, base)).rejects.toThrow();
@@ -221,6 +241,66 @@ describe('acquire and release', () => {
     vi.spyOn(proto, 'sync').mockRejectedValueOnce(new Error('disk full'));
     await expect(acquireStackLock(dir, base)).rejects.toThrow('disk full');
     expect((await readdir(dir)).filter((name) => name !== 'probe')).toEqual([]);
+  });
+});
+
+describe('size cap', () => {
+  const readCapped = (max: number) => install.inInstall(dir, (d) => d.read(STACK_LOCK_NAME, max));
+  it('returns a file of exactly the maximum whole', async () => {
+    await writeFile(path, Buffer.alloc(16, 0x61));
+    expect((await readCapped(16))?.bytes).toHaveLength(16);
+  });
+  it('returns max + 1 bytes for a file one byte over, and for a huge sparse file', async () => {
+    await writeFile(path, Buffer.alloc(17, 0x61));
+    expect((await readCapped(16))?.bytes).toHaveLength(17);
+    await rm(path);
+    const sparse = await open(path, 'w');
+    try {
+      await sparse.truncate(64 * 1024 * 1024);
+    } finally {
+      await sparse.close();
+    }
+    expect((await readCapped(16))?.bytes).toHaveLength(17);
+    expect((await readCapped(STACK_LOCK_MAX_BYTES))?.bytes).toHaveLength(STACK_LOCK_MAX_BYTES + 1);
+  });
+  it('reads a record in full when no cap is given (other callers unchanged)', async () => {
+    await writeFile(path, Buffer.alloc(9000, 0x61));
+    expect((await install.inInstall(dir, (d) => d.read(STACK_LOCK_NAME)))?.bytes).toHaveLength(
+      9000,
+    );
+  });
+  it('breaks an oversize file that stays unchanged for the stale window', async () => {
+    await writeFile(path, Buffer.alloc(100, 0x61));
+    const events: string[] = [];
+    const lock = await held({ maxBytes: 16, onEvent: (event) => void events.push(event) });
+    expect(events).toContain('stack-lock-broken');
+    expect((await parse()).token).toBe(lock.token);
+    await lock.release();
+  });
+  it('compares only the capped prefix: a change past it is no beat, a change inside it is', async () => {
+    await writeFile(path, Buffer.alloc(100, 0x61));
+    const past = await acquireStackLock(dir, {
+      ...base,
+      maxBytes: 16,
+      sleep: async () => {
+        const tail = Buffer.alloc(100, 0x61);
+        tail[90] = 0x62;
+        await writeFile(path, tail);
+      },
+    });
+    expect(past.status).toBe('held');
+    if (past.status === 'held') await past.lock.release();
+    await writeFile(path, Buffer.alloc(100, 0x61));
+    const inside = await acquireStackLock(dir, {
+      ...base,
+      maxBytes: 16,
+      sleep: async () => {
+        const head = Buffer.alloc(100, 0x61);
+        head[3] = 0x62;
+        await writeFile(path, head);
+      },
+    });
+    expect(inside.status).toBe('busy');
   });
 });
 
@@ -322,21 +402,78 @@ describe('heartbeat', () => {
     expect(await parse()).toMatchObject({ seq: 3 });
     await lock.release();
   });
-  it.each([
-    ['removed', async () => rm(path)],
-    ['taken over', async () => writeFile(path, record(token(), 'extension', 1))],
-  ])('detects a lost lock (%s), reports once and never touches it again', async (_name, lose) => {
+  it.each([['taken over', async () => writeFile(path, record(token(), 'extension', 1))]])(
+    'detects a lost lock (%s), reports once and never touches it again',
+    async (_name, lose) => {
+      const events: string[] = [];
+      const lock = await held({ onEvent: (event) => void events.push(event) });
+      await lose();
+      const before = await readFile(path, 'utf8').catch(() => null);
+      expect(await lock.beat()).toBe('lost');
+      expect(lock.lost).toBe(true);
+      expect(await lock.beat()).toBe('lost');
+      expect(events.filter((event) => event === 'stack-lock-lost')).toHaveLength(1);
+      expect(await readFile(path, 'utf8').catch(() => null)).toBe(before);
+      await lock.release();
+      expect(await readFile(path, 'utf8').catch(() => null)).toBe(before);
+    },
+  );
+  it('re-creates its own record, seq + 1, when the name is absent', async () => {
     const events: string[] = [];
     const lock = await held({ onEvent: (event) => void events.push(event) });
-    await lose();
-    const before = await readFile(path, 'utf8').catch(() => null);
+    await rm(path);
+    expect(await lock.beat()).toBe('ok');
+    expect(await parse()).toMatchObject({ token: lock.token, holder: 'updater', seq: 2 });
+    expect((await stat(path)).mode & 0o777).toBe(0o644);
+    expect(lock.lost).toBe(false);
+    expect(events).not.toContain('stack-lock-lost');
+    expect(await lock.beat()).toBe('ok');
+    expect(await parse()).toMatchObject({ seq: 3 });
+    await lock.release();
+    expect(await readdir(dir)).toEqual([]);
+  });
+  it('a failed re-create (EEXIST) is a failed beat; a foreign record is then a loss', async () => {
+    const lock = await held();
+    await rm(path);
+    const theirs = record(token(), 'extension', 5);
+    const real = install.InstallDirectory.prototype.createExclusive;
+    vi.spyOn(install.InstallDirectory.prototype, 'createExclusive').mockImplementationOnce(
+      async function (this: install.InstallDirectory, name: string, bytes: Buffer) {
+        await writeFile(path, theirs);
+        return real.call(this, name, bytes);
+      },
+    );
+    expect(await lock.beat()).toBe('error');
+    expect(lock.lost).toBe(false);
     expect(await lock.beat()).toBe('lost');
     expect(lock.lost).toBe(true);
-    expect(await lock.beat()).toBe('lost');
-    expect(events.filter((event) => event === 'stack-lock-lost')).toHaveLength(1);
-    expect(await readFile(path, 'utf8').catch(() => null)).toBe(before);
+    expect(await readFile(path, 'utf8')).toBe(theirs);
     await lock.release();
-    expect(await readFile(path, 'utf8').catch(() => null)).toBe(before);
+    expect(await readFile(path, 'utf8')).toBe(theirs);
+  });
+  it('a failed re-create whose name now holds its own restored record stays held', async () => {
+    const lock = await held();
+    await rm(path);
+    const real = install.InstallDirectory.prototype.createExclusive;
+    vi.spyOn(install.InstallDirectory.prototype, 'createExclusive').mockImplementationOnce(
+      async function (this: install.InstallDirectory, name: string, bytes: Buffer) {
+        await writeFile(path, record(lock.token, 'updater', 1));
+        return real.call(this, name, bytes);
+      },
+    );
+    expect(await lock.beat()).toBe('error');
+    expect(await lock.beat()).toBe('ok');
+    expect(lock.lost).toBe(false);
+    expect(await parse()).toMatchObject({ token: lock.token, seq: 2 });
+    await lock.release();
+    expect(await readdir(dir)).toEqual([]);
+  });
+  it('a beat after release has started never re-creates the file', async () => {
+    const lock = await held();
+    await lock.release();
+    expect(await readdir(dir)).toEqual([]);
+    expect(await lock.beat()).toBe('lost');
+    expect(await readdir(dir)).toEqual([]);
   });
   it('reports a failing write once per streak and recovers', async () => {
     const events: string[] = [];

@@ -22,8 +22,10 @@ const stackLockBeatMs = 5000
 const stackLockStaleMs = 60000
 const stackLockPollMs = 1000
 const stackLockRounds = 3
+const stackLockMaxBytes = 4096
 
 const windowsLockReleaseTries = 4
+const otherLockReleaseTries = 1
 const lockReleasePause = 50 * time.Millisecond
 
 const upgradeActiveMessage = "An upgrade is running for this Haive Desktop install. Install, Start and Stop are refused to protect its database backup. Wait for the upgrade to finish, then refresh status. If the updater is hung, stop that updater container in Docker Desktop, then check the upgrade state before retrying."
@@ -33,6 +35,7 @@ const extensionBusyMessage = "Another Haive Desktop operation holds the install 
 type lockConfig struct {
 	beat, stale, poll time.Duration
 	rounds            int
+	maxBytes          int
 	releaseTries      int
 	releasePause      time.Duration
 	remove            func(string) error
@@ -80,6 +83,9 @@ func (c lockConfig) resolved() lockConfig {
 	if c.rounds == 0 {
 		c.rounds = stackLockRounds
 	}
+	if c.maxBytes <= 0 {
+		c.maxBytes = stackLockMaxBytes
+	}
 	if c.releasePause <= 0 {
 		c.releasePause = lockReleasePause
 	}
@@ -92,8 +98,8 @@ func (c lockConfig) resolved() lockConfig {
 	return c
 }
 
-// A non-regular entry is refused, never followed or deleted.
-func readLockFile(path string) ([]byte, error) {
+// A non-regular entry is refused, never followed or deleted. At most limit+1 bytes are read.
+func readLockFile(path string, limit int) ([]byte, error) {
 	info, err := os.Lstat(path)
 	if err != nil {
 		return nil, err
@@ -106,7 +112,7 @@ func readLockFile(path string) ([]byte, error) {
 		return nil, err
 	}
 	defer f.Close()
-	return io.ReadAll(f)
+	return io.ReadAll(io.LimitReader(f, int64(limit)+1))
 }
 
 var errLockNotRegular = errors.New("not a regular file")
@@ -136,10 +142,11 @@ type stackLock struct {
 	cfg       lockConfig
 	b         bridge
 
-	mu      sync.Mutex
-	seq     int
-	lost    bool
-	failing bool
+	mu       sync.Mutex
+	seq      int
+	lost     bool
+	failing  bool
+	released bool
 
 	stop    chan struct{}
 	done    chan struct{}
@@ -157,13 +164,21 @@ func (l *stackLock) isLost() bool {
 func (l *stackLock) beat() string {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	if l.lost {
+	// After release has started a beat must never re-create the file.
+	if l.lost || l.released {
 		return "lost"
 	}
-	current, err := readLockFile(l.path)
+	current, err := readLockFile(l.path, l.cfg.maxBytes)
 	if errors.Is(err, fs.ErrNotExist) {
-		l.lost = true
-		return "lost"
+		// A break-then-restore leaves the name absent for a moment: take it back. A failed create
+		// (the name was taken meanwhile) is a failed beat; the next read decides.
+		if createLockFile(l.path, encodeLockRecord(l.token, l.startedAt, l.seq+1), l.cfg.write) != nil {
+			l.failing = true
+			return "error"
+		}
+		l.seq++
+		l.failing = false
+		return "ok"
 	}
 	if err != nil {
 		l.failing = true
@@ -214,12 +229,13 @@ func (l *stackLock) releaseLock() {
 		<-l.done
 		l.mu.Lock()
 		defer l.mu.Unlock()
+		l.released = true
 		if l.lost {
 			return
 		}
 		tries := l.cfg.releaseTries
 		if tries <= 0 {
-			tries = 1
+			tries = otherLockReleaseTries
 			if l.b.os == "windows" {
 				tries = windowsLockReleaseTries
 			}
@@ -240,7 +256,7 @@ func (l *stackLock) releaseLock() {
 }
 
 func (l *stackLock) removeOwn() bool {
-	current, err := readLockFile(l.path)
+	current, err := readLockFile(l.path, l.cfg.maxBytes)
 	if errors.Is(err, fs.ErrNotExist) {
 		return true
 	}
@@ -304,7 +320,7 @@ func (b bridge) acquireStackLock(ctx context.Context) (*stackLock, error) {
 			return nil, lockUnavailable(path)
 		}
 
-		first, err := readLockFile(path)
+		first, err := readLockFile(path, cfg.maxBytes)
 		if errors.Is(err, fs.ErrNotExist) {
 			continue
 		}
@@ -321,7 +337,7 @@ func (b bridge) acquireStackLock(ctx context.Context) (*stackLock, error) {
 			}
 			sleep(cfg.poll)
 			waited += cfg.poll
-			now, err := readLockFile(path)
+			now, err := readLockFile(path, cfg.maxBytes)
 			if errors.Is(err, fs.ErrNotExist) {
 				verdict = "free"
 				break
@@ -364,12 +380,14 @@ func (b bridge) breakStale(path string, expected []byte, cfg lockConfig) bool {
 	if err := rename(path, tomb); err != nil {
 		return errors.Is(err, fs.ErrNotExist)
 	}
-	displaced, err := readLockFile(tomb)
+	displaced, err := readLockFile(tomb, cfg.maxBytes)
 	if err != nil {
 		return false
 	}
 	if bytes.Equal(displaced, expected) {
-		return cfg.remove(tomb) == nil
+		// The name is already free: a tomb that cannot be removed is harmless, so go on.
+		cfg.remove(tomb)
+		return true
 	}
 	// A holder beat or re-acquired between our last read and the rename: give its lock back.
 	createLockFile(path, displaced, cfg.write)

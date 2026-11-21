@@ -495,7 +495,7 @@ func TestStackLockReleaseLeavesForeignToken(t *testing.T) {
 }
 
 func TestStackLockLostDetection(t *testing.T) {
-	for _, mode := range []string{"removed", "foreign"} {
+	for _, mode := range []string{"foreign"} {
 		t.Run(mode, func(t *testing.T) {
 			b := fixture(t)
 			b.lockCfg.beat = 2 * time.Millisecond
@@ -503,11 +503,7 @@ func TestStackLockLostDetection(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if mode == "removed" {
-				os.Remove(lockPathOf(b))
-			} else {
-				os.WriteFile(lockPathOf(b), rawRecord(randomHex(t), "updater", 1), 0644)
-			}
+			os.WriteFile(lockPathOf(b), rawRecord(randomHex(t), "updater", 1), 0644)
 			select {
 			case <-l.done:
 			case <-time.After(2 * time.Second):
@@ -785,7 +781,168 @@ func TestStackLockObservationHonorsContext(t *testing.T) {
 
 func TestStackLockDefaultsMatchWireContract(t *testing.T) {
 	c := lockConfig{}.resolved()
-	if c.beat != 5*time.Second || c.stale != 60*time.Second || c.poll != time.Second || c.rounds != 3 || c.releasePause != 50*time.Millisecond || stackLockName != ".haive-stack-lock" {
+	if c.beat != 5*time.Second || c.stale != 60*time.Second || c.poll != time.Second || c.rounds != 3 || c.maxBytes != 4096 || stackLockMaxBytes != 4096 || c.releasePause != 50*time.Millisecond || stackLockName != ".haive-stack-lock" {
 		t.Fatalf("%+v", c)
+	}
+}
+
+func TestStackLockReadIsCapped(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "lock")
+	for _, size := range []int{16, 17} {
+		if err := os.WriteFile(path, bytes.Repeat([]byte("a"), size), 0644); err != nil {
+			t.Fatal(err)
+		}
+		got, err := readLockFile(path, 16)
+		if err != nil || len(got) != size {
+			t.Fatalf("size %d: read %d bytes, %v", size, len(got), err)
+		}
+	}
+	os.Remove(path)
+	f, err := os.Create(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Truncate(64 << 20); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+	for _, max := range []int{16, stackLockMaxBytes} {
+		if got, err := readLockFile(path, max); err != nil || len(got) != max+1 {
+			t.Fatalf("sparse file with cap %d: read %d bytes, %v", max, len(got), err)
+		}
+	}
+}
+
+func TestStackLockOversizeFileIsStale(t *testing.T) {
+	b := fixture(t)
+	b.lockCfg = lockConfig{stale: 3 * time.Millisecond, poll: time.Millisecond, maxBytes: 16}
+	b.sleep = func(time.Duration) {}
+	os.WriteFile(lockPathOf(b), bytes.Repeat([]byte("a"), 100), 0644)
+	l, err := b.acquireStackLock(context.Background())
+	if err != nil {
+		t.Fatalf("oversize unchanged file not broken: %v", err)
+	}
+	l.releaseLock()
+}
+
+func TestStackLockComparesOnlyTheCappedPrefix(t *testing.T) {
+	for _, at := range []int{90, 3} {
+		b := fixture(t)
+		b.lockCfg = lockConfig{stale: 3 * time.Millisecond, poll: time.Millisecond, maxBytes: 16}
+		path := lockPathOf(b)
+		os.WriteFile(path, bytes.Repeat([]byte("a"), 100), 0644)
+		b.sleep = func(time.Duration) {
+			changed := bytes.Repeat([]byte("a"), 100)
+			changed[at] = 'b'
+			os.WriteFile(path, changed, 0644)
+		}
+		l, err := b.acquireStackLock(context.Background())
+		if at == 90 && err != nil {
+			t.Fatalf("a change past the cap counted as a beat: %v", err)
+		}
+		if at == 3 && err == nil {
+			t.Fatal("a change inside the cap was not seen as a beat")
+		}
+		if l != nil {
+			l.releaseLock()
+		}
+	}
+}
+
+func TestStackLockBeatRecreatesAbsentFile(t *testing.T) {
+	b := fixture(t)
+	b.lockCfg.beat = time.Hour
+	l, err := b.acquireStackLock(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.releaseLock()
+	os.Remove(lockPathOf(b))
+	if got := l.beat(); got != "ok" || l.isLost() {
+		t.Fatalf("absent file: %s lost=%v", got, l.isLost())
+	}
+	data, _ := os.ReadFile(lockPathOf(b))
+	var record lockRecord
+	if json.Unmarshal(data, &record) != nil || record.Token != l.token || record.Seq != 2 {
+		t.Fatalf("record not re-created as ours with seq 2: %q", data)
+	}
+}
+
+// A re-create that fails (EEXIST in production, a failing write here: both come back as one error) is a
+// failed beat, never a loss; what the next beat reads decides.
+func TestStackLockFailedRecreateIsAFailedBeat(t *testing.T) {
+	for _, mode := range []string{"foreign", "own"} {
+		t.Run(mode, func(t *testing.T) {
+			b := fixture(t)
+			b.lockCfg.beat = time.Hour
+			failWrites := false
+			b.lockCfg.write = func(f *os.File, data []byte) error {
+				if failWrites {
+					return errors.New("name taken")
+				}
+				_, err := f.Write(data)
+				return err
+			}
+			l, err := b.acquireStackLock(context.Background())
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer l.releaseLock()
+			os.Remove(lockPathOf(b))
+			failWrites = true
+			if got := l.beat(); got != "error" || l.isLost() {
+				t.Fatalf("failed re-create: %s lost=%v", got, l.isLost())
+			}
+			failWrites = false
+			if mode == "foreign" {
+				os.WriteFile(lockPathOf(b), rawRecord(randomHex(t), "updater", 5), 0644)
+				if got := l.beat(); got != "lost" || !l.isLost() {
+					t.Fatalf("foreign record: %s", got)
+				}
+				return
+			}
+			os.WriteFile(lockPathOf(b), rawRecord(l.token, "extension", 1), 0644)
+			if got := l.beat(); got != "ok" || l.isLost() {
+				t.Fatalf("own restored record: %s lost=%v", got, l.isLost())
+			}
+		})
+	}
+}
+
+func TestStackLockBeatAfterReleaseNeverRecreates(t *testing.T) {
+	b := fixture(t)
+	b.lockCfg.beat = time.Hour
+	l, err := b.acquireStackLock(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	l.releaseLock()
+	if lockExists(b) {
+		t.Fatal("release left the lock")
+	}
+	if got := l.beat(); got != "lost" || lockExists(b) {
+		t.Fatalf("beat after release: %s, file exists=%v", got, lockExists(b))
+	}
+}
+
+func TestStackLockTombRemovalFailureAfterEqualReadIsNotBusy(t *testing.T) {
+	b := fixture(t)
+	b.lockCfg = lockConfig{stale: 3 * time.Millisecond, poll: time.Millisecond}
+	b.sleep = func(time.Duration) {}
+	b.lockCfg.remove = func(path string) error {
+		if strings.Contains(path, ".stale.") {
+			return os.ErrPermission
+		}
+		return os.Remove(path)
+	}
+	path := lockPathOf(b)
+	os.WriteFile(path, rawRecord(randomHex(t), "updater", 1), 0644)
+	l, err := b.acquireStackLock(context.Background())
+	if err != nil {
+		t.Fatalf("a successful break was reported busy: %v", err)
+	}
+	defer l.releaseLock()
+	if tombs, _ := filepath.Glob(path + ".stale.*"); len(tombs) != 1 {
+		t.Fatalf("expected the tomb left behind, got %v", tombs)
 	}
 }

@@ -9,6 +9,7 @@ export const STACK_LOCK_BEAT_MS = 5000;
 export const STACK_LOCK_STALE_MS = 60000;
 export const STACK_LOCK_POLL_MS = 1000;
 export const STACK_LOCK_ROUNDS = 3;
+export const STACK_LOCK_MAX_BYTES = 4096;
 export const STACK_LOCK_RELEASE_TRIES = 3;
 export const STACK_LOCK_RELEASE_PAUSE_MS = 100;
 
@@ -18,6 +19,7 @@ export interface StackLockOptions {
   staleMs?: number;
   pollMs?: number;
   rounds?: number;
+  maxBytes?: number;
   releaseTries?: number;
   releasePauseMs?: number;
   heartbeat?: boolean;
@@ -43,6 +45,7 @@ function resolve(options: StackLockOptions): Resolved {
     staleMs: options.staleMs ?? STACK_LOCK_STALE_MS,
     pollMs: options.pollMs ?? STACK_LOCK_POLL_MS,
     rounds: options.rounds ?? STACK_LOCK_ROUNDS,
+    maxBytes: options.maxBytes ?? STACK_LOCK_MAX_BYTES,
     releaseTries: options.releaseTries ?? STACK_LOCK_RELEASE_TRIES,
     releasePauseMs: options.releasePauseMs ?? STACK_LOCK_RELEASE_PAUSE_MS,
     heartbeat: options.heartbeat ?? true,
@@ -105,7 +108,8 @@ export class StackLock {
   }
 
   beat(): Promise<'ok' | 'lost' | 'error'> {
-    if (this.lostFlag) return Promise.resolve('lost');
+    // After release has started a beat must never re-create the file.
+    if (this.lostFlag || this.releasing) return Promise.resolve('lost');
     // A tick that arrives while a write is still in flight joins it rather than overlapping.
     this.inFlight ??= this.beatOnce().finally(() => {
       this.inFlight = undefined;
@@ -116,18 +120,25 @@ export class StackLock {
   private async beatOnce(): Promise<'ok' | 'lost' | 'error'> {
     try {
       const outcome = await inInstall(this.installDir, async (dir) => {
-        const current = await dir.read(STACK_LOCK_NAME);
+        const current = await dir.read(STACK_LOCK_NAME, this.options.maxBytes);
+        // A break-then-restore leaves the name absent for a moment: take it back; EEXIST fails the beat.
+        if (!current) {
+          await dir.createExclusive(
+            STACK_LOCK_NAME,
+            encode(this.token, this.options.holder, this.startedAt, this.seq + 1),
+          );
+          return 'created' as const;
+        }
         // A write that failed after truncating leaves our own record empty or partial: not a loss.
         const torn = this.failing && current !== undefined && !parses(current.bytes);
-        if (!current || (decode(current.bytes).token !== this.token && !torn))
-          return 'lost' as const;
+        if (decode(current.bytes).token !== this.token && !torn) return 'lost' as const;
         await dir.overwrite(
           STACK_LOCK_NAME,
           encode(this.token, this.options.holder, this.startedAt, this.seq + 1),
         );
         return 'ok' as const;
       });
-      if (outcome === 'ok') {
+      if (outcome === 'ok' || outcome === 'created') {
         this.seq += 1;
         this.failing = false;
         return 'ok';
@@ -163,7 +174,7 @@ export class StackLock {
     for (let attempt = 1; attempt <= tries; attempt++) {
       try {
         await inInstall(this.installDir, async (dir) => {
-          const current = await dir.read(STACK_LOCK_NAME);
+          const current = await dir.read(STACK_LOCK_NAME, this.options.maxBytes);
           if (current && decode(current.bytes).token === this.token)
             await dir.remove(STACK_LOCK_NAME).catch((error: unknown) => {
               if (code(error) !== 'ENOENT') throw error;
@@ -214,7 +225,7 @@ export async function acquireStackLock(
     // A non-regular entry throws here and is propagated: never read, followed or deleted.
     const first = await op(async (dir) => {
       await dir.entry(STACK_LOCK_NAME);
-      return dir.read(STACK_LOCK_NAME).catch(() => null);
+      return dir.read(STACK_LOCK_NAME, opts.maxBytes).catch(() => null);
     });
     if (first === undefined) continue;
     if (first === null) return { status: 'busy', holder: 'unknown' };
@@ -240,7 +251,7 @@ export async function acquireStackLock(
     while (waited < opts.staleMs) {
       await opts.sleep(poll);
       waited += poll;
-      const now = await op((dir) => dir.read(STACK_LOCK_NAME)).catch(() => null);
+      const now = await op((dir) => dir.read(STACK_LOCK_NAME, opts.maxBytes)).catch(() => null);
       if (now === null) {
         verdict = 'unknown';
         break;
@@ -281,9 +292,12 @@ async function breakStale(
         if (code(error) === 'ENOENT') return 'free' as const;
         throw error;
       }
-      const displaced = await dir.read(tomb);
+      const displaced = await dir.read(tomb, opts.maxBytes);
       if (displaced?.bytes.equals(expected)) {
-        await dir.remove(tomb);
+        // The name is already free: a tomb that cannot be removed is harmless, so report it and go on.
+        await dir.remove(tomb).catch((error: unknown) => {
+          opts.onEvent?.('stack-lock-tomb-left', { code: code(error) });
+        });
         opts.onEvent?.('stack-lock-broken', { token: oldToken, unchangedMs });
         return 'free' as const;
       }
