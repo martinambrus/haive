@@ -1361,10 +1361,36 @@ the step-CLI choice route and the summary CLI route, and a fix-round choice is r
 lock accepts. `@haive/shared/composed-lsp-provider-lock` allows exactly one enabled
 `claude-code` provider. The dispatcher refuses the rest of the way: `composedLspProviderIds` holds
 the providers with an effective reference, a preferred provider outside it returns a skip plan
-with a named reason, and with no preference the choice floats only inside the set, so no capability
-gap falls through to another CLI. A prior or verifying reference does not count. Before the first
+with a named reason (the user's saved pick is the one exception, below), and with no preference the
+choice floats only inside the set, so no capability gap falls through to another CLI. A prior or
+verifying reference does not count. Before the first
 build makes any reference effective, the set is the lock's verified providers, so the environment
-steps that build the image, and their AI repair, can run; LSP readiness stays false until then. A launch follows the same rule: until some provider holds an effective reference the task's CLI launch uses the provider sandbox image, as a legacy task does before its environment is built; once one exists, a changed input, a vanished image, an unverified provider or a changed provider is refused. Work is refused, never moved to another CLI, and LSP is never dropped silently.
+steps that build the image, and their AI repair, can run; LSP readiness stays false until then. A launch follows the same rule: until some provider holds an effective reference the task's CLI launch uses the provider sandbox image, as a legacy task does before its environment is built; once one exists, a changed input, a vanished image, an unverified provider or a changed provider is refused. Work is refused, never moved to another CLI (a saved pick, below, is skipped and said so), and LSP is never dropped silently.
+
+A saved pick is skipped, not refused. The one preferred provider the dispatcher does not refuse is
+the user's saved user-wide choice (`user_step_cli_preferences` and `user_step_cli_role_preferences`,
+`explicit = true`: the "Also for my later tasks" rows). A locked task meets one only because it was
+saved on another task after this task locked: adoption refuses a task whose saved picks name a CLI
+the lock does not allow, and the lock refuses a switch here, which is where a pick is remembered.
+`resolvePreferredCli` returns `savedPreference` (`{ taskProviderId }`, the
+task's own CLI) on those two saved returns only, and not when the task sets `ignore_saved_step_clis`
+(a row honoured there was set within the task and counts as a task pick). A task choice
+(`task_step_cli_choices`), a fix-round choice, a round provider and the task's own CLI never carry
+it, so they stay refused, never moved. Every dispatching caller passes it on as
+`DispatchRequest.savedPreference`; a request that does not say where its pick came from keeps the
+refusal, so a caller that forgets fails closed. For a saved pick outside the set `resolveDispatch`
+drops the preference: it prefers the task's own CLI when the set holds it, otherwise the choice
+floats inside the set as with no preference. A disabled saved pick, and a disabled task CLI that
+would replace it, are still refused as disabled. The skipped pick's effort level is dropped with it:
+levels are per-CLI scales, so the substitute runs at its provider's configured level, else its
+scale's maximum, as a step with none saved does, and the enqueue payload carries no effort either.
+The plan carries `skippedSavedPreference` (provider id and label); after the enqueue the caller
+appends one sentence naming the skipped and the running CLI to `task_steps.warning_message`
+(`noteSavedCliSkip`; `appendStepWarning` is one UPDATE that adds the text once, so a retry warning
+written beside it is never overwritten). The sentence is display copy and nothing may key on it. The
+step recap forwards the source so it runs on the substitute and writes no sentence: its step's own
+dispatch already did. `providerHoldFor` and the persona pin check (`task-queue.ts`) only read the
+resolver's id and are unchanged; the pin check still names the saved CLI, not the substitute.
 
 The rule and what it guards change in different transactions, so one lock orders them: the task row,
 taken `FOR NO KEY UPDATE` by `lockTaskForComposedLsp` (`@haive/shared/composed-lsp-provider-lock`).

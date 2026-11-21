@@ -121,6 +121,7 @@ import {
   type SimilarSite,
 } from './steps/workflow/_similar-sites.js';
 import type { CliProviderRecord } from '../cli-adapters/types.js';
+import { noteSavedCliSkip } from './saved-cli-skip.js';
 import { resolvePreferredCli, TRUNCATION_RETRY_NOTICE } from './step-runner.js';
 import { augmentPromptWithLedger, recordLedgerEntry } from './task-ledger.js';
 import { augmentPromptWithTerseness } from './terseness-context.js';
@@ -864,7 +865,11 @@ async function dispatchMergeFixAgent(
     buildMergeFixPrompt(issue.branchName ?? '', issue.title ?? undefined),
   );
   const prompt = afterTruncation ? `${augmented}\n\n${TRUNCATION_RETRY_NOTICE}` : augmented;
-  const { cliProviderId: preferred, effortLevel: preferredEffort } = await resolvePreferredCli(
+  const {
+    cliProviderId: preferred,
+    effortLevel: preferredEffort,
+    savedPreference,
+  } = await resolvePreferredCli(
     db,
     params.userId,
     stepDef.metadata.id,
@@ -877,6 +882,7 @@ async function dispatchMergeFixAgent(
   const plan = await resolveTaskDispatch(db, params.taskId, {
     providers,
     preferredProviderId: preferred,
+    savedPreference,
     input: { kind: 'prompt', prompt, capabilities: ['tool_use', 'file_write'] },
     houseRules: houseRulesOptOut(
       'a merge fixer reconciles existing histories, it writes no new code',
@@ -917,6 +923,7 @@ async function dispatchMergeFixAgent(
     spec: plan.invocation.spec,
     timeoutMs: overrideOr(current, MERGE_FIX_TIMEOUT_MS),
   });
+  await noteSavedCliSkip(db, current.id, plan);
   return { kind: 'ok', invId };
 }
 
@@ -1355,7 +1362,11 @@ async function prepareReviewAgent(
         )
       : undefined;
   const worktreeRel = issueWorktreeRel(issue);
-  const { cliProviderId: preferred, effortLevel: preferredEffort } = await resolvePreferredCli(
+  const {
+    cliProviderId: preferred,
+    effortLevel: preferredEffort,
+    savedPreference,
+  } = await resolvePreferredCli(
     ra.db,
     ra.params.userId,
     ra.stepDef.metadata.id,
@@ -1383,6 +1394,7 @@ async function prepareReviewAgent(
   const plan = await resolveTaskDispatch(ra.db, ra.taskId, {
     providers: ra.providers,
     preferredProviderId: preferred,
+    savedPreference,
     worktreeRel,
     input: { kind: 'prompt', prompt: fullPrompt, capabilities },
     houseRules: houseRulesFor(ra.stepDef.metadata.id, role, issue.estimatedFiles),
@@ -1493,6 +1505,7 @@ async function spawnReviewAgent(
     spec: invocation.spec,
     timeoutMs: timeoutMs ?? overrideOr(ra.current, REVIEW_TIMEOUT_MS),
   });
+  await noteSavedCliSkip(ra.db, ra.current.id, prepared.plan);
   return invId;
 }
 
@@ -2646,7 +2659,11 @@ async function spawnReplanner(
       replannerPrompt(ea.plan, failed, all),
   );
   const prompt = afterTruncation ? `${augmented}\n\n${TRUNCATION_RETRY_NOTICE}` : augmented;
-  const { cliProviderId: preferred, effortLevel: preferredEffort } = await resolvePreferredCli(
+  const {
+    cliProviderId: preferred,
+    effortLevel: preferredEffort,
+    savedPreference,
+  } = await resolvePreferredCli(
     ea.db,
     ea.params.userId,
     ea.stepDef.metadata.id,
@@ -2659,6 +2676,7 @@ async function spawnReplanner(
   const plan = await resolveTaskDispatch(ea.db, ea.taskId, {
     providers: ea.providers,
     preferredProviderId: preferred,
+    savedPreference,
     input: { kind: 'prompt', prompt, capabilities: ['tool_use'] },
     houseRules: houseRulesOptOut('the replanner reorders the remaining issues and writes no code'),
     invokeOpts: { cwd: ea.params.workspacePath, effortLevel: preferredEffort ?? undefined },
@@ -2705,6 +2723,7 @@ async function spawnReplanner(
     spec: plan.invocation.spec,
     timeoutMs: overrideOr(ea.current, REVIEW_TIMEOUT_MS),
   });
+  await noteSavedCliSkip(ea.db, ea.current.id, plan);
   return true;
 }
 
@@ -3246,7 +3265,11 @@ export async function resolveDagPhase(
       (i) => i.outcome === 'pending' && i.cliInvocationId === null,
     );
     if (undispatched.length > 0) {
-      const { cliProviderId: preferred, effortLevel: preferredEffort } = await resolvePreferredCli(
+      const {
+        cliProviderId: preferred,
+        effortLevel: preferredEffort,
+        savedPreference,
+      } = await resolvePreferredCli(
         db,
         params.userId,
         stepDef.metadata.id,
@@ -3298,6 +3321,7 @@ export async function resolveDagPhase(
         const planDispatch = await resolveTaskDispatch(db, params.taskId, {
           providers,
           preferredProviderId: preferred,
+          savedPreference,
           worktreeRel,
           input: { kind: 'prompt', prompt, capabilities: spec.requiredCapabilities },
           houseRules: houseRulesFor(stepDef.metadata.id, 'coder', issue.estimatedFiles),
@@ -3370,6 +3394,7 @@ export async function resolveDagPhase(
           spec: planDispatch.invocation.spec,
           timeoutMs: overrideOrLearned(current, spec.timeoutMs),
         });
+        await noteSavedCliSkip(db, current.id, planDispatch);
         dispatched += 1;
       }
       // Nothing went out: each coder was refused (its issue now reads failed_unrecoverable) or lost

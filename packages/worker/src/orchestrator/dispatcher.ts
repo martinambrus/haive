@@ -138,6 +138,19 @@ export interface DispatchInvocationSubAgent {
 
 export type DispatchInvocation = DispatchInvocationCli | DispatchInvocationSubAgent;
 
+/** Where a saved per-step preference sits relative to its task: the task's own CLI, which a
+ *  skipped saved pick yields to when the composed-LSP set allows it. */
+export interface SavedPreferenceSource {
+  taskProviderId: string | null;
+}
+
+/** A saved per-step pick that the composed-LSP lock skipped. Structural fact only; the words
+ *  shown for it are the caller's. */
+export interface SkippedSavedPreference {
+  providerId: string;
+  label: string | null;
+}
+
 export interface DispatchPlan {
   mode: DispatchMode;
   providerId: string | null;
@@ -156,6 +169,8 @@ export interface DispatchPlan {
   /** Set on a 'skip' plan whose cause is a prompt step's persona that cannot be pasted. It is the
    *  step's whole failure text, which must not read as "no cli provider available". */
   personaFailure?: string;
+  /** Set when the composed-LSP lock skipped the user's saved pick and this plan runs another CLI. */
+  skippedSavedPreference?: SkippedSavedPreference;
   reason: string;
 }
 
@@ -169,6 +184,9 @@ export interface DispatchRequest {
   };
   providers: CliProviderRecord[];
   preferredProviderId?: string | null;
+  /** Set ONLY when `preferredProviderId` is the user's saved per-step preference: the one pick the
+   *  composed-LSP lock skips instead of refusing. Omitted means refuse (fail closed). */
+  savedPreference?: SavedPreferenceSource;
   input: DispatchInput;
   invokeOpts: InvokeOpts;
   /** When true, a steering-capable adapter builds an interactive stream-json
@@ -724,17 +742,24 @@ function composedLspAllowedSet(
 }
 
 export function resolveDispatch(req: DispatchRequest): DispatchPlan {
-  const off = disabledProvider(req.providers, req.preferredProviderId ?? null);
-  if (off) {
-    return skipPlan(
+  const disabledSkip = (off: CliProviderRecord) =>
+    skipPlan(
       `the selected cli provider "${providerLabel(off)}" is disabled; enable it again or choose another CLI for this step`,
     );
-  }
+  let preferredId = req.preferredProviderId ?? null;
+  const off = disabledProvider(req.providers, preferredId);
+  if (off) return disabledSkip(off);
   const composedSet = composedLspAllowedSet(req.providers, req.composedLspProviderIds);
-  const preferredId = req.preferredProviderId ?? null;
+  let skipped: SkippedSavedPreference | null = null;
   if (composedSet && preferredId && !composedSet.has(preferredId)) {
     const chosen = req.providers.find((p) => p.id === preferredId);
-    return skipPlan(composedLspLockReason(chosen ? providerLabel(chosen) : null));
+    const label = chosen ? providerLabel(chosen) : null;
+    if (!req.savedPreference) return skipPlan(composedLspLockReason(label));
+    skipped = { providerId: preferredId, label };
+    const own = req.savedPreference.taskProviderId;
+    preferredId = own && composedSet.has(own) ? own : null;
+    const ownOff = disabledProvider(req.providers, preferredId);
+    if (ownOff) return disabledSkip(ownOff);
   }
   const enabled = req.providers.filter((p) => p.enabled && (!composedSet || composedSet.has(p.id)));
 
@@ -749,7 +774,7 @@ export function resolveDispatch(req: DispatchRequest): DispatchPlan {
   let sawWithoutMcp = false;
   let sawWithMcp = false;
   let firstBuildError: ProviderBuildError | null = null;
-  for (const { provider, adapter } of dispatchCandidates(enabled, req.preferredProviderId ?? null, {
+  for (const { provider, adapter } of dispatchCandidates(enabled, preferredId, {
     needsVision,
     preferVision: req.preferVision,
     registry: req.registry,
@@ -763,12 +788,17 @@ export function resolveDispatch(req: DispatchRequest): DispatchPlan {
     }
     let plan: DispatchPlan | null;
     try {
-      plan = buildCliSidePlan(adapter, provider, req, needsSubagents);
+      plan = buildCliSidePlan(
+        adapter,
+        provider,
+        skipped ? { ...req, invokeOpts: { ...req.invokeOpts, effortLevel: undefined } } : req,
+        needsSubagents,
+      );
     } catch (err) {
       // An explicit pick keeps its failure visible; a plain error is a bug and stays fatal;
       // the first cause is rethrown when nothing builds.
       if (!(err instanceof ProviderBuildError)) throw err;
-      if (provider.id === req.preferredProviderId) throw err;
+      if (provider.id === preferredId) throw err;
       firstBuildError ??= err;
       log.warn(
         { err, providerId: provider.id, providerName: provider.name },
@@ -776,7 +806,7 @@ export function resolveDispatch(req: DispatchRequest): DispatchPlan {
       );
       continue;
     }
-    if (plan) return plan;
+    if (plan) return skipped ? { ...plan, skippedSavedPreference: skipped } : plan;
   }
 
   if (firstBuildError) throw firstBuildError;

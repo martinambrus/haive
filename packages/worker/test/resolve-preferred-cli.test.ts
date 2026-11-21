@@ -102,7 +102,11 @@ describe('resolvePreferredCli', () => {
 
   it('keeps a disabled saved default preference', async () => {
     const db = fakeDb({ saved: { default: { cliProviderId: DISABLED_CLI, effortLevel: 'low' } } });
-    expect(await resolve(db)).toEqual({ cliProviderId: DISABLED_CLI, effortLevel: 'low' });
+    expect(await resolve(db)).toEqual({
+      cliProviderId: DISABLED_CLI,
+      effortLevel: 'low',
+      savedPreference: { taskProviderId: TASK_CLI },
+    });
   });
 
   it('keeps a disabled saved role preference', async () => {
@@ -110,6 +114,7 @@ describe('resolvePreferredCli', () => {
     expect(await resolve(db, 'reviewer')).toEqual({
       cliProviderId: DISABLED_CLI,
       effortLevel: 'low',
+      savedPreference: { taskProviderId: TASK_CLI },
     });
   });
 
@@ -130,7 +135,11 @@ describe('resolvePreferredCli', () => {
 
   it('still reads the saved preference where this task chose nothing', async () => {
     const db = fakeDb({ saved: { default: { cliProviderId: SAVED_CLI, effortLevel: 'low' } } });
-    expect(await resolve(db)).toEqual({ cliProviderId: SAVED_CLI, effortLevel: 'low' });
+    expect(await resolve(db)).toEqual({
+      cliProviderId: SAVED_CLI,
+      effortLevel: 'low',
+      savedPreference: { taskProviderId: TASK_CLI },
+    });
   });
 
   it("honours this task's choice under ignore_saved_step_clis with no touch marker", async () => {
@@ -171,6 +180,59 @@ describe('resolvePreferredCli', () => {
   });
 });
 
+describe('resolvePreferredCli saved-preference marker', () => {
+  it('marks a saved default and a saved named role, naming the task CLI', async () => {
+    const saved = { cliProviderId: SAVED_CLI, effortLevel: 'low' };
+    const db = fakeDb({ saved: { default: saved, reviewer: saved } });
+    expect((await resolve(db)).savedPreference).toEqual({ taskProviderId: TASK_CLI });
+    expect((await resolve(db, 'reviewer')).savedPreference).toEqual({ taskProviderId: TASK_CLI });
+  });
+
+  it('marks a saved pick honoured under ignore_saved_step_clis only as a task pick', async () => {
+    const db = fakeDb({
+      saved: { default: { cliProviderId: SAVED_CLI, effortLevel: null } },
+      touched: ['default'],
+    });
+    const out = await resolve(db, 'default', true);
+    expect(out.cliProviderId).toBe(SAVED_CLI);
+    expect(out.savedPreference).toBeUndefined();
+  });
+
+  it.each([
+    [
+      'a role pick made in this task',
+      { choices: { reviewer: { cliProviderId: PICKED_CLI, effortLevel: null } } },
+      'reviewer',
+    ],
+    [
+      'a default pick made in this task',
+      {
+        choices: { default: { cliProviderId: PICKED_CLI, effortLevel: null } },
+        saved: { default: { cliProviderId: SAVED_CLI, effortLevel: null } },
+      },
+      'default',
+    ],
+    [
+      'a task pick without a provider row',
+      { choices: { default: { cliProviderId: UNLISTED_CLI, effortLevel: null } } },
+      'default',
+    ],
+    [
+      'a saved pick without a provider row',
+      { saved: { default: { cliProviderId: UNLISTED_CLI, effortLevel: null } } },
+      'default',
+    ],
+    ['nothing saved', {}, 'default'],
+  ])('carries no marker for %s', async (_name, opts, role) => {
+    expect((await resolve(fakeDb(opts), role)).savedPreference).toBeUndefined();
+  });
+
+  it('carries no marker for a saved pick left out under ignore_saved_step_clis', async () => {
+    const db = fakeDb({ saved: { default: { cliProviderId: SAVED_CLI, effortLevel: null } } });
+    expect((await resolve(db, 'default', true)).savedPreference).toBeUndefined();
+  });
+});
+
 it('resolves a module dimension seat from its task choice while an unset seat inherits the step default', async () => {
   const fake = createFakeDb({
     taskStepCliChoices: schema.taskStepCliChoices,
@@ -199,5 +261,9 @@ it('resolves a module dimension seat from its task choice while an unset seat in
   ).toEqual({ cliProviderId: PICKED_CLI, effortLevel: 'high' });
   expect(
     await resolvePreferredCli(db, USER, stepId, TASK_CLI, PROVIDERS, 'coherence', TASK, false),
-  ).toEqual({ cliProviderId: SAVED_CLI, effortLevel: 'low' });
+  ).toEqual({
+    cliProviderId: SAVED_CLI,
+    effortLevel: 'low',
+    savedPreference: { taskProviderId: TASK_CLI },
+  });
 });

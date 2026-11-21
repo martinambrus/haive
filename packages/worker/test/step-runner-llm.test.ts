@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Database } from '@haive/database';
 import { StepPrepareParkError } from '@haive/shared/step';
@@ -17,6 +18,22 @@ import {
 } from '../src/step-engine/steps/workflow/_fix-test-store.js';
 import type { SQL } from 'drizzle-orm';
 import { PgDialect } from 'drizzle-orm/pg-core';
+
+const composedLock = vi.hoisted(() => ({ ids: null as string[] | null }));
+vi.mock('../src/lsp/configured-lsp.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/lsp/configured-lsp.js')>();
+  return {
+    ...actual,
+    lspDispatchState: vi.fn(async (...args: Parameters<typeof actual.lspDispatchState>) =>
+      composedLock.ids
+        ? {
+            ready: Object.fromEntries(args[2].map((p) => [p.id, false])),
+            composedProviderIds: composedLock.ids,
+          }
+        : actual.lspDispatchState(...args),
+    ),
+  };
+});
 
 vi.mock('../src/orchestrator/global-kb-context.js', async (importOriginal) => ({
   ...(await importOriginal<object>()),
@@ -68,6 +85,8 @@ import * as externalDrift from '../src/step-engine/steps/workflow/_external-drif
 
 interface MockState {
   roundChoice?: CliProviderRecord;
+  /** The user's saved per-step CLI pick, as `user_step_cli_preferences` stores it. */
+  savedPref?: { cliProviderId: string; effortLevel: string | null };
   taskStepRow: Record<string, unknown>;
   cliInvocationRow: Record<string, unknown> | null;
   /** Rows the WIDE invocation reads see — the trailing-history counters
@@ -214,6 +233,18 @@ function makeMockDb(state: MockState, opts: MockDbOptions = {}, inTransaction = 
       const apply = (v: Record<string, unknown>): Record<string, unknown>[] => {
         state.updates.push({ table: tableName, ...v });
         if (tableName === 'task_steps') {
+          // An atomic append is stored as the string the database would hold: the note is the
+          // statement's last parameter, and an earlier warning that already says it is kept.
+          if (v.warningMessage && typeof v.warningMessage === 'object') {
+            const note = new PgDialect().sqlToQuery(v.warningMessage as SQL).params.at(-1);
+            const held = state.taskStepRow.warningMessage as string | null | undefined;
+            v = {
+              ...v,
+              warningMessage: held?.includes(String(note))
+                ? held
+                : [held, note].filter(Boolean).join(' '),
+            };
+          }
           state.taskStepRow = { ...state.taskStepRow, ...v };
           return [state.taskStepRow];
         }
@@ -238,7 +269,9 @@ function makeMockDb(state: MockState, opts: MockDbOptions = {}, inTransaction = 
     // to params.cliProviderId and the loopSpec defaults — matching
     // production behavior for users who haven't set anything.
     query: {
-      userStepCliPreferences: { findFirst: async () => undefined },
+      userStepCliPreferences: {
+        findFirst: async () => (state.savedPref ? { ...state.savedPref } : undefined),
+      },
       userStepCliRolePreferences: { findFirst: async () => undefined },
       taskStepCliChoices: {
         findFirst: async ({ where }: { where: SQL }) =>
@@ -1243,6 +1276,122 @@ describe('prepare park control', () => {
     expect(prepare).toHaveBeenCalledOnce();
     expect(enqueue).toHaveBeenCalledOnce();
     expect(state.inserts.filter((entry) => entry.table === 'cli_invocations')).toHaveLength(1);
+  });
+});
+
+describe('a saved CLI the composed-LSP lock refuses', () => {
+  const prov = (id: string, name: string, label: string): CliProviderRecord => ({
+    ...makeProvider(),
+    id,
+    name: name as CliProviderRecord['name'],
+    label,
+  });
+  const claude = prov(randomUUID(), 'claude-code', 'Claude Code');
+  const codex = prov(randomUUID(), 'codex', 'Codex');
+  const otherClaude = prov(randomUUID(), 'claude-code', 'Claude Two');
+  const gemini = prov(randomUUID(), 'gemini', 'Gemini');
+
+  afterEach(() => {
+    composedLock.ids = null;
+  });
+
+  async function runStep(
+    state: MockState,
+    taskCli: CliProviderRecord,
+    providers: CliProviderRecord[],
+  ) {
+    const enqueueCliInvocation = vi.fn();
+    const result = await advanceStep({
+      db: makeMockDb(state),
+      taskId: 'task-1',
+      userId: 'user-1',
+      repoPath: '/tmp',
+      workspacePath: '/tmp',
+      cliProviderId: taskCli.id,
+      stepDef: baseStep(),
+      providers,
+      deps: { enqueueCliInvocation },
+    });
+    return { result, enqueueCliInvocation };
+  }
+
+  it('runs the step on a CLI the set allows and says so, appending to an earlier notice', async () => {
+    composedLock.ids = [claude.id];
+    const state = freshState();
+    state.savedPref = { cliProviderId: codex.id, effortLevel: 'high' };
+    const first = await runStep(state, claude, [claude, codex]);
+    expect(first.result.status).toBe('waiting_cli');
+    expect(state.cliInvocationRow?.cliProviderId).toBe(claude.id);
+    expect(state.cliInvocationRow?.effort).not.toMatchObject({ source: 'step' });
+    expect(first.enqueueCliInvocation.mock.calls[0]![0].effortLevel).toBeUndefined();
+    const warning = String(state.taskStepRow.warningMessage);
+    expect(warning).toContain('"Codex"');
+    expect(warning).toContain('"Claude Code"');
+
+    composedLock.ids = [otherClaude.id];
+    state.savedPref = { cliProviderId: gemini.id, effortLevel: null };
+    state.taskStepRow.status = 'pending';
+    state.cliInvocationRow = null;
+    await runStep(state, otherClaude, [claude, otherClaude, gemini]);
+    const both = String(state.taskStepRow.warningMessage);
+    expect(both.startsWith(warning)).toBe(true);
+    expect(both).toContain('"Gemini"');
+    expect(both).toContain('"Claude Two"');
+  });
+
+  it('runs the ai-fix agent on a CLI the set allows and says so', async () => {
+    composedLock.ids = [claude.id];
+    const state = freshState();
+    state.savedPref = { cliProviderId: codex.id, effortLevel: 'high' };
+    state.taskStepRow.aiFixContext = { priorError: 'boom', priorOutput: 'partial' };
+    const { result, enqueueCliInvocation } = await runStep(state, claude, [claude, codex]);
+    expect(result.status).toBe('waiting_cli');
+    expect(state.cliInvocationRow?.cliProviderId).toBe(claude.id);
+    expect(enqueueCliInvocation.mock.calls[0]![0].effortLevel).toBeUndefined();
+    const warning = String(state.taskStepRow.warningMessage);
+    expect(warning).toContain('"Codex"');
+    expect(warning).toContain('"Claude Code"');
+    const invInsert = state.inserts.find((i) => i.table === 'cli_invocations');
+    expect(invInsert!.row.prompt).toContain('Diagnose the root cause');
+  });
+
+  it('writes no notice and keeps the effort when the saved pick is allowed', async () => {
+    composedLock.ids = [claude.id];
+    const state = freshState();
+    state.savedPref = { cliProviderId: claude.id, effortLevel: 'high' };
+    const { enqueueCliInvocation } = await runStep(state, claude, [claude, codex]);
+    expect(state.updates.some((u) => 'warningMessage' in u)).toBe(false);
+    expect(enqueueCliInvocation.mock.calls[0]![0].effortLevel).toBe('high');
+    expect(state.cliInvocationRow?.effort).toMatchObject({ source: 'step' });
+  });
+
+  it('still refuses the next fix round CLI outside the set, saved row or not', async () => {
+    composedLock.ids = [claude.id];
+    const state = freshState();
+    state.roundChoice = { ...codex, id: randomUUID(), label: 'Picked' };
+    state.savedPref = { cliProviderId: codex.id, effortLevel: null };
+    state.taskStepRow.stepId = '07-phase-2-implement';
+    state.taskStepRow.round = 2;
+    const stepDef = baseStep();
+    stepDef.metadata.id = '07-phase-2-implement';
+    const enqueueCliInvocation = vi.fn();
+    const result = await advanceStep({
+      db: makeMockDb(state),
+      taskId: 'task-1',
+      userId: 'user-1',
+      repoPath: '/tmp',
+      workspacePath: '/tmp',
+      cliProviderId: claude.id,
+      round: 2,
+      stepDef,
+      providers: [claude, state.roundChoice],
+      deps: { enqueueCliInvocation },
+    });
+    expect(result.status).toBe('failed');
+    expect(state.taskStepRow.errorMessage).toContain(
+      'Next fix round CLI "Picked" cannot run this step: ',
+    );
+    expect(enqueueCliInvocation).not.toHaveBeenCalled();
   });
 });
 
