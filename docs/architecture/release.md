@@ -409,7 +409,9 @@ gone. When the updater held the database and the lock, then neither created nor 
 the start was not `--check` or a dry plan, its last step (`recordAttempt`) writes one row with
 phase `preflight`: status `refused` with `metadata.refusal` (channel-changed,
 rollback-images-missing, install-locked, a preflight refusal), or `failed` for an error. `error` is capped at 2048
-characters, `channel` is the resolved one, and an unusable `--version` is stored as `unknown`. In
+characters, `channel` is the resolved one, and an unusable `--version` is stored as `unknown`. A refusal
+raised before the install settings are read (`install-locked`, `install-file-linked`) records `public` and an
+unknown current version. In
 the same transaction, after the insert, it deletes the attempt rows beyond the newest 50 (ordered
 `started_at DESC, id DESC`, never the row it just wrote), so repeated refusals cannot grow the
 table. An attempt row is exactly `phase = 'preflight' AND status IN ('refused', 'failed')`; no real
@@ -448,33 +450,38 @@ file-sharing layer. Only exclusive create and rename are relied on.
 The file is a lease. Its single line is JSON in this field order: `v` (1), `token` (32 lowercase hex),
 `holder` (`updater` or `extension`), `startedAt` (informational, never compared with a clock) and `seq`. It is
 created exclusively at mode 0644 and rewritten in place by its holder every 5 s with `seq` plus one, after a
-check that the file still carries the holder's own token. While a failed write leaves a streak open, an empty or
-partial record of its own is rewritten instead of reported as a loss. A contender that finds the file reads its
+check that the file still carries the holder's own token; a file that is gone is created again with the holder's
+own record, since a contender's break and restore leaves the name absent for a moment. While a failed write
+leaves a streak open, an empty or partial record of its own is rewritten instead of reported as a loss. A contender that finds the file reads its
 bytes, then polls every 1 s: a missing file is free, changed bytes mean a live holder (busy), and bytes
 unchanged across 60 s of polls mean the holder is gone. It counts the sleeps it requested and never reads a
 wall or monotonic clock, so host sleep and clock skew between host, VM and container cannot age a live lock;
-an empty or partial record is just another byte string. Breaking a stale lock renames it to a tomb beside it
-(exactly one breaker wins) and re-reads the tomb: bytes other than the observed ones mean a fresh lock was
-displaced, which is put back by exclusive create and reported as busy. At most 3 rounds, then busy. A holder
-whose file is gone or carries another token has lost the lock: it reports once, stops beating and never removes
-another holder's file. Release removes the file only when it carries the holder's token, is shared by every
+an empty or partial record is just another byte string, and so is a file longer than 4096 bytes (a record is
+about 150): every read takes at most 4097 bytes and those are what is compared. Breaking a stale lock renames
+it to a tomb beside it (exactly one breaker wins) and re-reads the tomb: bytes other than the observed ones
+mean a fresh lock was displaced, which is put back by exclusive create and reported as busy. A tomb that cannot
+be removed after an equal re-read does not stop the acquisition (the updater logs `stack-lock-tomb-left`); the
+leftover `.haive-stack-lock.stale.*` file is harmless. At most 3 rounds, then busy. A holder that finds another
+token in the file has lost the lock: the updater logs `stack-lock-lost` once (the bridge has no log for it), the
+holder stops beating and never removes another holder's file. Release removes the file only when it carries the holder's token, is shared by every
 caller, never throws, and a failed removal leaves a lock that the stale rule clears. A non-regular entry at the
 name (a directory or a link) is refused and never followed or deleted. A holder name read from a record reaches
 an operator only as a plain token, since the file is writable by anyone with access to the install and
 messages render as markdown.
 
 The updater takes it right after its database lock and the live-run check, before the install-file checks,
-and holds it through rollback. It releases it in `finally` on every exit path and on SIGTERM (exit 143); SIGINT
-stays unhandled, because the updater is its container's PID 1 and Ctrl-C is ignored there today. A busy lock
+and holds it through rollback. It releases it in `finally` on every exit path and on SIGTERM (exit 143). That handler is new: as PID 1
+the updater ignored SIGTERM, so `docker stop` waited out its grace period and then killed it, and now it exits
+at once and frees the lock. SIGINT stays unhandled, because Ctrl-C is ignored by PID 1 there today. A busy lock
 refuses with `install-locked`, exit 3, and an attempt row like any preflight refusal. A dry plan, a `--check`
 with no live run (read-only) and a missing install directory take no lock (the last logs `stack-lock-skipped`).
 The extension takes it for Start and Stop, after reading the install settings and its first container check,
 before the bundle check and the port repick, and holds it through the Compose call. Install never takes it (the
 installer refuses a non-empty directory) and Status is read-only. The launchers take nothing: they return
 before the dangerous phase and are older-release code for the very upgrade that matters. Both implementations
-share the file name, record, beat (5 s), stale window (60 s), poll (1 s) and rounds (3)
+share the file name, record, beat (5 s), stale window (60 s), poll (1 s), rounds (3) and size cap (4096 bytes)
 (`packages/updater/src/stack-lock.ts`, `docker/desktop-extension/bridge/stack_lock.go`); a script test pins
-them equal. Every count and time limit is an optional parameter defaulting to a named constant.
+them equal. Every count, size and time limit is an optional parameter defaulting to a named constant.
 
 No release floor is needed. An updater that predates the lock never takes it: the extension's container-identity
 check, kept as it was (both checks), is then the only protection, with the window it always had. An extension
@@ -486,8 +493,14 @@ A holder that dies leaves the file. The next contender clears it after 60 s with
 lock; a lock whose holder lives is never broken, since it changes at least every 5 s. Residual windows: a
 holder frozen for more than 60 s (SIGSTOP, a paused VM) while a contender is awake can lose the lock and learns
 of it at its next beat; between the rename and the restore of a displaced fresh lock the name is briefly
-absent, so a third party creating it in that instant keeps it. Docker Desktop's file-sharing coherence is not
-verified: the create is exclusive and no decision rests on a negative lookup. Delete `.haive-stack-lock` by hand
+absent, so the displaced holder's next beat creates it again and a third party creating it first keeps it. A
+holder whose beat cannot be written (a full disk, say) stops refreshing the lock, which then lapses after 60 s;
+the extension's container-identity check still covers that case. A bridge process killed in the middle of Start
+(the Desktop window closes) can leave its Compose child running while the lease lapses, unlike the sibling
+directory lock, which never lapses. A container the updater started (the volume archive, a migration
+one-shot) can outlive the updater, and neither the lock nor the container-identity check covers it then.
+Docker Desktop's file-sharing coherence is not verified: the create is exclusive and no decision rests on a
+negative lookup. Delete `.haive-stack-lock` by hand
 only when no updater container and no extension operation is running.
 
 ## Own-module images
@@ -848,8 +861,8 @@ live first-start check below on the owner's native Desktop version.
    with the upgrade message and leave services alone, including while the updater
    archives PostgreSQL. A direct Install request must also refuse before delegation.
    Kill a running updater container of a release that includes the install stack lock:
-   Start and Stop must refuse for about a minute, until its lock is judged abandoned,
-   then work. While Start is in flight, an upgrade of this install must refuse with
+   Start and Stop must wait about a minute, until its lock is judged abandoned, then
+   work. While Start is in flight, an upgrade of this install must refuse with
    `install-locked` instead of snapshotting.
    A Docker inspection failure that persists after one retry must refuse these
    actions, while another install's updater must not block this one. After the updater finishes, Stop; verify this
