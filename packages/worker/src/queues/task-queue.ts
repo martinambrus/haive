@@ -133,7 +133,8 @@ import {
   AGENT_PERSONA_UNRESOLVED_EVENT,
   checkPinnedStepPersonas,
 } from '../orchestrator/persona-start-check.js';
-import { dispatchCandidates } from '../orchestrator/dispatcher.js';
+import { dispatchCandidates, resolvePreferredProvider } from '../orchestrator/dispatcher.js';
+import { lspDispatchState } from '../lsp/configured-lsp.js';
 import { ContainerManager } from '../sandbox/container-manager.js';
 import { defaultDockerRunner } from '../sandbox/docker-runner.js';
 import {
@@ -1722,8 +1723,9 @@ async function loadProviders(
 }
 
 /** The hold message for a fresh step whose resolved CLI is a listed provider that is switched
- *  off, else null. Only a step that dispatches a CLI or reads the default one is asked, and a
- *  step that will only skip is never held. */
+ *  off, else null. The provider is the one the dispatcher would run, so a saved pick the composed
+ *  lock skips is not it. Only a step that dispatches a CLI or reads the default one is asked, and
+ *  a step that will only skip is never held. */
 export async function providerHoldFor(
   db: Database,
   ctx: ResolvedTaskContext,
@@ -1733,7 +1735,7 @@ export async function providerHoldFor(
 ): Promise<{ message: string; providerId: string } | null> {
   if (!dispatchesCli(stepDef) && stepDef.metadata.providerSensitive !== true) return null;
   const providers = await loadProviders(db, ctx.userId);
-  const { cliProviderId } = await resolvePreferredCli(
+  const { cliProviderId, savedPreference } = await resolvePreferredCli(
     db,
     ctx.userId,
     stepDef.metadata.id,
@@ -1751,13 +1753,23 @@ export async function providerHoldFor(
       await upsertRow(db, ctx.taskId, stepDef, round, runIdx >= 0 ? runIdx : undefined);
     throw err;
   });
-  const message = providerHoldMessage(providers, cliProviderId);
+  // Only a saved pick can be skipped by the composed lock, so only then is the lock's set read.
+  const preferred = resolvePreferredProvider({
+    providers,
+    preferredProviderId: cliProviderId,
+    savedPreference,
+    composedLspProviderIds: savedPreference
+      ? (await lspDispatchState(db, ctx.taskId, [], false)).composedProviderIds
+      : null,
+  });
+  const held = preferred.kind === 'disabled' ? preferred.provider.id : null;
+  const message = providerHoldMessage(providers, held);
   if (message === null) return null;
   const skips = await willSkipBeforeAdmission(
     { ...ctx, db, stepDef, round, providers },
     await upsertRow(db, ctx.taskId, stepDef, round, runIdx >= 0 ? runIdx : undefined),
   );
-  return skips || !cliProviderId ? null : { message, providerId: cliProviderId };
+  return skips || !held ? null : { message, providerId: held };
 }
 
 /** The three inputs `fairPriority` (@haive/shared/fair-priority) turns into a BullMQ priority,

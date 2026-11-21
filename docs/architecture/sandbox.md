@@ -1365,7 +1365,10 @@ Auto-continue therefore adopts. An environment that is not adopted writes no con
 template hash and image tag are those of the legacy path. Once the cheap checks pass, step 01 logs
 the decision with a closed reason: `run_list`, `providers`, or none when adopted. The decision is
 repeated inside the transaction that inserts and links the row, under the task row lock (see Provider
-lock): a choice or default CLI change that landed in between demotes the new row to the legacy
+lock), from the task row's CLI read under it. A task with no own CLI uses the oldest enabled provider
+among the provider rows that decision reads (`composedLspAdoptable`), never the CLI resolved when
+the step started: provider rows are written without the task lock, so that value can be stale. A
+choice, default CLI or provider change that landed in between demotes the new row to the legacy
 variant, stored without the key, and the log says so.
 
 Replacing a legacy template. A task linked to a stored absent/1 template (it ticked the opt-out,
@@ -1384,7 +1387,8 @@ form and never trusts detect. A refusal throws `ComposedLspReplacementRefusedErr
 the inserted row back.
 
 On acceptance one transaction inserts a NEW template row, takes the task row lock (see Provider
-lock) and decides again from the task's current CLI and choices, links only the acting task to the
+lock) and decides again from the task's current CLI (the oldest enabled provider when it has none)
+and choices, links only the acting task to the
 row and writes a `task_events` row `env_template.replaced` with `sourceTemplateId` and
 `candidateTemplateId`. The row holds the form's deps plus contract 2 and no Dockerfile, so 02
 renders it: the generator emits the installer block only when the contract is not 2, so no stored
@@ -1433,8 +1437,10 @@ it, so they stay refused, never moved. Every dispatching caller passes it on as
 `DispatchRequest.savedPreference`; a request that does not say where its pick came from keeps the
 refusal, so a caller that forgets fails closed. For a saved pick outside the set `resolveDispatch`
 drops the preference: it prefers the task's own CLI when the set holds it, otherwise the choice
-floats inside the set as with no preference. A disabled saved pick, and a disabled task CLI that
-would replace it, are still refused as disabled. The skipped pick's effort level is dropped with it:
+floats inside the set as with no preference. The skip comes before the pick's own state is read: a
+switched-off saved pick the lock skips is neither refused nor held on, while a switched-off task
+CLI that replaces it is refused as disabled and the step hold parks on it. A pick that is not saved
+keeps the disabled check first. The skipped pick's effort level is dropped with it:
 levels are per-CLI scales, so the substitute runs at its provider's configured level, else its
 scale's maximum, as a step with none saved does, and the enqueue payload carries no effort either.
 The plan carries `skippedSavedPreference` (provider id and label); after the enqueue the caller
@@ -1442,8 +1448,13 @@ appends one sentence naming the skipped and the running CLI to `task_steps.warni
 (`noteSavedCliSkip`; `appendStepWarning` is one UPDATE that adds the text once, so a retry warning
 written beside it is never overwritten). The sentence is display copy and nothing may key on it. The
 step recap forwards the source so it runs on the substitute and writes no sentence: its step's own
-dispatch already did. `providerHoldFor` and the persona pin check (`task-queue.ts`) only read the
-resolver's id and are unchanged; the pin check still names the saved CLI, not the substitute.
+dispatch already did. `resolvePreferredProvider` (`dispatcher.ts`) is the decision alone: the
+provider the dispatch goes on with and the pick it skipped, the disabled provider it refuses, or the
+lock's refusal. `resolveDispatch` and `providerHoldFor` (`task-queue.ts`) both call it, so the hold
+parks on the provider the dispatcher would refuse, never on a saved pick it skips. The hold reads
+the lock's set (`lspDispatchState`) only when `savedPreference` is set, since only a saved pick can
+be skipped. The persona pin check (`task-queue.ts`) still reads only the resolver's id and names the
+saved CLI, not the substitute.
 
 The rule and what it guards change in different transactions, so one lock orders them: the task row,
 taken `FOR NO KEY UPDATE` by `lockTaskForComposedLsp` (`@haive/shared/composed-lsp-provider-lock`).

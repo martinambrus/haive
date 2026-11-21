@@ -741,26 +741,49 @@ function composedLspAllowedSet(
   );
 }
 
-export function resolveDispatch(req: DispatchRequest): DispatchPlan {
-  const disabledSkip = (off: CliProviderRecord) =>
-    skipPlan(
-      `the selected cli provider "${providerLabel(off)}" is disabled; enable it again or choose another CLI for this step`,
-    );
+/** What a request's preferred provider comes to before any plan is built: the provider the dispatch goes on with
+ *  (null floats to the default order) and the saved pick the composed lock skipped, or the refusal. The step hold
+ *  asks the same function, so a step parks exactly where a dispatch would refuse a switched-off provider. */
+export type PreferredProvider =
+  | { kind: 'use'; providerId: string | null; skipped: SkippedSavedPreference | null }
+  | { kind: 'disabled'; provider: CliProviderRecord }
+  | { kind: 'locked'; label: string | null };
+
+export function resolvePreferredProvider(
+  req: Pick<
+    DispatchRequest,
+    'providers' | 'preferredProviderId' | 'savedPreference' | 'composedLspProviderIds'
+  >,
+): PreferredProvider {
   let preferredId = req.preferredProviderId ?? null;
-  const off = disabledProvider(req.providers, preferredId);
-  if (off) return disabledSkip(off);
   const composedSet = composedLspAllowedSet(req.providers, req.composedLspProviderIds);
   let skipped: SkippedSavedPreference | null = null;
   if (composedSet && preferredId && !composedSet.has(preferredId)) {
     const chosen = req.providers.find((p) => p.id === preferredId);
     const label = chosen ? providerLabel(chosen) : null;
-    if (!req.savedPreference) return skipPlan(composedLspLockReason(label));
+    if (!req.savedPreference) {
+      const off = disabledProvider(req.providers, preferredId);
+      return off ? { kind: 'disabled', provider: off } : { kind: 'locked', label };
+    }
     skipped = { providerId: preferredId, label };
     const own = req.savedPreference.taskProviderId;
     preferredId = own && composedSet.has(own) ? own : null;
-    const ownOff = disabledProvider(req.providers, preferredId);
-    if (ownOff) return disabledSkip(ownOff);
   }
+  const off = disabledProvider(req.providers, preferredId);
+  return off
+    ? { kind: 'disabled', provider: off }
+    : { kind: 'use', providerId: preferredId, skipped };
+}
+
+export function resolveDispatch(req: DispatchRequest): DispatchPlan {
+  const preferred = resolvePreferredProvider(req);
+  if (preferred.kind === 'disabled')
+    return skipPlan(
+      `the selected cli provider "${providerLabel(preferred.provider)}" is disabled; enable it again or choose another CLI for this step`,
+    );
+  if (preferred.kind === 'locked') return skipPlan(composedLspLockReason(preferred.label));
+  const { providerId: preferredId, skipped } = preferred;
+  const composedSet = composedLspAllowedSet(req.providers, req.composedLspProviderIds);
   const enabled = req.providers.filter((p) => p.enabled && (!composedSet || composedSet.has(p.id)));
 
   if (enabled.length === 0) {

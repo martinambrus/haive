@@ -1,5 +1,6 @@
 import { and, eq } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
+import { resolveTaskCliProviderId } from '@haive/shared';
 import { composedLspRunListEligible } from '@haive/shared/run-list';
 import { decideComposedLspProviderLock } from '@haive/shared/composed-lsp-provider-lock';
 import { taskRunListStepIds } from './final-verification.js';
@@ -67,26 +68,27 @@ async function collectProviderIds(
   return ids;
 }
 
-/** Whether a new environment for this task may adopt contract 2: the run list carries the composed steps and one enabled claude-code provider serves every step. */
+/** Whether a new environment for this task may adopt contract 2: the run list carries the composed steps and one enabled claude-code provider serves every step. A null `defaultProviderId` means the task has no own default and is resolved here as the oldest enabled provider. */
 export async function composedLspAdoptable(
   db: Pick<Database, 'query' | 'select'>,
   args: { taskId: string; userId: string; defaultProviderId: string | null },
 ): Promise<{ ok: true } | { ok: false; reason: 'run_list' | 'providers' }> {
   const stepIds = await taskRunListStepIds(db, args.taskId);
   if (!stepIds || !composedLspRunListEligible(stepIds)) return { ok: false, reason: 'run_list' };
-  const effectiveProviderIds = await collectProviderIds(db, {
-    ...args,
-    defaultProviderId: args.defaultProviderId,
-    stepIds,
-  });
   const providers = await db
     .select({
       id: schema.cliProviders.id,
       name: schema.cliProviders.name,
       enabled: schema.cliProviders.enabled,
+      createdAt: schema.cliProviders.createdAt,
     })
     .from(schema.cliProviders)
     .where(eq(schema.cliProviders.userId, args.userId));
+  const effectiveProviderIds = await collectProviderIds(db, {
+    ...args,
+    defaultProviderId: resolveTaskCliProviderId(args.defaultProviderId, providers),
+    stepIds,
+  });
   return decideComposedLspProviderLock({ effectiveProviderIds, providers }).ok
     ? { ok: true }
     : { ok: false, reason: 'providers' };

@@ -68,6 +68,7 @@ const PROVIDERS = [
 
 interface Scenario {
   defaultProvider?: string;
+  providers?: typeof PROVIDERS;
   repoLsp?: string[] | null;
   runList?: string[];
   choices?: { stepId: string; cliProviderId: string | null }[];
@@ -124,7 +125,8 @@ function buildFake(s: Scenario, storedDeps: Record<string, unknown> | null) {
     },
     onboardingTooling: { schemaVersion: ONBOARDING_TOOLING_SCHEMA_VERSION, tooling: {} },
   });
-  for (const p of PROVIDERS) fake.insert(schema.cliProviders, { userId: USER, ...p });
+  for (const p of s.providers ?? PROVIDERS)
+    fake.insert(schema.cliProviders, { userId: USER, ...p });
   for (const c of s.choices ?? []) {
     fake.insert(schema.taskStepCliChoices, { taskId: TASK, role: 'default', ...c });
   }
@@ -302,6 +304,37 @@ describe('refused replacement', () => {
       expect([templates(r), r.fake.rows(schema.tasks)]).toEqual(before);
     },
   );
+});
+
+describe('replacement provider read under the lock', () => {
+  it('decides on the provider read under the lock when the task has no default: refuses after an enable makes another provider the oldest', async () => {
+    const r = await makeLegacy({
+      defaultProvider: CLAUDE,
+      providers: [
+        { id: CODEX, name: 'codex', enabled: false },
+        { id: CLAUDE, name: 'claude-code', enabled: true },
+      ],
+      stored: 'absent',
+      replace: true,
+    });
+    r.fake.hooks.beforeInsert = (table) => {
+      if (table === schema.envTemplates)
+        r.fake.patch(schema.cliProviders, CODEX, { enabled: true });
+    };
+    await expect(r.apply()).rejects.toMatchObject({ code: REFUSED, reason: 'providers' });
+  });
+
+  it('decides on the provider read under the lock when the task has no default: accepts after a disable makes another claude-code provider the oldest', async () => {
+    const r = await makeLegacy({ defaultProvider: CLAUDE, stored: 'absent', replace: true });
+    r.fake.hooks.beforeInsert = (table) => {
+      if (table === schema.envTemplates)
+        r.fake.patch(schema.cliProviders, CLAUDE, { enabled: false });
+    };
+    await r.apply();
+    const linked = r.fake.rows(schema.tasks).find((t) => t.id === TASK)!.envTemplateId;
+    const row = templates(r).find((t) => t.id === linked)!;
+    expect((row.declaredDeps as Deps)[KEY]).toBe(2);
+  });
 });
 
 describe('replacement pins', () => {

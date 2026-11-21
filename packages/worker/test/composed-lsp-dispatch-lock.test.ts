@@ -38,6 +38,7 @@ vi.mock('../src/orchestrator/agent-rules.js', async (original) => ({
 }));
 import {
   resolveDispatch,
+  resolvePreferredProvider,
   resolveTaskDispatch,
   type DispatchInput,
 } from '../src/orchestrator/dispatcher.js';
@@ -429,7 +430,14 @@ describe('resolveDispatch with a saved preference outside the set', () => {
     expect(plan.skippedSavedPreference).toBeUndefined();
   });
 
-  it('keeps the disabled refusal for a disabled saved pick', () => {
+  it('refuses a disabled pick that is not saved as disabled', () => {
+    const off = { ...B, enabled: false } as CliProviderRecord;
+    const plan = resolveDispatch({ ...locked, providers: [A, off, C], preferredProviderId: B.id });
+    expect(plan.mode).toBe('skip');
+    expect(plan.reason).toContain('is disabled');
+  });
+
+  it('skips a disabled saved pick like an enabled one', () => {
     const off = { ...B, enabled: false } as CliProviderRecord;
     const plan = resolveDispatch({
       ...locked,
@@ -437,8 +445,22 @@ describe('resolveDispatch with a saved preference outside the set', () => {
       preferredProviderId: B.id,
       savedPreference: { taskProviderId: A.id },
     });
-    expect(plan.mode).toBe('skip');
-    expect(plan.reason).toContain('is disabled');
+    expect(plan.mode).toBe('cli');
+    expect(plan.providerId).toBe(A.id);
+    expect(plan.skippedSavedPreference).toEqual({ providerId: B.id, label: B.label });
+  });
+
+  it('floats a disabled saved pick to the set when the task CLI is unset', () => {
+    const off = { ...B, enabled: false } as CliProviderRecord;
+    const plan = resolveDispatch({
+      ...locked,
+      providers: [A, off, C],
+      preferredProviderId: B.id,
+      savedPreference: { taskProviderId: null },
+    });
+    expect(plan.mode).toBe('cli');
+    expect(plan.providerId).toBe(A.id);
+    expect(plan.skippedSavedPreference).toEqual({ providerId: B.id, label: B.label });
   });
 
   it('refuses a disabled task CLI as disabled rather than floating past it', () => {
@@ -504,5 +526,50 @@ describe('resolveDispatch with a saved preference outside the set', () => {
       savedPreference: { taskProviderId: null },
     });
     expect(floated.providerId).toBe(A.id);
+  });
+});
+
+describe('resolvePreferredProvider', () => {
+  const locked = { providers: [A, B, C], composedLspProviderIds: [A.id] };
+
+  it('skips a disabled saved pick outside the set', () => {
+    const off = { ...B, enabled: false } as CliProviderRecord;
+    const r = resolvePreferredProvider({
+      ...locked,
+      providers: [A, off, C],
+      preferredProviderId: B.id,
+      savedPreference: { taskProviderId: A.id },
+    });
+    expect(r).toEqual({
+      kind: 'use',
+      providerId: A.id,
+      skipped: { providerId: B.id, label: B.label },
+    });
+  });
+
+  it('refuses the task CLI as disabled when it is inside the set and switched off', () => {
+    const off = { ...A, enabled: false } as CliProviderRecord;
+    const r = resolvePreferredProvider({
+      ...locked,
+      providers: [off, B, C],
+      preferredProviderId: B.id,
+      savedPreference: { taskProviderId: A.id },
+    });
+    expect(r.kind).toBe('disabled');
+    if (r.kind === 'disabled') expect(r.provider.id).toBe(A.id);
+  });
+
+  it('locks an enabled pick outside the set that is not saved', () => {
+    const r = resolvePreferredProvider({ ...locked, preferredProviderId: B.id });
+    expect(r).toEqual({ kind: 'locked', label: B.label });
+  });
+
+  it('goes on with the pick for a request that is not composed', () => {
+    const r = resolvePreferredProvider({
+      providers: [A, B, C],
+      preferredProviderId: B.id,
+      composedLspProviderIds: null,
+    });
+    expect(r).toEqual({ kind: 'use', providerId: B.id, skipped: null });
   });
 });

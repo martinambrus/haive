@@ -91,16 +91,17 @@ import type {
   StepStatus,
 } from '@haive/shared';
 import { currentBuildStamp } from '../build-stamp.js';
-import { disabledProvider } from '../orchestrator/provider-hold.js';
 import { noteSavedCliSkip } from './saved-cli-skip.js';
 import { resolveModelLimits } from '../cli-adapters/model-capabilities.js';
 import { ProviderBuildError } from '../cli-adapters/prompt-delivery.js';
 import type { CliProviderRecord } from '../cli-adapters/types.js';
 import {
+  resolvePreferredProvider,
   resolveTaskDispatch,
   type DispatchPlan,
   type SavedPreferenceSource,
 } from '../orchestrator/dispatcher.js';
+import { lspDispatchState } from '../lsp/configured-lsp.js';
 import { resolveFixRoundCli } from './steps/workflow/_fix-round-cli.js';
 import { houseRulesFor, houseRulesOptOut } from '../orchestrator/house-rules.js';
 import type { IntegrationBinding } from '@haive/shared/integrations';
@@ -298,8 +299,9 @@ async function loadLastCompletedFormValues(
  *  saved per-step override, plus the effort/reasoning override stored beside it (null when
  *  none). Falls back to the task default CLI (and null effort) when neither exists or the
  *  chosen id has no provider row (a deleted provider). A provider that is switched off is
- *  still an explicit pick: the step hold parks on it and the dispatcher refuses it, so it
- *  is never swapped for another CLI here. Legacy auto-recorded rows (explicit=false) are
+ *  still an explicit pick, never swapped for another CLI here: `resolvePreferredProvider`
+ *  decides whether the step hold parks on it and the dispatcher refuses it (a saved pick a
+ *  composed task's lock skips is neither). Legacy auto-recorded rows (explicit=false) are
  *  ignored so the task provider wins. `savedPreference` is set only on a pick read from the
  *  user's saved rows (not one made in this task), so the dispatcher may skip it where it must
  *  refuse the others. A task that set `ignoreSaved` honours no saved row, only its own choices,
@@ -4765,9 +4767,18 @@ async function maybeEnqueueStepSummary(
     });
     const invocation = plan.invocation;
     if (plan.mode === 'skip' || !invocation || invocation.kind !== 'cli') {
-      if (disabledProvider(providers, preferredProviderId)) {
+      // Blame the provider the dispatcher refused, so a saved pick the composed lock skips is not it.
+      const preferred = resolvePreferredProvider({
+        providers,
+        preferredProviderId,
+        savedPreference,
+        composedLspProviderIds: savedPreference
+          ? (await lspDispatchState(db, params.taskId, [], false)).composedProviderIds
+          : null,
+      });
+      if (preferred.kind === 'disabled') {
         logger.warn(
-          { taskId: params.taskId, stepId: stepDef.metadata.id, providerId: preferredProviderId },
+          { taskId: params.taskId, stepId: stepDef.metadata.id, providerId: preferred.provider.id },
           'step summary skipped: the resolved CLI provider is disabled',
         );
       }
