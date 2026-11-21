@@ -180,6 +180,134 @@ describe('resolvePreferredCli', () => {
   });
 });
 
+const savedRow = (cliProviderId: string, effortLevel: string | null = 'low') => ({
+  cliProviderId,
+  effortLevel,
+});
+const taskOnly = { cliProviderId: TASK_CLI, effortLevel: null };
+const withMarker = (cliProviderId: string, effortLevel: string | null = 'low') => ({
+  cliProviderId,
+  effortLevel,
+  savedPreference: { taskProviderId: TASK_CLI },
+});
+
+describe('resolvePreferredCli with and without ignore_saved_step_clis', () => {
+  // [name, role, fake options, result with the flag off, result with the flag on]
+  const cases: [string, string, Parameters<typeof fakeDb>[0], object, object][] = [
+    [
+      'default: task pick over a saved row',
+      'default',
+      {
+        choices: { default: savedRow(PICKED_CLI, 'high') },
+        saved: { default: savedRow(SAVED_CLI) },
+      },
+      savedRow(PICKED_CLI, 'high'),
+      savedRow(PICKED_CLI, 'high'),
+    ],
+    [
+      'default: cleared task pick with a saved row',
+      'default',
+      {
+        choices: { default: { cliProviderId: null, effortLevel: null } },
+        saved: { default: savedRow(SAVED_CLI) },
+      },
+      taskOnly,
+      taskOnly,
+    ],
+    [
+      'default: task pick on an unlisted provider',
+      'default',
+      {
+        choices: { default: savedRow(UNLISTED_CLI, 'max') },
+        saved: { default: savedRow(SAVED_CLI) },
+      },
+      taskOnly,
+      taskOnly,
+    ],
+    [
+      'default: saved row only',
+      'default',
+      { saved: { default: savedRow(SAVED_CLI) } },
+      withMarker(SAVED_CLI),
+      taskOnly,
+    ],
+    [
+      'default: saved row on a disabled provider',
+      'default',
+      { saved: { default: savedRow(DISABLED_CLI) } },
+      withMarker(DISABLED_CLI),
+      taskOnly,
+    ],
+    [
+      'default: saved row on an unlisted provider',
+      'default',
+      { saved: { default: savedRow(UNLISTED_CLI) } },
+      taskOnly,
+      taskOnly,
+    ],
+    ['default: nothing', 'default', {}, taskOnly, taskOnly],
+    [
+      'role: role pick',
+      'reviewer',
+      {
+        choices: { reviewer: savedRow(PICKED_CLI, 'high') },
+        saved: { reviewer: savedRow(SAVED_CLI), default: savedRow(SAVED_CLI) },
+      },
+      savedRow(PICKED_CLI, 'high'),
+      savedRow(PICKED_CLI, 'high'),
+    ],
+    [
+      'role: cleared role pick with a default pick',
+      'reviewer',
+      {
+        choices: {
+          reviewer: { cliProviderId: null, effortLevel: null },
+          default: savedRow(PICKED_CLI, 'high'),
+        },
+        saved: { reviewer: savedRow(SAVED_CLI) },
+      },
+      savedRow(PICKED_CLI, 'high'),
+      savedRow(PICKED_CLI, 'high'),
+    ],
+    [
+      'role: role saved only',
+      'reviewer',
+      { saved: { reviewer: savedRow(SAVED_CLI) } },
+      withMarker(SAVED_CLI),
+      taskOnly,
+    ],
+    [
+      'role: role saved plus default saved',
+      'reviewer',
+      { saved: { reviewer: savedRow(SAVED_CLI), default: savedRow(PICKED_CLI) } },
+      withMarker(SAVED_CLI),
+      taskOnly,
+    ],
+    [
+      'role: default saved only',
+      'reviewer',
+      { saved: { default: savedRow(PICKED_CLI) } },
+      withMarker(PICKED_CLI),
+      taskOnly,
+    ],
+  ];
+
+  it.each(cases)('%s', async (_name, role, opts, flagOff, flagOn) => {
+    expect(await resolve(fakeDb(opts), role, false)).toEqual(flagOff);
+    expect(await resolve(fakeDb(opts), role, true)).toEqual(flagOn);
+  });
+
+  it.each([
+    [false, withMarker(SAVED_CLI)],
+    [true, taskOnly],
+  ])('with a saved row and no task id, ignore_saved_step_clis %s', async (flag, expected) => {
+    const db = fakeDb({ saved: { default: savedRow(SAVED_CLI) } });
+    expect(
+      await resolvePreferredCli(db, USER, STEP, TASK_CLI, PROVIDERS, 'default', undefined, flag),
+    ).toEqual(expected);
+  });
+});
+
 describe('resolvePreferredCli saved-preference marker', () => {
   it('marks a saved default and a saved named role, naming the task CLI', async () => {
     const saved = { cliProviderId: SAVED_CLI, effortLevel: 'low' };
