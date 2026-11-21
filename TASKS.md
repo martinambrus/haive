@@ -900,12 +900,21 @@ Notes from the #1309 driver:
 
 ### T740 · FNF[agent-description-render] · agent descriptions render wrong for some inputs
 
-status: open · kind: fix · found: #1302 driver 2026-11-21, checked against the code · priority: P4
+status: open, items 1-2 in review as #1310 (2026-11-21: full TOML and YAML escape sets, first-word case rule, renderer v4) · kind: fix · found: #1302 driver 2026-11-21, checked against the code · priority: P4
 
 Either fix changes the rendered body, so the renderer pin (#1302) forces a renderer version bump with it.
 
 1. `tomlBasicString` (`worker/src/step-engine/steps/onboarding/_agent-templates.ts` ~:203) escapes backslashes and quotes but not newlines, so a multi-line description renders invalid TOML for Codex agents (confirmed with Python `tomllib`). PRE-EXISTING.
 2. `firstCharLower` (`_agent-templates.ts` ~:88) lowercases an acronym-led description (`API gateway` becomes `aPI gateway`). PRE-EXISTING.
+
+Follow-ups found by the #1310 driver:
+
+3. `worker/src/bundle-parser/decoders/codex-toml.ts` ~:85 finds the multi-line string end with `indexOf('"""')`, ignoring escapes: a body with 5, 8, ... consecutive quotes is written valid but read back truncated. PRE-EXISTING, low.
+4. `codex-toml.ts` ~:50-57, ~:87: the multi-line branch drops the backslash of an unknown escape and of a line-ending `\`; only hand-written files a real parser rejects or that use continuation. PRE-EXISTING, low.
+5. `worker/src/sandbox/mcp-config.ts` ~:621-623 `tomlString` escapes only `\` and `"`: a user MCP server with a multi-line env value renders a `config.toml` tomllib rejects (probed); the bare key at ~:544 is unescaped too (not probed). PRE-EXISTING, medium-low.
+6. `steps/onboarding/09_5-skill-generation.ts` ~:653-654: the long or multi-line skill description branch (folded block scalar) leaves control characters raw, and PyYAML rejects that SKILL.md (probed); descriptions of 120 characters or fewer now parse through the shared fix. PRE-EXISTING.
+7. `07-generate-files.ts` ~:303-325: the agents index passes control characters raw into a table cell. Cosmetic, PRE-EXISTING.
+8. Coverage: every control varies only the description, so a mutant that stops escaping the name line survives (names are validated slugs). Low.
 
 ### T741 · FNF[fix-gate-continue-stale-row] · gate Continue does not reset a stale row at the next round
 
