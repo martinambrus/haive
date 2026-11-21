@@ -383,8 +383,8 @@ jobs:
   postgres-gated:
     name: Postgres-gated tests
     runs-on: ubuntu-latest
-    # 174 rows × the measured 10 s model + 120 s setup = 1860 s green.
-    # 44 minutes covers 1.5 × row time (2610 s); 46 includes setup and 900 s over green.
+    # 175 rows × the measured 10 s model + 120 s setup = 1870 s green.
+    # 44 minutes covers 1.5 × row time (2625 s); 46 includes setup and 890 s over green.
     timeout-minutes: 46
     services:
       postgres:
@@ -700,6 +700,7 @@ jobs:
           worker test/checkout-watch-queue.test.ts T117_DATABASE_URL codex_t117_queue_ci pg
           worker test/imported-removed-cli-targets.test.ts T118_DATABASE_URL test_t118_removed_cli_ci pg
           database test/derived-task-types-storage.test.ts DERIVED_TASK_TYPES_TEST_URL derived_task_types_test pg
+          worker test/step-warning-append-db.test.ts STEP_WARNING_APPEND_TEST_URL step_warning_append_test pg
           GATED
           exit "$failed"
 

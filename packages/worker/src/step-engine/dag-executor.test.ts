@@ -43,6 +43,7 @@ import { beginFixTestCapture, finishFixTestCapture } from './steps/workflow/_fix
 import { resolveTaskDispatch } from '../orchestrator/dispatcher.js';
 import type { DagCoderContext, StepContext } from './step-definition.js';
 import type { ReviewerOutput } from '@haive/shared';
+import { applyWarningPatch } from '../../test/support/step-warning-patch.js';
 
 // Wraps the real dispatcher so one test can stub a single call.
 vi.mock('./steps/workflow/_fix-test-store.js', () => ({
@@ -1202,7 +1203,11 @@ function makeDagMergeWaitDb(opts: {
           if (table === schema.dagAgentRuns) agentRunUpdates.push(patch);
           if (table === schema.taskSteps) {
             if ('status' in patch) stepStatus = patch.status as string;
-            if ('warningMessage' in patch) stepWarningMessage = patch.warningMessage as string;
+            if ('warningMessage' in patch)
+              stepWarningMessage = applyWarningPatch(
+                stepWarningMessage,
+                patch.warningMessage,
+              ) as string;
             if ('errorMessage' in patch) {
               stepErrorMessage = (patch.errorMessage as string | null) ?? null;
             }

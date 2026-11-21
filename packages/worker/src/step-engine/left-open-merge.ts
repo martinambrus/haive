@@ -28,7 +28,7 @@ import {
 import { inMergeDirLock, liveClaimHolder } from './merge-dir-claim.js';
 import { settleProjections, type KeptMetadata } from './merge-projections.js';
 import { findWorktreePathClaimant } from '../repo/worktree-claims.js';
-import { addStepWarning } from './step-ownership.js';
+import { appendStepWarning } from './step-ownership.js';
 import type { TaskStepRow } from './step-runner.js';
 
 // A cancel runs no step code, so a merge a fixer was resolving stays open where it ran. The cancel
@@ -518,9 +518,9 @@ export async function noteAbortedByNext(
       },
     );
     if (!settled) continue;
-    current = await addStepWarning(
+    current = await appendStepWarning(
       db,
-      current,
+      current.id,
       `A merge of ${merge.ref} that the cancelled task "${owner.title}" (${owner.taskId}) left open in ${dir} was aborted before this merge started.`,
     );
   }

@@ -88,20 +88,8 @@ export async function updateOwnedStep(
   return row;
 }
 
-/** Add `note` to the step's warning once, after whatever it already says. */
-export async function addStepWarning(
-  db: Database | DbHandle,
-  row: TaskStepRow,
-  note: string,
-): Promise<TaskStepRow> {
-  if (row.warningMessage?.includes(note)) return row;
-  return updateOwnedStep(db, row.id, {
-    warningMessage: [row.warningMessage, note].filter(Boolean).join(' '),
-  });
-}
-
-/** Add `note` to the step's warning in one statement, so a write that replaced the column since the
- *  caller read its row is not overwritten (`addStepWarning` joins the caller's snapshot). */
+/** Adds `note` to the step's warning once, in one statement, so a warning another writer added since
+ *  the caller read its row is kept. */
 export async function appendStepWarning(
   db: Database | DbHandle,
   id: string,

@@ -15,6 +15,7 @@ import { gitPreview } from '../repo/git-preview.js';
 import { ReopenStepFormError } from '../step-engine/step-definition.js';
 import type { StepContext } from '../step-engine/step-definition.js';
 import { killGit } from '../../test/support/kill-git.js';
+import { applyWarningPatch } from '../../test/support/step-warning-patch.js';
 
 const handBack = vi.hoisted(() => ({ calls: [] as unknown[][], failOnce: false }));
 vi.mock('../step-engine/git-merge.js', async (importOriginal) => {
@@ -181,7 +182,7 @@ function stubDb() {
       },
     }),
     update: (table: unknown) => ({
-      set: (patch: { warningMessage?: string | null }) => ({
+      set: (patch: { warningMessage?: unknown }) => ({
         where: (cond: SQL) => {
           if (table === schema.taskEvents) {
             const { params } = new PgDialect().sqlToQuery(cond);
@@ -195,7 +196,8 @@ function stubDb() {
           }
           return {
             returning: async () => {
-              if ('warningMessage' in patch) warning = patch.warningMessage ?? null;
+              if ('warningMessage' in patch)
+                warning = applyWarningPatch(warning, patch.warningMessage);
               return [{ id: 'ts-1', warningMessage: warning }];
             },
           };

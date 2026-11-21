@@ -38,7 +38,7 @@ vi.mock('./merge-dir-claim.js', () => ({
 vi.mock('../repo/worktree-claims.js', () => ({ findWorktreePathClaimant: async () => null }));
 vi.mock('../queues/cli-exec/secret-mask.js', () => ({ taskSecretMaskPolicy: async () => ({}) }));
 vi.mock('./step-ownership.js', () => ({
-  addStepWarning: async (_db: unknown, row: unknown) => row,
+  appendStepWarning: async (_db: unknown, id: string) => ({ id }),
 }));
 
 import {
