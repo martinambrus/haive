@@ -469,8 +469,12 @@ name (a directory or a link) is refused and never followed or deleted. A holder 
 an operator only as a plain token, since the file is writable by anyone with access to the install and
 messages render as markdown.
 
-The updater takes it right after its database lock and the live-run check, before the install-file checks,
-and holds it through rollback. It releases it in `finally` on every exit path and on SIGTERM (exit 143). That handler is new: as PID 1
+The updater takes it right after its database lock and a first live-run read, before the install-file checks,
+and holds it through rollback. That first read only decides whether a `--check` needs the lock. The wait can
+outlast the run the read saw: the snapshot's database restart ends the first updater's session lock, so a second
+updater can pass it, read the first one's live run and wait while the first finishes. Under the lock the updater
+reads the live run again and recovers, cleans and records attempts from that read alone, so a finished run is
+never resumed or rolled back. It releases the lock in `finally` on every exit path and on SIGTERM (exit 143). That handler is new: as PID 1
 the updater ignored SIGTERM, so `docker stop` waited out its grace period and then killed it, and now it exits
 at once and frees the lock. SIGINT stays unhandled, because Ctrl-C is ignored by PID 1 there today. A busy lock
 refuses with `install-locked`, exit 3, and an attempt row like any preflight refusal. A dry plan, a `--check`

@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { randomBytes } from 'node:crypto';
+import { randomBytes, randomUUID } from 'node:crypto';
 import { mkdtemp, open, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -378,6 +378,69 @@ describe('crash recovery of an abandoned record', () => {
     const outcome = await main({ stackLock: { ...quick, staleMs: 6, sleep } });
     expect(outcome).toBe(3);
     expect(count).toBe(5);
+  });
+});
+
+describe('the live run is read again under the lock', () => {
+  // The first updater's snapshot restarts PostgreSQL, which ends its session lock on the database. A
+  // second updater then passes tryLock, reads the first one's live run and waits for the stack lock.
+  // The first updater's end (the journal changes, its lock file goes) lands during that wait, so
+  // what the second one read before the wait is out of date. The hook below is that end, and it
+  // runs inside the second updater's own poll, so nothing depends on timing.
+  const firstUpdaterEnds = (journalAfter: typeof liveRun | null) => async (): Promise<void> => {
+    vi.mocked(journal.findLiveRun).mockResolvedValue(journalAfter as never);
+    await rm(lock, { force: true });
+  };
+  // The install-file writer's temp name for .env; the updater's cleanup removes it.
+  const leftoverName = () => `..env.${randomUUID()}`;
+  beforeEach(async () => {
+    vi.mocked(journal.findLiveRun).mockResolvedValue(liveRun as never);
+    await writeFile(lock, record(ext.token, 'updater', ext.seq));
+  });
+  it('neither resumes nor rolls back a run that finished during the wait', async () => {
+    const leftover = join(dir, leftoverName());
+    await writeFile(leftover, 'crashed writer');
+    const outcome = await main({ stackLock: { ...quick, sleep: firstUpdaterEnds(null) } });
+    expect(outcome).toBe(0);
+    expect(run.resume).not.toHaveBeenCalled();
+    expect(run.rollback).not.toHaveBeenCalled();
+    expect(journal.startRun).toHaveBeenCalledTimes(1);
+    // The run that acts cleans the leftover, which makes the check below meaningful.
+    await expect(stat(leftover)).rejects.toMatchObject({ code: 'ENOENT' });
+    expect(await heldBy()).toBeNull();
+  });
+  it('recovers from the run as it is under the lock, not as it was before the wait', async () => {
+    const later = { ...liveRun, phase: 'verify' };
+    expect(await main({ stackLock: { ...quick, sleep: firstUpdaterEnds(later) } })).toBe(0);
+    expect(run.resume).toHaveBeenCalledTimes(1);
+    expect(run.resume).toHaveBeenCalledWith(expect.objectContaining({ runId: 'live' }), 'verify');
+    expect(run.rollback).not.toHaveBeenCalled();
+    expect(journal.startRun).not.toHaveBeenCalled();
+  });
+  it('recovers a run that began during the wait instead of starting a second one', async () => {
+    vi.mocked(journal.findLiveRun).mockResolvedValue(null);
+    expect(await main({ stackLock: { ...quick, sleep: firstUpdaterEnds(liveRun) } })).toBe(0);
+    expect(run.resume).toHaveBeenCalledWith(expect.objectContaining({ runId: 'live' }), 'migrate');
+    expect(journal.startRun).not.toHaveBeenCalled();
+  });
+  it('records a later refusal as an attempt, since the run it saw no longer exists', async () => {
+    vi.mocked(journal.lastDoneChannel).mockResolvedValue('other');
+    expect(await main({ stackLock: { ...quick, sleep: firstUpdaterEnds(null) } })).toBe(3);
+    expect(journal.recordAttempt).toHaveBeenCalledWith(
+      h.sql,
+      expect.objectContaining({ status: 'refused', metadata: { refusal: 'channel-changed' } }),
+    );
+  });
+  it('stays read-only for a --check whose live run finished during the wait', async () => {
+    process.argv.push('--check');
+    // A crashed writer's leftover is cleaned only by a run that acts, never by a read-only check.
+    const leftover = join(dir, leftoverName());
+    await writeFile(leftover, 'crashed writer');
+    expect(await main({ stackLock: { ...quick, sleep: firstUpdaterEnds(null) } })).toBe(0);
+    expect(run.resume).not.toHaveBeenCalled();
+    expect(journal.startRun).not.toHaveBeenCalled();
+    expect(await readFile(leftover, 'utf8')).toBe('crashed writer');
+    expect(await heldBy()).toBeNull();
   });
 });
 

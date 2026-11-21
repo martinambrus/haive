@@ -338,7 +338,9 @@ export async function main(options: { stackLock?: StackLockOptions } = {}): Prom
     }
 
     locked = true;
-    const live = await findLiveRun(sql);
+    // This first read only decides whether the stack lock applies: a read-only check with no live
+    // run changes nothing and never contends for it.
+    let live = await findLiveRun(sql);
     hasRun = live !== null;
     if (live || !flag('check')) {
       const outcome = await acquireStackLock(installDir, { onEvent: emit, ...options.stackLock });
@@ -348,6 +350,12 @@ export async function main(options: { stackLock?: StackLockOptions } = {}): Prom
         stackLock = outcome.lock;
         stopSignals = releaseOnSignal(stackLock);
       }
+      // Waiting for the lock can outlast what the first read saw: the snapshot's database restart
+      // ends the first updater's session lock, so a second updater can pass it and wait while the
+      // first finishes its run. Only a read under the lock is current. Recovery and the cleanup
+      // below use it alone, so a finished run is never resumed or rolled back.
+      live = await findLiveRun(sql);
+      hasRun = live !== null;
     }
     await requireRegularInstallFiles(installDir);
     if (live || !flag('check')) await cleanupInstallTemps(installDir);
