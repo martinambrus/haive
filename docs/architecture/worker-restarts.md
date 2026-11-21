@@ -777,7 +777,11 @@ went away (`UnresolvedStepError`). A third cause is a registered producer that c
 pinned output contract or host role policy (`pinned-step-support-unavailable`). An unsupported or
 malformed execution-contract pin is another cause (`invalid-execution-contract`): a custom fix
 target, a guarded span on a derived, non-static or non-unique run list, a span predicate no
-registered step provides, or a span whose first step leads the list. Dead is neither failed nor
+registered step provides, or a span whose first step leads the list. Behind that fence, which
+refuses every custom fix target today, `deadTaskResolution` also asks `unsupportedPinnedFixTarget`
+(`step-engine/fix-consumer.ts`) about the pinned target: a target absent from the pinned run list,
+or registered but not a module step declaring the pinned `fixConsumer` version (or fanning out),
+is a cause too; an unregistered target stays an unresolved step. Dead is neither failed nor
 completed. `markTaskDead`
 (`queues/task-queue.ts`) sets `dead_at` and `dead_reason`, keeps the status and the epoch, appends
 `task.dead` (`TASK_DEAD_EVENT`) naming the missing ids, supersedes every open run of the task, and
@@ -801,7 +805,7 @@ at run time.
 `provider-missing` keeps it dead even when every step resolves. The revival owner repeats this check
 inside its transaction, including for direct callers. `reviveDeadTask` also rechecks pinned producer
 contract, host role policy and execution-contract support inside that transaction; any unsupported
-pin keeps the task dead, with no remap. Execution-contract death uses the same boot revival: a task
+pin, a fix target included, keeps the task dead, with no remap. Execution-contract death uses the same boot revival: a task
 whose span predicate was unregistered revives on the first boot that registers it again, and every
 boot that does not leaves it dead. A provider restored but deactivated can revive into the integration
 park. This uses only resolver state, never dead-reason copy or token refresh (see

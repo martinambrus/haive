@@ -1,6 +1,7 @@
 import { DataEdgePlanError } from '@haive/shared/data-edge-plan';
 import { assertDataEdgeSupport } from '../step-engine/data-edge-support.js';
 import { assertWorkerExecutionContractSupported } from '../step-engine/execution-contract-support.js';
+import { unsupportedPinnedFixTarget } from '../step-engine/fix-consumer.js';
 import {
   ExecutionContractError,
   DerivedRunPlanError,
@@ -133,6 +134,8 @@ export function deadTaskResolution(
       registry,
     );
     assertDataEdgeSupport(task, registry);
+    const unsupported = unsupportedPinnedFixTarget(task, registry);
+    if (unsupported !== null) throw new ExecutionContractError(unsupported);
   } catch (error) {
     if (error instanceof ExecutionContractError)
       return { unresolved: [], outsideList: null, supportReason: error.message };

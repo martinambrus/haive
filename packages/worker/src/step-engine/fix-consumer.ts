@@ -3,6 +3,7 @@ import {
   FIX_LOOP_TARGET_STEP_ID,
   parseExecutionContract,
   parseStepId,
+  pinnedTaskStepIds,
 } from '@haive/shared/modularity';
 import { eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
@@ -30,6 +31,31 @@ export function resolvePinnedFixConsumer(
   const def = registry.get(target.stepId);
   if (!def || !isCapableModuleStep(target, def)) return { ok: false };
   return { ok: true, def };
+}
+
+/** Why this worker cannot run the fix target a task pinned, or null when it can or the task pins
+ *  none. A target that is not on the task's pinned run list can never be routed. A registered one
+ *  must be a capable module step at the pinned version. An unregistered one is left to the
+ *  unresolved-step check, so a missing module keeps that path's wording. A malformed contract
+ *  throws, it is never read as no target. */
+export function unsupportedPinnedFixTarget(
+  task: {
+    executionContract?: unknown;
+    runListSnapshot?: readonly string[] | null;
+    derivedRunPlan?: unknown;
+    executionPath?: string | null;
+  },
+  registry: Pick<StepRegistry, 'get'>,
+): string | null {
+  const target = pinnedFixTarget(task.executionContract);
+  if (!target) return null;
+  const runList = pinnedTaskStepIds(task);
+  if (runList !== null && !runList.includes(target.stepId))
+    return `the pinned fix target ${target.stepId} is not in the run list of this task`;
+  if (!registry.get(target.stepId)) return null;
+  return resolvePinnedFixConsumer(target, registry).ok
+    ? null
+    : `the pinned fix target ${target.stepId} is not a registered module step with fix consumer version ${target.capabilityVersion} on this worker`;
 }
 
 /** Advisory option list for a gate; the router still fails the task by name at Continue. */
