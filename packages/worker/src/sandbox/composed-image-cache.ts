@@ -14,7 +14,9 @@ import { schema, type Database } from '@haive/database';
 import { logger, DEFAULT_RTK_VERSION, type CliProviderName } from '@haive/shared';
 import {
   composeSandboxImage,
+  composedImageReferencesSandboxBase,
   SANDBOX_CORE_IMAGE,
+  type ComposeInput,
   type EnvironmentImageRef,
   type SandboxImageComposition,
 } from './image-composer.js';
@@ -137,7 +139,8 @@ export async function resolveEnvironmentImage(
 }
 
 /** Shared composition calculation. A peek uses inspect only; only the ensure path may
- * heal/build the base. A missing composed image must not fall through to another image. */
+ * heal/build the base, and only for a composition that names it. A missing composed image
+ * must not fall through to another image. */
 export async function resolveSandboxImageComposition(
   db: Database,
   taskId: string,
@@ -244,23 +247,23 @@ export async function resolveSandboxImageComposition(
   if (contract === 2 && !pinnedLaunch && !environmentImage)
     throw new ComposedImageNotVerifiedError(ENV_IMAGE_CHANGED);
 
-  const baseImageId = pinned
-    ? pinned.baseImageId
-    : buildBase
-      ? await resolveBaseImageId(runner)
-      : peekBaseImageId
-        ? await peekBaseImageId()
-        : (await runner.inspect(SANDBOX_CORE_IMAGE)).imageId;
-  const composition = composeSandboxImage({
+  const composeInput: ComposeInput = {
     envTemplateDockerfile: envTemplate.generatedDockerfile,
     provider,
-    baseImageId,
     rtkVersion,
     lspInstallContractVersion: contract,
     lspServers: deps.lspServers,
     lspServerVersions: deps.lspServerVersions,
     environmentImage,
-  });
+  };
+  const baseImageId = pinned
+    ? pinned.baseImageId
+    : buildBase && composedImageReferencesSandboxBase(composeInput)
+      ? await resolveBaseImageId(runner)
+      : peekBaseImageId
+        ? await peekBaseImageId()
+        : (await runner.inspect(SANDBOX_CORE_IMAGE)).imageId;
+  const composition = composeSandboxImage({ ...composeInput, baseImageId });
   return {
     ...composition,
     tag: effective?.tag ?? composition.tag,
@@ -282,10 +285,11 @@ export async function resolveSandboxImageComposition(
  */
 async function resolveBaseImageId(runner: DockerRunner): Promise<string | null> {
   // Best-effort, because this function's contract is already "null when the base is not
-  // built" and an env-template composition need not reference the base at all. Rebuilding
-  // it here is what stops the silent half of a prune: with no base image the hash below
-  // loses its base contribution, so a composed tag built on the OLD base is then served as
-  // a cache hit against a rebuilt one — the exact drift this id exists to catch.
+  // built" and it is reached only for a composition whose Dockerfile names the base
+  // (`composedImageReferencesSandboxBase`). Rebuilding it here is what stops the silent half
+  // of a prune: with no base image the hash below loses its base contribution, so a composed
+  // tag built on the OLD base is then served as a cache hit against a rebuilt one — the exact
+  // drift this id exists to catch.
   await ensureSandboxCoreImage(SANDBOX_CORE_IMAGE, runner).catch((err: unknown) => {
     log.warn({ err, baseImage: SANDBOX_CORE_IMAGE }, 'sandbox-core base image rebuild failed');
   });

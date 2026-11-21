@@ -80,7 +80,12 @@ export interface ComposeInput {
   environmentImage?: EnvironmentImageRef | null;
 }
 
-export function composeSandboxImage(input: ComposeInput): SandboxImageComposition {
+function renderComposition(input: ComposeInput): {
+  dockerfileBody: string;
+  referencesSandboxBase: boolean;
+  hasCliInstall: boolean;
+  hasExtras: boolean;
+} {
   const contract = resolveComposedLspInstallContract(
     input.lspInstallContractVersion,
     input.provider.name,
@@ -125,6 +130,23 @@ export function composeSandboxImage(input: ComposeInput): SandboxImageCompositio
 
   const referencesSandboxBase =
     input.envTemplateDockerfile === null || dockerfileBody.includes(SANDBOX_CORE_IMAGE);
+  return {
+    dockerfileBody,
+    referencesSandboxBase,
+    hasCliInstall: installLines.length > 0,
+    hasExtras: extra.length > 0,
+  };
+}
+
+/** The rule that lets the core image id into the hash; it also decides whether a launch needs
+ *  the core image at all. */
+export function composedImageReferencesSandboxBase(input: ComposeInput): boolean {
+  return renderComposition(input).referencesSandboxBase;
+}
+
+export function composeSandboxImage(input: ComposeInput): SandboxImageComposition {
+  const { dockerfileBody, referencesSandboxBase, hasCliInstall, hasExtras } =
+    renderComposition(input);
   const baseIdForHash = referencesSandboxBase && input.baseImageId ? input.baseImageId : '';
   const hashInput =
     baseIdForHash.length > 0 ? `${baseIdForHash}\n${dockerfileBody}` : dockerfileBody;
@@ -135,8 +157,8 @@ export function composeSandboxImage(input: ComposeInput): SandboxImageCompositio
     hash,
     dockerfileBody,
     hasEnvTemplate: input.envTemplateDockerfile !== null,
-    hasCliInstall: installLines.length > 0,
-    hasExtras: extra.length > 0,
+    hasCliInstall,
+    hasExtras,
   };
 }
 
