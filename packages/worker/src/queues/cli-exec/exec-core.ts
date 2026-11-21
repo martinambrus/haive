@@ -120,6 +120,7 @@ import {
   isCliTimeoutFailure,
   MODEL_CAPABILITY_HEADLINES,
   PROVIDER_FATAL_HEADLINES,
+  fatalClassFromStreamErrorCode,
   type ModelCapabilityClass,
   type ProviderFatalClass,
 } from './failure-class.js';
@@ -185,6 +186,17 @@ const PROVIDER_AUTH_HINT_OVERRIDES: Record<string, string> = {
 // login / tokens / 401 / unauthorized.
 const TERMINATION_EXIT_CODES: ReadonlySet<number> = new Set([130, 137, 143]);
 
+/** What the CLI's own stream error code says about the failure; no key when it says nothing. */
+function streamFailureFlags(
+  collector: ReturnType<typeof createStreamJsonCollector>,
+): Pick<ExecutionOutcome, 'authFailure' | 'streamFailureClass'> {
+  const streamFailureClass = fatalClassFromStreamErrorCode(collector.getAssistantErrorCode());
+  return {
+    ...(collector.hadAuthFailure() ? { authFailure: true } : {}),
+    ...(streamFailureClass ? { streamFailureClass } : {}),
+  };
+}
+
 export function interpretCliFailure(
   result: ExecutionOutcome,
   providerName: string | null,
@@ -247,14 +259,16 @@ export function interpretCliFailure(
   // will not recover within this run. Headline them with a stable internal prefix
   // so looping consumers (isFatalProviderFailure → DAG escalation, merge-fix retry)
   // fail the task fast instead of re-dispatching agents against a dead provider.
+  // The CLI's own stream error code (authFailure, streamFailureClass) wins over the text rules.
   const fatalClass =
     result.authFailure === true
       ? 'auth'
-      : classifyProviderFatal(
+      : (result.streamFailureClass ??
+        classifyProviderFatal(
           result.exitCode,
           existing,
           result.providerErrorScan ?? result.rawOutput,
-        );
+        ));
   if (!fatalClass) return existing;
   return buildProviderFatalMessage(fatalClass, providerName, formatAuthDetail(existing));
 }
@@ -1296,6 +1310,7 @@ export async function executeCliSpec(
       apiDurationMs: collector.getApiDurationMs(),
       toolUsage: collector.getToolUsage(),
       ...persisted,
+      ...streamFailureFlags(collector),
     };
   }
 
@@ -1341,7 +1356,7 @@ export async function executeCliSpec(
       toolUsage: collector.getToolUsage(),
       ...persisted,
       providerErrorScan,
-      ...(collector.hadAuthFailure() ? { authFailure: true } : {}),
+      ...streamFailureFlags(collector),
     };
   }
 

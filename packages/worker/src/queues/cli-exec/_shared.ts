@@ -13,6 +13,7 @@ import { QUEUE_NAMES, type InvocationToolUsage } from '@haive/shared';
 import { defaultCliSpawner, type CliSpawner } from '../../cli-executor/index.js';
 import type { CodexAppServerFailure } from '../../cli-executor/codex-app-server.js';
 import { getBullRedis } from '../../redis.js';
+import type { ProviderFatalClass } from './failure-class.js';
 
 export const log: ReturnType<typeof logger.child> = logger.child({ module: 'cli-exec-queue' });
 
@@ -96,6 +97,8 @@ export interface ExecutionOutcome {
   /** The CLI's own stream reported an authentication failure; the classifier reads it before any
    *  text rule. Set only when true. */
   authFailure?: boolean;
+  /** The fatal class the CLI's own stream error code names; read before any text rule. */
+  streamFailureClass?: ProviderFatalClass;
   /** antigravity only: the tail of agy's own `--log-file`, captured out of the
    *  sandbox. agy writes provider-fatal errors (quota/auth/5xx) ONLY here and exits
    *  0 with empty stdout, so this is the sole signal interpretCliFailure can classify
