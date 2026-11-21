@@ -352,7 +352,10 @@ describe('the structural code wins over disagreeing text', () => {
   });
 
   it('server_error with a rate-limit text is a server error', async () => {
-    const { outcome, message } = await run(withCode('server_error', 'API Error: 429 Too Many Requests'), 1);
+    const { outcome, message } = await run(
+      withCode('server_error', 'API Error: 429 Too Many Requests'),
+      1,
+    );
     expectClass(outcome, message, 'server_error');
   });
 });
