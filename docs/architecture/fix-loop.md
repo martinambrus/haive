@@ -33,9 +33,11 @@ still refuses such a pin. The router then resolves that step in place of 07 and 
 task before any reset when it is unregistered, is not a module step declaring the pinned
 `fixConsumer` version, is off the run list, or belongs to a module that is deactivated or
 whose schema setup failed. The round is not entered then: a `loop_back` records no
-`fix_loop.requested` or `fix_loop.started`, a gate Continue no `fix_loop.continued`, and neither
-resets a step or spends a round of the cap. A module whose schema is still being set up routes,
-and the advance parks as it does for any module step. The step reads the defect through
+`fix_loop.started`, a gate Continue no `fix_loop.continued`, and neither resets a step or spends
+a round of the cap. The oscillation and cap legs record the next round's request before the
+router runs, so a refusal after them leaves that request behind. A module whose schema is still
+being set up routes, and the advance parks as it does for any module step. The step reads the
+defect through
 `ctx.host.loadFixLoopDiagnosis()`, which is null unless a request is recorded for its own
 round: `round > 0` is also true after a revise-loop fork, so it never decides a fix round.
 
