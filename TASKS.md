@@ -702,7 +702,7 @@ Found with the shared usage connection (#1291 poller, #1292 api and web), 2026-1
 
 ### T723 · FNF[claude-login-set] · Claude login set leftovers (+17)
 
-status: open · kind: fix · found: #1282 build and review 2026-11-19 · priority: P4
+status: open, in review as #1306 (2026-11-21: items 1, 12, 13, 14, 17 fixed; 3 and 16 pinned by controls; 9 and 11 were already on main; 2, 4-8, 10, 15 left: 2 test-only, 4 a large fake refactor, 5-6 end with the plaintext drop, 7 web form, 8 latent, 10 third-party, 15 a disclosed decision) · kind: fix · found: #1282 build and review 2026-11-19 · priority: P4
 
 Paths are under `packages/`. Items 2 to 4 are PRE-EXISTING; item 1 is PRE-EXISTING for the clicked row and reaches the whole set since #1282. Items 5 to 10 were found with #1283: 5 to 7 and 10 are PRE-EXISTING, 8 is NEW and latent, 9 exists since #1282. Items 11 to 13 were found in #1283's review round (lock order against the image job) and are PRE-EXISTING.
 
@@ -724,6 +724,12 @@ Paths are under `packages/`. Items 2 to 4 are PRE-EXISTING; item 1 is PRE-EXISTI
 15. NEW with #1285, a disclosed decision: a clone of a row whose login token sits only in legacy `env_vars` (not yet copied to a secret row by the boot step) ends with no token, where it used to get one. The seed reads secret rows only (`api/src/lib/cli-login-secret.ts` ~:204-226). Reachable only before the boot copy has run on an install.
 16. No control pins the seed's tie rule (newest token, then smallest id); a tie needs equal secret `updated_at`, which after a set-wide write means equal logins. Test only.
 17. PRE-EXISTING, related: `AUTH_RE` (`worker/src/queues/cli-exec/failure-class.ts:294`) does not match Claude's own "Not logged in · Please run /login" or "Invalid API key · Please run /login" (checked against the real regex). A run on a row whose auth volume exists but holds no token (item 1, a deleted token, item 15) fails with the generic `cli invocation failed: <tail>` and no Log in hint, and the status stays `ok`, so every retry fails the same way until Test or Sign out. Only a missing volume gives `CliLoginRequiredError` and the Log in button. Fix: classify the binary's no-login line as an auth failure, with a negative control for prose that only mentions logging in.
+
+Added 2026-11-21 (#1306 driver):
+
+18. `worker/src/queues/cli-exec/handlers.ts` ~:1427 counts only volumes removed in this run, so after a partial removal a retry reports "Already signed out." (`web/src/lib/cli-jobs.ts`) while it just deleted the tokens. Cosmetic, newly reachable for tokens since #1306.
+19. Boot `clearPrunedSandboxImageState` (`worker/src/data-migrations.ts` ~:974-976) does one unordered multi-row `UPDATE cli_providers ... WHERE id IN (...)`: the same hold-high-wait-low hazard. Select the ids `FOR UPDATE` in id order first. PRE-EXISTING; needs two or more stale rows and a concurrent login-set write at boot.
+20. Doc drift: `docs/architecture/ci-smokes.md` ~:51 history clause ("raised from 40 ... and again for the 169th") is stale; only the numbers were corrected. PRE-EXISTING.
 
 ### T724 · Step 11 review cannot keep one learning the recorder plans to delete
 
@@ -924,6 +930,18 @@ Refusals raised before `readInstall()` (`install-locked`, `install-file-linked`;
 status: open · kind: fix · found: #1305 driver 2026-11-21 · priority: P4
 
 `judgeCandidate` (`worker/src/queues/dead-task-boot.ts` ~:390) reaches `run-list.ts` ~:327, which throws "has no definition" for a live task whose type definition is missing: an error log at every boot and the task is never judged. Same for snapshot-bearing tasks; #1305 also makes it reachable for snapshot-less pinned ones. Admin type delete is refused while tasks exist (`api/src/routes/task-types.ts` ~:880); module-seeded types were not checked, so verify reachability first. PRE-EXISTING.
+
+### T747 · FNF[claude-stream-error-codes] · only one of the Claude CLI's assistant error codes is read
+
+status: open · kind: fix · found: #1306 driver 2026-11-21 · priority: P4
+
+`worker/src/queues/cli-exec/stream.ts` ~:87 and `exec-core.ts` ~:1221 read only `authentication_failed` from the top-level assistant `error` field. Claude CLI 2.1.330 also stamps `oauth_org_not_allowed`, `account_on_hold`, `verification_required`, `cloud_credential_error`, `billing_error`, `rate_limit`, `overloaded`, `server_error`, `invalid_request`, `model_not_found`, `max_output_tokens` and `unknown`; map the ones with a failure class (auth, rate limit, provider outage) to it. A steered run whose later turn fails auth takes the result branch and carries no flag. PRE-EXISTING.
+
+### T748 · FNF[empty-typed-secret] · the api stores a secret-named env var with an empty value
+
+status: open · kind: fix · found: #1306 driver 2026-11-21 · priority: P4
+
+`api/src/routes/cli-providers.ts` ~:557 (create) and ~:865 (PATCH), via `shared/src/schemas/cli-providers.ts` ~:98 and `shared/src/cli-providers/provider-secret.ts` ~:25, accept a secret-named env var with an empty value and store an encrypted empty string; `worker/src/secrets/provider-secrets.ts` ~:33 then injects it as an empty env var. The web form drops empties, so this is API-only. PRE-EXISTING.
 
 ### T721 · The Claude usage grant reaches sandbox environments
 
