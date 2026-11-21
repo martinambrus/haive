@@ -95,11 +95,13 @@ describe('deadTaskResolution with the fence open', () => {
   });
 
   describe('a target no worker can run as a fix round', () => {
-    const incapable: [string, () => StepRegistry, object][] = [
+    const ON_LIST = [TARGET, REVIEW, AFTER];
+    const OFF_LIST = [REVIEW, AFTER];
+    const incapable: [string, () => StepRegistry, string[]][] = [
       [
         'registered without fixConsumer',
         () => registryOf(stub(REVIEW, 1), stub(AFTER, 2), stub(TARGET, 0)),
-        pinOf(TARGET),
+        ON_LIST,
       ],
       [
         'with agentMining set',
@@ -109,29 +111,32 @@ describe('deadTaskResolution with the fence open', () => {
             stub(AFTER, 2),
             stub(TARGET, 0, { ...capable, agentMining: { agents: [] } }),
           ),
-        pinOf(TARGET),
+        ON_LIST,
       ],
       [
         'unregistered and off the snapshot',
         () => registryOf(stub(REVIEW, 1), stub(AFTER, 2)),
-        pinOf(TARGET),
+        OFF_LIST,
       ],
       [
         'capable but off the snapshot',
         () => registryOf(stub(REVIEW, 1), stub(AFTER, 2), stub(TARGET, 0, capable)),
-        pinOf(TARGET),
+        OFF_LIST,
       ],
     ];
-    it.each(incapable)('%s names the target and lists nothing unresolved', (_n, build, pin) => {
-      const found = deadTaskResolution(
-        task({ executionContract: pin, runListSnapshot: [REVIEW, AFTER] }),
-        'static',
-        build(),
-      );
-      expect(typeof found.supportReason).toBe('string');
-      expect(found.supportReason).toContain(TARGET);
-      expect(found.unresolved).toEqual([]);
-    });
+    it.each(incapable)(
+      '%s names the target and lists nothing unresolved',
+      (_n, build, snapshot) => {
+        const found = deadTaskResolution(
+          task({ executionContract: pinOf(TARGET), runListSnapshot: snapshot }),
+          'static',
+          build(),
+        );
+        expect(typeof found.supportReason).toBe('string');
+        expect(found.supportReason).toContain(TARGET);
+        expect(found.unresolved).toEqual([]);
+      },
+    );
 
     it('a core step named by the pin is refused', () => {
       const registry = registryOf(stub(REVIEW, 1), stub(AFTER, 2), stub(CORE, 0, capable));
