@@ -31,9 +31,20 @@ nobody reads the defect.
 A task pin may name a module step as the fix target instead (see Task types); every gate
 still refuses such a pin. The router then resolves that step in place of 07 and fails the
 task before any reset when it is unregistered, is not a module step declaring the pinned
-`fixConsumer` version, or is off the run list. The step reads the defect through
+`fixConsumer` version, is off the run list, or belongs to a module that is deactivated or
+whose schema setup failed. The round is not entered then: a `loop_back` records no
+`fix_loop.started`, a gate Continue no `fix_loop.continued`, and neither resets a step or spends
+a round of the cap. The oscillation and cap legs record the next round's request before the
+router runs, so a refusal after them leaves that request behind. A module whose schema is still
+being set up routes, and the advance parks as it does for any module step. The step reads the
+defect through
 `ctx.host.loadFixLoopDiagnosis()`, which is null unless a request is recorded for its own
 round: `round > 0` is also true after a revise-loop fork, so it never decides a fix round.
+
+A pinned target is never skipped, as 07 is not: the api refuses Skip on it (`canSkip` is false),
+boot rejects a step that declares `fixConsumer` together with `allowSkip` (`fix-consumer-skippable`),
+and at a round a recorded request entered its own `shouldRun` cannot skip it (07's `shouldRun`
+answers true there for the same reason). Round 0 keeps the step's own run decision.
 
 Recovery addresses a round as (task, step, round) at an epoch, never by step id: resets, step
 ownership, Retry and Resume, the boot passes, the stalled sweep and dead-task revival treat a
@@ -308,7 +319,9 @@ eligibility check in place of the core dispatch list; a core step never does. Bo
 previews list providers for the target `fixRoundTargetDef` names, before the router runs. A pin
 that resolves to no capable step lists none, and Continue then fails the task with
 `fix_loop.unroutable`. The api shows the round provider on the same step: it reads the contract
-only for a task whose choices hold a round slot, and a malformed contract displays as no pin.
+only for a task whose choices hold a round slot, and a malformed contract shows the round slot
+on no step: the worker never falls back to 07 for one (its router fails the task, its gate lists
+no provider), so the card and the listing resolve the ordinary slot.
 
 A choice that becomes unusable before the gate answer is applied refuses that answer
 instead of failing the task. The same transaction restores the gate's `waiting_form` status,

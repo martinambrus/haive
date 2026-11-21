@@ -241,8 +241,8 @@ async function loadTaskCliChoices(
 async function loadFixTargetStepIds(
   db: ReturnType<typeof getDb>,
   taskIds: string[],
-): Promise<Map<string, string>> {
-  const out = new Map<string, string>();
+): Promise<Map<string, string | null>> {
+  const out = new Map<string, string | null>();
   if (taskIds.length === 0) return out;
   const rows = await db
     .select({ id: schema.tasks.id, executionContract: schema.tasks.executionContract })
@@ -253,7 +253,7 @@ async function loadFixTargetStepIds(
       out.set(r.id, fixLoopTargetStepId(r.executionContract));
     } catch (err) {
       if (!(err instanceof ExecutionContractError)) throw err;
-      out.set(r.id, FIX_LOOP_TARGET_STEP_ID);
+      out.set(r.id, null);
     }
   }
   return out;
@@ -269,7 +269,7 @@ function taskCliSlot(
   stepId: string,
   role: string,
   round = 0,
-  fixTarget = FIX_LOOP_TARGET_STEP_ID,
+  fixTarget: string | null = FIX_LOOP_TARGET_STEP_ID,
 ): TaskCliChoice | undefined {
   if (stepId !== fixTarget || role !== 'default' || round < 1) return choices?.get(role);
   const roundRole = `fix:${round}:default`;
@@ -360,7 +360,7 @@ export async function enrichStepsWithCliPreferences<T extends { stepId: string; 
       : new Map<string, Map<string, TaskCliChoice>>();
   const fixTarget =
     taskId !== null && steps.some((s) => hasRoundSlot(choicesByStep.get(s.stepId)))
-      ? ((await loadFixTargetStepIds(db, [taskId])).get(taskId) ?? FIX_LOOP_TARGET_STEP_ID)
+      ? (await loadFixTargetStepIds(db, [taskId])).get(taskId)
       : FIX_LOOP_TARGET_STEP_ID;
   const hasRoundChoice = steps.some(
     (s) =>
@@ -513,7 +513,7 @@ export async function resolveCurrentStepCliProviderIds(
           stepId ?? '',
           'default',
           task.currentRound,
-          fixTargets.get(task.id) ?? FIX_LOOP_TARGET_STEP_ID,
+          fixTargets.get(task.id),
         ),
         providerRows,
       )
@@ -529,7 +529,7 @@ export async function resolveCurrentStepCliProviderIds(
         stepId ?? '',
         role,
         task.currentRound,
-        fixTargets.get(task.id) ?? FIX_LOOP_TARGET_STEP_ID,
+        fixTargets.get(task.id),
       );
       return choice ? choice.cliProviderId : honor(role, saved);
     };
@@ -1027,11 +1027,10 @@ export function isStepSkippable(
     executionContract?: unknown;
   },
 ): boolean {
-  if (
-    task.executionContract != null &&
-    !executionContractSchema.safeParse(task.executionContract).success
-  )
-    return false;
+  if (task.executionContract != null) {
+    const parsed = executionContractSchema.safeParse(task.executionContract);
+    if (!parsed.success || parsed.data.fixTarget?.stepId === stepId) return false;
+  }
   if (spanEntryIds(task.executionContract).has(stepId)) return false;
   if (stepId === '00-triage' && task.derivedRunPlan != null && task.executionPath == null)
     return false;

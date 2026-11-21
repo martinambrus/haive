@@ -180,7 +180,7 @@ import {
   openPendingStep,
   updateOwnedStep,
 } from './step-ownership.js';
-import { isPinnedFixRepair } from './fix-consumer.js';
+import { isPinnedFixRepair, stepRunDecision } from './fix-consumer.js';
 import { isFixLoopSuppressed } from './steps/workflow/_fix-loop.js';
 import { resolveCuratedSummary } from './_step-summary.js';
 import { promptCarriesPastedPersona, templatePersonaIds } from './steps/_retrieval-guidance.js';
@@ -3251,7 +3251,7 @@ export async function willSkipBeforeAdmission(
   if (!stepDef.shouldRun || hasIntegrationContinuation(row.integrationWait)) return false;
   try {
     const ctx = buildStepContext(params, row, new AbortController().signal, () => {});
-    return !(await stepDef.shouldRun(ctx));
+    return !(await stepRunDecision(ctx, stepDef));
   } catch (err) {
     log.warn(
       { err, taskId: params.taskId, stepId: stepDef.metadata.id },
@@ -3385,7 +3385,7 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
       isFreshStepEntry(row.status) &&
       !hasIntegrationContinuation(row.integrationWait)
     ) {
-      const should = await stepDef.shouldRun(ctx);
+      const should = await stepRunDecision(ctx, stepDef);
       if (!should) {
         await foldCliParkOnResume(db, row.id);
         const updated = await openPendingStep(db, taskId, params.epoch, row.id, {

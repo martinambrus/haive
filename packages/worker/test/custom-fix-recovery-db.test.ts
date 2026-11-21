@@ -1,7 +1,7 @@
 import { randomBytes, randomUUID } from 'node:crypto';
 import { and, asc, eq } from 'drizzle-orm';
 import { DelayedError } from 'bullmq';
-import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createDatabase, schema, type Database } from '@haive/database';
 import { configService, TASK_JOB_NAMES, type WorkflowType } from '@haive/shared';
 import { ExecutionContractError } from '@haive/shared/modularity';
@@ -1021,6 +1021,183 @@ describe.skipIf(!url)('recovery of a fix round on Postgres', () => {
         ).toEqual(before);
         expect(h.adds).toEqual([]);
       });
+    });
+  });
+
+  describe('custom leg with the target module deactivated', () => {
+    const leg = LEGS[1]!;
+    const deactivate = () =>
+      db.insert(schema.modules).values({
+        moduleId: 'cfr-fix',
+        packageName: '@haive/module-cfr-fix',
+        name: 'cfr-fix',
+        installedVersion: '1.0.0',
+        deactivatedAt: new Date(),
+      });
+    afterEach(async () => {
+      await db.delete(schema.modules).where(eq(schema.modules.moduleId, 'cfr-fix'));
+    });
+    const loopBack = async (taskId: string, row: StepRow) =>
+      handleResult(db, await ctxFor(leg, taskId), row.stepId, {
+        status: 'loop_back',
+        row,
+        diagnosis: 'defect',
+        sourceStepId: row.stepId,
+      });
+    const refusedBefore = async (id: string) => {
+      const t = await taskOf(id);
+      expect(t.status).toBe('failed');
+      expect(t.orchestrationEpoch).toBe(BASE_EPOCH);
+      expect(t.errorMessage).toContain(`fix loop target ${customTarget}`);
+      expect(t.errorMessage).toContain('cfr-fix');
+      const types = (await eventsOf(id)).map((e) => e.eventType);
+      expect(types).toContain('fix_loop.unroutable');
+      expect(types).not.toContain('fix_loop.requested');
+      expect(types).not.toContain('fix_loop.started');
+      expect(types).not.toContain('fix_loop.continued');
+      expect(
+        await db
+          .select()
+          .from(schema.taskSteps)
+          .where(and(eq(schema.taskSteps.taskId, id), eq(schema.taskSteps.round, 1))),
+      ).toEqual([]);
+      expect(h.adds).toEqual([]);
+    };
+
+    it('fails the task by name on a loop_back before the round is entered', async () => {
+      await deactivate();
+      const id = await seedTask(leg);
+      const source = await seedRow(leg, id, 'REVIEW', 0, 'done');
+      await loopBack(id, source);
+      await refusedBefore(id);
+      expect((await eventsOf(id)).map((e) => e.eventType)).toContain('step.loop_back');
+    });
+
+    it('fails the task by name at the round-limit Continue', async () => {
+      await deactivate();
+      const id = await seedTask(leg, { status: 'waiting_user', currentRound: 1 });
+      const source = await seedRow(leg, id, 'REVIEW', 0, 'done');
+      const gateRow = await seedRow(leg, id, 'REVIEW', 1, 'waiting_form', {
+        waitingStartedAt: new Date(),
+      });
+      await recordFixLoopRequest(db, id, source.id, {
+        round: 2,
+        sourceStepId: leg.ids.REVIEW,
+        diagnosis: 'defect',
+      });
+      await resolveFixLoopGate(db, await ctxFor(leg, id), gateRow, 'continue', 1, '');
+      const t = await taskOf(id);
+      expect(t.status).toBe('failed');
+      expect(t.errorMessage).toContain(`fix loop target ${customTarget}`);
+      const types = (await eventsOf(id)).map((e) => e.eventType);
+      expect(types).toContain('fix_loop.unroutable');
+      expect(types).not.toContain('fix_loop.continued');
+      expect(h.adds).toEqual([]);
+    });
+
+    it('does not spend the round cap on a refused round', async () => {
+      await deactivate();
+      const id = await seedTask(leg, { maxFixRounds: 1 });
+      const source = await seedRow(leg, id, 'REVIEW', 0, 'done');
+      await loopBack(id, source);
+      await refusedBefore(id);
+      await db.delete(schema.modules).where(eq(schema.modules.moduleId, 'cfr-fix'));
+      await db.update(schema.tasks).set({ status: 'running' }).where(eq(schema.tasks.id, id));
+      await loopBack(id, source);
+      expect(await eventsOf(id, 'fix_loop.started')).toHaveLength(1);
+      expect((await taskOf(id)).currentStepId).toBe(customTarget);
+    });
+  });
+
+  describe('a live task with no run list snapshot that pins a fix target', () => {
+    const TYPE = 'cfr_paths_type';
+    const CURRENT = 'cfr-p-current';
+    const PLAIN = 'module.cfp-plain.target';
+    const GHOST = 'module.cfp-ghost.target';
+    const OK = 'module.cfp-ok.target';
+    const legPin = (stepId: string): Leg => ({
+      name: 'paths',
+      type: TYPE,
+      ids: { TARGET: stepId, REVIEW: CURRENT, AFTER: CURRENT },
+      pin: { version: 1, guardedSpans: [], fixTarget: { stepId, capabilityVersion: 1 } },
+    });
+    const deps: DeadTaskBootDeps = {
+      enqueueStart: async () => undefined,
+      enqueueAdvance: enqueueRedrive,
+      redriveRetryDelaysMs: [],
+    };
+    const seedPaths = async (pin: object | null, current: string) => {
+      const leg = legPin(PLAIN);
+      const id = await seedTask(leg, {
+        type: TYPE,
+        currentStepId: current,
+        runListSnapshot: null,
+        executionContract: pin,
+      });
+      await seedRow({ ...leg, ids: { ...leg.ids, REVIEW: current } }, id, 'REVIEW', 0, 'pending');
+      return id;
+    };
+
+    beforeAll(async () => {
+      await db.insert(schema.taskTypeDefinitions).values({
+        slug: TYPE,
+        displayName: TYPE,
+        source: 'test',
+        runListStrategy: 'workflow_paths',
+      });
+      stub(CURRENT, 0, TYPE);
+      stub(PLAIN, 1, TYPE);
+      stub(OK, 2, TYPE, { fixConsumer: { version: 1 }, editsCodeOrTests: true });
+    });
+    afterAll(async () => {
+      await db.delete(schema.tasks).where(eq(schema.tasks.userId, userId));
+      await db.delete(schema.taskTypeDefinitions).where(eq(schema.taskTypeDefinitions.slug, TYPE));
+    });
+
+    it('is marked dead when the pinned target is registered without the capability', async () => {
+      const id = await seedPaths(legPin(PLAIN).pin, CURRENT);
+      expect(await reconcileDeadTasks(db, deps)).toMatchObject({ marked: 1, failed: 0 });
+      const t = await taskOf(id);
+      expect(t.deadAt).not.toBeNull();
+      expect(t.deadReason).toContain(PLAIN);
+    });
+
+    it('is marked dead by name when the pinned target is unregistered, and revived once it is registered', async () => {
+      const id = await seedPaths(legPin(GHOST).pin, CURRENT);
+      expect(await reconcileDeadTasks(db, deps)).toMatchObject({ marked: 1, failed: 0 });
+      expect((await taskOf(id)).deadAt).not.toBeNull();
+      const [dead] = await eventsOf(id, 'task.dead');
+      expect((dead!.payload as { unresolved?: string[] }).unresolved).toContain(GHOST);
+      expect(h.adds).toEqual([]);
+      stub(GHOST, 3, TYPE, { fixConsumer: { version: 1 }, editsCodeOrTests: true });
+      expect(await reconcileDeadTasks(db, deps)).toMatchObject({ marked: 0, revived: 1 });
+      expect((await taskOf(id)).deadAt).toBeNull();
+    });
+
+    it('is left alone when the pinned target is registered and capable', async () => {
+      const id = await seedPaths(legPin(OK).pin, CURRENT);
+      expect(await reconcileDeadTasks(db, deps)).toMatchObject({ marked: 0, revived: 0 });
+      expect((await taskOf(id)).deadAt).toBeNull();
+    });
+
+    it('does not judge a task with no pin whose current step is unregistered', async () => {
+      const id = await seedPaths(null, 'cfr-p-unregistered');
+      expect(await reconcileDeadTasks(db, deps)).toMatchObject({ marked: 0, revived: 0 });
+      expect((await taskOf(id)).deadAt).toBeNull();
+    });
+
+    it('leaves a task whose contract carries no pin and no span alone when its current step is registered', async () => {
+      const id = await seedPaths({ version: 1, guardedSpans: [] }, CURRENT);
+      expect(await reconcileDeadTasks(db, deps)).toMatchObject({ marked: 0, revived: 0 });
+      expect((await taskOf(id)).deadAt).toBeNull();
+    });
+
+    it('keeps judging a static pinned task as before', async () => {
+      const custom = LEGS[1]!;
+      const id = await seedTask(custom);
+      await seedRow(custom, id, 'REVIEW', 0, 'pending');
+      expect(await reconcileDeadTasks(db, deps)).toMatchObject({ marked: 0, revived: 0 });
+      expect((await taskOf(id)).deadAt).toBeNull();
     });
   });
 });

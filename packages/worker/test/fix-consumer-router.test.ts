@@ -8,6 +8,11 @@ import {
 import { resetStepAndDownstream } from '../src/queues/_step-reset.js';
 import { advanceStep } from '../src/step-engine/index.js';
 import { stepRegistry } from '../src/step-engine/registry.js';
+import {
+  markModuleSchemaFailed,
+  markModuleSchemaReady,
+  markModuleSchemaUnready,
+} from '../src/modules/schema-ready.js';
 import type { StepDefinition } from '../src/step-engine/step-definition.js';
 import { gate2VerifyApprovalStep } from '../src/step-engine/steps/workflow/09-gate-2-verify-approval.js';
 
@@ -429,6 +434,7 @@ afterEach(() => {
   h.state.moduleRows = [];
   h.state.laterModuleRows = null;
   h.state.moduleReads = 0;
+  markModuleSchemaReady('epoch-fix');
   vi.restoreAllMocks();
   vi.mocked(advanceStep).mockClear();
   setContainerCleanupRunner(null);
@@ -618,5 +624,97 @@ describe('a fix round whose pinned custom target is valid', () => {
     expect(failure()).toBeUndefined();
     expect(h.state.events).not.toContain('fix_loop.unroutable');
     expect(h.state.add.mock.lastCall?.[1]).toMatchObject({ stepId: CAPABLE, round: 2 });
+  });
+});
+
+describe('a fix round whose pinned custom target module cannot run', () => {
+  const snapshot = ['epoch-job-target', CAPABLE, 'epoch-job-step'];
+  const off: [string, () => void][] = [
+    ['deactivated', () => (h.state.moduleRows = [{ deactivatedAt: new Date() }])],
+    [
+      'schema setup failed',
+      () => {
+        markModuleSchemaUnready('epoch-fix');
+        markModuleSchemaFailed('epoch-fix');
+      },
+    ],
+  ];
+
+  describe.each(off)('%s', (_name, switchOff) => {
+    it('fails the task by name before the round is entered, at a step fix request', async () => {
+      h.state.readsAnswer = true;
+      switchOff();
+      vi.mocked(resetStepAndDownstream).mockClear();
+      await handleResult(
+        db as never,
+        ctx(snapshot, pin(CAPABLE)) as never,
+        'epoch-job-step',
+        loopBack as never,
+      );
+      expect(failure()?.errorMessage).toContain(`fix loop target ${CAPABLE}`);
+      expect(h.state.events).toContain('fix_loop.unroutable');
+      expect(h.state.events).not.toContain('fix_loop.started');
+      expect(vi.mocked(resetStepAndDownstream)).not.toHaveBeenCalled();
+      expect(h.state.add).not.toHaveBeenCalled();
+    });
+
+    it('fails the task by name before the round is entered, at the round-limit Continue', async () => {
+      h.state.readsAnswer = true;
+      switchOff();
+      vi.mocked(resetStepAndDownstream).mockClear();
+      await resolveFixLoopGate(
+        db as never,
+        ctx(snapshot, pin(CAPABLE)) as never,
+        GATE as never,
+        'continue',
+        1,
+        '',
+      );
+      expect(failure()?.errorMessage).toContain(`fix loop target ${CAPABLE}`);
+      expect(h.state.events).toContain('fix_loop.unroutable');
+      expect(h.state.events).not.toContain('fix_loop.continued');
+      expect(vi.mocked(resetStepAndDownstream)).not.toHaveBeenCalled();
+      expect(h.state.add).not.toHaveBeenCalled();
+    });
+  });
+
+  const routes: [string, () => void][] = [
+    ['an active module row', () => (h.state.moduleRows = [{ deactivatedAt: null }])],
+    ['no module row', () => {}],
+    ['a schema that is merely unready', () => markModuleSchemaUnready('epoch-fix')],
+  ];
+  it.each(routes)('still routes with %s', async (_name, setUp) => {
+    h.state.readsAnswer = true;
+    setUp();
+    vi.mocked(resetStepAndDownstream).mockClear();
+    vi.mocked(resetStepAndDownstream).mockResolvedValueOnce(null);
+    await handleResult(
+      db as never,
+      ctx(snapshot, pin(CAPABLE)) as never,
+      'epoch-job-step',
+      loopBack as never,
+    );
+    expect(failure()).toBeUndefined();
+    expect(vi.mocked(resetStepAndDownstream).mock.calls[0]![2]).toBe(CAPABLE);
+    expect(h.state.events).toContain('fix_loop.started');
+  });
+
+  it('reads no module row for a leg with no pin or a malformed pin', async () => {
+    h.state.readsAnswer = true;
+    vi.mocked(resetStepAndDownstream).mockClear();
+    vi.mocked(resetStepAndDownstream).mockResolvedValueOnce(null);
+    await handleResult(
+      db as never,
+      ctx([...snapshot, '07-phase-2-implement'], null) as never,
+      'epoch-job-step',
+      loopBack as never,
+    );
+    await handleResult(
+      db as never,
+      ctx(['epoch-job-target', '07-phase-2-implement', 'epoch-job-step'], { version: 99 }) as never,
+      'epoch-job-step',
+      loopBack as never,
+    );
+    expect(h.state.moduleReads).toBe(0);
   });
 });

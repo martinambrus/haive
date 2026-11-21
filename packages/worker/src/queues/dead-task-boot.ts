@@ -1,7 +1,7 @@
 import { DataEdgePlanError } from '@haive/shared/data-edge-plan';
 import { assertDataEdgeSupport } from '../step-engine/data-edge-support.js';
 import { assertWorkerExecutionContractSupported } from '../step-engine/execution-contract-support.js';
-import { unsupportedPinnedFixTarget } from '../step-engine/fix-consumer.js';
+import { pinnedFixTarget, unsupportedPinnedFixTarget } from '../step-engine/fix-consumer.js';
 import {
   ExecutionContractError,
   DerivedRunPlanError,
@@ -169,7 +169,8 @@ export function deadTaskResolution(
   const unresolved = isStatic ? [...resolveRunList(scope, registry).unresolved] : [];
   // A task with no snapshot keeps no list to re-check, so the record of its death says what was missing.
   if (task.runListSnapshot === null) {
-    for (const id of task.deathNamed ?? []) {
+    const pinned = pinnedFixTarget(task.executionContract)?.stepId;
+    for (const id of [...(task.deathNamed ?? []), ...(pinned ? [pinned] : [])]) {
       if (!unresolved.includes(id) && !resolveTaskStep(scope, id, registry)) unresolved.push(id);
     }
   }
@@ -569,7 +570,10 @@ export async function reconcileDeadTasks(
   let marked = 0;
   const live = await readCandidates(
     db,
-    and(isNull(schema.tasks.deadAt), isNotNull(schema.tasks.runListSnapshot)),
+    and(
+      isNull(schema.tasks.deadAt),
+      or(isNotNull(schema.tasks.runListSnapshot), isNotNull(schema.tasks.executionContract)),
+    ),
   );
   for (const c of live) {
     try {

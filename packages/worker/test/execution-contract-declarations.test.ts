@@ -6,6 +6,7 @@ import { StepRegistry } from '../src/step-engine/registry.js';
 import type { StepDefinition } from '@haive/shared/step';
 import { validateComposition } from '@haive/shared/modularity';
 import { buildRunList } from '../src/queues/run-list.js';
+import { assertMatchingOutputDeclaration } from '../src/step-engine/step-output-contract.js';
 const evaluate = vi.fn(async () => true);
 const composable = {
   stepId: 'fix',
@@ -162,4 +163,28 @@ it('rejects the actual core cleanup on the feasible zero-merge path', () => {
       }),
     ]),
   );
+});
+
+it('refuses a fix consumer that allows a user skip, on every registration path', () => {
+  const skippable = {
+    ...def,
+    metadata: { ...def.metadata, allowSkip: true },
+  } as StepDefinition;
+  expect(() => new StepRegistry().register(skippable)).toThrow('fix-consumer-skippable');
+  expect(() => new StepRegistry().override(skippable)).toThrow('fix-consumer-skippable');
+  expect(() => assertMatchingOutputDeclaration(skippable, composable)).toThrow(
+    'fix-consumer-skippable',
+  );
+  expect(() => load(skippable)).toThrow('fix-consumer-skippable');
+});
+
+it('still registers a fix consumer without allowSkip and an allowSkip step without the capability', () => {
+  expect(() => new StepRegistry().register(def)).not.toThrow();
+  const { fixConsumer: _capability, ...plain } = def;
+  expect(() =>
+    new StepRegistry().register({
+      ...plain,
+      metadata: { ...def.metadata, allowSkip: true },
+    } as StepDefinition),
+  ).not.toThrow();
 });

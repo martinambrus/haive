@@ -1066,15 +1066,22 @@ async function routableFixLoopTarget(
     registry: stepRegistry,
     executionContract: ctx.executionContract,
   });
-  if (resolved.ok) return resolved.def;
+  const id = resolved.ok ? resolved.def.metadata.id : null;
+  const off = id
+    ? ((await moduleDeactivationMessage(db, id)) ?? moduleSchemaFailedMessage(id))
+    : null;
+  if (resolved.ok && off === null) return resolved.def;
+  const reason = resolved.ok
+    ? `fix loop target ${id} of task type ${ctx.workflowType} cannot run: ${off}`
+    : resolved.reason;
   // Taken under the source row like the hand-off it replaces, as a Retry takes the steps first.
   const failed = await db.transaction(async (tx) => {
     if (!(await lockOwnedStep(tx, sourceRowId))) return false;
-    if (!(await writeTaskFailed(tx, ctx.taskId, resolved.reason, ctx.orchestrationEpoch))) {
+    if (!(await writeTaskFailed(tx, ctx.taskId, reason, ctx.orchestrationEpoch))) {
       return false;
     }
     await appendEvent(tx, ctx.taskId, sourceRowId, 'fix_loop.unroutable', {
-      reason: resolved.reason,
+      reason,
     });
     return true;
   });

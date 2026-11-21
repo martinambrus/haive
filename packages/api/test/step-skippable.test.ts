@@ -115,4 +115,49 @@ describe('isStepSkippable', () => {
       expect(isStepSkippable(flags, SKIPPABLE, { type: 'workflow', executionContract })).toBe(true);
     });
   });
+
+  describe('pinned fix target', () => {
+    const TARGET = 'module.fix-demo.repair';
+    const withTarget = new Map(flags).set(TARGET, {
+      ...flags.get('11g-save-database')!,
+      stepId: TARGET,
+      allowSkip: true,
+    });
+    const fixPin = (stepId: string) => ({
+      version: 1,
+      guardedSpans: [],
+      fixTarget: { stepId, capabilityVersion: 1 },
+    });
+
+    it('refuses the target the pin names, even when its catalog row opts in', () => {
+      expect(
+        isStepSkippable(withTarget, TARGET, {
+          type: 'workflow',
+          executionContract: fixPin(TARGET),
+        }),
+      ).toBe(false);
+    });
+
+    it('keeps the same step skippable without a pin or when the pin names another step', () => {
+      expect(isStepSkippable(withTarget, TARGET, { type: 'workflow' })).toBe(true);
+      expect(
+        isStepSkippable(withTarget, TARGET, {
+          type: 'workflow',
+          executionContract: fixPin('module.fix-demo.other'),
+        }),
+      ).toBe(true);
+    });
+
+    it('refuses under a malformed pin and leaves 07 and ordinary steps unchanged', () => {
+      expect(
+        isStepSkippable(withTarget, TARGET, {
+          type: 'workflow',
+          executionContract: { version: 99 },
+        }),
+      ).toBe(false);
+      const task = { type: 'workflow', executionContract: fixPin(TARGET) };
+      expect(isStepSkippable(withTarget, '07-phase-2-implement', task)).toBe(false);
+      expect(isStepSkippable(withTarget, '11g-save-database', task)).toBe(true);
+    });
+  });
 });

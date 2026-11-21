@@ -781,8 +781,9 @@ registered step provides, or a span whose first step leads the list. Behind that
 refuses every custom fix target today, `deadTaskResolution` also asks `unsupportedPinnedFixTarget`
 (`step-engine/fix-consumer.ts`) about the pinned target: a target absent from the pinned run list,
 or registered but not a module step declaring the pinned `fixConsumer` version (or fanning out),
-is a cause too; an unregistered target stays an unresolved step. Dead is neither failed nor
-completed. `markTaskDead`
+is a cause too; an unregistered target stays an unresolved step (a task with no run-list snapshot
+has no list to find it in, so its pin names it) and the task revives once the target registers.
+Dead is neither failed nor completed. `markTaskDead`
 (`queues/task-queue.ts`) sets `dead_at` and `dead_reason`, keeps the status and the epoch, appends
 `task.dead` (`TASK_DEAD_EVENT`) naming the missing ids, supersedes every open run of the task, and
 otherwise tears nothing down, so a revive finds the task as it was. The api refuses every advancing
@@ -790,7 +791,7 @@ action on a dead task with 409 `task_dead` (`api/src/lib/task-dead.ts`); Cancel 
 
 **What marks it.** At boot, `reconcileDeadTasks` (`queues/dead-task-boot.ts`) runs after the
 orphaned jobs are handed back and before orphaned steps are recovered; it checks every live task
-that has a run-list snapshot and marks one that names a missing step, lacks executable support for a
+that has a run-list snapshot or an execution-contract pin and marks one that names a missing step, lacks executable support for a
 pinned output contract or host role policy, or carries an unsupported execution-contract pin. At run
 time the hand-off marks a task whose current or next step does not resolve. An
 `ExecutionContractError` from a worker START or ADVANCE is terminal too: START marks only a
@@ -798,8 +799,9 @@ still-queued task at the epoch it read, and ADVANCE uses the held epoch and step
 `markTaskDeadFromJob`. Both preserve the named reason, append one `task.dead` event and supersede
 open runs; their callers kill CLI sandboxes and resync project state after commit. Duplicate jobs
 write nothing and the stalled sweep excludes dead tasks. API create and first START refusals still
-write no task state, event or job. A task with no snapshot (the dynamic types) is only ever marked
-at run time.
+write no task state, event or job. A task with no snapshot (the dynamic types) and no
+execution-contract pin is only ever marked at run time; boot judges one that carries a pin like any
+other, naming its pinned fix target beside the steps its last `task.dead` event named.
 
 **What revives it.** Required integrations of the current step are re-resolved as well: a required
 `provider-missing` keeps it dead even when every step resolves. The revival owner repeats this check

@@ -225,13 +225,8 @@ const SHAPES: Shape[] = [
     contract: guarded('module.gg.guard'),
     strategy: 'workflow_paths',
     snapshot: null,
-    expected: {
-      availability: 'refused',
-      create: 'refused',
-      ...API_ADMITS,
-      ...WORKER_KILLS,
-      boot: 'untouched',
-    },
+    // Boot judges a snapshot-less task that carries a contract, so it agrees with the workers.
+    expected: { availability: 'refused', create: 'refused', ...API_ADMITS, ...WORKER_KILLS },
   },
   {
     name: 'guarded with a predicate only the API registers',
