@@ -1,7 +1,7 @@
 import { readdirSync, readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
-import { baselineColumns, baselineTableNames } from './baseline.js';
+import { baselineColumns, baselineTableNames, DROPPED_SINCE_BASELINE } from './baseline.js';
 import { checksum } from './checksum.js';
 
 const baselineUrl = new URL('../../migrations/0000_baseline.sql', import.meta.url);
@@ -19,9 +19,36 @@ CREATE TABLE "gadgets" (
 );
 `;
 
+function liveTablesAfterMigrations(): Set<string> {
+  const tables = new Set(baselineTableNames(baselineSql));
+  // A LOOSER parser than the production one, deliberately: `baselineTableNames` matches
+  // drizzle-kit's exact generated shape, while these are hand-written and guarded
+  // (`CREATE TABLE IF NOT EXISTS`). Tightening the production parser to fit them would make it
+  // accept output drizzle-kit never produces, which is the shape it exists to verify.
+  const migrationsDir = new URL('../../migrations/', import.meta.url);
+  for (const file of readdirSync(migrationsDir).sort()) {
+    if (!file.endsWith('.sql') || file === '0000_baseline.sql') continue;
+    // Comments STRIPPED first. Every migration here documents its own rollback, which means the
+    // header literally contains `DROP TABLE IF EXISTS "…"` — matched by the loop below, this
+    // silently removed the very table the file creates and the count came out unchanged.
+    const sql = readFileSync(new URL(file, migrationsDir), 'utf8').replace(/--[^\n]*/g, '');
+    for (const m of sql.matchAll(/CREATE TABLE (?:IF NOT EXISTS )?"?([a-z0-9_]+)"?/gi)) {
+      tables.add(m[1]!);
+    }
+    for (const m of sql.matchAll(/DROP TABLE (?:IF EXISTS )?"?([a-z0-9_]+)"?/gi)) {
+      tables.delete(m[1]!);
+    }
+  }
+  return tables;
+}
+
 describe('baselineTableNames', () => {
   it('finds every created table', () => {
     expect(baselineTableNames(SAMPLE)).toEqual(['widgets', 'gadgets']);
+  });
+
+  it('leaves out the tables it is told to skip', () => {
+    expect(baselineTableNames(SAMPLE, ['widgets'])).toEqual(['gadgets']);
   });
 });
 
@@ -32,6 +59,10 @@ describe('baselineColumns', () => {
       'widgets.id',
       'widgets.name',
     ]);
+  });
+
+  it('leaves out the columns of the tables it is told to skip', () => {
+    expect([...baselineColumns(SAMPLE, ['widgets'])]).toEqual(['gadgets.id']);
   });
 });
 
@@ -53,27 +84,17 @@ describe('the real baseline', () => {
       const src = readFileSync(new URL(file, schemaDir), 'utf8');
       declared += (src.match(/=\s*pgTable\(/g) ?? []).length;
     }
-    const tables = new Set(baselineTableNames(baselineSql));
-    // A LOOSER parser than the production one, deliberately: `baselineTableNames` matches
-    // drizzle-kit's exact generated shape, while these are hand-written and guarded
-    // (`CREATE TABLE IF NOT EXISTS`). Tightening the production parser to fit them would make it
-    // accept output drizzle-kit never produces, which is the shape it exists to verify.
-    const migrationsDir = new URL('../../migrations/', import.meta.url);
-    for (const file of readdirSync(migrationsDir).sort()) {
-      if (!file.endsWith('.sql') || file === '0000_baseline.sql') continue;
-      // Comments STRIPPED first. Every migration here documents its own rollback, which means the
-      // header literally contains `DROP TABLE IF EXISTS "…"` — matched by the loop below, this
-      // silently removed the very table the file creates and the count came out unchanged.
-      const sql = readFileSync(new URL(file, migrationsDir), 'utf8').replace(/--[^\n]*/g, '');
-      for (const m of sql.matchAll(/CREATE TABLE (?:IF NOT EXISTS )?"?([a-z0-9_]+)"?/gi)) {
-        tables.add(m[1]!);
-      }
-      for (const m of sql.matchAll(/DROP TABLE (?:IF EXISTS )?"?([a-z0-9_]+)"?/gi)) {
-        tables.delete(m[1]!);
-      }
-    }
+    const tables = liveTablesAfterMigrations();
 
     expect(tables.size).toBe(declared);
+  });
+
+  it('the baseline tables no later migration keeps are exactly DROPPED_SINCE_BASELINE', () => {
+    const live = liveTablesAfterMigrations();
+    const dropped = baselineTableNames(baselineSql)
+      .filter((name) => !live.has(name))
+      .sort();
+    expect(dropped).toEqual([...DROPPED_SINCE_BASELINE].sort());
   });
 
   it('creates the core tables the pre-baseline corpus never could', () => {

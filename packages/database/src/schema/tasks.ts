@@ -900,28 +900,6 @@ export const taskStepAgentMinings = pgTable(
   ],
 );
 
-// --- Per-task "CLI touched" markers (retired) ----------------------------
-// Once recorded which (step, role) the user explicitly set a CLI for WITHIN a task
-// that has ignore_saved_step_clis=true, so that task honoured the saved per-step
-// pref there. Neither written nor read any more: a mid-task change is a
-// task_step_cli_choices row, and such a task honours no saved pref. A row left
-// from before has no effect. The table stays until a later migration drops it.
-export const taskStepCliTouched = pgTable(
-  'task_step_cli_touched',
-  {
-    taskId: uuid('task_id')
-      .notNull()
-      .references(() => tasks.id, { onDelete: 'cascade' }),
-    stepId: varchar('step_id', { length: 128 }).notNull(),
-    role: varchar('role', { length: 32 }).notNull().default('default'),
-    createdAt: timestamp('created_at').notNull().defaultNow(),
-  },
-  (table) => [
-    uniqueIndex('task_step_cli_touched_pk').on(table.taskId, table.stepId, table.role),
-    index('task_step_cli_touched_task_id_idx').on(table.taskId),
-  ],
-);
-
 // --- Per-task step CLI choices -------------------------------------------
 // The CLI (and effort) a person picked for one (step, role) WITHIN one task. Every
 // resolver reads it before the user's saved preference, which a pick rewrites only when

@@ -34,7 +34,6 @@ function setup() {
     tasks: schema.tasks,
     cliProviders: schema.cliProviders,
     taskStepCliChoices: schema.taskStepCliChoices,
-    taskStepCliTouched: schema.taskStepCliTouched,
     userStepCliPreferences: schema.userStepCliPreferences,
     userStepCliRolePreferences: schema.userStepCliRolePreferences,
   });
@@ -532,29 +531,6 @@ describe('a slot with and without ignore_saved_step_clis', () => {
       ]);
       expect(listing.get(TASK)).toEqual(ids);
     }
-  });
-
-  it('leaves a leftover touch-marker row without effect', async () => {
-    const s = setup();
-    s.fake.insert(schema.taskStepCliTouched, {
-      taskId: TASK,
-      stepId: dflt.stepId,
-      role: 'default',
-    });
-    s.save(dflt.stepId, SAVED_CLI);
-    const [card] = await enrichStepsWithCliPreferences(
-      s.db,
-      flags,
-      USER,
-      [{ stepId: dflt.stepId }],
-      TASK,
-      true,
-    );
-    expect(card?.preferredCliProviderId).toBeNull();
-    const listing = await resolveCurrentStepCliProviderIds(s.db, flags, USER, [
-      { id: TASK, currentStepId: dflt.stepId, cliProviderId: TASK_CLI, ignoreSavedStepClis: true },
-    ]);
-    expect(listing.get(TASK)).toEqual([TASK_CLI]);
   });
 });
 

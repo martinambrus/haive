@@ -19,24 +19,36 @@ const CREATE_TABLE = /^CREATE TABLE "([a-z0-9_]+)" \($/;
  *  with an unquoted `CONSTRAINT`, so requiring a quoted identifier first is enough. */
 const COLUMN_LINE = /^\s+"([a-z0-9_]+)"\s/;
 
-/** Every table the baseline creates. */
-export function baselineTableNames(sql: string): string[] {
+/**
+ * Baseline tables a later migration drops. The adoption classifier needs every expected table
+ * present before it calls a journal-less database `legacy`, so a database built by `push --force`
+ * from a barrel that no longer declares one of these, or one whose journal `push` dropped, would
+ * read as half-built and be refused. Leaving them out keeps both adoptable; a database that still
+ * has the table is fine too, since extra tables are allowed and the dropping migration removes it.
+ * `baseline.test.ts` pins this list to the corpus: add a table here in the same change as the
+ * migration that drops it.
+ */
+export const DROPPED_SINCE_BASELINE: readonly string[] = ['task_step_cli_touched'];
+
+/** Every table the baseline creates, except those named in `skip`. */
+export function baselineTableNames(sql: string, skip: readonly string[] = []): string[] {
   const names: string[] = [];
   for (const line of sql.split('\n')) {
     const match = CREATE_TABLE.exec(line);
-    if (match?.[1]) names.push(match[1]);
+    if (match?.[1] && !skip.includes(match[1])) names.push(match[1]);
   }
   return names;
 }
 
-/** Every `table.column` the baseline creates, as a set of `"table.column"` keys. */
-export function baselineColumns(sql: string): Set<string> {
+/** Every `table.column` the baseline creates, as a set of `"table.column"` keys, except the
+ *  columns of tables in `skip`. */
+export function baselineColumns(sql: string, skip: readonly string[] = []): Set<string> {
   const columns = new Set<string>();
   let current: string | null = null;
   for (const line of sql.split('\n')) {
     const table = CREATE_TABLE.exec(line);
     if (table?.[1]) {
-      current = table[1];
+      current = skip.includes(table[1]) ? null : table[1];
       continue;
     }
     if (current === null) continue;
