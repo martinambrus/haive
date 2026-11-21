@@ -4,6 +4,7 @@ import { DelayedError } from 'bullmq';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createDatabase, schema, type Database } from '@haive/database';
 import { configService, TASK_JOB_NAMES, type WorkflowType } from '@haive/shared';
+import { ExecutionContractError } from '@haive/shared/modularity';
 import {
   enqueueRedrive,
   handleResult,
@@ -181,6 +182,7 @@ describe.skipIf(!url)('recovery of a fix round on Postgres', () => {
     for (const key of Object.keys(applied)) delete applied[key];
     gate.held = undefined;
     vi.spyOn(configService, 'getFresh').mockResolvedValue('normal');
+    vi.spyOn(configService, 'getBoolean').mockResolvedValue(false);
     await db.delete(schema.tasks).where(eq(schema.tasks.userId, userId));
   });
   afterAll(async () => {
@@ -895,7 +897,7 @@ describe.skipIf(!url)('recovery of a fix round on Postgres', () => {
         if (leg.pin) {
           expect(result).toMatchObject({ marked: 1, revived: 0 });
           expect(task.deadAt).not.toBeNull();
-          expect(task.deadReason).toContain('a custom fix target is not yet supported');
+          expect(task.deadReason).toContain(new ExecutionContractError('refused').code);
         } else {
           expect(result).toMatchObject({ marked: 0, revived: 0 });
           expect(task.deadAt).toBeNull();

@@ -43,9 +43,8 @@ const taskOf = (
   executionContract,
   runListSnapshot,
 });
-const notCapable = (id: string, version = 1) =>
-  `the pinned fix target ${id} is not a registered module step with fix consumer version ${version} on this worker`;
-const offList = (id: string) => `the pinned fix target ${id} is not in the run list of this task`;
+// Each refusal row varies one input, so a refusal alone says which check fired; the wording is free to change.
+const refusedFor = (id: string) => expect.stringContaining(id);
 
 describe('unsupportedPinnedFixTarget', () => {
   const capable = def(TARGET, { fixConsumer: { version: 1 } });
@@ -69,7 +68,7 @@ describe('unsupportedPinnedFixTarget', () => {
   it('judges a task with no pinned run list by the registry alone', () => {
     const task = taskOf(pin(TARGET), null);
     expect(unsupportedPinnedFixTarget(task, registryOf([capable]))).toBeNull();
-    expect(unsupportedPinnedFixTarget(task, registryOf([def(TARGET)]))).toBe(notCapable(TARGET));
+    expect(unsupportedPinnedFixTarget(task, registryOf([def(TARGET)]))).toEqual(refusedFor(TARGET));
   });
 
   it.each([
@@ -77,16 +76,16 @@ describe('unsupportedPinnedFixTarget', () => {
     ['a fan-out step', def(TARGET, { fixConsumer: { version: 1 }, agentMining: {} })],
     ['a fix consumer of another version', def(TARGET, { fixConsumer: { version: 2 } })],
   ])('names %s', (_name, step) => {
-    expect(unsupportedPinnedFixTarget(taskOf(pin(TARGET)), registryOf([step]))).toBe(
-      notCapable(TARGET),
+    expect(unsupportedPinnedFixTarget(taskOf(pin(TARGET)), registryOf([step]))).toEqual(
+      refusedFor(TARGET),
     );
   });
 
   it('names a core step the contract pins, since only a module step can be a fix target', () => {
     const core = def(FIX_LOOP_TARGET_STEP_ID, { fixConsumer: { version: 1 } });
     const task = taskOf(pin(FIX_LOOP_TARGET_STEP_ID), [FIX_LOOP_TARGET_STEP_ID, OTHER]);
-    expect(unsupportedPinnedFixTarget(task, registryOf([core]))).toBe(
-      notCapable(FIX_LOOP_TARGET_STEP_ID),
+    expect(unsupportedPinnedFixTarget(task, registryOf([core]))).toEqual(
+      refusedFor(FIX_LOOP_TARGET_STEP_ID),
     );
   });
 
@@ -94,14 +93,45 @@ describe('unsupportedPinnedFixTarget', () => {
     ['a capable target', [capable]],
     ['an unregistered target', []],
   ])('names %s that is not on the pinned run list', (_name, registered) => {
-    expect(unsupportedPinnedFixTarget(taskOf(pin(TARGET), [OTHER]), registryOf(registered))).toBe(
-      offList(TARGET),
-    );
+    expect(
+      unsupportedPinnedFixTarget(taskOf(pin(TARGET), [OTHER]), registryOf(registered)),
+    ).toEqual(refusedFor(TARGET));
   });
 
-  it('reads the candidates of a derived plan as the run list', () => {
-    const task = { executionContract: pin(TARGET), derivedRunPlan: rolePlan(1) };
-    expect(unsupportedPinnedFixTarget(task, registryOf([capable]))).toBe(offList(TARGET));
+  describe('a derived plan', () => {
+    const planListing = (...paths: (string | null)[]) => {
+      const plan = structuredClone(rolePlan(1)) as unknown as {
+        candidates: { executionPath: string | null; stepIds: string[] }[];
+      };
+      for (const c of plan.candidates) if (paths.includes(c.executionPath)) c.stepIds.push(TARGET);
+      return plan;
+    };
+
+    it('reads the candidates as the run list', () => {
+      const task = { executionContract: pin(TARGET), derivedRunPlan: rolePlan(1) };
+      expect(unsupportedPinnedFixTarget(task, registryOf([capable]))).toEqual(refusedFor(TARGET));
+    });
+
+    it.each([
+      ['before triage chose a path, one candidate listing it is enough', null],
+      ['on the chosen path that lists it', 'quick_bugfix'],
+    ])('names nothing for a capable target: %s', (_name, executionPath) => {
+      const task = {
+        executionContract: pin(TARGET),
+        derivedRunPlan: planListing('quick_bugfix'),
+        executionPath,
+      };
+      expect(unsupportedPinnedFixTarget(task, registryOf([capable]))).toBeNull();
+    });
+
+    it('names a capable target the chosen path does not list', () => {
+      const task = {
+        executionContract: pin(TARGET),
+        derivedRunPlan: planListing('quick_bugfix'),
+        executionPath: 'full_workflow',
+      };
+      expect(unsupportedPinnedFixTarget(task, registryOf([capable]))).toEqual(refusedFor(TARGET));
+    });
   });
 
   it('throws on a malformed contract instead of reading it as no target', () => {

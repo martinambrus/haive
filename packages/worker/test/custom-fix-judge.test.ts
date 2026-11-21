@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { ExecutionContractError } from '@haive/shared/modularity';
 import { deadTaskResolution } from '../src/queues/dead-task-boot.js';
 import { StepRegistry } from '../src/step-engine/registry.js';
 import type { StepDefinition } from '../src/step-engine/step-definition.js';
@@ -53,7 +54,7 @@ const task = (over: Partial<Parameters<typeof deadTaskResolution>[0]> = {}) => (
   ...over,
 });
 
-const REFUSAL = 'a custom fix target is not yet supported by this worker';
+const CONTRACT_REFUSED = new ExecutionContractError('refused').code;
 const ORDINARY = { unresolved: [], outsideList: null };
 
 describe('deadTaskResolution with the fence open', () => {
@@ -204,7 +205,7 @@ describe('deadTaskResolution with the real fence', () => {
       registry,
     );
     expect(found).toMatchObject({ unresolved: [], outsideList: null });
-    expect(found.supportReason).toContain(REFUSAL);
+    expect(found.supportReason).toContain(CONTRACT_REFUSED);
   });
 
   it('refuses an incapable fixTarget the same way', () => {
@@ -215,7 +216,7 @@ describe('deadTaskResolution with the real fence', () => {
       registry,
     );
     expect(found).toMatchObject({ unresolved: [], outsideList: null });
-    expect(found.supportReason).toContain(REFUSAL);
+    expect(found.supportReason).toContain(CONTRACT_REFUSED);
   });
 
   it('leaves an unpinned task alone', () => {
