@@ -49,10 +49,10 @@ now models each split job with those historical numbers and explicit setup allow
 - The constants and the formula live in one place: the `budget` of each job in
   `scripts/test/ci-step-independence.test.mjs` (`minimumLimits` is the formula). None of this document, `ci.yml` or
   `scripts/test/ci-gated-list.test.mjs` states the current number of rows, so adding a GATED row needs no edit to a
-  count or a limit. The limits in `ci.yml` were raised to hold the list plus the budget's `rowHeadroom` rows, so the
-  next rows need no edit; once the list outgrows them the pin fails and names the minutes to raise both limits to (for
-  the list plus the headroom). Measure a green run again, then raise the two limits together. The ceiling of twice a
-  green run bounds how much headroom the limits can carry.
+  count or a limit, until the list outgrows the limits in `ci.yml`. The pin then fails and names the minutes to raise
+  both limits to, which hold the list plus the budget's `rowHeadroom` rows, so the rows added after a raise need no edit
+  either. Measure a green run again, then raise the two limits together. The ceiling of twice a green run bounds
+  `rowHeadroom`, and the test checks that it does.
 - The five guarded-span controls added on 2026-11-18 ran in 6.4 to 18.8 s each locally including Vitest startup,
   11.5 s on average, close to the modelled 10 s; this does not remeasure the complete CI job. The historical 10 s
   per-row model is retained; verify the next green CI run.
@@ -79,7 +79,7 @@ out falsely, and Ctrl-C works there.
 
 ## CI steps
 
-Every environment-gated test under `packages/` needs a GATED row or an explicit reasoned exemption in `scripts/test/ci-gated-list.test.mjs`, which also verifies that exempt Redis files already run in another workflow step with their guard environment. It also pins that the list is exactly the gated files that are not exempt, so a row is never forgotten, dropped, doubled or stale, and no count is edited when a row is added.
+Every environment-gated test under `packages/` needs a GATED row or an explicit reasoned exemption in `scripts/test/ci-gated-list.test.mjs`, which also verifies that exempt Redis files already run in another workflow step with their guard environment. It also pins that the list is exactly the gated files that are not exempt, so a missing, doubled or stale row fails and no count is edited when a row is added; a gated file deleted together with its row is not flagged.
 
 In the `smokes` and `postgres-gated` jobs of `.github/workflows/ci.yml` every step up to `Apply database migrations`
 (id `migrate`) is setup and keeps the default condition, so a failed one skips everything after it. Every step after it is an independent

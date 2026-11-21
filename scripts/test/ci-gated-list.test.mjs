@@ -140,7 +140,7 @@ describe('the environment-gated list in ci.yml', () => {
     assert.equal(new Set(listedFiles).size, listedFiles.length, 'duplicate GATED test row');
   });
 
-  // The former hard-coded row count, derived: the list is the gated files that are not exempt.
+  // The tests around this one each check a part of it; compared whole, a failure shows every difference.
   it('is exactly the gated test files that are not exempt', () => {
     assert.deepEqual(
       listedFiles,

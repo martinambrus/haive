@@ -385,8 +385,8 @@ jobs:
     runs-on: ubuntu-latest
     # Sized by the budget in scripts/test/ci-step-independence.test.mjs, which holds the formula: the gated
     # step covers its rows' modelled time on a slower runner, and this limit covers the setup plus that
-    # step's whole limit. Both were raised to hold the list plus the budget's rowHeadroom rows, so the next
-    # rows need no edit here; that test fails, naming the minutes to raise, once the list outgrows them.
+    # step's whole limit. A new row needs no edit here until the list outgrows the two limits; that test then
+    # fails, naming the minutes to raise both to, which hold the list plus the budget's rowHeadroom rows.
     timeout-minutes: 52
     services:
       postgres:

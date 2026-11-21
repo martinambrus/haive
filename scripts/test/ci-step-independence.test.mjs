@@ -59,8 +59,8 @@ const JOBS = [
     bounded: true,
     // MEASURED 2026-11-12: 1423 s for 143 rows (main: 1222 s for 134), so 10 s/row;
     // 120 s allows duplicate setup and module builds.
-    // The limits in ci.yml were raised to hold the list plus rowHeadroom rows, so the next rows need no
-    // edit; once the list outgrows them, the failure names the limits that hold it plus rowHeadroom more.
+    // A new row needs no edit to the limits in ci.yml until the list outgrows them; the failure then names
+    // the limits that hold the list plus rowHeadroom more rows, and the 2x ceiling bounds rowHeadroom.
     budget: {
       outsideGatedSeconds: 120,
       secondsPerRow: 10,
@@ -137,7 +137,8 @@ function model(checks, { outsideGatedSeconds, secondsPerRow }) {
 
 // The least whole-minute limits that hold `rows` GATED rows. The gated step holds
 // slowRunnerFactor times the time its rows are modelled to take. The job holds a green run plus
-// marginSeconds, and the setup plus the whole gated step limit.
+// marginSeconds, and the setup plus the whole gated step limit. A list so short that the margin
+// alone is over twice a green run has no limits that fit.
 function minimumLimits(
   rows,
   { outsideGatedSeconds, secondsPerRow, slowRunnerFactor, marginSeconds },
@@ -798,6 +799,31 @@ describe('the limits the gated budget names', () => {
       outsideGatedSeconds + short * secondsPerRow + marginSeconds >
         outsideGatedSeconds + stepMinutes * 60,
     );
+  });
+
+  // The limits a failing pin names are those for the list plus rowHeadroom more rows, both in the
+  // job margin pin and in the gated step pin. The limits are set here, so they do not move with ci.yml.
+  it('names the limits for the list plus rowHeadroom more rows', () => {
+    const { outsideGatedSeconds, secondsPerRow, marginSeconds, rowHeadroom } = spec.budget;
+    const count = rows + 100;
+    const named = minimumLimits(count + rowHeadroom, spec.budget);
+    const namedInMessage = new RegExp(
+      `to at least ${named.stepMinutes} and the job's to at least ${named.jobMinutes}\\b`,
+    );
+    // A job limit under a green run plus the margin, with the step limit under it.
+    const job = Math.ceil((outsideGatedSeconds + count * secondsPerRow + marginSeconds) / 60) - 1;
+    assert.throws(() => checkJob(withLimits(count, job - 1, job), spec), namedInMessage);
+    // A step limit under the modelled time, with a job limit that holds it.
+    const { stepMinutes } = minimumLimits(count, spec.budget);
+    assert.throws(
+      () => checkJob(withLimits(count, stepMinutes - 1, named.jobMinutes), spec),
+      namedInMessage,
+    );
+  });
+
+  it('has a rowHeadroom that the 2x ceiling allows for the list as it is', () => {
+    const { stepMinutes, jobMinutes } = minimumLimits(rows + spec.budget.rowHeadroom, spec.budget);
+    checkJob(withLimits(rows, stepMinutes, jobMinutes), spec);
   });
 
   for (const count of [short, rows, rows + 1, rows + 25, rows + 100, rows + 400]) {
