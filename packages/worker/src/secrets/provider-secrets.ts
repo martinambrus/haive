@@ -30,10 +30,14 @@ export async function resolveProviderSecrets(
   const resolved: Record<string, string> = {};
   for (const row of rows) {
     if (WORKER_ONLY_SECRET_NAMES.has(row.secretName)) continue;
-    resolved[row.secretName] = envelopeDecrypt(
+    const value = envelopeDecrypt(
       { encryptedValue: row.encryptedValue, encryptedDek: row.encryptedDek },
       masterKek,
     );
+    // An empty stored value means not set; injecting it would shadow a same-named adapter
+    // default or plain env value.
+    if (value === '') continue;
+    resolved[row.secretName] = value;
   }
   return resolved;
 }

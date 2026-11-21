@@ -177,6 +177,63 @@ describe('a provider saved through the API with a secret-looking env key', () =>
   });
 });
 
+describe('an empty secret-named env value', () => {
+  it('create refuses it and writes nothing', async () => {
+    const fake = setup();
+    const res = await send('POST', '/', {
+      name: 'claude-code',
+      label: 'p',
+      authMode: 'api_key',
+      envVars: { ANTHROPIC_API_KEY: '' },
+    });
+    expect(res.status).toBe(400);
+    expect(await res.text()).toContain('ANTHROPIC_API_KEY');
+    expect(fake.rows(schema.cliProviders)).toHaveLength(0);
+    expect(fake.rows(schema.cliProviderSecrets)).toHaveLength(0);
+    expect(fake.rows(schema.auditEvents)).toHaveLength(0);
+    expect(h.add).not.toHaveBeenCalled();
+    expect(h.auditLog).not.toHaveBeenCalled();
+  });
+
+  it('update refuses it, keeps the stored secret and applies nothing', async () => {
+    const fake = setup(true);
+    const real = randomBytes(16).toString('hex');
+    expect(
+      (await send('PATCH', `/${PROVIDER}`, { envVars: { ANTHROPIC_API_KEY: real } })).status,
+    ).toBe(200);
+    const before = fake.rows(schema.cliProviders)[0]!;
+    const label = before.label;
+    const envVars = before.envVars;
+    const res = await send('PATCH', `/${PROVIDER}`, {
+      label: 'renamed',
+      envVars: { ANTHROPIC_BASE_URL: 'https://new.example', ANTHROPIC_API_KEY: '' },
+    });
+    expect(res.status).toBe(400);
+    expect(await res.text()).toContain('ANTHROPIC_API_KEY');
+    expect(secretValues(fake).ANTHROPIC_API_KEY === real).toBe(true);
+    expect(fake.rows(schema.cliProviderSecrets)).toHaveLength(1);
+    const after = fake.rows(schema.cliProviders)[0]!;
+    expect(after.label).toBe(label);
+    expect(after.envVars).toEqual(envVars);
+  });
+
+  it('a non-secret empty value is still accepted and stored', async () => {
+    const fake = setup();
+    const created = await send('POST', '/', {
+      name: 'claude-code',
+      label: 'p',
+      authMode: 'api_key',
+      envVars: { FOO_FLAG: '' },
+    });
+    expect(created.status).toBe(201);
+    expect(fake.rows(schema.cliProviders)[0]!.envVars).toEqual({ FOO_FLAG: '' });
+    const other = setup(true);
+    const updated = await send('PATCH', `/${PROVIDER}`, { envVars: { FOO_FLAG: '' } });
+    expect(updated.status).toBe(200);
+    expect(other.rows(schema.cliProviders)[0]!.envVars).toEqual({ FOO_FLAG: '' });
+  });
+});
+
 describe('cloning a provider saved before the split', () => {
   it('gives the clone the legacy key as a secret, never in envVars', async () => {
     const fake = setup();

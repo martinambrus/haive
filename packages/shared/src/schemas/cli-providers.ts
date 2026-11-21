@@ -1,3 +1,4 @@
+import { splitSecretLikeEnv } from '../constants/secret-env.js';
 import { isVersionToken, VERSION_TOKEN_REQUIREMENT } from '../tooling/version-token.js';
 import { z } from 'zod';
 
@@ -95,7 +96,21 @@ export const createCliProviderRequestSchema = z.object({
   executablePath: z.string().optional(),
   wrapperPath: z.string().optional(),
   wrapperContent: z.string().optional(),
-  envVars: z.record(z.string(), z.string()).optional(),
+  // An empty secret-named value would overwrite a stored secret with nothing.
+  envVars: z
+    .record(z.string(), z.string())
+    .superRefine((env, ctx) => {
+      for (const [name, value] of Object.entries(splitSecretLikeEnv(env).secrets)) {
+        if (value === '') {
+          ctx.addIssue({
+            code: 'custom',
+            path: [name],
+            message: `${name} looks like a secret and needs a value; omit it to leave a stored secret unchanged`,
+          });
+        }
+      }
+    })
+    .optional(),
   cliArgs: z.array(z.string()).optional(),
   authMode: cliAuthModeSchema,
   cliVersion: z
