@@ -730,7 +730,7 @@ status: open · kind: design · found: agent-memory pilot pair 2 (the treatment 
 
 PRE-EXISTING, by design today. The step-11 learning review offers `writeFiles` (every planned op or none), the KB and skill sync switches, and an instruction. A planned insert or update can be vetoed alone by emptying its staged draft in the inline editor. A planned delete cannot: a delete op gets no `editPath` (`packages/worker/src/step-engine/steps/workflow/11-phase-8-learning.ts` `learningOpsToDiffFiles` ~:1103, pinned by `11-phase-8-learning.test.ts` ~:528-529). A reviewer who wants to keep one learning the recorder calls stale must reject every op or spend a re-roll through the instruction. Seen on a real run: the recorder planned 2 new, 2 updated and 1 removed learning, and the removal could only be refused by rejecting all five. Needs a decision: a per-op keep for deletes (for example a staged tombstone the reviewer can clear) or a per-op checklist for every op. Interacts with the deletion identity records (#1202) and the replay rules in T672.
 
-### T725 · FNF[translator-render] · Translator render step and artifact lows (+9)
+### T725 · FNF[translator-render] · Translator render step and artifact lows (+10)
 
 status: open · kind: bug · found: translator assembly milestone (module PR #7) · priority: P4
 
@@ -745,6 +745,7 @@ In `martinambrus/haive-module-translator`; all NEW with the render step, none bl
 7. Guards no control pins: the part-count cap throw in `src/routes.ts`; the review status check and the revision comparison between the two sessions in `src/db/artifacts.ts`; `fenceIn` parts other than blocks and invalidations; the store's marker-list check; manifest bytes in `accounted_bytes`.
 8. `src/migrations/0008_artifacts.sql:17`: no index serves the cross-task artifact order of `GET /artifacts` (module PR #9); measured fine at 5,000 artifacts for one owner, more needs a numbered migration. PRE-EXISTING.
 9. Translations page and routes (module PR #9): the Blob copy doubles a download's memory peak; `src/routes.ts:13` accepts `.` and `..` as part filenames (unreachable behind the part lookup); the server can return an empty page with a `nextCursor`, which only the page mitigates. PRE-EXISTING.
+10. Download memory, measured 2026-11-21 (T735 item 2): a whole file just under the 32 MiB bound peaks at 175 to 196 MiB in the renderer plus 31 to 39 MiB in the browser process, a 4 MB part at about 31 MiB. Each part is held several times while it is read and checked (response body, decoded text, the parsed two-byte `content` string, the encoded copy, the WebCrypto digest copy, the Blob copy) and the leftovers pile up between collections. LOW: a book stays far below the bound (estimate: 10 to 16 MB at the admission limits). Fix direction: serve a part as raw bytes with its hash in a header, hash and append it without keeping intermediate copies, or lower the bound. PRE-EXISTING.
 
 ### T726 · FNF[translator-retention] · Translator delete, orphan reconcile and operator leftovers (+11)
 
@@ -772,7 +773,7 @@ In `martinambrus/haive-module-translator`, PRE-EXISTING design. Consent reserves
 
 Related, measured 2026-11-20: `src/db/setup.ts:155-163` (`accountedStorage`) charges 2,048 B per seen row, so about 16,384 runs fill a 32 MiB allowance.
 
-### T728 · FNF[composed-lsp-provider-lock] · composed LSP provider lock and template replacement leftovers (+14)
+### T728 · FNF[composed-lsp-provider-lock] · composed LSP provider lock and template replacement leftovers (+16)
 
 status: open · kind: fix · found: legacy template replacement build and review (#1288) 2026-11-20 · priority: P4
 
@@ -792,10 +793,12 @@ Paths are under `packages/`. NEW means introduced by #1288.
 12. `worker/test/step-runner-reuse.test.ts` prints "invs is not iterable" (test noise). PRE-EXISTING.
 13. The task page's CLI pickers still list every provider for a contract-2 task; the lock answers 409 `composed_lsp_provider_locked` only when a choice is written. Disable or annotate the refused providers in the pickers. Found by the replacement live check. PRE-EXISTING since #1272.
 14. A Retry of step 01 on a contract-2 task rebuilt its image in step 03 with a new id although the row's tag and Dockerfile were unchanged (live check task c858faec, step 7); a legacy row in the same check reused its image. Whether the contract-2 tag rule (#1288) or the contract-2 path causes the rebuild is unchecked.
+15. The step card's CLI mirrors still name the saved CLI on a locked task, though dispatch skips a saved pick the lock refuses (#1297): `api/src/routes/tasks/_helpers.ts` ~:524-545 and `web/src/lib/step-cli-providers.ts` ~:33-47. Show the CLI that dispatch will run. PRE-EXISTING.
+16. `providerHoldFor` (`worker/src/queues/task-queue.ts` ~:1720-1747) holds only on the resolver's id. With an enabled saved pick outside the lock's set and a disabled task CLI inside it, the step fails with "is disabled" instead of parking as it does with nothing saved; a disabled saved pick keeps the disabled refusal and hold although the lock would skip it. Mirror the dispatcher's skip in the hold. PRE-EXISTING (the step failed on the lock before #1297). Checked against the code 2026-11-21.
 
 ### T729 · A CLI remembered on another task can be refused at dispatch for a composed LSP task
 
-status: open, decided by the owner 2026-11-20 (option a), queued · kind: fix · found: #1288 review 2026-11-20 · priority: P3
+status: open, decided by the owner 2026-11-20 (option a), in review as #1297 (2026-11-21) · kind: fix · found: #1288 review 2026-11-20 · priority: P3
 
 Saved CLI preferences ("Also for my later tasks") are user-wide, so a pick remembered on another task is not ordered against this task's composed LSP decision, and `resolvePreferredCli` (`worker/src/step-engine/step-runner.ts` ~:377) applies none of the provider rule. A contract-2 task whose step later resolves a remembered CLI the lock refuses is stopped by the dispatch backstop, and the step fails. The task lock cannot cover it. PRE-EXISTING since #1272.
 
@@ -829,15 +832,17 @@ status: open · kind: fix · found: translator scale and acceptance milestone 20
 
 ### T735 · Translator first paid run and its prerequisites
 
-status: open, in work 2026-11-20 (the owner approved the first paid run and runs it, guided) · kind: feature · found: owner decisions 2026-11-20 · priority: P2
+status: open, in work 2026-11-20 (the owner approved the first paid run and runs it, guided); the free-step walk waits on the owner's admin switch (item 4) and the consent fix (item 7) · kind: feature · found: owner decisions 2026-11-20 · priority: P2
 
 In `martinambrus/haive-module-translator`.
 
 1. DONE module PR #11 (7296b0d). The declared call timeout goes from 180 s to 300 s (owner decision 2026-11-20): module PR #11. The host floor `CLI_TIMEOUT_BASE_MINUTES` (45 minutes on the dev install) already decides a step's own call (`escalatedTimeoutMs`, `packages/shared/src/constants/index.ts` ~:863), so the change matters only if that floor is set lower.
-2. Validate the 32 MiB page bound (`src/web/download.ts:4` `ASSEMBLY_BOUND_BYTES`; building the Blob holds a second copy, about 64 MiB at peak) with a generated book just under and just over it: the first downloads, the second is refused, and the tab's peak memory is recorded. No model calls (owner decision 2026-11-20).
-3. Before the run: T733 merged; the module installed on the dev stack (`external-modules/translator`, `pnpm module add translator`, install, build, `pnpm docker rebuild` while nothing runs); the task type made startable on that install only, by an uncommitted `selectable: true` in `src/manifest.ts`, until the owner's quality sign-off.
-4. A walkthrough for the owner, written after walking the free steps (upload, source approval, consent screen) in the browser.
+2. DONE 2026-11-21, measured, no code change (`.claude/tmp/codex-run/T735/bound-test/results.md`): in Chrome with the module's own download engine, a file just under the bound saved with an equal SHA-256 at 175 to 196 MiB above start in the renderer plus 31 to 39 MiB in the browser process; a 40 MiB file was refused before allocation and its 4 MB part 1 saved at about 31 MiB; an 8 MiB file cost about 47 MiB. Recommendation to the owner: keep 32 MiB (books stay far below it); the README figure is item 6, the memory itself T725 item 10. Original item: validate the 32 MiB page bound (`src/web/download.ts:4` `ASSEMBLY_BOUND_BYTES`; building the Blob holds a second copy, about 64 MiB at peak) with a generated book just under and just over it: the first downloads, the second is refused, and the tab's peak memory is recorded. No model calls (owner decision 2026-11-20).
+3. DONE 2026-11-21: T733 merged (module PR #12, 3493a9e), the module loads on the dev stack, its database exists and the type is listed (local uncommitted `selectable: true`). Original item: before the run: T733 merged; the module installed on the dev stack (`external-modules/translator`, `pnpm module add translator`, install, build, `pnpm docker rebuild` while nothing runs); the task type made startable on that install only, by an uncommitted `selectable: true` in `src/manifest.ts`, until the owner's quality sign-off.
+4. A walkthrough for the owner, written after walking the free steps (upload, source approval, consent screen) in the browser. Written 2026-11-21 from the code and README (`.claude/tmp/codex-run/T735/owner-walkthrough.md`); the browser walk waits on the owner ticking Admin "Allow tasks of module-seeded types" (a global config switch the run may not change). Writing it found item 7.
 5. After the owner's quality sign-off: unhide in a module PR (`selectable: true`, and the README's hidden-type text).
+6. The README's download memory figure ("about twice the bound plus one part, roughly 70 MiB") is low by 2.5 to 2.8 times (item 2). Correct it in a module docs PR.
+7. Setup consent blockers, fixed in module PR #13 (in review 2026-11-21): `providers()` (`src/db/setup.ts`) threw for more than 50 enabled CLI rows (the owner has 78), so the consent form never opened; and it never offered a Claude Code row, whose provider form hides and nulls Model (the model is the last `--model` argument). The fix lists up to 200 rows and offers Claude Code rows by that argument, with the consent fingerprint unchanged. Same PR: a reopened consent form pre-selects its providers (`defaults`, not `default`). Deploy: pull the live clone, `pnpm docker libs`.
 
 ### T736 · FNF[translator-grouping] · Translator unit grouping and calibration envelope leftovers (+8)
 
@@ -859,6 +864,19 @@ In `martinambrus/haive-module-translator`.
 status: open · kind: fix · found: gate-3 parking build (#1296) 2026-11-20 · priority: P4
 
 1. PRE-EXISTING: in a fresh worktree, `pnpm --filter @haive/worker typecheck` fails on `packages/worker/src/modules.generated.ts` until `@haive/module-statistics` is built (`pnpm --filter @haive/module-statistics build`), and `packages/worker/test/step-integrations-boot.test.ts` failed while `modules.generated.ts` was absent. Fix direction: make the worker's typecheck and test tasks build the generated modules first (a dependency turbo's `^build` follows), or say so in `docs/architecture/testing.md`.
+
+### T738 · FNF[step-warning-atomic-append] · a step warning written from the caller's row snapshot can drop one added since
+
+status: open · kind: fix · found: #1297 driver 2026-11-21 · priority: P4
+
+1. `addStepWarning` (`worker/src/step-engine/step-ownership.ts` ~:92-100) joins the caller's row snapshot and writes the whole column, so a warning another writer added after the caller read its row is lost. Sites: `merge-resolver.ts` ~:532, 557, 679, 897, 1123, 1598; `left-open-merge.ts` ~:521; `dag-executor.ts` ~:977; `project-state/branch-revert.ts` ~:611. Fix direction: route them through `appendStepWarning` (one UPDATE that adds the text once, added by #1297). PRE-EXISTING; #1297's notice was traced through these flows and is not overwritten.
+2. `queues/cli-exec/handlers.ts` ~:387 replaces `warning_message` for a codex app-server fallback. Unreachable on a composed-LSP task today (only claude-code can be in its set). Same fix. PRE-EXISTING.
+
+### T739 · FNF[cli-touched-vestigial] · the touched-CLI marker table has readers and no writer
+
+status: open · kind: fix · found: #1297 driver 2026-11-21, checked against the code · priority: P4
+
+1. `task_step_cli_touched` is read (`worker/src/step-engine/step-runner.ts` ~:333-343 `isTouched`, `api/src/routes/tasks/_helpers.ts` ~:186-199) but never written. The CLI switch writes the per-task choice first (`api/src/lib/step-cli-choice.ts` ~:87), which the resolver reads before any saved row, so an in-task pick never depends on the marker; under `ignore_saved_step_clis` a saved row is simply never honoured. Dead code, no user-visible effect. Fix direction: drop the readers, then the table in a later two-phase migration, or document why it stays. PRE-EXISTING.
 
 ### T721 · The Claude usage grant reaches sandbox environments
 
@@ -1096,10 +1114,10 @@ Resolution: the diagnosis above did not hold for the live error. Codex read its 
 
 ### T694 · FNF[insight-gate3] · insight-cycle approval exposures beside the gate-3 park (+10)
 
-status: open; items 1, 3 and 4 done by #1294 (2c29b923a, deployed 2026-11-20 17:29Z); items 2 and 10 decided by the owner 2026-11-20 (item 10: option B) in review as #1296, a test-layering fix owed (Greptile: the input-variant matrices belong on the fake-database layer, `docs/architecture/testing.md:14-19`) · kind: fix · found: review of the gate-3 park change 2026-11-16 · priority: P2
+status: open; items 1, 3 and 4 done by #1294 (2c29b923a, deployed 2026-11-20 17:29Z); items 2 and 10 done by #1296 (0dd72fa79, deployed 2026-11-21 01:48Z; owner decisions 2026-11-20, item 10 option B; the input-variant matrices moved to the fake-database layer in the same PR); item 11 is next · kind: fix · found: review of the gate-3 park change 2026-11-16 · priority: P2
 
 1. DONE #1294. Stale-tab attestation: the step submit body carries only `values` and targets the newest `waiting_form` row (`api/src/routes/tasks/steps.ts` ~:902-1017), so any stale tab of the same owner can attest a gate-2 or gate-3 answer for a form it never showed. Bind latched-gate submits to `stepRowId` + `waitingStartedAt`.
-2. A successful second insight cycle (no verify failure, gate 2 skipped) still lets a gate-3 preset commit the refreshed diff (`insight-gate3-return.ts` ~:54-66 settles on the prior done gate 3). Same exposure as the owner's park decision; owner call whether it should park too. OWNER DECIDED 2026-11-20: always park gate 3 after a gate-3 insight cycle, whether or not its verification failed; presets and pre-answers are ignored there. Scope: only cycles a person started by picking insights at a parked gate 3 (`10-gate-3-commit.ts` ~:639); automatic rounds (`autoActOnInsights`, `08e-insights-triage.ts` ~:247) stay as they are. Once the person answers that gate 3, Retry, Resume and worker takeover must not park it again, and the fresh-submission anchor (`freshInsightGateSubmission`, today the latest `gate2_approved` event) moves to the cycle.
+2. DONE #1296. A successful second insight cycle (no verify failure, gate 2 skipped) still lets a gate-3 preset commit the refreshed diff (`insight-gate3-return.ts` ~:54-66 settles on the prior done gate 3). Same exposure as the owner's park decision; owner call whether it should park too. OWNER DECIDED 2026-11-20: always park gate 3 after a gate-3 insight cycle, whether or not its verification failed; presets and pre-answers are ignored there. Scope: only cycles a person started by picking insights at a parked gate 3 (`10-gate-3-commit.ts` ~:639); automatic rounds (`autoActOnInsights`, `08e-insights-triage.ts` ~:247) stay as they are. Once the person answers that gate 3, Retry, Resume and worker takeover must not park it again, and the fresh-submission anchor (`freshInsightGateSubmission`, today the latest `gate2_approved` event) moves to the cycle.
 3. DONE #1294. Gate 1.5 (08d2) defaults to accept when nothing blocks (`detected.blocking` false), and accept defers to gate 2, but a successful insight cycle skips gate 2 (`task-queue.ts` ~:2410), so accepted QA findings reach no human in that cycle.
 4. DONE #1294. `readValidationSnapshot` is not abortable and reads every changed file serially (up to 8 MiB each, two attempts); a cancel waits for it.
 5. PRE-EXISTING: `readValidationSnapshot({ db, taskId })` in `worker/src/queues/validation-recheck.ts` ~:127 passes no cancel source (`validationSuccessor` has no `StepContext`), so the queue-level recheck read cannot be cancelled.
@@ -1107,7 +1125,7 @@ status: open; items 1, 3 and 4 done by #1294 (2c29b923a, deployed 2026-11-20 17:
 7. BY DESIGN, from #1294: the api's latched-gate predicate (`api/src/routes/tasks/steps.ts` `insightGateLatched`) is a superset of the worker's, with no settled or `approvedRound` exemption, so a later gate-3 park the worker would not latch still refuses old tabs and non-web clients with 409 `step_form_stale` (the web always sends the fields). Fix if it bites: one latch predicate shared through `@haive/shared`. #1296 widens it on purpose: both gates latch on any task that ever ran a gate-3 cycle, or holds a continuation it cannot read, so a non-web client there must send the row id and park stamp (`api/src/routes/tasks/steps.ts:128-153`). The shared predicate stays the fix.
 8. LOW, cosmetic, PRE-EXISTING: a second tab racing the same latched park can show `step_form_not_waiting` without a reload until the next poll (`web/src/app/(app)/tasks/[id]/page.tsx` ~:1372).
 9. COVERAGE: nothing pins what follows the approval of a gate 2 kept for deferred QA findings (depends on item 2), and no case covers the `run_seq` / `created_at` tie-break of `gate3QaDeferred` (`worker/src/queues/insight-gate3-return.ts`). #1296 pins that an answered QA-kept gate 2 completes. Its approval writes no `insight.check` event (`worker/src/queues/insight-gate3-return.ts:217-222`; only `step.form_submitted` records it), and the step into the following gate 3 is still not pinned end to end.
-10. PRE-EXISTING, decide with item 2: an unlatched gate 2 still honours `preAnswers['09-gate-2-verify-approval']` (`worker/src/step-engine/step-runner.ts` ~:3596; neither gate declares `humanOnlyFormFields`), so a task that pre-answered gate 2 auto-approves the gate 2 that #1294 keeps for deferred QA findings. Explained to the owner 2026-11-20 with four options: A keep; B in a gate-3 insight cycle, a gate 2 kept for deferred QA findings ignores its pre-answer (recommended); C every gate 2 with deferred QA findings ignores pre-answers; D gate 2 approves and gate 3 lists the findings. OWNER DECIDED 2026-11-20: option B; it ships with item 2. On the dev install no task type (0 of 15) and no task (0 of 453) has pre-answered gate 2 or 3.
+10. DONE #1296. PRE-EXISTING, decide with item 2: an unlatched gate 2 still honours `preAnswers['09-gate-2-verify-approval']` (`worker/src/step-engine/step-runner.ts` ~:3596; neither gate declares `humanOnlyFormFields`), so a task that pre-answered gate 2 auto-approves the gate 2 that #1294 keeps for deferred QA findings. Explained to the owner 2026-11-20 with four options: A keep; B in a gate-3 insight cycle, a gate 2 kept for deferred QA findings ignores its pre-answer (recommended); C every gate 2 with deferred QA findings ignores pre-answers; D gate 2 approves and gate 3 lists the findings. OWNER DECIDED 2026-11-20: option B; it ships with item 2. On the dev install no task type (0 of 15) and no task (0 of 453) has pre-answered gate 2 or 3.
 11. PRE-EXISTING, relied on by #1296; follows from the owner's always-park decision, so no new decision: a Retry of a step above the pick row in the pick's round bumps the source row's generation, so `latestGate3Request` returns null and the cycle ends (`worker/src/queues/insight-gate3-return.ts:147-148`, used by `openGate3Cycle` and `gate3InsightCycle`). The re-run gate 3 is then ordinary, and a preset can commit the cycle's edits, which stay in the worktree, unseen. A Retry clicked on the pick row itself stops at its form (`pause_form_on_retry`). Reasoned from the code, not reproduced. Fix direction: latch task-wide as the failed path does, so after a gate-3 cycle applied edits the next gate 3 parks until a person answers one.
 12. DROPPED on review: no gate 2 is kept by a runtime recheck. `successor.recheck` sends the run to 07c or 07b first (`worker/src/queues/validation-recheck.ts` ~:131-135), and the return to gate 2 goes through the same skip decision without `recheck`.
 13. LOW: gate 2's advance now reads continuation events in every task, so an unreadable event throws a step error. It fails closed, and the check handoff already throws on the same event (`insight-gate3-return.ts:131-141`, `step-runner.ts` ~:3584-3588).
@@ -2128,12 +2146,13 @@ status: parked · kind: design · was modular #270 · reason: diminishing return
 `maintenance.auto=false` closes gc.recentObjectsHook. An explicit gc still runs that hook.
 Measure growth, then find a safe repack/prune under hardened args.
 
-### T392 · FNF[start-check-provider] · the persona start check names only the first dispatch candidate (+1)
+### T392 · FNF[start-check-provider] · the persona start check names only the first dispatch candidate (+2)
 
 status: open · kind: fix · found: T392 driver 2026-11-06 · priority: P4
 
 1. `providerNameFor` in the persona start check (packages/worker/src/queues/task-queue.ts ~:2737) takes the first `dispatchCandidates(...)` entry. It ignores subagent and MCP eligibility, and since PR #1025 also a first implicit candidate that fails to build while dispatch lands on the next one. Advisory only (records an unresolved-persona event). PRE-EXISTING. Fix direction: resolve the provider through `resolveDispatch` or share its candidate filter.
 2. `resolveTaskDispatch` calls `resolveDispatch` a second time with the codex extras (packages/worker/src/orchestrator/dispatcher.ts ~:436), so the new "provider could not build a command" warning logs twice per dispatch for the same implicit candidate. REGRESSION (log volume only). Fix direction: warn only on the outer call, or dedupe by provider id.
+3. The pick it names ignores the composed-LSP lock: on a locked task it names a saved CLI that dispatch skips since #1297 (`worker/src/queues/task-queue.ts` ~:3256-3269). Advisory and documented; resolving through the dispatcher (item 1's direction) fixes both. PRE-EXISTING.
 
 ### T394 · FNF[stop-noop-missing-current] · Stop still answers 0 when the current row is missing, finished, or an unparked answered form
 
