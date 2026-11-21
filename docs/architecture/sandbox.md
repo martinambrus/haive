@@ -749,6 +749,8 @@ row included, in id order: no row lock, row update or secret write for a member 
 secret row takes a share lock on its provider row). The image job (`markProvidersReady`) locks provider rows
 in id order without the auth lock, so a writer that held one row while it waited for a lower id could
 deadlock with it; a create inserts its own row first, which is invisible to other transactions until commit.
+A task insert that names two different providers takes both key-share locks in id order just before the insert,
+since its two foreign-key checks would take them in constraint order.
 The clicked or created row keeps the write and audit event it always had, each sibling gets the token and its
 own strict `cli_provider.secret.set` event (`source` `manual` or `environment`, `viaProviderId`, `setSize`),
 and every row written gets one new `auth_generation`. A write made on a sibling between the click and the run
@@ -1433,7 +1435,8 @@ one id-ordered batch, the task row, then leaf rows (provider rows and step rows 
 saved preference rows, the template row, task events). Step 01 inserts its template row before it
 takes the task row: the insert takes a share lock on the repository row, and a repository delete
 holds that row and then asks for task rows. The writers of provider rows (`lockLoginSet`, the grok
-credential refresh status write, `markProvidersReady`) never take a task or step row. One inversion remains: deleting a provider
+credential refresh status write, `markProvidersReady`) never take a task or step row. A task insert naming two providers takes both of their key-share locks in id
+order before the insert, so it matches those writers. One inversion remains: deleting a provider
 holds its row and then needs the task rows its SET NULL rewrites, while a holder of the task row
 needs that provider's share lock (the choice inserts through their foreign key, the summary
 route's update); Postgres aborts one of them (`40P01`) and the state stays consistent. Saved
