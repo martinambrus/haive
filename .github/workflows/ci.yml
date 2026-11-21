@@ -383,8 +383,8 @@ jobs:
   postgres-gated:
     name: Postgres-gated tests
     runs-on: ubuntu-latest
-    # 173 rows × the measured 10 s model + 120 s setup = 1850 s green.
-    # 44 minutes covers 1.5 × row time (2595 s); 46 includes setup and 910 s over green.
+    # 174 rows × the measured 10 s model + 120 s setup = 1860 s green.
+    # 44 minutes covers 1.5 × row time (2610 s); 46 includes setup and 900 s over green.
     timeout-minutes: 46
     services:
       postgres:
@@ -562,6 +562,7 @@ jobs:
           worker test/fix-round-cli-db.test.ts FIX_ROUND_CLI_TEST_URL fix_round_cli_test pg
           worker test/upload-reaper-db.test.ts UPLOAD_REAPER_TEST_URL upload_reaper_test pg
           worker test/step-row-lock-order-db.test.ts WORKER_STEP_ROW_LOCK_ORDER_TEST_URL worker_step_row_lock_order_test pg
+          worker test/credential-refresh-lock-order-db.test.ts CREDENTIAL_REFRESH_LOCK_ORDER_TEST_URL credential_refresh_lock_order_test pg
           worker test/task-cancel-guard-db.test.ts WORKER_TASK_CANCEL_GUARD_TEST_URL worker_task_cancel_guard_test pg
           worker test/step-fold-preread-db.test.ts WORKER_STEP_FOLD_PREREAD_TEST_URL worker_step_fold_preread_test pg
           worker test/lock-tier-order-db.test.ts WORKER_LOCK_TIER_ORDER_TEST_URL worker_lock_tier_order_test pg

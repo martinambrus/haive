@@ -247,11 +247,14 @@ export function interpretCliFailure(
   // will not recover within this run. Headline them with a stable internal prefix
   // so looping consumers (isFatalProviderFailure → DAG escalation, merge-fix retry)
   // fail the task fast instead of re-dispatching agents against a dead provider.
-  const fatalClass = classifyProviderFatal(
-    result.exitCode,
-    existing,
-    result.providerErrorScan ?? result.rawOutput,
-  );
+  const fatalClass =
+    result.authFailure === true
+      ? 'auth'
+      : classifyProviderFatal(
+          result.exitCode,
+          existing,
+          result.providerErrorScan ?? result.rawOutput,
+        );
   if (!fatalClass) return existing;
   return buildProviderFatalMessage(fatalClass, providerName, formatAuthDetail(existing));
 }
@@ -1338,6 +1341,7 @@ export async function executeCliSpec(
       toolUsage: collector.getToolUsage(),
       ...persisted,
       providerErrorScan,
+      ...(collector.hadAuthFailure() ? { authFailure: true } : {}),
     };
   }
 

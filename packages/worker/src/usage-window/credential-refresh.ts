@@ -3,6 +3,7 @@ import { and, eq, inArray } from 'drizzle-orm';
 import {
   cliAuthTaskVolumePrefix,
   logger,
+  lockLoginSet,
   resolveCliAuthUserVolumeName,
   type CliProviderName,
 } from '@haive/shared';
@@ -164,21 +165,27 @@ async function refreshGrokVolume(
       { vol, providerIds: sharing.map((r) => r.id) },
       'grok refresh token rejected (invalid_grant); marking the provider as needing a re-login',
     );
-    await assertHeld();
-    await db
-      .update(schema.cliProviders)
-      .set({
-        authStatus: 'unknown',
-        authMessage:
-          'grok sign-in expired and could not be renewed — log in to this CLI again from the Haive providers page.',
-        authLastCheckedAt: new Date(),
-      })
-      .where(
-        inArray(
-          schema.cliProviders.id,
-          sharing.map((r) => r.id),
-        ),
-      );
+    // The set lock comes first: the image job locks provider rows in id order without the auth
+    // lock, so an UPDATE that locks rows as it scans them could hold a higher id while it waits.
+    // The rows written are the rows locked: the set as it is now, not as the tick read it earlier.
+    await db.transaction(async (tx) => {
+      const members = await lockLoginSet(tx, sharing[0]!);
+      await assertHeld();
+      await tx
+        .update(schema.cliProviders)
+        .set({
+          authStatus: 'unknown',
+          authMessage:
+            'grok sign-in expired and could not be renewed — log in to this CLI again from the Haive providers page.',
+          authLastCheckedAt: new Date(),
+        })
+        .where(
+          inArray(
+            schema.cliProviders.id,
+            members.map((m) => m.id),
+          ),
+        );
+    });
     // Suppress retries only after the re-login status was recorded successfully.
     deadRefreshToken.set(vol, cred.refreshToken);
     return;

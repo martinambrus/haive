@@ -748,6 +748,21 @@ taskRoutes.post('/', requireNewWorkAllowed, async (c) => {
       definition: locked,
       choices: body.integrationChoices ?? [],
     });
+    if (
+      body.cliProviderId &&
+      body.summaryCliProviderId &&
+      body.cliProviderId !== body.summaryCliProviderId
+    ) {
+      // The insert's two foreign-key checks take these row locks in constraint order. Taking them here
+      // in id order matches the id-order lockers of provider rows, and the checks then find them held.
+      // A missing row is not refused here: the insert's own foreign-key check reports it.
+      await handle
+        .select({ id: schema.cliProviders.id })
+        .from(schema.cliProviders)
+        .where(inArray(schema.cliProviders.id, [body.cliProviderId, body.summaryCliProviderId]))
+        .orderBy(schema.cliProviders.id)
+        .for('key share');
+    }
     const rows = await handle
       .insert(schema.tasks)
       .values({

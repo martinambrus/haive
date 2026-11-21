@@ -1180,6 +1180,110 @@ describe.skipIf(!url)('POST /tasks create path on Postgres', () => {
     });
   });
 
+  describe('a task naming two providers beside an id-order holder of a provider row', () => {
+    const LOWER = '00000000-0000-4000-8000-0000000000f1';
+    const HIGHER = '00000000-0000-4000-8000-0000000000f2';
+    let peer: Database;
+
+    beforeAll(() => {
+      peer = createDatabase(url as string);
+    });
+    afterAll(async () => {
+      await peer.$client.end({ timeout: 5 });
+    });
+    beforeEach(async () => {
+      h.add.mockReset();
+      await db.insert(schema.cliProviders).values(
+        [LOWER, HIGHER].map((id) => ({
+          id,
+          userId: USER,
+          name: 'claude-code' as const,
+          label: `claude-code-${id}`,
+          enabled: true,
+        })),
+      );
+    });
+
+    const blockedBy = async (pid: number) => {
+      const [row] = await db.execute<{ blocked: boolean }>(sql`
+        select exists (
+          select 1 from pg_stat_activity
+          where wait_event_type = 'Lock' and ${pid}::int = any (pg_blocking_pids(pid))
+        ) as blocked`);
+      return row?.blocked === true;
+    };
+
+    // A wait on database state, the exception the testing guide allows; the deadline is kept small.
+    const waitUntil = async (condition: () => Promise<boolean>) => {
+      const deadline = Date.now() + 5000;
+      while (!(await condition())) {
+        if (Date.now() > deadline)
+          throw new Error('no backend was blocked by the peer within 5000 ms');
+        await new Promise((resolve) => setTimeout(resolve, 20));
+      }
+    };
+
+    /** Whether someone holds the row now. FOR UPDATE, since only it conflicts with a KEY SHARE. */
+    const rowHeld = (id: string) =>
+      db
+        .transaction((tx) =>
+          tx.execute(sql`select id from cli_providers where id = ${id} for update nowait`),
+        )
+        .then(
+          () => false,
+          (error: unknown) => {
+            if (!isLockNotAvailable(error)) throw error;
+            return true;
+          },
+        );
+
+    it.each([
+      { name: 'the higher id as the run provider', cli: HIGHER, summary: LOWER },
+      { name: 'the higher id as the summary provider', cli: LOWER, summary: HIGHER },
+    ])(
+      'holds no higher provider row while it waits for the lower one: $name',
+      async ({ cli, summary }) => {
+        let holds!: () => void;
+        const holding = new Promise<void>((resolve) => (holds = resolve));
+        let release!: () => void;
+        const released = new Promise<void>((resolve) => (release = resolve));
+        let pid = 0;
+        const peerRun = peer.transaction(async (tx) => {
+          const [row] = await tx.execute<{ pid: number }>(sql`select pg_backend_pid() as pid`);
+          pid = row!.pid;
+          await tx.execute(sql`select id from cli_providers where id = ${LOWER} for update`);
+          holds();
+          await released;
+        });
+        await Promise.race([holding, peerRun]);
+        let response: Promise<Response> | undefined;
+        let higherHeld = false;
+        try {
+          response = Promise.resolve(
+            post({
+              type: 'cp-plain',
+              repositoryId: REPO,
+              cliProviderId: cli,
+              summaryCliProviderId: summary,
+            }),
+          );
+          await waitUntil(() => blockedBy(pid));
+          higherHeld = await rowHeld(HIGHER);
+        } finally {
+          release();
+          await peerRun;
+          await response?.catch(() => undefined);
+        }
+        expect(higherHeld, 'the request holds the higher provider row while it waits').toBe(false);
+        const { row } = await created(await response!);
+        expect({ cli: row.cliProviderId, summary: row.summaryCliProviderId }).toEqual({
+          cli,
+          summary,
+        });
+      },
+    );
+  });
+
   describe('a request refused by a repository lock another transaction holds', () => {
     const BOUND_MS = 400;
     const BUSY = { error: 'The repository is busy, try again', code: null };

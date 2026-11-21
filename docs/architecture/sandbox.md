@@ -734,20 +734,24 @@ it to every row of the set. Inside the promotion transaction `lockLoginSet` (`@h
 set's rows in id order, before any of their secrets; each row in turn gets its strict
 `cli_provider.secret.set` audit, the secret upsert and the legacy-env cleanup; then one update gives all
 of them one new `auth_generation`, status `ok` and a later check stamp. A login through any row
-therefore supersedes a sign-out queued from any row of the set. The sign-out job deletes the login
-token of every row of the set and, when no volume failed, resets their status, in one transaction that
-reads the set once, so a row that joined while the volumes were being removed is deleted and reset
-with the rest; it also deletes the usage token and the usage snapshot of every row of the set. Its
+therefore supersedes a sign-out queued from any row of the set. When no volume failed, the sign-out job
+deletes the login token, the usage token and the usage snapshot of every row of the set and resets their
+status, in one transaction that reads the set once, so a row that joined while the volumes were being
+removed is deleted and reset with the rest; a volume that could not be removed leaves all of them as
+they were, and a retry finishes. Its
 supersede check reads the
 clicked row's generation alone, which is enough because the api writers of a login token all write the
-whole set and a row that joins one takes the set's generation (the boot copy of legacy environment
-values writes the row it finds and advances no other). A manual login-secret POST, a settings
+whole set and a row that joins one takes the set's generation, or keeps the one its own save advanced
+by typing a sign-out secret name (the boot copy of legacy environment values writes the row it finds and
+advances no other). A manual login-secret POST, a settings
 save that types the token and a create that types it do so in one transaction under the set's lock (`writeLoginTokenToSet`, `api/src/lib/cli-login-secret.ts`):
 the transaction's first lock on any provider row is `lockLoginSet` over every row it will touch, the clicked
 row included, in id order: no row lock, row update or secret write for a member may come before it (a new
 secret row takes a share lock on its provider row). The image job (`markProvidersReady`) locks provider rows
 in id order without the auth lock, so a writer that held one row while it waited for a lower id could
 deadlock with it; a create inserts its own row first, which is invisible to other transactions until commit.
+A task insert that names two different providers takes both key-share locks in id order just before the insert,
+since its two foreign-key checks would take them in constraint order.
 The clicked or created row keeps the write and audit event it always had, each sibling gets the token and its
 own strict `cli_provider.secret.set` event (`source` `manual` or `environment`, `viaProviderId`, `setSize`),
 and every row written gets one new `auth_generation`. A write made on a sibling between the click and the run
@@ -779,8 +783,10 @@ before and refuses, before it writes or seeds, a row whose scope moved between i
 token with the newest secret `updated_at` (tie: smallest id), its token ciphertext, `auth_status`,
 `auth_message`, check stamp (read through text, so its microseconds survive) and `auth_generation`, and
 records one strict `cli_provider.secret.set` event on the joining row (`source` `join`, `viaProviderId`
-the row it copied from, `setSize`) in the same transaction. The set's login replaces a token the joining
-row had; a set where no other row holds a token seeds nothing, and the joining row keeps its own. A clone
+the row it copied from, `setSize`) in the same transaction. A settings save that also advanced the row's
+generation (it typed a sign-out secret name, even with an empty value) keeps that generation instead of
+copying the set's, so it still supersedes a sign-out queued through the row. The set's login replaces a token
+the joining row had; a set where no other row holds a token seeds nothing, and the joining row keeps its own. A clone
 of a claude-code subscription row leaves the login token and the usage token out of its secret copy (and
 the login token out of the copy of legacy environment values), so an isolated clone starts without
 either and a joining clone gets the set's; every other secret is copied as before, and a clone of an
@@ -838,7 +844,8 @@ join. Disconnect refuses a row that is not Claude Code. The readers stay per row
 `credentialRepairedAt` and GET `usage-auth` read the row's own grant. Where a transaction writes more
 than one provider's rows, the order is the set's advisory auth lock, then `lockLoginSet` over the set's
 provider rows in id order as the first row lock, then the secret and snapshot writes: the image job
-locks provider rows in id order without the auth lock.
+locks provider rows in id order without the auth lock. The grok credential refresh writes the re-login
+status of the rows `lockLoginSet` returned, the rows sharing the volume at that moment, the same way.
 
 ## CLI sign-out and newer logins
 
@@ -855,7 +862,8 @@ wait minutes, so a login completed in between must survive it. Two pieces do tha
   other writer of the login token (a manual POST, a settings save or a create that types it) advance
   every row they write with one new value, as do Connect and the manual POST of the usage token, while
   the boot copy advances its own row only and a row that joins a set takes the generation of the row it
-  copies. An abandoned attempt, a usage refresh or convergence, a grok refresh, a task's sync-back and
+  copies, unless its own settings save advanced it by typing a sign-out secret name (`keepGeneration`).
+  An abandoned attempt, a usage refresh or convergence, a grok refresh, a task's sync-back and
   the delete of a login or usage token never advance it. The sign-out job carries the
   value read at request time and, when the row's value differs, removes nothing and returns
   `{ ok: true, superseded: true }`; the poll route reports it as `done` and the page says the user
@@ -1430,8 +1438,9 @@ Lock order, outermost first: the repository (its task key, then its row), the ta
 one id-ordered batch, the task row, then leaf rows (provider rows and step rows through foreign keys,
 saved preference rows, the template row, task events). Step 01 inserts its template row before it
 takes the task row: the insert takes a share lock on the repository row, and a repository delete
-holds that row and then asks for task rows. The writers of provider rows (`lockLoginSet`,
-`markProvidersReady`) never take a task or step row. One inversion remains: deleting a provider
+holds that row and then asks for task rows. The writers of provider rows (`lockLoginSet`, the grok
+credential refresh status write, `markProvidersReady`) never take a task or step row. A task insert naming two providers takes both of their key-share locks in id
+order before the insert, so it matches those writers. One inversion remains: deleting a provider
 holds its row and then needs the task rows its SET NULL rewrites, while a holder of the task row
 needs that provider's share lock (the choice inserts through their foreign key, the summary
 route's update); Postgres aborts one of them (`40P01`) and the state stays consistent. Saved

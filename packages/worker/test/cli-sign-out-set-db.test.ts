@@ -230,7 +230,7 @@ describe.skipIf(!url)('a Claude sign-out covers every row of its credential set'
     expect(await outside(['A', 'B', 'D', 'E', 'F'])).toEqual(before);
   });
 
-  it('deletes the tokens of the set but keeps its health when a volume cannot be removed', async () => {
+  it('keeps the tokens, usage grants, snapshots and health of the set when a volume cannot be removed, and a retry finishes', async () => {
     const before = await outside(['A', 'B']);
     const { runner } = fakeRunner(rows.A, async () => ({ ok: false, stderr: 'busy' }));
     const real = globalThis.setTimeout;
@@ -239,14 +239,20 @@ describe.skipIf(!url)('a Claude sign-out covers every row of its credential set'
       .mockImplementation(((fn: any, ms?: number, ...a: any[]) =>
         real(fn, [1000, 2000, 4000, 8000, 16000].includes(ms ?? 0) ? 0 : ms, ...a)) as any);
     try {
-      expect(await handleSignOutJob(db, payload(rows.A), runner)).toMatchObject({ ok: false });
+      const result = await handleSignOutJob(db, payload(rows.A), runner);
+      expect(result).toMatchObject({ ok: false });
+      expect((result as { failed: unknown[] }).failed).toEqual(
+        volumeNames(rows.A).map((name) => ({ name, stderr: 'busy' })),
+      );
     } finally {
       spy.mockRestore();
     }
-    expect(await names(rows.A.id)).toEqual(['ANTHROPIC_AUTH_TOKEN']);
-    expect(await names(rows.B.id)).toEqual(['ANTHROPIC_AUTH_TOKEN']);
-    expect(await snapshots([rows.A.id, rows.B.id])).toEqual([]);
-    expect((await outside(['A', 'B'])).providers).toEqual(before.providers);
+    expect(await outside(['A', 'B'])).toEqual(before);
+    expect(await names(rows.A.id)).toEqual(NAMES.slice().sort());
+    const retry = fakeRunner(rows.A);
+    expect(await handleSignOutJob(db, payload(rows.A), retry.runner)).toMatchObject({ ok: true });
+    expect(retry.volumes.size).toBe(0);
+    await expectSetSignedOut(PAST);
   });
 
   it('resumes an interrupted sign-out to the same end state, then repeats it', async () => {
@@ -271,6 +277,25 @@ describe.skipIf(!url)('a Claude sign-out covers every row of its credential set'
     const stamp = (await provider(rows.A.id)).authLastCheckedAt!;
     await handleSignOutJob(db, payload(rows.A), resumed.runner, resumeJob(rows.A));
     await expectSetSignedOut(stamp);
+  });
+
+  it('rolls the whole set back when the auth lock is lost while the tokens are being deleted', async () => {
+    const before = await world();
+    const scope = `cli-auth:${cliAuthScope(rows.A)}`;
+    const drop = await trigger(
+      'cli_provider_secrets',
+      'AFTER DELETE',
+      `PERFORM pg_terminate_backend(pid) FROM pg_locks WHERE locktype = 'advisory'
+        AND classid = ((hashtextextended('${scope}', 0) >> 32) & 4294967295)::oid
+        AND objid = (hashtextextended('${scope}', 0) & 4294967295)::oid;`,
+    );
+    const { runner } = fakeRunner(rows.A);
+    try {
+      await expect(handleSignOutJob(db, payload(rows.A), runner)).rejects.toThrow();
+    } finally {
+      await drop();
+    }
+    expect(await world()).toEqual(before);
   });
 
   it('signs out a row that joins the set while the volume is being removed', async () => {
