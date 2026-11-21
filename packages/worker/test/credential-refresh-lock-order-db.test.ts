@@ -1,6 +1,6 @@
 import { randomBytes } from 'node:crypto';
 import { eq, inArray, sql } from 'drizzle-orm';
-import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createDatabase, isLockNotAvailable, schema, type Database } from '@haive/database';
 import type { DockerRunner } from '../src/sandbox/docker-runner.js';
 import { refreshExpiringCliCredentials } from '../src/usage-window/credential-refresh.js';
@@ -75,6 +75,13 @@ describe.skipIf(!url)(
           authStatus: 'ok',
           authMessage: 'authenticated',
         });
+    });
+
+    beforeEach(async () => {
+      await db
+        .update(schema.cliProviders)
+        .set({ authStatus: 'ok', authMessage: 'authenticated', isolateAuth: false })
+        .where(inArray(schema.cliProviders.id, [...IDS]));
     });
 
     afterEach(() => {
@@ -180,6 +187,51 @@ describe.skipIf(!url)(
           expect(row.authStatus).toBe('unknown');
           expect(row.authMessage).toContain('sign-in expired');
         }
+      },
+      TEST_TIMEOUT,
+    );
+
+    it(
+      'writes the status to the rows it locked, not the rows it read before the lock',
+      async () => {
+        vi.mocked(readVolumeFile).mockResolvedValue(
+          JSON.stringify({
+            'issuer::client': {
+              key: randomBytes(16).toString('hex'),
+              refresh_token: randomBytes(16).toString('hex'),
+              oidc_client_id: 'client',
+              expires_at: '2020-01-01T00:00:00Z',
+            },
+          }),
+        );
+        // The stub runs after the tick read the rows and took the advisory lock, before the transaction:
+        // one row leaves the set in that gap.
+        vi.stubGlobal(
+          'fetch',
+          vi.fn(async () => {
+            await db
+              .update(schema.cliProviders)
+              .set({ isolateAuth: true })
+              .where(eq(schema.cliProviders.id, IDS[1]));
+            return { ok: false, status: 400, text: async () => '{"error":"invalid_grant"}' };
+          }),
+        );
+        await refreshExpiringCliCredentials(db, {} as DockerRunner);
+        const rows = await db
+          .select({
+            id: schema.cliProviders.id,
+            authStatus: schema.cliProviders.authStatus,
+            authMessage: schema.cliProviders.authMessage,
+          })
+          .from(schema.cliProviders)
+          .where(inArray(schema.cliProviders.id, [...IDS]));
+        const byId = new Map(rows.map((row) => [row.id, row]));
+        for (const id of [IDS[0], IDS[2]]) {
+          expect(byId.get(id)?.authStatus).toBe('unknown');
+          expect(byId.get(id)?.authMessage).toContain('sign-in expired');
+        }
+        expect(byId.get(IDS[1])?.authStatus).toBe('ok');
+        expect(byId.get(IDS[1])?.authMessage).toBe('authenticated');
       },
       TEST_TIMEOUT,
     );

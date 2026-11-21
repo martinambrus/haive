@@ -845,7 +845,7 @@ join. Disconnect refuses a row that is not Claude Code. The readers stay per row
 than one provider's rows, the order is the set's advisory auth lock, then `lockLoginSet` over the set's
 provider rows in id order as the first row lock, then the secret and snapshot writes: the image job
 locks provider rows in id order without the auth lock. The grok credential refresh writes the re-login
-status of the rows sharing a volume the same way, after `lockLoginSet`.
+status of the rows `lockLoginSet` returned, the rows sharing the volume at that moment, the same way.
 
 ## CLI sign-out and newer logins
 

@@ -167,8 +167,9 @@ async function refreshGrokVolume(
     );
     // The set lock comes first: the image job locks provider rows in id order without the auth
     // lock, so an UPDATE that locks rows as it scans them could hold a higher id while it waits.
+    // The rows written are the rows locked: the set as it is now, not as the tick read it earlier.
     await db.transaction(async (tx) => {
-      await lockLoginSet(tx, sharing[0]!);
+      const members = await lockLoginSet(tx, sharing[0]!);
       await assertHeld();
       await tx
         .update(schema.cliProviders)
@@ -181,7 +182,7 @@ async function refreshGrokVolume(
         .where(
           inArray(
             schema.cliProviders.id,
-            sharing.map((r) => r.id),
+            members.map((m) => m.id),
           ),
         );
     });

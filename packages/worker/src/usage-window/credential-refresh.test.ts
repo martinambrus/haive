@@ -85,7 +85,7 @@ function refreshFixture() {
   const where = vi.fn(async () => undefined);
   const set = vi.fn(() => ({ where }));
   const update = vi.fn(() => ({ set }));
-  const lock = { for: vi.fn(async () => []) };
+  const lock = { for: vi.fn(async () => [{ id: 'fixture-provider' }, { id: 'shared-provider' }]) };
   const tx = {
     update,
     select: () => ({ from: () => ({ where: () => ({ orderBy: () => lock }) }) }),
