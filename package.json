@@ -16,6 +16,7 @@
     "pretest:e2e": "playwright install chromium",
     "test:e2e:setup": "playwright install --with-deps chromium",
     "test:scripts": "node --test \"scripts/test/*.test.mjs\"",
+    "test:gated": "node scripts/run-gated-tests.mjs",
     "smoke": "pnpm --filter @haive/worker smoke:all",
     "typecheck": "node scripts/workspace-task.mjs typecheck",
     "typecheck:e2e": "tsc --noEmit -p tests",

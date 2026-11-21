@@ -21,7 +21,8 @@ variant against real git, real timers or a real server.
   function. A test that needs a database or Redis server is an env-gated file (`describe.skipIf` on its URL)
   with a row in the CI GATED list, or a reasoned exemption in `scripts/test/ci-gated-list.test.mjs` when another
   CI step already runs it with its guard environment (several Redis files run in the smokes job); CI fails a gated
-  file with neither ([CI smokes](ci-smokes.md)).
+  file with neither ([CI smokes](ci-smokes.md)). `pnpm test:gated <file>` runs a gated file on your machine
+  (Running the gated files locally).
 
 ## Limits are injectable
 
@@ -69,3 +70,36 @@ Unit tests run in their own matrix job, separate from lint and typecheck: `@haiv
 and one shared job for all other packages. Each job lists its 15 slowest files in the job summary; the list is
 report only, because a timing gate on shared runners would flake. Env-gated real-store tests run in the
 **Postgres-gated tests** job, or in the step their exemption names.
+
+## Running the gated files locally
+
+`pnpm test:gated <selection...>` (`scripts/run-gated-tests.mjs`) runs rows of the CI GATED list the way the CI loop
+runs them. A selection is a test file (`test/pg-transaction-fence.test.ts`, optionally behind its package:
+`database/test/...`), a package name (all its rows) or `all`. No selection, or a name that matches no row, exits 2
+before any container starts. Rows run one at a time in list order; a failed row does not stop the later ones.
+
+The runner keeps no list of its own. `scripts/lib/ci-gated.mjs` reads the rows, the service images and the job and
+step env from the `postgres-gated` job of `.github/workflows/ci.yml` through the reader the workflow pins use
+(`scripts/test/workflow.mjs`). `scripts/test/run-gated-tests.test.mjs` pins that: it compares the rows with the raw
+heredoc text and runs the real CI step script and the runner against stub `docker` and `pnpm`, so both must run the
+same package, file, variable, database and server for every row and reach the same completeness verdict. A change
+to the loop's row handling, env or completeness check is a change to the runner too.
+
+Per row it does what the loop does: probe for the database and create it when missing, apply
+`pnpm --filter @haive/database migrate` to it, run `vitest run <file>` with the row's variable set to the database
+URL, and read the JSON report. A file with no passing test, or any skipped or todo test, did not run in full and
+fails the row. The summary lists each file as passed, FAILED, INCOMPLETE or TIMEOUT; the exit code is 0 only when
+every row passed, 1 otherwise, and 128 plus the signal number after an interrupt.
+
+It starts its own throwaway containers, `gated-tests-<id>-postgres`, `-pgvector` and `-redis`, never the dev stack's,
+and only the servers the selection needs (Redis only for a file that reads a Redis variable of the gated step). Each
+uses the image the CI job declares, is published on an ephemeral port of `127.0.0.1` and has a random password.
+`docker rm -fv` removes them after success, failure and interrupt (SIGINT, SIGTERM, SIGHUP), and every wait has a
+deadline: a row that overruns its limit is killed and reported TIMEOUT. SIGKILL cannot be handled: list what a killed
+run left with `docker ps -a --filter name=gated-tests-` and remove it with `docker rm -fv`. The test process gets the CI job and step env with every Postgres
+and Redis URL pointed at these containers, or dropped when that server is not running, so a `DATABASE_URL` or
+`REDIS_URL` in the developer's shell never reaches it.
+
+The CI setup steps are not repeated: run `pnpm install`, build `@haive/shared`, `@haive/database` and
+`@haive/web-kit`, build the modules and, for api and worker rows, run `node scripts/gen-modules.mjs` (see Running
+one package). Docker must be running.
