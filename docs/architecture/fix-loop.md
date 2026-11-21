@@ -621,7 +621,7 @@ and every auto-submit path, keeps the form's computed defaults and parks for the
 needs the owner's matching `step.form_submitted` event for the row and generation, newer than the
 cycle's `insight.continuation` event, and the route binds it to the form's row and park stamp like
 every latched gate. No `gate2_approved` is recorded, since nothing failed. The requirement ends with
-the cycle (a gate 3 at or after its first round completed before the current round); outside a cycle
+the cycle (workflow-commits says what ends one: a Retry of the pick's row does not); outside a cycle
 gate 2 keeps honouring its presets, deferred findings or not. Configured checks on either side still
 run.
 Gate 3 regenerates its diff, message and form. Earlier commit/message approval is not
@@ -652,9 +652,10 @@ auto-submit variant can apply it. It keeps computed defaults and parks with
 `insight.continuation` event and than `gate2_approved`.
 The route also refuses a stale form: a latched gate's answer must name the row and park its form
 was rendered for (see worker-restarts, form park marker).
-The requirement survives Retry, Resume and boot takeover until a gate 3 at or after the cycle's
-first round completes (done or skipped) before the current round; a configured late editor
-introducing another round between the gates does not clear it.
+The requirement survives Retry (of the pick's own row or of a step above it included), Resume and
+boot takeover until a gate 3 completes after the cycle as workflow-commits describes (at or after
+the cycle's first round, or the pick row's own re-run, completed before the current round); a
+configured late editor introducing another round between the gates does not clear it.
 A warning note in the form explains that the refreshed changes need a new commit decision.
 Gate 3 outside a gate-3 cycle, including after an automatic insight round, retains ordinary
 auto-continue behavior.

@@ -2998,7 +2998,12 @@ describe.skipIf(!url)('manual insight batch journal on Postgres', () => {
     };
 
     /** What the submit route writes in one transaction when the owner answers a gate-3 form. */
-    async function answerAsOwner(rowId: string, taskId: string, createdAt: Date | SQL = ANSWER_AT) {
+    async function answerAsOwner(
+      rowId: string,
+      taskId: string,
+      createdAt: Date | SQL = ANSWER_AT,
+      generation = 0,
+    ) {
       await db.transaction(async (tx) => {
         await tx
           .update(schema.taskSteps)
@@ -3009,7 +3014,7 @@ describe.skipIf(!url)('manual insight batch journal on Postgres', () => {
           taskStepId: rowId,
           eventType: 'step.form_submitted',
           createdAt,
-          payload: { ...STAMPED, userId, generation: 0, commit: true },
+          payload: { ...STAMPED, userId, generation, commit: true },
         });
       });
     }
@@ -3084,6 +3089,199 @@ describe.skipIf(!url)('manual insight batch journal on Postgres', () => {
       ]);
       await addContinuationEvent(ctx.taskId, sourceRow.id, 3, { createdAt: at(5) });
       expectParked(await advanceStep(params), apply);
+    });
+
+    describe('after a Retry reset the source row', () => {
+      const upstreamId = '07-upstream-probe';
+
+      /** A cycle the real handoff opened, then a Retry (the real reset) that re-runs the pick's own
+       *  row at round 0, below the cycle's round: from a step above it, or from the row itself. */
+      async function seedRetriedCycle(target: 'above' | 'self') {
+        const pick = await seedGatePick(false);
+        await handoffInsightContinuation(db, pick.ctx, pick.source, pick.continuation, routeSteps);
+        const { taskId } = pick.ctx;
+        const sourceId = pick.source.id;
+        const [repo] = await db
+          .insert(schema.repositories)
+          .values({
+            userId,
+            name: 'commit preset',
+            source: 'blank',
+            storagePath: '/unused',
+            localPath: '/unused',
+          })
+          .returning();
+        await db
+          .update(schema.tasks)
+          .set({
+            type: 'workflow',
+            repositoryId: repo!.id,
+            autoContinue: true,
+            preAnswers: { [gateId]: { commit: true, commitMessage: 'preset message' } },
+          })
+          .where(eq(schema.tasks.id, taskId));
+        if (target === 'above')
+          await db.insert(schema.taskSteps).values({
+            taskId,
+            stepId: upstreamId,
+            stepIndex: 1,
+            title: 'Upstream',
+            status: 'done',
+            round: 0,
+          });
+        const retry = async () => {
+          const reset = await resetStepAndDownstream(
+            db,
+            taskId,
+            target === 'above' ? upstreamId : gateId,
+            0,
+          );
+          if (!reset || reset === 'superseded') throw new Error('the reset did not apply');
+          // What the api Retry also writes: the held form on the clicked row, the position.
+          if (target === 'self')
+            await db
+              .update(schema.taskSteps)
+              .set({ pauseFormOnRetry: true })
+              .where(eq(schema.taskSteps.id, sourceId));
+          await db
+            .update(schema.tasks)
+            .set({ currentStepId: gateId, currentRound: 0 })
+            .where(eq(schema.tasks.id, taskId));
+          return reset.newEpoch;
+        };
+        const apply = vi.fn(async () => ({ committed: true }));
+        const stepDef: StepDefinition = {
+          metadata: {
+            id: gateId,
+            index: 10,
+            workflowType: 'workflow',
+            title: 'Commit',
+            description: '',
+            requiresCli: false,
+          },
+          form: () => ({
+            title: 'Commit',
+            fields: [
+              { id: 'commit', type: 'checkbox', label: 'Commit', default: true },
+              { id: 'commitMessage', type: 'textarea', label: 'Message', default: 'fresh message' },
+            ],
+          }),
+          apply,
+        };
+        const advance = (epoch: number, round = 0) =>
+          advanceStep({
+            db,
+            taskId,
+            userId,
+            repoPath: '/unused',
+            workspacePath: '/unused',
+            cliProviderId: null,
+            stepDef,
+            epoch,
+            round,
+            moduleDeactivation: null,
+          });
+        const [event] = await db
+          .select()
+          .from(schema.taskEvents)
+          .where(
+            and(
+              eq(schema.taskEvents.taskId, taskId),
+              eq(schema.taskEvents.eventType, 'insight.continuation'),
+            ),
+          );
+        return { taskId, sourceId, retry, advance, apply, cycleEventId: event!.id };
+      }
+
+      const expectHeld = (
+        result: Awaited<ReturnType<typeof advanceStep>>,
+        apply: ReturnType<typeof vi.fn>,
+        label?: string,
+      ) => {
+        expect(result.status, label).toBe('waiting_form');
+        expect(result.row.waitingStartedAt, label).not.toBeNull();
+        expect(result.row.formValues, label).toBeNull();
+        expect(apply, label).not.toHaveBeenCalled();
+      };
+
+      it.each(['above', 'self'] as const)(
+        'a preset does not commit the re-run of the pick row after a Retry from %s',
+        async (target) => {
+          const { retry, advance, apply } = await seedRetriedCycle(target);
+          const epoch = await retry();
+          expectHeld(await advance(epoch), apply);
+          // The held form was a one-shot; entering the parked row again must not commit either.
+          expectHeld(await advance(epoch), apply, 'entered again');
+        },
+      );
+
+      it.each(ANCHOR_CASES)(
+        'an owner answer for the re-run %s needs to be newer than the cycle event to count',
+        async (_name, answerAt, expected) => {
+          const { taskId, sourceId, retry, advance, apply, cycleEventId } =
+            await seedRetriedCycle('above');
+          await db
+            .update(schema.taskEvents)
+            .set({ createdAt: microsecond(CYCLE_AT_MICRO) })
+            .where(eq(schema.taskEvents.id, cycleEventId));
+          const epoch = await retry();
+          await db
+            .update(schema.taskSteps)
+            .set({ status: 'waiting_form' })
+            .where(eq(schema.taskSteps.id, sourceId));
+          await answerAsOwner(sourceId, taskId, microsecond(answerAt), 1);
+          const result = await advance(epoch);
+          expect(result.status).toBe(expected);
+          if (expected === 'waiting_form') expect(apply).not.toHaveBeenCalled();
+          else {
+            expect(apply).toHaveBeenCalledOnce();
+            expect(await advance(epoch)).toMatchObject({ status: 'done' });
+            expect(apply).toHaveBeenCalledOnce();
+          }
+        },
+      );
+
+      it('an owner answer stamped with the old generation does not count for the re-run', async () => {
+        const { taskId, sourceId, retry, advance, apply } = await seedRetriedCycle('above');
+        const epoch = await retry();
+        await db
+          .update(schema.taskSteps)
+          .set({ status: 'waiting_form' })
+          .where(eq(schema.taskSteps.id, sourceId));
+        await answerAsOwner(sourceId, taskId, sql`now() + interval '1 second'`, 0);
+        expectHeld(await advance(epoch), apply);
+      });
+
+      it('a later gate 3 commits with the preset once the re-run was answered and done', async () => {
+        const { taskId, sourceId, retry, advance, apply } = await seedRetriedCycle('above');
+        const epoch = await retry();
+        await db
+          .update(schema.taskSteps)
+          .set({ status: 'waiting_form' })
+          .where(eq(schema.taskSteps.id, sourceId));
+        await answerAsOwner(sourceId, taskId, sql`now() + interval '1 second'`, 1);
+        expect(await advance(epoch)).toMatchObject({ status: 'done' });
+        expect(apply).toHaveBeenCalledOnce();
+        const later = await addGate3Row(taskId, 2, 'pending');
+        await db
+          .update(schema.tasks)
+          .set({ currentStepId: gateId, currentRound: 2 })
+          .where(eq(schema.tasks.id, taskId));
+        const result = await advance(epoch, 2);
+        expect(result.row.id).toBe(later.id);
+        expect(result.status).toBe('done');
+        expect(apply).toHaveBeenCalledTimes(2);
+      });
+
+      it('an unanswered re-run stays parked across Resume, boot re-entry and a second Retry', async () => {
+        const { retry, advance, apply } = await seedRetriedCycle('above');
+        let epoch = await retry();
+        expectHeld(await advance(epoch), apply);
+        for (const reentry of ['Resume', 'boot', 'Retry']) {
+          if (reentry === 'Retry') epoch = await retry();
+          expectHeld(await advance(epoch), apply, reentry);
+        }
+      });
     });
 
     describe('recovery', () => {
