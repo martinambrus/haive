@@ -107,7 +107,10 @@ since it runs that step inside the job (below). A `settle-stopped-task` job owes
 
 **A step whose CLI provider is switched off is held.** A fresh step that dispatches a CLI or is
 provider-sensitive is held (`providerHoldFor`, `task-queue.ts`) while the provider its task, step or
-saved choice names is listed but disabled. Precedence is pause, then module schema, then provider.
+saved choice names is listed but disabled. The provider is the one the dispatcher would refuse
+(`resolvePreferredProvider`): on a composed-LSP task a saved pick outside the lock's set is skipped,
+so a switched-off one does not hold the step and the task's own CLI is checked instead (see
+Provider lock in [Sandbox](sandbox.md)). Precedence is pause, then module schema, then provider.
 The hold is evaluated only for fresh entries, never for a continuation, so a disable mid-step fails
 with the dispatcher's named skip and Retry works once the provider is enabled. START takes the same
 check and queues the advance; a held first step leaves a `pending` row without the park stamp, which
