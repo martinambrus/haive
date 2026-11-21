@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { schema, type Database } from '@haive/database';
 import { createFakeDb } from '@haive/database/testing';
 import { providerHoldFor } from '../src/queues/task-queue.js';
+import { lspDispatchState } from '../src/lsp/configured-lsp.js';
 import type { StepDefinition } from '../src/step-engine/step-definition.js';
 import type { ResolvedTaskContext } from '../src/queues/run-list.js';
 
@@ -10,6 +11,10 @@ vi.mock('../src/redis.js', () => ({
   getBullRedis: () => ({}),
   getRedis: () => ({ scan: async () => ['0', []], del: async () => 0 }),
 }));
+vi.mock('../src/lsp/configured-lsp.js', async (importOriginal) => {
+  const real = await importOriginal<typeof import('../src/lsp/configured-lsp.js')>();
+  return { ...real, lspDispatchState: vi.fn(real.lspDispatchState) };
+});
 vi.mock('bullmq', async (importOriginal) => ({
   ...(await importOriginal<typeof import('bullmq')>()),
   Queue: class {
@@ -168,5 +173,15 @@ describe('the provider hold of a composed task resolves the provider as the disp
     const setup = { composed: true, own: CODEX, off: [CLAUDE], saved: CLAUDE };
     expect((await hold(setup))?.providerId).toBe(CLAUDE);
     expect(await hold({ ...setup, refs: [CODEX] })).toBeNull();
+  });
+
+  it('H9 reads the lock set only for a saved pick', async () => {
+    const read = vi.mocked(lspDispatchState);
+    read.mockClear();
+    await hold({ composed: true, own: CLAUDE, off: [CLAUDE] });
+    await hold({ composed: true, own: CLAUDE, off: [], chosen: CODEX });
+    expect(read).not.toHaveBeenCalled();
+    await hold({ composed: true, own: CLAUDE, off: [], saved: CODEX });
+    expect(read).toHaveBeenCalledTimes(1);
   });
 });
