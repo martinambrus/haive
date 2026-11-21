@@ -27,7 +27,7 @@ says the runtime serves the task's live tree, so it cannot validate the snapshot
 
 The real read-only mount control runs in CI `compose-boot` inside the built worker image,
 with a shared host-visible temporary path and a bounded wait for `haive-cli-sandbox:latest`.
-It adds no GATED row (the list stays at 156). Local controls and static workflow pins do not
+It adds no GATED row: `scripts/test/ci-gated-list.test.mjs` exempts it by name. Local controls and static workflow pins do not
 prove the Actions environment: only a PR run proves this wiring works, and it must pass before merge.
 
 **A run sees only its own files.** `runInSandbox` writes a run's wrapper script and extra files (MCP

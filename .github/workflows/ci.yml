@@ -383,9 +383,11 @@ jobs:
   postgres-gated:
     name: Postgres-gated tests
     runs-on: ubuntu-latest
-    # 175 rows × the measured 10 s model + 120 s setup = 1870 s green.
-    # 44 minutes covers 1.5 × row time (2625 s); 46 includes setup and 890 s over green.
-    timeout-minutes: 46
+    # Sized by the budget in scripts/test/ci-step-independence.test.mjs, which holds the formula: the gated
+    # step covers its rows' modelled time on a slower runner, and this limit covers the setup plus that
+    # step's whole limit. A new row needs no edit here until the list outgrows the two limits; that test then
+    # fails, naming the minutes to raise both to, which hold the list plus the budget's rowHeadroom rows.
+    timeout-minutes: 52
     services:
       postgres:
         image: postgres:18-alpine
@@ -487,7 +489,7 @@ jobs:
       # Setup, including module builds, ends at migrate; a failed setup never runs the list.
       - name: Postgres-gated tests
         if: ${{ !cancelled() && steps.migrate.conclusion == 'success' }}
-        timeout-minutes: 44
+        timeout-minutes: 50
         env:
           PG_CONTAINER: ${{ job.services.postgres.id }}
           PGVECTOR_CONTAINER: ${{ job.services.pgvector.id }}

@@ -40,18 +40,22 @@ now models each split job with those historical numbers and explicit setup allow
 - `smokes`: 907 + 62 = 969 s modelled green. Its 32-minute limit (1920 s) leaves 951 s over that model and covers
   the largest check's entire 900 s limit plus modelled green (1869 s), so later checks still have room after a hang.
   The extra 62 s conservatively allows moving module preparation from the old gated step into this job's setup.
-- `postgres-gated`: 120 s setup/module allowance + 10 s per row = 1870 s at 175 rows. MEASURED 2026-11-12 on
-  ubuntu-latest: the gated step took 1222 s for 134 rows on main and 1423 s for 143 rows, about 10 s per row, so the
-  older 7.5 s figure undercounted. Its 46-minute limit (2760 s) leaves 890 s over modelled green and covers the
-  44-minute gated step limit plus setup (2760 s). The 120 s allowance rounds up the historical 62 s setup maximum to
-  include module preparation.
+- `postgres-gated`: 120 s setup/module allowance + 10 s per GATED row. MEASURED 2026-11-12 on ubuntu-latest: the
+  gated step took 1222 s for 134 rows on main and 1423 s for 143 rows, about 10 s per row, so the older 7.5 s figure
+  undercounted. The 120 s allowance rounds up the historical 62 s setup maximum to include module preparation.
 - Both jobs retain at least 600 s over modelled green, stay within twice that model and leave room for a check's
-  whole time limit plus the rest of a green run. The gated step also retains at least 1.5 times its modelled row time:
-  its 44 minutes holds 176 rows and fails the pin at 177 (raised from 40 when the guarded-span
-  controls brought the list to 165 rows, and again as rows were added since); the job's 600 s margin lasts through 204 rows.
-  The five new controls ran in 6.4 to 18.8 s each locally including Vitest startup, 11.5 s on average, close to the
-  modelled 10 s; this does not remeasure the complete CI job. The historical 10 s per-row model is retained; verify the next green CI run.
-  Measure again before raising a limit when those pins fail.
+  whole time limit plus the rest of a green run. The gated step also retains at least 1.5 times its modelled row time,
+  and the job limit covers the setup plus that step's whole limit.
+- The constants and the formula live in one place: the `budget` of each job in
+  `scripts/test/ci-step-independence.test.mjs` (`minimumLimits` is the formula). None of this document, `ci.yml` or
+  `scripts/test/ci-gated-list.test.mjs` states the current number of rows, so adding a GATED row needs no edit to a
+  count or a limit, until the list outgrows the limits in `ci.yml`. The pin then fails and names the minutes to raise
+  both limits to, which hold the list plus the budget's `rowHeadroom` rows, so the rows added after a raise need no edit
+  either. Measure a green run again, then raise the two limits together. The ceiling of twice a green run bounds
+  `rowHeadroom`, and the test checks that it does.
+- The five guarded-span controls added on 2026-11-18 ran in 6.4 to 18.8 s each locally including Vitest startup,
+  11.5 s on average, close to the modelled 10 s; this does not remeasure the complete CI job. The historical 10 s
+  per-row model is retained; verify the next green CI run.
 
 The old model at 115 rows was 907 + 862.5 = 1769.5 s in one job. The split's expected critical path is the larger
 of 969 s and 982.5 s (about 16.4 minutes rather than 29.5), subject to runner scheduling and repeated setup. This is
@@ -75,7 +79,7 @@ out falsely, and Ctrl-C works there.
 
 ## CI steps
 
-Every environment-gated test under `packages/` needs a GATED row or an explicit reasoned exemption in `scripts/test/ci-gated-list.test.mjs`, which also verifies that exempt Redis files already run in another workflow step with their guard environment.
+Every environment-gated test under `packages/` needs a GATED row or an explicit reasoned exemption in `scripts/test/ci-gated-list.test.mjs`, which also verifies that exempt Redis files already run in another workflow step with their guard environment. It also pins that the list is exactly the gated files that are not exempt, so a missing, doubled or stale row fails and no count is edited when a row is added; a gated file deleted together with its row is not flagged.
 
 In the `smokes` and `postgres-gated` jobs of `.github/workflows/ci.yml` every step up to `Apply database migrations`
 (id `migrate`) is setup and keeps the default condition, so a failed one skips everything after it. Every step after it is an independent

@@ -140,6 +140,14 @@ describe('the environment-gated list in ci.yml', () => {
     assert.equal(new Set(listedFiles).size, listedFiles.length, 'duplicate GATED test row');
   });
 
+  // The tests around this one each check a part of it; compared whole, a failure shows every difference.
+  it('is exactly the gated test files that are not exempt', () => {
+    assert.deepEqual(
+      listedFiles,
+      gatedFiles.filter((file) => !Object.hasOwn(exemptions, file)),
+    );
+  });
+
   it('has a row or an explicit exemption for every gated test file', () => {
     assert.deepEqual(
       gatedFiles.filter((file) => !listedFiles.includes(file) && !Object.hasOwn(exemptions, file)),
@@ -205,5 +213,4 @@ it('runs the snapshot control in compose-boot with worker tooling, shared bind p
   assert.ok(step.run.includes('-e SNAPSHOT_SANDBOX_TEST_IMAGE=haive-cli-sandbox:latest'));
   assert.ok(step.run.includes('vitest run --root . test/exec-core-boundary-mounts.test.ts'));
   assert.ok(!step.run.includes('pnpm --filter'));
-  assert.equal(listedFiles.length, 175);
 });

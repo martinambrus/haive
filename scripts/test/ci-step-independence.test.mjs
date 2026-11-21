@@ -59,11 +59,14 @@ const JOBS = [
     bounded: true,
     // MEASURED 2026-11-12: 1423 s for 143 rows (main: 1222 s for 134), so 10 s/row;
     // 120 s allows duplicate setup and module builds.
+    // A new row needs no edit to the limits in ci.yml until the list outgrows them; the failure then names
+    // the limits that hold the list plus rowHeadroom more rows, and the 2x ceiling bounds rowHeadroom.
     budget: {
       outsideGatedSeconds: 120,
       secondsPerRow: 10,
       slowRunnerFactor: 1.5,
       marginSeconds: 600,
+      rowHeadroom: 25,
     },
     setup: [
       'actions/checkout',
@@ -130,6 +133,23 @@ function model(checks, { outsideGatedSeconds, secondsPerRow }) {
     gatedSeconds: rows * secondsPerRow,
     greenSeconds: outsideGatedSeconds + rows * secondsPerRow,
   };
+}
+
+// The least whole-minute limits that hold `rows` GATED rows. The gated step holds
+// slowRunnerFactor times the time its rows are modelled to take. The job holds a green run plus
+// marginSeconds, and the setup plus the whole gated step limit. A list so short that the margin
+// alone is over twice a green run has no limits that fit.
+function minimumLimits(
+  rows,
+  { outsideGatedSeconds, secondsPerRow, slowRunnerFactor, marginSeconds },
+) {
+  const gatedSeconds = rows * secondsPerRow;
+  const stepMinutes = Math.ceil((slowRunnerFactor * gatedSeconds) / 60);
+  const jobSeconds = Math.max(
+    outsideGatedSeconds + gatedSeconds + marginSeconds,
+    outsideGatedSeconds + stepMinutes * 60,
+  );
+  return { stepMinutes, jobMinutes: Math.ceil(jobSeconds / 60) };
 }
 
 const guard = ({ prerequisite, leg }) =>
@@ -267,8 +287,13 @@ function checkJob(job, spec, workflow = workflows[spec.file]) {
     }
   }
   if (spec.budget) {
-    const { outsideGatedSeconds, slowRunnerFactor, marginSeconds } = spec.budget;
+    const { outsideGatedSeconds, slowRunnerFactor, marginSeconds, rowHeadroom } = spec.budget;
     const { gated, rows, gatedSeconds, greenSeconds } = model(checks, spec.budget);
+    let raise = '';
+    if (gated) {
+      const { stepMinutes, jobMinutes } = minimumLimits(rows + rowHeadroom, spec.budget);
+      raise = `; raise the gated step's timeout-minutes to at least ${stepMinutes} and the job's to at least ${jobMinutes}, which hold these ${rows} rows and ${rowHeadroom} more`;
+    }
     assert.match(
       job['timeout-minutes'] ?? '',
       WHOLE_MINUTES,
@@ -277,7 +302,7 @@ function checkJob(job, spec, workflow = workflows[spec.file]) {
     const limit = Number(job['timeout-minutes']) * 60;
     assert.ok(
       limit >= greenSeconds + marginSeconds,
-      `the job's limit of ${limit} s leaves ${limit - greenSeconds} s over a green run (${greenSeconds} s modelled for ${rows} gated rows), not the ${marginSeconds} s a slower runner needs`,
+      `the job's limit of ${limit} s leaves ${limit - greenSeconds} s over a green run (${greenSeconds} s modelled for ${rows} gated rows), not the ${marginSeconds} s a slower runner needs${raise}`,
     );
     assert.ok(
       limit <= 2 * greenSeconds,
@@ -297,8 +322,8 @@ function checkJob(job, spec, workflow = workflows[spec.file]) {
     );
     if (gated)
       assert.ok(
-        Number(gated['timeout-minutes']) * 60 >= slowRunnerFactor * gatedSeconds,
-        `the gated step's limit of ${Number(gated['timeout-minutes']) * 60} s is under ${slowRunnerFactor} times the ${gatedSeconds} s its ${rows} rows are modelled to take, so a slower runner would end a green run`,
+        Number(gated['timeout-minutes']) >= minimumLimits(rows, spec.budget).stepMinutes,
+        `the gated step's limit of ${Number(gated['timeout-minutes']) * 60} s is under ${slowRunnerFactor} times the ${gatedSeconds} s its ${rows} rows are modelled to take, so a slower runner would end a green run${raise}`,
       );
   }
 }
@@ -687,6 +712,7 @@ const MUTANTS = [
       );
     },
     (spec) => spec.id === 'postgres-gated',
+    /raise the gated step's timeout-minutes to at least \d+ and the job's to at least \d+/,
   ],
   [
     'a new check that is not a smoke chain and has no time limit',
@@ -737,6 +763,85 @@ for (const spec of JOBS) {
     }
   });
 }
+
+describe('the limits the gated budget names', () => {
+  const spec = JOBS.find((s) => s.id === 'postgres-gated');
+  const live = workflows[spec.file].jobs[spec.id];
+  const { rows } = model(
+    live.steps.slice(live.steps.findIndex((step) => step.id === spec.prerequisite) + 1),
+    spec.budget,
+  );
+
+  // The live job with exactly `count` GATED rows (rows past the live list are placeholders) and the
+  // given limits in minutes.
+  const withLimits = (count, stepMinutes, jobMinutes) => {
+    const clone = structuredClone(live);
+    const gated = clone.steps.find((step) => gatedRows(step) !== null);
+    gated.run = gated.run.replace(
+      /(<<'GATED'\n)([\s\S]+?)(\nGATED(?:\n|$))/,
+      (_, open, list, close) => {
+        const listed = list.split('\n');
+        return open + Array.from({ length: count }, (_, i) => listed[i] ?? 'x').join('\n') + close;
+      },
+    );
+    gated['timeout-minutes'] = String(stepMinutes);
+    clone['timeout-minutes'] = String(jobMinutes);
+    return clone;
+  };
+
+  // A list this short is the one where the job's margin over a green run, not the gated step's
+  // limit, sets the job's minimum; the other counts are the live list and longer ones.
+  const short = 100;
+  it('has a short list for which the job margin sets the job limit', () => {
+    const { outsideGatedSeconds, secondsPerRow, marginSeconds } = spec.budget;
+    const { stepMinutes } = minimumLimits(short, spec.budget);
+    assert.ok(
+      outsideGatedSeconds + short * secondsPerRow + marginSeconds >
+        outsideGatedSeconds + stepMinutes * 60,
+    );
+  });
+
+  // The limits a failing pin names are those for the list plus rowHeadroom more rows, both in the
+  // job margin pin and in the gated step pin. The limits are set here, so they do not move with ci.yml.
+  it('names the limits for the list plus rowHeadroom more rows', () => {
+    const { outsideGatedSeconds, secondsPerRow, marginSeconds, rowHeadroom } = spec.budget;
+    const count = rows + 100;
+    const named = minimumLimits(count + rowHeadroom, spec.budget);
+    const namedInMessage = new RegExp(
+      `to at least ${named.stepMinutes} and the job's to at least ${named.jobMinutes}\\b`,
+    );
+    // A job limit under a green run plus the margin, with the step limit under it.
+    const job = Math.ceil((outsideGatedSeconds + count * secondsPerRow + marginSeconds) / 60) - 1;
+    assert.throws(() => checkJob(withLimits(count, job - 1, job), spec), namedInMessage);
+    // A step limit under the modelled time, with a job limit that holds it.
+    const { stepMinutes } = minimumLimits(count, spec.budget);
+    assert.throws(
+      () => checkJob(withLimits(count, stepMinutes - 1, named.jobMinutes), spec),
+      namedInMessage,
+    );
+  });
+
+  it('has a rowHeadroom that the 2x ceiling allows for the list as it is', () => {
+    const { stepMinutes, jobMinutes } = minimumLimits(rows + spec.budget.rowHeadroom, spec.budget);
+    checkJob(withLimits(rows, stepMinutes, jobMinutes), spec);
+  });
+
+  for (const count of [short, rows, rows + 1, rows + 25, rows + 100, rows + 400]) {
+    const { stepMinutes, jobMinutes } = minimumLimits(count, spec.budget);
+
+    it(`accepts the named limits for ${count} rows and rejects one minute less`, () => {
+      checkJob(withLimits(count, stepMinutes, jobMinutes), spec);
+      assert.throws(
+        () => checkJob(withLimits(count, stepMinutes - 1, jobMinutes), spec),
+        assert.AssertionError,
+      );
+      assert.throws(
+        () => checkJob(withLimits(count, stepMinutes, jobMinutes - 1), spec),
+        assert.AssertionError,
+      );
+    });
+  }
+});
 
 function redisDatabases(step) {
   const texts = [
