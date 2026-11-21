@@ -28,9 +28,10 @@ export async function pendingInsightApproval(db: Database, taskId: string): Prom
 }
 
 /** Required while the latest insight check is a gate-2 approval. It settles once a completed
- * gate-3 row carries the owner's answer for its current generation, written after that approval.
- * A Retry that re-runs the answered row, or a newer approval, withdraws the answer, so the form
- * stays human-only across Retry, Resume and worker takeover whatever round it runs at. */
+ * gate-3 row at or after the approval's round and below this row's carries the owner's answer for
+ * its current generation, written after that approval. A row below the approval's round or at a
+ * later round never settles another; a Retry that re-runs the answered row, or a newer approval,
+ * withdraws the answer, so the form stays human-only across Retry, Resume and worker takeover. */
 async function failedInsightGate3ReviewRequired(
   db: Database,
   row: typeof schema.taskSteps.$inferSelect,
@@ -57,6 +58,8 @@ async function failedInsightGate3ReviewRequired(
     where: and(
       eq(schema.taskSteps.taskId, row.taskId),
       eq(schema.taskSteps.stepId, '10-gate-3-commit'),
+      gte(schema.taskSteps.round, approvedRound),
+      sql`${schema.taskSteps.round} < ${row.round}`,
       inArray(schema.taskSteps.status, ['done', 'skipped']),
       sql`exists (
         select 1 from ${schema.taskEvents} submitted, ${schema.taskEvents} approved, ${schema.tasks} owned

@@ -150,13 +150,16 @@ round and generation, so such a Retry ends the cycle for routing only. The faile
 requirement, read from the task's latest `insight.check` event (`failedInsightGate3ReviewRequired`):
 while that event is a gate-2 re-approval, gate 3 parks for a new human answer whatever its round, so a
 Retry that re-runs gate 3 below the approval's round (round numbers grow, and a Retry re-runs a lower
-one) still parks it; round order proves nothing about what came after the approval. The requirement
-ends once a gate-3 row that is still done or skipped carries the authenticated owner's
-`step.form_submitted` answer for that row's current generation, created after that approval (event
-against event, compared in PostgreSQL). That one answered row ends it for a gate 3 at any round, below
-or above its own. A Retry that re-runs the answered row, or a newer gate-2 re-approval, withdraws the
-proof and the gate asks again; a completion with no stamped owner answer (an engine skip, an older
-record) ends nothing, so the next gate 3 asks once. Either requirement parks the gate. A warning note
+one) still parks it. The requirement ends once a gate-3 row at or after the approval's round and below
+the current one, still done or skipped, carries the authenticated owner's `step.form_submitted` answer
+for that row's current generation, created after that approval (event against event, compared in
+PostgreSQL). The window is the cycle's: an answer covers the gates after it, never one a Retry reset
+below it, so a gate 3 reset below an answered later-round row parks again, and an answer given below
+the approval's round (a Retry pulled the task back and the person answered it there) settles only its
+own row; both fail closed and settle on the next answer. A Retry that re-runs the answered row, or a
+newer gate-2 re-approval, withdraws the proof and the gate asks again; a completion with no stamped
+owner answer (an engine skip, an older record) ends nothing, so the next gate 3 asks once. Either
+requirement parks the gate. A warning note
 explains that the refreshed changes need review and a new commit decision. Inside the same cycle, a gate 2 kept because the accepted QA
 review deferred its findings parks for the owner the same way (fix-loop). Ordinary gates retain
 their existing preset behavior.

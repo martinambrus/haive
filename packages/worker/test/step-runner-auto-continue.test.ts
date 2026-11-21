@@ -80,7 +80,12 @@ function gateRowLookup(world: GateWorld, cond: unknown): Record<string, unknown>
       .sort((a, b) => (b.round as number) - (a.round as number))[0];
   if (values.includes('10-gate-3-commit') && values.includes('step.form_submitted'))
     return world.rows.find(
-      (r) => r.stepId === '10-gate-3-commit' && settled(r) && r.ownerAnswered === true,
+      (r) =>
+        r.stepId === '10-gate-3-commit' &&
+        settled(r) &&
+        r.ownerAnswered === true &&
+        (r.round as number) >= numbers[0]! &&
+        (r.round as number) < numbers[1]!,
     );
   if (values.includes('10-gate-3-commit'))
     return world.rows.find(
@@ -2787,12 +2792,12 @@ describe('gates after a gate-3 insight cycle (database faked)', () => {
     );
 
     it.each(
-      ['done', 'skipped'].flatMap((status) => [1, 2, 4].map((round) => [status, round] as const)),
+      ['done', 'skipped'].flatMap((status) => [3, 4].map((round) => [status, round] as const)),
     )(
       'a %s gate-3 row answered by the owner after the approval (round %i) settles the latch',
       async (status, round) => {
         const run = seedFailedPath('task preset', {
-          round: 2,
+          round: 5,
           rows: [answeredRow(round, status)],
         });
         expect((await run.advance()).status).toBe('done');
@@ -2801,12 +2806,44 @@ describe('gates after a gate-3 insight cycle (database faked)', () => {
     );
 
     it.each(
-      ['done', 'skipped'].flatMap((status) => [1, 2, 4].map((round) => [status, round] as const)),
+      ['done', 'skipped'].flatMap((status) => [0, 1, 2].map((round) => [status, round] as const)),
+    )(
+      'a gate-3 row answered below the approval round never settles a later one (%s, round %i)',
+      async (status, round) => {
+        const run = seedFailedPath('task preset', {
+          round: 5,
+          rows: [answeredRow(round, status)],
+        });
+        await expectParked(run, 'commit');
+      },
+    );
+
+    it.each(
+      ['done', 'skipped'].flatMap((status) =>
+        [2, 3].flatMap((current) =>
+          [3, 4, 6]
+            .filter((answered) => answered >= current)
+            .map((answered) => [status, answered, current] as const),
+        ),
+      ),
+    )(
+      'a later-round answer never settles an earlier-round gate 3 (%s answered at round %i, current round %i)',
+      async (status, answered, current) => {
+        const run = seedFailedPath('task preset', {
+          round: current,
+          rows: [answeredRow(answered, status)],
+        });
+        await expectParked(run, 'commit');
+      },
+    );
+
+    it.each(
+      ['done', 'skipped'].flatMap((status) => [3, 4].map((round) => [status, round] as const)),
     )(
       'a %s gate-3 row without the owner answer after the approval (round %i) does not settle',
       async (status, round) => {
         const run = seedFailedPath('task preset', {
-          round: 2,
+          round: 5,
           rows: [answeredRow(round, status, false)],
         });
         await expectParked(run, 'commit');
@@ -2817,8 +2854,8 @@ describe('gates after a gate-3 insight cycle (database faked)', () => {
       'an answered gate-3 row that is %s again no longer settles the latch',
       async (status) => {
         const run = seedFailedPath('task preset', {
-          round: 2,
-          rows: [answeredRow(2, status)],
+          round: 5,
+          rows: [answeredRow(4, status)],
         });
         await expectParked(run, 'commit');
       },

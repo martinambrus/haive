@@ -3653,13 +3653,13 @@ describe.skipIf(!url)('manual insight batch journal on Postgres', () => {
       }
 
       /** A gate-3 row a Retry pulled back to round 2, below the gate-2 approval's round 3. */
-      async function seedPulledBack(check: 'approved' | 'failed' | 'none' = 'approved') {
-        const seeded = await seedGate3('none', 2);
+      async function seedPulledBack(check: 'approved' | 'failed' | 'none' = 'approved', round = 2) {
+        const seeded = await seedGate3('none', round);
         if (check === 'approved')
           await addCheck(seeded.ctx.taskId, 'gate2_approved', 3, APPROVED_AT);
         if (check === 'failed') await addCheck(seeded.ctx.taskId, 'verify_failed', 3, APPROVED_AT);
         const retry = async () => {
-          const reset = await resetStepAndDownstream(db, seeded.ctx.taskId, gateId, 2);
+          const reset = await resetStepAndDownstream(db, seeded.ctx.taskId, gateId, round);
           if (!reset || reset === 'superseded') throw new Error('the reset did not apply');
           return reset.newEpoch;
         };
@@ -3753,6 +3753,15 @@ describe.skipIf(!url)('manual insight batch journal on Postgres', () => {
           'gate2',
           'waiting_form',
         ],
+        [
+          'sits on a gate-3 row that is not completed',
+          '2026-01-02T00:00:00.000600Z',
+          'owner',
+          0,
+          'form_submitted',
+          'open',
+          'waiting_form',
+        ],
       ] as const)(
         'a later gate 3 settles only on a proof row that %s',
         async (_name, at, who, generation, kind, onRow, expected) => {
@@ -3775,6 +3784,11 @@ describe.skipIf(!url)('manual insight batch journal on Postgres', () => {
               .returning();
             rowId = gate2!.id;
           }
+          if (onRow === 'open')
+            await db
+              .update(schema.taskSteps)
+              .set({ status: 'waiting_form' })
+              .where(eq(schema.taskSteps.id, rowId));
           await db.insert(schema.taskEvents).values({
             taskId: ctx.taskId,
             taskStepId: rowId,
@@ -3796,8 +3810,41 @@ describe.skipIf(!url)('manual insight batch journal on Postgres', () => {
         },
       );
 
-      it('a later gate 3 commits with the preset until a newer approval latches it again', async () => {
+      it('a later gate 3 settles only on an answer newer than the latest approval, not an earlier check', async () => {
+        const { ctx, params, apply, sourceRow } = await seedGate3('none', 4);
+        await addCheck(ctx.taskId, 'verify_failed', 3, '2026-01-02T00:00:00.000100Z');
+        await addCheck(ctx.taskId, 'gate2_approved', 3, APPROVED_AT);
+        await answerAsOwner(sourceRow.id, ctx.taskId, microsecond('2026-01-02T00:00:00.000400Z'));
+        expectParked(await advanceStep(params), apply);
+      });
+
+      it('an answered later-round gate 3 does not settle a pulled-back one', async () => {
+        const { ctx, params, apply, retry } = await seedPulledBack();
+        const later = await addGate3Row(ctx.taskId, 3, 'done');
+        await answerAsOwner(later.id, ctx.taskId, microsecond('2026-01-02T00:00:00.000600Z'));
+        const epoch = await retry();
+        expectParked(await advanceStep({ ...params, epoch }), apply);
+      });
+
+      it('an answer below the approval round settles no later gate 3', async () => {
         const { ctx, params, apply, waitForAnswer } = await seedPulledBack();
+        await waitForAnswer();
+        await answerAsOwner(ctx.taskStepId, ctx.taskId, microsecond('2026-01-02T00:00:00.000600Z'));
+        expect(await advanceStep(params)).toMatchObject({ status: 'done' });
+        expect(apply).toHaveBeenCalledOnce();
+        await addGate3Row(ctx.taskId, 4, 'pending');
+        await db
+          .update(schema.tasks)
+          .set({ currentStepId: gateId, currentRound: 4 })
+          .where(eq(schema.tasks.id, ctx.taskId));
+        expect(await advanceStep({ ...params, round: 4 })).toMatchObject({
+          status: 'waiting_form',
+        });
+        expect(apply).toHaveBeenCalledOnce();
+      });
+
+      it('a later gate 3 commits with the preset until a newer approval latches it again', async () => {
+        const { ctx, params, apply, waitForAnswer } = await seedPulledBack('approved', 3);
         await waitForAnswer();
         await answerAsOwner(ctx.taskStepId, ctx.taskId, microsecond('2026-01-02T00:00:00.000600Z'));
         expect(await advanceStep(params)).toMatchObject({ status: 'done' });
