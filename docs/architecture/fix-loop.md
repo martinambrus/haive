@@ -35,6 +35,11 @@ task before any reset when it is unregistered, is not a module step declaring th
 `ctx.host.loadFixLoopDiagnosis()`, which is null unless a request is recorded for its own
 round: `round > 0` is also true after a revise-loop fork, so it never decides a fix round.
 
+A pinned target is never skipped, as 07 is not: the api refuses Skip on it (`canSkip` is false),
+boot rejects a step that declares `fixConsumer` together with `allowSkip` (`fix-consumer-skippable`),
+and at a round a recorded request entered its own `shouldRun` cannot skip it (07's `shouldRun`
+answers true there for the same reason). Round 0 keeps the step's own run decision.
+
 Recovery addresses a round as (task, step, round) at an epoch, never by step id: resets, step
 ownership, Retry and Resume, the boot passes, the stalled sweep and dead-task revival treat a
 pinned target's round as 07's. `custom-fix-recovery-db.test.ts` (worker) and

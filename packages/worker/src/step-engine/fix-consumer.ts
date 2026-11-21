@@ -96,3 +96,10 @@ export async function isPinnedFixRepair(ctx: StepContext, def: StepDefinition): 
     return false;
   return isFixRound(ctx);
 }
+
+/** Whether a step runs: its own `shouldRun`, or the repair round of the fix target a task pinned.
+ *  A pinned target's repair round is never suppressed by its own `shouldRun`; 07 guarantees this
+ *  in its own `shouldRun`, a module step cannot. */
+export async function stepRunDecision(ctx: StepContext, def: StepDefinition): Promise<boolean> {
+  return ((await def.shouldRun?.(ctx)) ?? true) || (await isPinnedFixRepair(ctx, def));
+}
