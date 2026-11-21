@@ -148,9 +148,30 @@ async function latestGate3Request(db: Pick<Database, 'query'>, taskId: string, r
   if (!source || source.rerunGeneration !== request.generation) return null;
   return { event, request };
 }
-/** The gate-3 cycle whose first gate 3 is still owed to a person; null once an earlier gate-3 row settled it. */
+/** The newest gate-3 apply request of the task, whatever round or source-row generation it recorded.
+ *  A person's pick writes the event once and no Retry or reset touches it, so it proves the cycle
+ *  began even after a Retry re-ran the source row at a lower round or a higher generation. */
+async function latestGate3Cycle(db: Pick<Database, 'query'>, taskId: string) {
+  const events = await db.query.taskEvents.findMany({
+    where: and(
+      eq(schema.taskEvents.taskId, taskId),
+      eq(schema.taskEvents.eventType, 'insight.continuation'),
+    ),
+    orderBy: [desc(schema.taskEvents.createdAt), desc(schema.taskEvents.id)],
+  });
+  const event = events.find((e) => {
+    const c = readInsightContinuation(e.payload?.continuation);
+    return c.mode === 'gate3' && c.stage === 'apply';
+  });
+  return event ? { event, request: readInsightContinuation(event.payload?.continuation) } : null;
+}
+/** The gate-3 cycle whose first gate 3 is still owed to a person, or null once it was settled.
+ *  The cycle event proves it; a Retry never ends it. Two things settle it: an earlier gate-3 row at
+ *  or after the cycle's round that is done or skipped, or the pick's source row, reset by a Retry
+ *  after the pick and completed again at a round below this one, which shows a person passed that
+ *  gate again. The source row's own generation at the pick settles nothing. */
 export async function openGate3Cycle(db: Pick<Database, 'query'>, taskId: string, round: number) {
-  const found = await latestGate3Request(db, taskId, round);
+  const found = await latestGate3Cycle(db, taskId);
   if (!found) return null;
   const settled = await db.query.taskSteps.findFirst({
     where: and(
@@ -161,7 +182,21 @@ export async function openGate3Cycle(db: Pick<Database, 'query'>, taskId: string
       inArray(schema.taskSteps.status, ['done', 'skipped']),
     ),
   });
-  return settled ? null : found;
+  if (settled) return null;
+  const source = await db.query.taskSteps.findFirst({
+    where: and(
+      eq(schema.taskSteps.taskId, taskId),
+      eq(schema.taskSteps.id, found.request.sourceStepRow),
+    ),
+  });
+  if (
+    source &&
+    source.round < round &&
+    (source.status === 'done' || source.status === 'skipped') &&
+    source.rerunGeneration > found.request.generation
+  )
+    return null;
+  return found;
 }
 /** A gate-3 cycle outlives its triage checkpoint and ordinary blocking fix rounds. */
 export async function gate3InsightCycle(db: Database, taskId: string, round: number) {

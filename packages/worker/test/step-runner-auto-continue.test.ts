@@ -2271,24 +2271,29 @@ describe('gates after a gate-3 insight cycle (database faked)', () => {
   type Qa = { round: number; status: 'done' | 'skipped'; decision?: 'accept' | 'fix' };
   const QA_ACCEPT: Qa[] = [{ round: 2, status: 'done', decision: 'accept' }];
 
-  const gateRow = (stepId: string, id: string, round: number, status: string) => ({
+  const gateRow = (stepId: string, id: string, round: number, status: string, generation = 0) => ({
     id,
     stepId,
     round,
     status,
-    rerunGeneration: 0,
+    rerunGeneration: generation,
   });
 
   /** The latest gate-3 apply request, naming `src` as its source row, or an automatic round's event. */
-  const continuation = (round: number, automatic = false) => ({
+  const continuation = (
+    round: number,
+    automatic = false,
+    sourceStepRow = 'src',
+    generation = 0,
+  ) => ({
     id: `ev-${round}`,
     payload: {
       continuation: {
         version: 1,
         kind: 'insight_revise',
         batchId: 'batch',
-        sourceStepRow: 'src',
-        generation: 0,
+        sourceStepRow,
+        generation,
         round,
         ...(automatic ? {} : { mode: 'gate3', stage: 'apply' }),
       },
@@ -2304,6 +2309,20 @@ describe('gates after a gate-3 insight cycle (database faked)', () => {
     submission?: Record<string, unknown>;
     savedValues?: Record<string, unknown>;
     status?: string;
+    /** The round and generation the cycle's event recorded. */
+    cycleRound?: number;
+    cycleGeneration?: number;
+    /** The generation of the gate row being advanced, and whether a Retry holds its form. */
+    rowGeneration?: number;
+    pauseForm?: boolean;
+    /** The cycle's source row: a separate row by default, the gate row itself, or none at all. */
+    source?: {
+      self?: boolean;
+      absent?: boolean;
+      round?: number;
+      status?: string;
+      rerunGeneration?: number;
+    };
   }
 
   /** One pending gate row at `round` holding the pre-answer `source`, with the cycle `opts` names. */
@@ -2313,7 +2332,16 @@ describe('gates after a gate-3 insight cycle (database faked)', () => {
     const stepId = gate === 3 ? GATE3 : GATE2;
     const answer = gate === 3 ? { commit: true } : { decision: 'approve' };
     const state = freshState();
-    const sourceRound = gate === 3 ? round - 1 : 0;
+    const src = opts.source ?? {};
+    const sourceId = src.self ? 'ts-1' : 'src';
+    const sourceRound = src.round ?? (src.self ? round : gate === 3 ? round - 1 : 0);
+    const sourceRow = gateRow(
+      GATE3,
+      sourceId,
+      sourceRound,
+      src.status ?? (src.self ? status : 'done'),
+      src.rerunGeneration ?? (src.self ? (opts.rowGeneration ?? 0) : 0),
+    );
     state.taskRow = {
       id: 'task-1',
       autoContinue: source !== 'form autoSubmit',
@@ -2326,17 +2354,27 @@ describe('gates after a gate-3 insight cycle (database faked)', () => {
       stepId,
       round,
       status,
-      rerunGeneration: 0,
+      rerunGeneration: opts.rowGeneration ?? 0,
+      ...(opts.pauseForm ? { pauseFormOnRetry: true } : {}),
       waitingStartedAt: null,
       detectOutput: {},
       formValues: opts.savedValues ?? (source === 'saved synthetic' ? answer : null),
     };
     state.gate = {
       continuations:
-        cycle === 'none' ? [] : [continuation(gate === 3 ? round : 1, cycle === 'automatic')],
+        cycle === 'none'
+          ? []
+          : [
+              continuation(
+                opts.cycleRound ?? (gate === 3 ? round : 1),
+                cycle === 'automatic',
+                sourceId,
+                opts.cycleGeneration ?? 0,
+              ),
+            ],
       checks: [],
       rows: [
-        gateRow(GATE3, 'src', sourceRound, 'done'),
+        ...(src.absent ? [] : [sourceRow]),
         ...qa.map((q, i) => ({
           ...gateRow('08d2-adversarial-qa-review', `qa-${i}`, q.round, q.status),
           output: q.decision ? { decision: q.decision } : {},
@@ -2499,6 +2537,164 @@ describe('gates after a gate-3 insight cycle (database faked)', () => {
         expect(run.apply).toHaveBeenCalledOnce();
       },
     );
+
+    describe('after a Retry reset the source row or pulled the task below the cycle round', () => {
+      const RETRY_ROW: GateSeed = {
+        round: 0,
+        cycleRound: 1,
+        rowGeneration: 1,
+        source: { self: true },
+      };
+
+      it.each(SOURCES.flatMap((source) => [[source, false] as const, [source, true] as const]))(
+        'the gate row is the source row, below the cycle round, generation 1: %s (form held=%s)',
+        async (source, pauseForm) => {
+          const run = seedGate(3, source, { ...RETRY_ROW, pauseForm });
+          await expectParked(run, 'commit');
+          expect(run.reconcile).not.toHaveBeenCalled();
+        },
+      );
+
+      it.each(
+        SOURCES.flatMap((source) =>
+          ['pending', 'running', 'waiting_form', 'failed'].map((s) => [source, s] as const),
+        ),
+      )(
+        'a later round parks while the reset source row is not completed: %s, source %s',
+        async (source, sourceStatus) => {
+          const run = seedGate(3, source, {
+            round: 2,
+            cycleRound: 1,
+            source: { round: 0, status: sourceStatus, rerunGeneration: 1 },
+          });
+          await expectParked(run, 'commit');
+        },
+      );
+
+      const GRID = [0, 1, 2]
+        .flatMap((round) =>
+          [0, 1].flatMap((generation) =>
+            ['pending', 'done'].map((status) => ({ round, generation, status })),
+          ),
+        )
+        .filter((c) => !(c.status === 'done' && c.generation === 1 && c.round > 0));
+
+      it.each(GRID)(
+        'gate round $round, source generation $generation, source $status: not settled, parks',
+        async ({ round, generation, status }) => {
+          const run = seedGate(3, 'task preset', {
+            round,
+            cycleRound: 1,
+            source: { round: 0, status, rerunGeneration: generation },
+          });
+          await expectParked(run, 'commit');
+        },
+      );
+
+      it.each(['pending', 'running', 'waiting_form'])(
+        'an owner answer for the re-run on a %s row applies once and a duplicate advance does nothing',
+        async (status) => {
+          const run = seedGate(3, 'task preset', {
+            ...RETRY_ROW,
+            status,
+            savedValues: { commit: true },
+            submission: ownerSubmission(3, { generation: 1 }),
+          });
+          expect((await run.advance()).status).toBe('done');
+          expect(run.apply).toHaveBeenCalledOnce();
+          expect((await run.advance()).status).toBe('done');
+          expect(run.apply).toHaveBeenCalledOnce();
+        },
+      );
+
+      it.each([
+        ['queue payload alone', {}],
+        ['saved values without an event', { savedValues: { commit: true } }],
+        [
+          'wrong user',
+          {
+            savedValues: { commit: true },
+            submission: ownerSubmission(3, { userId: 'other', generation: 1 }),
+          },
+        ],
+        [
+          'wrong generation',
+          { savedValues: { commit: true }, submission: ownerSubmission(3, { generation: 0 }) },
+        ],
+        [
+          'commit mismatch',
+          {
+            savedValues: { commit: true },
+            submission: ownerSubmission(3, { commit: false, generation: 1 }),
+          },
+        ],
+      ] as [string, GateSeed][])(
+        'stays parked with invalid human evidence for the re-run: %s',
+        async (_n, opts) => {
+          const run = seedGate(3, 'queue answer', {
+            ...RETRY_ROW,
+            ...opts,
+            status: 'waiting_form',
+          });
+          await expectParked(run, 'commit');
+        },
+      );
+
+      it.each(['done', 'skipped'])(
+        'a source row completed again at a lower round (%s) settles the cycle for a later round',
+        async (status) => {
+          const run = seedGate(3, 'task preset', {
+            round: 2,
+            cycleRound: 1,
+            source: { round: 0, status, rerunGeneration: 1 },
+          });
+          expect((await run.advance()).status).toBe('done');
+          expect(run.apply).toHaveBeenCalledOnce();
+        },
+      );
+
+      it.each([
+        ['done at the generation the pick completed with', { round: 0, status: 'done' }],
+        ['skipped at the generation the pick completed with', { round: 0, status: 'skipped' }],
+        ...['pending', 'running', 'waiting_form', 'failed'].map(
+          (status) =>
+            [`${status} with a higher generation`, { round: 0, status, rerunGeneration: 1 }] as [
+              string,
+              GateSeed['source'],
+            ],
+        ),
+        [
+          'done with a higher generation at the gate row round',
+          { round: 2, status: 'done', rerunGeneration: 1 },
+        ],
+        [
+          'done with a higher generation above the gate row round',
+          { round: 3, status: 'done', rerunGeneration: 1 },
+        ],
+        ['absent', { absent: true }],
+      ] as [string, GateSeed['source']][])(
+        'a later round still parks when the source row is %s',
+        async (_n, source) => {
+          const run = seedGate(3, 'task preset', { round: 2, cycleRound: 1, source });
+          await expectParked(run, 'commit');
+        },
+      );
+
+      it.each(['task preset', 'queue answer'] as const)(
+        'an automatic round event with the Retry shape is not a cycle and commits: %s',
+        async (source) => {
+          const run = seedGate(3, source, { ...RETRY_ROW, cycle: 'automatic' });
+          expect((await run.advance()).status).toBe('done');
+          expect(run.apply).toHaveBeenCalledOnce();
+        },
+      );
+
+      it('no event with the Retry shape commits', async () => {
+        const run = seedGate(3, 'task preset', { ...RETRY_ROW, cycle: 'none' });
+        expect((await run.advance()).status).toBe('done');
+        expect(run.apply).toHaveBeenCalledOnce();
+      });
+    });
 
     it('a failed verification keeps the gate parked until a fresh submission arrives', async () => {
       const run = seedGate(3, 'task preset');

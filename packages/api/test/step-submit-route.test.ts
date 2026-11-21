@@ -464,6 +464,39 @@ it('accepts a gate-3 answer after a gate-3 insight cycle that carries the form i
   });
 });
 
+/** The Retry shape: the waiting gate-3 row is the cycle's own source row, reset to generation 1 at a
+ *  round below the cycle's round. */
+function retriedSourceFixture() {
+  const fixture = gateFixture({ stepId: GATE3 });
+  fixture.fake.insert(schema.taskEvents, {
+    taskId: TASK,
+    eventType: 'insight.continuation',
+    payload: cycleEvent({ sourceStepRow: fixture.stepRowId(), generation: 0, round: 1 }),
+    createdAt: new Date(Date.UTC(2026, 0, 1)),
+  });
+  return fixture;
+}
+
+it('refuses an unbound gate-3 answer on the cycle source row re-run below the cycle round', async () => {
+  const { fake } = retriedSourceFixture();
+  const before = snap(fake);
+  const res = await postGate(GATE3, {});
+  await expectRefused(res, fake, before);
+});
+
+it('accepts a bound gate-3 answer on the cycle source row re-run below the cycle round', async () => {
+  const { fake, stepRowId } = retriedSourceFixture();
+  const res = await postGate(GATE3, {
+    stepRowId: stepRowId(),
+    waitingStartedAt: PARK.toISOString(),
+  });
+  expect(res.status).toBe(200);
+  expect(fake.rows(schema.taskEvents).at(-1)).toMatchObject({
+    eventType: 'step.form_submitted',
+    payload: expect.objectContaining({ userId: USER, generation: 1, commit: true }),
+  });
+});
+
 it('needs no fields for a gate-3 answer after an automatic round, which is not a gate-3 cycle', async () => {
   const { fake } = gateFixtureWithContinuation(
     GATE3,

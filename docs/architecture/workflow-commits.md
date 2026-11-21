@@ -128,17 +128,28 @@ form defaults. The submit route attests owner, generation and explicit commit ch
 with the answer; only matching evidence newer than the cycle's start (its `insight.continuation`
 event, written in the handoff that resets the cycle's rows) and than any gate-2 re-approval can
 advance that pass. A stale tab cannot supply it: the answer must name the row and park its form
-was rendered for, else 409 `step_form_stale` (worker-restarts, form park marker). The
-requirement ends once a gate 3 at or after the cycle's first round completed (done or skipped)
-before the current round. Until then Retry, Resume and boot re-entry keep an unanswered form
-parked; re-entry after the owner's answer (Resume, takeover, a duplicate advance) uses that
-answer and does not park again. A Retry of the gate itself resets its answer and generation, so
-it asks again. A Retry of the pick's own row, or of a step above it in the pick's round, ends the
-cycle: that row no longer holds the generation the cycle named (`gate3InsightCycle` reads it the
-same way), so the next gate 3 is an ordinary one. A warning note explains that the refreshed
-changes need review and a new commit decision. Inside the same cycle, a gate 2 kept because the
-accepted QA review deferred its findings parks for the owner the same way (fix-loop). Ordinary
-gates retain their existing preset behavior.
+was rendered for, else 409 `step_form_stale` (worker-restarts, form park marker). The cycle is
+the task's latest apply-stage gate-3 `insight.continuation` event, read task-wide
+(`openGate3Cycle`): events are append-only and no Retry touches them, so neither the task's
+current round nor what happened to the pick's row since ends it. The requirement ends once a
+gate 3 at or after the cycle's first round completed (done or skipped) before the current round,
+or once the pick's own row, reset by a Retry after the pick, completed a new pass (generation
+above the cycle's, done or skipped) at a round below the current one. Until then Retry, Resume
+and boot re-entry keep an unanswered form parked; re-entry after the owner's answer (Resume,
+takeover, a duplicate advance) uses that answer and does not park again. A Retry of the gate
+itself resets its answer and generation, so it asks again. A Retry of the pick's own row, or of a
+step above it in the pick's round, pulls the task back below the cycle's round and bumps that
+row's generation, yet the cycle stays open: the re-run gate 3 parks, since the cycle's edits are
+still in the worktree. The re-run row's own answer, attested like any other (its generation,
+newer than the cycle's event), ends the requirement. Either way of ending it needs the completed
+gate 3 at an earlier round than the current one, so a gate 3 at or below the pick's round parks
+even when a person already answered a later-round gate 3 (a Retry above the pick after the
+post-cycle gate 3 was answered parks the re-run once more); that fails closed, and a later-round
+row never settles it. Routing is the exception: `gate3InsightCycle` still reads the pick row's
+round and generation, so such a Retry ends the cycle for routing only. A warning note explains
+that the refreshed changes need review and a new commit decision. Inside the same cycle, a gate 2 kept because the accepted QA
+review deferred its findings parks for the owner the same way (fix-loop). Ordinary gates retain
+their existing preset behavior.
 Step-runner retains the invocation through form submission
 and recovery using its existing pre-form lifecycle.
 
