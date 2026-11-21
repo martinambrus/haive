@@ -946,7 +946,7 @@ status: open · kind: fix · found: #1305 driver 2026-11-21 · priority: P4
 
 ### T747 · FNF[claude-stream-error-codes] · only one of the Claude CLI's assistant error codes is read
 
-status: open, main item in review as #1308 (2026-11-21: codes mapped to auth / rate_limit / server_error, steered runs classify) · kind: fix · found: #1306 driver 2026-11-21 · priority: P4
+status: open for follow-ups 1-8; main item DONE in #1308 (d52dd3722, deployed 2026-11-21 17:47Z: codes mapped to auth / rate_limit / server_error, steered runs classify) · kind: fix · found: #1306 driver 2026-11-21 · priority: P4
 
 `worker/src/queues/cli-exec/stream.ts` ~:87 and `exec-core.ts` ~:1221 read only `authentication_failed` from the top-level assistant `error` field. Claude CLI 2.1.330 also stamps `oauth_org_not_allowed`, `account_on_hold`, `verification_required`, `cloud_credential_error`, `billing_error`, `rate_limit`, `overloaded`, `server_error`, `invalid_request`, `model_not_found`, `max_output_tokens` and `unknown`; map the ones with a failure class (auth, rate limit, provider outage) to it. A steered run whose later turn fails auth takes the result branch and carries no flag. PRE-EXISTING.
 
