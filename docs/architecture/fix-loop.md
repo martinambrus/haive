@@ -308,7 +308,9 @@ eligibility check in place of the core dispatch list; a core step never does. Bo
 previews list providers for the target `fixRoundTargetDef` names, before the router runs. A pin
 that resolves to no capable step lists none, and Continue then fails the task with
 `fix_loop.unroutable`. The api shows the round provider on the same step: it reads the contract
-only for a task whose choices hold a round slot, and a malformed contract displays as no pin.
+only for a task whose choices hold a round slot, and a malformed contract shows the round slot
+on no step: the worker never falls back to 07 for one (its router fails the task, its gate lists
+no provider), so the card and the listing resolve the ordinary slot.
 
 A choice that becomes unusable before the gate answer is applied refuses that answer
 instead of failing the task. The same transaction restores the gate's `waiting_form` status,

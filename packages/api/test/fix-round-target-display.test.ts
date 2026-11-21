@@ -145,10 +145,7 @@ describe('step card of a pinned custom fix target', () => {
 });
 
 describe('step card without a pin, parity', () => {
-  it.each([
-    ['no contract', null],
-    ['a malformed pin', { version: 99 }],
-  ])('shows the round slot on 07 for %s', async (_name, contract) => {
+  it.each([['no contract', null]])('shows the round slot on 07 for %s', async (_name, contract) => {
     const s = setup(contract);
     s.save(LEGACY);
     s.choose(LEGACY, PICKED_CLI, ROUND);
@@ -168,6 +165,34 @@ describe('step card without a pin, parity', () => {
     const s = setup({ fixTarget: 'nonsense' });
     s.choose(LEGACY, PICKED_CLI, ROUND);
     await expect(card(s, LEGACY)).resolves.toBeDefined();
+  });
+});
+
+describe('a malformed pin names no round owner', () => {
+  it.each([
+    ['07', LEGACY],
+    ['a module step', CUSTOM],
+  ])('shows and lists the ordinary slot on %s', async (_name, stepId) => {
+    const s = setup({ version: 99 });
+    s.save(stepId);
+    s.choose(stepId, PICKED_CLI, ROUND);
+    const step = await card(s, stepId);
+    expect(step.preferredCliProviderId).toBe(SAVED_CLI);
+    expect(step.preferredEffortLevel).toBe('low');
+    expect(await listing(s, stepId)).toEqual([SAVED_CLI]);
+  });
+
+  it.each([
+    ['deleted', null, undefined],
+    ['disabled', PICKED_CLI, { enabled: false }],
+  ] as const)('does not flag a %s round provider', async (_state, provider, change) => {
+    for (const stepId of [LEGACY, CUSTOM]) {
+      const s = setup({ version: 99 });
+      s.choose(stepId, provider, ROUND);
+      if (change) await s.change(change);
+      expect(await card(s, stepId)).not.toHaveProperty('roundCliUnavailable');
+      expect(await listing(s, stepId)).not.toEqual([]);
+    }
   });
 });
 
@@ -205,14 +230,14 @@ describe('current-step provider listing of a pinned custom fix target', () => {
 });
 
 describe('current-step provider listing without a pin, parity', () => {
-  it.each([
-    ['no contract', null],
-    ['a malformed pin', { version: 99 }],
-  ])('lists the round provider for 07 with %s', async (_name, contract) => {
-    const s = setup(contract);
-    s.choose(LEGACY, PICKED_CLI, ROUND);
-    expect(await listing(s, LEGACY)).toEqual([PICKED_CLI]);
-  });
+  it.each([['no contract', null]])(
+    'lists the round provider for 07 with %s',
+    async (_name, contract) => {
+      const s = setup(contract);
+      s.choose(LEGACY, PICKED_CLI, ROUND);
+      expect(await listing(s, LEGACY)).toEqual([PICKED_CLI]);
+    },
+  );
 
   it('lists nothing behind a deleted round provider on 07', async () => {
     const s = setup(null);
