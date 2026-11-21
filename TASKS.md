@@ -977,9 +977,17 @@ Follow-ups found by the #1308 driver:
 
 ### T748 · FNF[empty-typed-secret] · the api stores a secret-named env var with an empty value
 
-status: open · kind: fix · found: #1306 driver 2026-11-21 · priority: P4
+status: open, main item in review as #1313 (2026-11-21: shared schema 400 naming the key, worker skips stored empties; dev has 0 stored empties) · kind: fix · found: #1306 driver 2026-11-21 · priority: P4
 
 `api/src/routes/cli-providers.ts` ~:557 (create) and ~:865 (PATCH), via `shared/src/schemas/cli-providers.ts` ~:98 and `shared/src/cli-providers/provider-secret.ts` ~:25, accept a secret-named env var with an empty value and store an encrypted empty string; `worker/src/secrets/provider-secrets.ts` ~:33 then injects it as an empty env var. The web form drops empties, so this is API-only. PRE-EXISTING.
+
+Follow-ups found by the #1313 driver:
+
+1. The clone route copies a legacy empty secret-like entry or stored empty row to the clone (`api/src/routes/cli-providers.ts` ~:1236-1257). Inert at run time through the worker skip. PRE-EXISTING.
+2. Worker `copyKeys` (`worker/src/secrets/move-secret-env.ts` ~:90-115) stores a legacy empty plaintext secret-like value as an empty encrypted secret; touches the destructive-migration gate, so its own change. PRE-EXISTING, inert at run time.
+3. `keepGeneration` (`api/src/routes/cli-providers.ts` ~:903, `api/src/lib/cli-login-secret.ts` ~:205-269) is unreachable from PATCH now; remove it or keep it as the hook for an "empty token advances the generation" contract. Low.
+4. The secrets list (`GET /:providerId/secrets`, the form's "N secrets configured") counts a stored empty as configured. PRE-EXISTING, low.
+5. Whitespace-only secret values are accepted (`shared/src/schemas/cli-providers.ts` ~:165 `min(1)`, the new rule tests `=== ''`); a whitespace login token is truthy and spreads set-wide. The web form trims. PRE-EXISTING, low.
 
 ### T749 · FNF[step-warning-notes] · attempt-scoped warning writes and the codex fallback's fence
 
@@ -994,6 +1002,12 @@ status: open · kind: docs · found: #1311 driver 2026-11-21 · priority: P4
 
 1. No doc says an applied migration must never be deleted or reverted (a database that applied a migration its code lacks is refused as a fork once a later one is pending); the rule lives only in `database/src/migrate/plan.ts` ~:33-36 and `migrate/index.ts` ~:274-281. Rollback after apply is roll-forward only. PRE-EXISTING.
 2. Dropping a baseline table needs a `DROPPED_SINCE_BASELINE` entry (`migrate/baseline.ts`, pinned by `baseline.test.ts`), or journal-less adoption refuses the database; documented only in code. AGENTS.md has 10 bytes spare, so this belongs in a new `docs/architecture/` topic file listed in its index (shrink an entry to make room). PRE-EXISTING.
+
+### T751 · FNF[gated-test-local-runner] · no local runner for the CI-only database tests
+
+status: open · kind: chore · found: #1313 driver 2026-11-21 · priority: P4
+
+The real-Postgres test files in the CI gated list skip without their env var, so a driver only runs them by hand-building a throwaway Postgres and the right URL per file; a change that breaks one (as #1313's first build did) is caught only by CI or by luck. Add a script that starts a throwaway Postgres 18, migrates it, and runs a named gated file (or all of them) with the env var the list declares. PRE-EXISTING.
 
 ### T721 · The Claude usage grant reaches sandbox environments
 
