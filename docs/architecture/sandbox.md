@@ -703,6 +703,23 @@ it. A shell container created before this rule keeps its create-time env until i
 Connecting usage stores a new grant on every row of the login set (below); that the vendor then
 retires the old one is unverified.
 
+**A secret-named provider env var needs a value.** A create or a settings save whose `envVars`
+holds a name that `SECRET_LIKE_ENV_NAME` matches, with the empty string, is refused with a 400
+that names the key, before any row, audit event, lock or job (`createCliProviderRequestSchema`,
+which the settings schema inherits through `.partial()`; it classifies with `splitSecretLikeEnv`,
+the split that sends those names to the encrypted store). In a settings save a secret-named key
+that is present sets the secret and one that is absent leaves it alone; the save never deletes a
+secret, the secret route's DELETE does. Naming the login token without a value is no exception: the
+save is refused, so it neither blanks the stored token nor advances the generation.
+`POST /cli-providers/:providerId/secrets` refuses an empty value too, and the web form never sends
+one. A non-secret variable with an empty value is kept and reaches the container as `NAME=`.
+`resolveProviderSecrets` also skips a stored value that
+decrypts to the empty string, which a row written before this rule, or moved from a legacy
+plaintext `envVars` entry, can still hold: the merge puts a secret over a same-named adapter
+default or plain value, so injecting it would blank, for example, the ollama adapter's
+placeholder token. Such a row is found without decrypting it: its `encrypted_value` is
+`<iv>:<tag>:` with an empty third part.
+
 Captured Claude OAuth credentials are verified before promotion. The login API envelope-encrypts
 its candidate with purpose, user and provider bindings before putting it on `cli-probe`; the
 worker decrypts it for that probe only. It resolves no active provider secrets, mounts no shared
@@ -742,9 +759,8 @@ removed is deleted and reset with the rest; a volume that could not be removed l
 they were, and a retry finishes. Its
 supersede check reads the
 clicked row's generation alone, which is enough because the api writers of a login token all write the
-whole set and a row that joins one takes the set's generation, or keeps the one its own save advanced
-by typing a sign-out secret name (the boot copy of legacy environment values writes the row it finds and
-advances no other). A manual login-secret POST, a settings
+whole set and a row that joins one takes the set's generation (the boot copy of legacy environment
+values writes the row it finds and advances no other). A manual login-secret POST, a settings
 save that types the token and a create that types it do so in one transaction under the set's lock (`writeLoginTokenToSet`, `api/src/lib/cli-login-secret.ts`):
 the transaction's first lock on any provider row is `lockLoginSet` over every row it will touch, the clicked
 row included, in id order: no row lock, row update or secret write for a member may come before it (a new
@@ -784,9 +800,7 @@ before and refuses, before it writes or seeds, a row whose scope moved between i
 token with the newest secret `updated_at` (tie: smallest id), its token ciphertext, `auth_status`,
 `auth_message`, check stamp (read through text, so its microseconds survive) and `auth_generation`, and
 records one strict `cli_provider.secret.set` event on the joining row (`source` `join`, `viaProviderId`
-the row it copied from, `setSize`) in the same transaction. A settings save that also advanced the row's
-generation (it typed a sign-out secret name, even with an empty value) keeps that generation instead of
-copying the set's, so it still supersedes a sign-out queued through the row. The set's login replaces a token
+the row it copied from, `setSize`) in the same transaction. The set's login replaces a token
 the joining row had; a set where no other row holds a token seeds nothing, and the joining row keeps its own. A clone
 of a claude-code subscription row leaves the login token and the usage token out of its secret copy (and
 the login token out of the copy of legacy environment values), so an isolated clone starts without
@@ -863,7 +877,7 @@ wait minutes, so a login completed in between must survive it. Two pieces do tha
   other writer of the login token (a manual POST, a settings save or a create that types it) advance
   every row they write with one new value, as do Connect and the manual POST of the usage token, while
   the boot copy advances its own row only and a row that joins a set takes the generation of the row it
-  copies, unless its own settings save advanced it by typing a sign-out secret name (`keepGeneration`).
+  copies.
   An abandoned attempt, a usage refresh or convergence, a grok refresh, a task's sync-back and
   the delete of a login or usage token never advance it. The sign-out job carries the
   value read at request time and, when the row's value differs, removes nothing and returns

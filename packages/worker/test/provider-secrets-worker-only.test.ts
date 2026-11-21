@@ -19,6 +19,8 @@ const secret = () => randomBytes(16).toString('hex');
 const TOKEN = secret();
 const GRANT = secret();
 const AUTH = secret();
+const BLANK_PROVIDER = 'provider-blank';
+const KEPT = secret();
 
 /** Every value a drizzle condition binds, flattened. */
 function conditionValues(node: unknown, acc: unknown[] = []): unknown[] {
@@ -38,6 +40,8 @@ const rows = [
   { providerId: PROVIDER, secretName: 'CLAUDE_CODE_OAUTH_TOKEN', ...envelopeEncrypt(TOKEN, KEK) },
   { providerId: PROVIDER, secretName: CLAUDE_USAGE_OAUTH_SECRET, ...envelopeEncrypt(GRANT, KEK) },
   { providerId: PROVIDER, secretName: 'ANTHROPIC_AUTH_TOKEN', ...envelopeEncrypt(AUTH, KEK) },
+  { providerId: BLANK_PROVIDER, secretName: 'EMPTY_API_KEY', ...envelopeEncrypt('', KEK) },
+  { providerId: BLANK_PROVIDER, secretName: 'KEPT_API_KEY', ...envelopeEncrypt(KEPT, KEK) },
 ];
 
 let db: Database;
@@ -85,5 +89,12 @@ describe('worker-only provider secrets', () => {
     expect(
       (await readProviderSecretToken(db, OTHER_PROVIDER, 'CLAUDE_CODE_OAUTH_TOKEN')) === null,
     ).toBe(true);
+  });
+
+  it('skips a stored empty value instead of injecting it as an empty variable', async () => {
+    const resolved = await resolveProviderSecrets(db, BLANK_PROVIDER);
+    expect(Object.keys(resolved).includes('EMPTY_API_KEY')).toBe(false);
+    expect(Object.keys(resolved)).toEqual(['KEPT_API_KEY']);
+    expect(resolved.KEPT_API_KEY === KEPT).toBe(true);
   });
 });
