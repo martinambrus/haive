@@ -62,7 +62,7 @@ const RESPONSE_STYLE_BLOCK = [
 
 // Agents whose entire job is to produce thorough, descriptive deliverables.
 // They must NOT receive the terseness directive.
-const RESPONSE_STYLE_EXEMPT_IDS = new Set<string>([
+export const RESPONSE_STYLE_EXEMPT_IDS = new Set<string>([
   'technical-spec-writer',
   'business-requirements-writer',
   'spec-quality-reviewer',

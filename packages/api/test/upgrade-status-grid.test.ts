@@ -4,6 +4,7 @@ import path from 'node:path';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { schema } from '@haive/database';
 import {
+  AGENT_RENDERER_VERSION,
   CLI_RULES_TEMPLATE_ID,
   RTK_REF_MARKER_END,
   RTK_REF_MARKER_START,
@@ -815,6 +816,78 @@ describe('the banner and the plan agree on the paths a template renders to', () 
     const got = await body();
     expect(got.changedTemplateIds).toEqual(['custom.b1.sk']);
     expect(got.obsoleteTemplateIds).toEqual(['custom.b1.sk']);
+    expect(got.hasUpgradeAvailable).toBe(true);
+  });
+
+  /** The salt format of bundleAgentTemplateHash, at a given renderer version. */
+  const salted = (ir: string, version: number) =>
+    sha256Hex(`${ir}\nhaive-agent-renderer:${version}`);
+  const OLD_VERSION = AGENT_RENDERER_VERSION - 1;
+
+  it('salts a bundle agent hash the way the shared helper does', () => {
+    expect(salted('h-c', AGENT_RENDERER_VERSION)).toBe(bundleAgentTemplateHash('h-c'));
+  });
+
+  it('reports a bundle agent recorded at the previous renderer version as changed', async () => {
+    world({
+      providers: CLAUDE_ONLY,
+      column: portable,
+      items: [item('a1', 'agent', SPEC_AGENT)],
+      rows: [
+        row('custom.b1.a1', 'custom-agent', '.claude/agents/a1.md', salted('h-c', OLD_VERSION)),
+      ],
+    });
+    const got = await body();
+    expect(got.changedTemplateIds).toEqual(['custom.b1.a1']);
+    expect(got.hasUpgradeAvailable).toBe(true);
+  });
+
+  it('reports a bundle agent recorded at the current renderer version as unchanged', async () => {
+    world({
+      providers: CLAUDE_ONLY,
+      column: portable,
+      items: [item('a1', 'agent', SPEC_AGENT)],
+      rows: [
+        row(
+          'custom.b1.a1',
+          'custom-agent',
+          '.claude/agents/a1.md',
+          salted('h-c', AGENT_RENDERER_VERSION),
+        ),
+      ],
+    });
+    const got = await body();
+    expect(got.changedTemplateIds).toEqual([]);
+    expect(got.hasUpgradeAvailable).toBe(false);
+  });
+
+  it('reports a bundle skill recorded with its bare hash as unchanged', async () => {
+    world({
+      providers: CLAUDE_ONLY,
+      column: portable,
+      items: [item('sk', 'skill', SPEC_SKILL)],
+      rows: [row('custom.b1.sk', 'custom-skill', '.claude/skills/sk/SKILL.md', 'h-c')],
+    });
+    const got = await body();
+    expect(got.changedTemplateIds).toEqual([]);
+    expect(got.hasUpgradeAvailable).toBe(false);
+  });
+
+  it('reports a built-in agent recorded at an older schema version as changed although its hash is equal', async () => {
+    // A built-in agent's schemaVersion is the renderer version, so a bump moves it in every repository.
+    world({
+      providers: CLAUDE_ONLY,
+      column: portable,
+      applicable: [agent.templateId],
+      rows: [
+        {
+          ...row(agent.templateId, 'agent', '.claude/agents/x.md', agent.contentHash),
+          templateSchemaVersion: agent.schemaVersion - 1,
+        },
+      ],
+    });
+    const got = await body();
+    expect(got.changedTemplateIds).toEqual([agent.templateId]);
     expect(got.hasUpgradeAvailable).toBe(true);
   });
 
