@@ -35,6 +35,13 @@ task before any reset when it is unregistered, is not a module step declaring th
 `ctx.host.loadFixLoopDiagnosis()`, which is null unless a request is recorded for its own
 round: `round > 0` is also true after a revise-loop fork, so it never decides a fix round.
 
+Recovery addresses a round as (task, step, round) at an epoch, never by step id: resets, step
+ownership, Retry and Resume, the boot passes, the stalled sweep and dead-task revival treat a
+pinned target's round as 07's. `custom-fix-recovery-db.test.ts` (worker) and
+`custom-fix-retry-db.test.ts` (api) run both targets through the same scenarios and require
+equal traces. The one target-sensitive check is the dead-task judge, which also refuses a pinned
+target this worker cannot run (see [Worker restarts](worker-restarts.md#dead-tasks)).
+
 **The target is fixed; what varies is whether 07 runs.** In DAG mode
 (`06b-sprint-planning.output.mode === 'dag'`) 07 used to skip at EVERY round, so every
 loop_back wrote a diagnosis nothing consumed and re-ran the whole review chain against
