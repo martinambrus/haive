@@ -970,7 +970,7 @@ A killed bridge leaves its Compose child running while the install lease lapses 
 
 ### T745 · FNF[attempt-row-early-refusals] · early updater refusals record placeholder fields
 
-status: open · kind: fix · found: #1304 driver 2026-11-21 · priority: P4
+status: done 2026-11-23 #1321 (3828added): early refusals record the channel and version from a bounded read (`attempt-fields.ts`, `ATTEMPT_ENV_MAX_BYTES` 256 KiB, lstat before open, `not-read` for a non-regular or oversize `.env`); fields recorded after `readInstall()` returns; follow-ups in T756 · kind: fix · found: #1304 driver 2026-11-21 · priority: P4
 
 Refusals raised before `readInstall()` (`install-locked`, `install-file-linked`; `packages/updater/src/cli.ts` ~:243, ~:295, ~:354) record channel `public` and an unknown current version in the attempt row. `release.md` now says so. PRE-EXISTING.
 
@@ -1045,7 +1045,7 @@ status: DONE in #1318 (2026-11-22: the busy block lowered only the repository-ta
 
 ### T753 · FNF[extension-bridge-ci] · no CI job runs the Desktop bridge's Go checks
 
-status: open · kind: chore · found: #1317 driver 2026-11-22 · priority: P4
+status: done 2026-11-22 #1320 (8722f1e80): `desktop-bridge-go` CI job (vet linux/windows/darwin, gofmt, tests) on changes under the bridge directory, pinned by `scripts/test/ci-desktop-bridge.test.mjs` · kind: chore · found: #1317 driver 2026-11-22 · priority: P4
 
 No workflow runs `go test`, `go vet`, `gofmt` or the cross builds for `docker/desktop-extension/bridge/`; only the regex pins in `scripts/test/desktop-extension.test.mjs` run in CI (`ci.yml` ~:74). The Go suite runs only when the extension image is built (`docker/desktop-extension/Dockerfile` ~:9-20 via `scripts/build-desktop-extension.sh`). Add a CI job in the pinned golang image that runs vet (linux, windows, darwin), gofmt and the tests on changes under that directory. PRE-EXISTING.
 
@@ -1066,6 +1066,47 @@ status: open · kind: fix · found: T735 free-step walk 2026-11-22 (owner: file 
 In `martinambrus/haive` (host), with a one-line follow-up in `martinambrus/haive-module-translator`.
 
 `packages/api/src/lib/task-type-definition.ts` ~:344-352 prepends `00-model-health-workflow` to every non-built-in static run list that has a step declaring `dispatchesCli` (documented: `docs/architecture/task-types.md` ~:255). The canary probes the task's resolved CLI, which for a task with no CLI is the user's default (`resolveTaskCliProviderId`, `docs/architecture/step-summaries.md` ~:78). The translator never dispatches to that provider: its calls go only to the providers ticked at its setup consent (`src/steps/tr-setup.ts` ~:64-66), and its pre-enqueue hook refuses any other. So on a translator task the canary spends on a provider the user did not choose, before the module's consent, and does not check the provider that will do the work. The module README discloses the call ("can run before module consent"); the owner judged it a defect. Measured: task ae8fb29c, no CLI picked, the canary called claude-code (claude-opus-4-6): 26.6k cached tokens, about $0.27 API-equivalent. Fix direction: a module manifest field saying the type selects its own providers, which the prepend honours (no canary for that type); the translator sets it and its README drops the canary sentence. Controls: a definition test that a module type with the field gets no canary and one without it still does; a task-creation test on the module-seed path.
+
+### T756 · FNF[updater-attempt-fields-followups] · minor follow-ups of the early-refusal fields (+8)
+
+status: open · kind: fix · found: #1321 reviews 2026-11-22 · priority: P4
+
+1. `packages/updater/src/journal.ts` ~:94: truncating the refusal message drops the appended note. REGRESSION, minor.
+2. `packages/updater/src/envkeys.ts` ~:48: `literalEnvValues` is exported generically though only the display read uses it. PRE-EXISTING, minor.
+3. `envkeys.ts` ~:35: the multiline parser is quadratic on long values (bounded by the 256 KiB cap). PRE-EXISTING, minor.
+4. `packages/updater/src/run.ts` ~:104-107 parses `.env` differently from `envkeys.ts`; the two can disagree on a quoted value. PRE-EXISTING, minor.
+5. `.env` is lstat'ed through the held directory, then read by path in `readInstall`. PRE-EXISTING, minor (fs-safe conversion).
+6. No test pins lstat-before-open for the display read (the FIFO case proves no block, not the order). Minor.
+7. The disagree and invalid-channel controls were never shown red on the base. Minor.
+8. The note-joining punctuation regex and literal vs resolved channel inside `readInstall` are untested edges. Minor.
+
+### T757 · FNF[fix-loop-escalation-atomicity] · cap/oscillation escalation is four separate writes (+3)
+
+status: open · kind: fix · found: T741 review 2026-11-23 · priority: P3
+
+1. `packages/worker/src/queues/task-queue.ts` ~:2660 (oscillation) / ~:2742 (cap): parking the row, `recordFixLoopRequest`, `markTaskWaiting` and the `fix_loop.escalated` event are four awaits outside one transaction. A crash after the park leaves a gate with no recorded next-round request and no event; since the duplicate guard refuses a replay at a parked gate, nothing completes the hand-off, and Continue enters a round with no diagnosis. PRE-EXISTING, by code reading (probe first). Fix direction: one transaction under the existing fences.
+2. `packages/worker/test/custom-fix-recovery-db.test.ts` ~:441 skips the pinned custom-target leg for the Continue reset (`if (!leg.pin)`); the pinned path is only unit-stubbed (`fix-consumer-router.test.ts` ~:614-628). Minor; dormant while the custom-fix fence is closed (T689 PR7b).
+3. `packages/worker/src/queues/insight-continuation.ts` ~:120: the `tx as unknown as Database` cast is redundant now that `resetStepAndDownstream` takes `Database | DbTx`. Minor.
+4. `task-queue.ts` ~:3201-3221 `reopen(target, nextRound, record, true)`: bare boolean; a named option reads better. Minor.
+
+### T758 · Desktop bridge: a killed bridge leaves its Compose child running past its install lease
+
+status: open · kind: design · found: T744 driver 2026-11-23 · priority: P3
+
+A SIGKILLed bridge cannot cancel `docker compose` (`docker/desktop-extension/bridge/main.go` ~:781, `runCommand` ~:795 uses `exec.CommandContext` with no process group or parent-death setup); its install lease (`stack_lock.go`, beats 5 s, broken after 60 s unchanged) lapses while Compose still starts or stops services, and an updater may then snapshot or migrate concurrently. PRE-EXISTING, consequential. Options with costs (design note `.claude/tmp/codex-run/T744-S/codex-1/bridge-design.md`): Linux process group plus `PR_SET_PDEATHSIG`; macOS parent-pipe watcher; Windows kill-on-close Job Object; lease renewal tied to a child-owning supervisor. Compose project labels cannot prove an in-flight client. Recommendation: OS-specific child supervision with group/Job cancellation, the lease held until the supervised command exits; ambiguous interrupted operations keep refusing for manual recovery. Needs an owner decision on scope (all three OSes vs Linux first).
+
+### T759 · Updater: losing the stack lease does not fence the holder's later phases
+
+status: open · kind: design · found: T744 review 2026-11-23 · priority: P3
+
+`packages/updater/src/stack-lock.ts` ~:146-149: lease loss only stops heartbeats. A holder frozen over 60 s that resumes after a takeover keeps running its phases and can start one-shots the new holder's child check (T744) never saw. PRE-EXISTING, consequential. Fix direction: check lease ownership (a fencing token) before each phase and each container start, and abort on loss.
+
+### T760 · FNF[updater-takeover-order] · a takeover may fail before it reaches the child check (+1)
+
+status: open · kind: fix · found: T744 review 2026-11-23 · priority: P4
+
+1. `packages/updater/src/cli.ts` ~:336: `ensureJournal` and the database bootstrap run before the lock and the child check, so after an updater killed mid-snapshot (Postgres stopped by `composeStop`) a takeover probably fails at the journal connection with no named refusal. PRE-EXISTING, unverified: probe first.
+2. `packages/updater/src/docker.ts` ~:262 `restoreVolume` has no caller. PRE-EXISTING, minor.
 
 ### T721 · The Claude usage grant reaches sandbox environments
 

@@ -20,7 +20,7 @@ import {
   type StackLock,
   type StackLockOptions,
 } from './stack-lock.js';
-import { attemptVersion } from './attempt-fields.js';
+import { attemptVersion, readAttemptInstallFields } from './attempt-fields.js';
 import {
   ensureJournal,
   findLiveRun,
@@ -298,6 +298,7 @@ async function upgrade(options: { stackLock?: StackLockOptions }): Promise<numbe
   let stopSignals: (() => void) | undefined;
   let hasRun = false;
   let fromVersion = 'unknown';
+  let installFieldsStarted = false;
   let toVersion = attemptVersion(arg('version'));
   let envAdded: string[] = [];
   let terminal:
@@ -366,6 +367,7 @@ async function upgrade(options: { stackLock?: StackLockOptions }): Promise<numbe
     if (live || !flag('check')) await cleanupInstallTemps(installDir);
     fromVersion = (await readEnvVar(envFile, 'HAIVE_VERSION')) ?? 'unknown';
     const { imageSettings, manifestOptions, missingTarget } = await readInstall();
+    installFieldsStarted = true;
     // Use the same Docker config as the children we are about to launch, while still under the
     // install lock and before recovery, image preparation or any volume/database upgrade work.
     if (live || !flag('check')) await dk.requireNoRunningOneShots();
@@ -611,7 +613,18 @@ async function upgrade(options: { stackLock?: StackLockOptions }): Promise<numbe
   } finally {
     if (locked && !hasRun && !flag('check') && terminal) {
       try {
-        await recordAttempt(sql, { fromVersion, toVersion, channel, ...terminal });
+        const fields = installFieldsStarted
+          ? { fromVersion, channel }
+          : await readAttemptInstallFields(installDir);
+        await recordAttempt(sql, {
+          fromVersion: fields.fromVersion,
+          toVersion,
+          channel: fields.channel,
+          ...terminal,
+          error: fields.note
+            ? `${terminal.error}${/[.!?]\s*$/.test(terminal.error) ? '' : '.'} ${fields.note}`
+            : terminal.error,
+        });
       } catch (err) {
         emit('attempt-record-failed', { message: safeErrorMessage(err) });
       }

@@ -38,6 +38,7 @@ import * as images from './images.js';
 import * as dk from './docker.js';
 import * as journal from './journal.js';
 import * as run from './run.js';
+import * as stackLock from './stack-lock.js';
 const pin = (host: string) => `private/haive-acme-${host}@sha256:${'a'.repeat(64)}`;
 const refs = { api: pin('api'), worker: pin('worker'), web: pin('web'), builder: pin('builder') };
 const settings: images.ImageSettings = {
@@ -982,6 +983,151 @@ it('public dry-plan emits a usage error without reading a target or journal', as
   expect(dk.localImages).not.toHaveBeenCalled();
 });
 
+describe('early refusal install fields', () => {
+  let dir: string;
+  const env = 'HAIVE_CHANNEL=acme\nHAIVE_VERSION=1.2.3\n';
+  beforeEach(async () => {
+    dir = await mkdtemp(join(tmpdir(), 'early-attempt-'));
+    await writeFile(join(dir, '.env'), env);
+    process.argv = process.argv.filter((value) => value !== '--check');
+    process.argv[process.argv.indexOf('--install-dir') + 1] = dir;
+  });
+  afterEach(async () => rm(dir, { recursive: true, force: true }));
+
+  it('records safe install fields for install-locked without changing launch settings', async () => {
+    vi.spyOn(stackLock, 'acquireStackLock').mockResolvedValue({
+      status: 'busy',
+      holder: 'extension',
+    });
+    expect(await main()).toBe(3);
+    expect(journal.recordAttempt).toHaveBeenCalledWith(
+      h.sql,
+      expect.objectContaining({
+        channel: 'acme',
+        fromVersion: '1.2.3',
+        metadata: { refusal: 'install-locked' },
+      }),
+    );
+    expect(process.env.DOCKER_CONFIG).toBe('/ambient');
+    expect(images.readImageSettings).not.toHaveBeenCalled();
+    expect(run.readEnvVar).not.toHaveBeenCalled();
+    expect(dk.readReleaseManifestImage).not.toHaveBeenCalled();
+    expect(journal.startRun).not.toHaveBeenCalled();
+    expect(run.phaseDraining).not.toHaveBeenCalled();
+    expect(await readFile(join(dir, '.env'), 'utf8')).toBe(env);
+  });
+
+  it('records safe install fields for install-file-linked without following the compose link', async () => {
+    await symlink(join(dir, 'unread-compose'), join(dir, 'docker-compose.yml'));
+    expect(await main()).toBe(3);
+    expect(journal.recordAttempt).toHaveBeenCalledWith(
+      h.sql,
+      expect.objectContaining({
+        channel: 'acme',
+        fromVersion: '1.2.3',
+        metadata: { refusal: 'install-file-linked' },
+      }),
+    );
+    expect(images.readImageSettings).not.toHaveBeenCalled();
+    expect(journal.startRun).not.toHaveBeenCalled();
+  });
+
+  it('marks both fields not read when .env is linked, without leaking its target', async () => {
+    await writeFile(join(dir, 'private-env'), env + 'SECRET=must-stay-private\n');
+    await rm(join(dir, '.env'));
+    await symlink(join(dir, 'private-env'), join(dir, '.env'));
+    expect(await main()).toBe(3);
+    expect(journal.recordAttempt).toHaveBeenCalledWith(
+      h.sql,
+      expect.objectContaining({
+        channel: 'not-read',
+        fromVersion: 'not-read',
+        error:
+          'install file must be a regular file: .env. Install channel and current version were not read: .env was unavailable, unsafe, oversized or invalid.',
+        metadata: { refusal: 'install-file-linked' },
+      }),
+    );
+    expect(images.readImageSettings).not.toHaveBeenCalled();
+    expect(run.readEnvVar).not.toHaveBeenCalled();
+    expect(JSON.stringify(vi.mocked(journal.recordAttempt).mock.calls)).not.toContain(
+      'must-stay-private',
+    );
+  });
+
+  it('keeps install-locked when its display read encounters a linked .env', async () => {
+    vi.spyOn(stackLock, 'acquireStackLock').mockResolvedValue({
+      status: 'busy',
+      holder: 'extension',
+    });
+    await rm(join(dir, '.env'));
+    await symlink(join(dir, 'unread-env'), join(dir, '.env'));
+    expect(await main()).toBe(3);
+    expect(journal.recordAttempt).toHaveBeenCalledWith(
+      h.sql,
+      expect.objectContaining({
+        channel: 'not-read',
+        fromVersion: 'not-read',
+        metadata: { refusal: 'install-locked' },
+        error: expect.stringContaining('Install channel and current version were not read'),
+      }),
+    );
+    expect(images.readImageSettings).not.toHaveBeenCalled();
+    expect(journal.startRun).not.toHaveBeenCalled();
+    expect(vi.mocked(journal.recordAttempt).mock.calls[0]![1].error).toContain(
+      'without activity. Install channel and current version were not read',
+    );
+  });
+
+  it('records safe display fields when reading install image settings fails', async () => {
+    const failure = new Error('compose config failed');
+    vi.mocked(images.readImageSettings).mockRejectedValueOnce(failure);
+    await expect(main()).rejects.toBe(failure);
+    expect(journal.recordAttempt).toHaveBeenCalledExactlyOnceWith(h.sql, {
+      status: 'failed',
+      channel: 'acme',
+      fromVersion: '1.2.3',
+      toVersion: '9.9.9',
+      error: 'compose config failed',
+      metadata: {},
+    });
+    expect(dk.readReleaseManifestImage).not.toHaveBeenCalled();
+    expect(journal.startRun).not.toHaveBeenCalled();
+    expect(process.env.DOCKER_CONFIG).toBe('/ambient');
+    expect(await readFile(join(dir, '.env'), 'utf8')).toBe(env);
+  });
+
+  it('records channel validation failures after acquiring the lock', async () => {
+    process.argv[process.argv.indexOf('--channel') + 1] = 'other';
+    await expect(main()).rejects.toThrow('disagrees');
+    expect(journal.recordAttempt).toHaveBeenCalledExactlyOnceWith(h.sql, {
+      status: 'failed',
+      channel: 'acme',
+      fromVersion: '1.2.3',
+      toVersion: '9.9.9',
+      error: '--channel disagrees with install HAIVE_CHANNEL',
+      metadata: {},
+    });
+  });
+
+  it('never records the raw invalid install channel', async () => {
+    await writeFile(join(dir, '.env'), 'HAIVE_CHANNEL=INVALID/channel\nHAIVE_VERSION=1.2.3\n');
+    vi.mocked(images.readImageSettings).mockResolvedValue({
+      ...settings,
+      HAIVE_CHANNEL: 'INVALID/channel',
+    });
+    await expect(main()).rejects.toThrow('invalid install channel');
+    expect(journal.recordAttempt).toHaveBeenCalledExactlyOnceWith(h.sql, {
+      status: 'failed',
+      channel: 'unknown',
+      fromVersion: '1.2.3',
+      toVersion: '9.9.9',
+      error:
+        'invalid install channel. Install channel could not be resolved from literal .env settings.',
+      metadata: {},
+    });
+  });
+});
+
 describe('terminal attempts before a run exists', () => {
   beforeEach(() => {
     process.argv = process.argv.filter((v) => v !== '--check');
@@ -1082,14 +1228,6 @@ describe('terminal attempts before a run exists', () => {
     process.argv.push('--change-channel', 'BAD');
     expect(await main()).toBe(2);
     expectAttempt('failed');
-  });
-  it('records channel validation failures after acquiring the lock', async () => {
-    process.argv[process.argv.indexOf('--channel') + 1] = 'other';
-    await expect(main()).rejects.toThrow('disagrees');
-    expect(attempts()).toHaveBeenCalledWith(
-      h.sql,
-      expect.objectContaining({ status: 'failed', channel: 'acme' }),
-    );
   });
   it('uses unknown when the installed version is absent', async () => {
     vi.mocked(run.readEnvVar).mockResolvedValue(null);
@@ -1196,19 +1334,6 @@ it('scrubs filesystem paths before recording an attempt', async () => {
   expect(journal.recordAttempt).toHaveBeenCalledWith(
     h.sql,
     expect.objectContaining({ error: 'cannot read [path]' }),
-  );
-});
-
-it('never records the raw invalid install channel', async () => {
-  process.argv = process.argv.filter((v) => v !== '--check');
-  vi.mocked(images.readImageSettings).mockResolvedValue({
-    ...settings,
-    HAIVE_CHANNEL: 'INVALID/channel',
-  });
-  await expect(main()).rejects.toThrow('invalid install channel');
-  expect(journal.recordAttempt).toHaveBeenCalledWith(
-    h.sql,
-    expect.objectContaining({ channel: 'public' }),
   );
 });
 
