@@ -64,6 +64,8 @@ import {
 import { buildPromptStep } from '../src/step-engine/steps/custom/prompt-step.js';
 import type { StepDefinition } from '../src/step-engine/step-definition.js';
 import type { CliProviderRecord } from '../src/cli-adapters/types.js';
+import { codexAppServerFallbackWarning } from '../src/cli-adapters/codex-app-server-verdict.js';
+import { OUTPUT_TRUNCATION_HEADLINE } from '../src/queues/cli-exec/failure-class.js';
 import { MODEL_CAPABILITY_HEADLINES } from '../src/queues/cli-exec/failure-class.js';
 import { MODEL_CAPABILITY_BOUNDARY_MARKER } from '../src/cli-adapters/model-capabilities.js';
 import { gate3CommitStep } from '../src/step-engine/steps/workflow/10-gate-3-commit.js';
@@ -120,7 +122,11 @@ function makeMockDb(state: MockState, opts: MockDbOptions = {}, inTransaction = 
         const tableName = tableNameOf(table);
         // Every row of the table, for the un-limited/un-ordered form of the query.
         const allRows = async () =>
-          tableName === 'task_steps' && state.taskStepRow.id ? [state.taskStepRow] : [];
+          tableName === 'task_steps' && state.taskStepRow.id
+            ? [state.taskStepRow]
+            : tableName === 'cli_invocations'
+              ? (state.cliInvocationHistory ?? [])
+              : [];
         return {
           where: (_cond: SQL) => ({
             limit: async (_n: number) => {
@@ -385,6 +391,67 @@ function makeProvider(): CliProviderRecord {
     updatedAt: new Date(),
   } as CliProviderRecord;
 }
+
+describe('attempt-scoped retry warnings', () => {
+  it.each(['apply', 'pre-form', 'truncation'] as const)(
+    'keeps the fallback and merge notes when %s retries, without repeating the retry note',
+    async (mode) => {
+      const state = freshState();
+      const fallback = codexAppServerFallbackWarning(
+        { stage: 'stream', detail: 'transport closed' },
+        '1.2.3',
+      );
+      const earlier = `${fallback} Merge left open for inspection.`;
+      Object.assign(state.taskStepRow, {
+        status: 'waiting_cli',
+        detectOutput: { ok: true },
+        warningMessage: earlier,
+      });
+      const invocation = {
+        id: 'run-1',
+        taskStepId: 'ts-1',
+        endedAt: new Date(),
+        consumedAt: null,
+        exitCode: mode === 'truncation' ? 1 : 0,
+        errorMessage: mode === 'truncation' ? OUTPUT_TRUNCATION_HEADLINE : null,
+        parsedOutput: {},
+        rawOutput: '{}',
+        mode: 'llm',
+      };
+      state.cliInvocationRow = { ...invocation };
+      state.cliInvocationHistory = [invocation];
+      const step = baseStep();
+      step.llm = {
+        ...step.llm!,
+        retry: { maxAttempts: 3 },
+        ...(mode === 'pre-form' ? { preForm: true, shouldRetryPreForm: () => true } : {}),
+      };
+      if (mode === 'apply')
+        step.apply = async () => {
+          throw new Error('shape rejected');
+        };
+      const run = () =>
+        advanceStep({
+          db: makeMockDb(state),
+          taskId: 'task-1',
+          userId: 'user-1',
+          repoPath: '/tmp',
+          workspacePath: '/tmp',
+          cliProviderId: 'prov-1',
+          stepDef: step,
+          providers: [makeProvider()],
+          deps: { enqueueCliInvocation: vi.fn() },
+        });
+      expect((await run()).status).toBe('waiting_cli');
+      const warning = String(state.taskStepRow.warningMessage);
+      expect(warning).toContain(`${earlier} Attempt 1 of 3 was rejected:`);
+      // Replaying the same completion is the same note, not another attempt.
+      state.cliInvocationRow = { ...invocation };
+      expect((await run()).status).toBe('waiting_cli');
+      expect(state.taskStepRow.warningMessage).toBe(warning);
+    },
+  );
+});
 
 describe('step attachment context through the real runner', () => {
   afterEach(() => vi.restoreAllMocks());

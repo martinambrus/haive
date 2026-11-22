@@ -6,6 +6,6 @@ import type { SQL } from 'drizzle-orm';
 export function applyWarningPatch(current: string | null, patch: unknown): string | null {
   if (typeof patch === 'string' || patch === null) return patch;
   const note = new PgDialect().sqlToQuery(patch as SQL).params[0] as string;
-  if (current?.includes(note)) return current;
+  if (note == null || current?.includes(note)) return current;
   return [current, note].filter(Boolean).join(' ');
 }

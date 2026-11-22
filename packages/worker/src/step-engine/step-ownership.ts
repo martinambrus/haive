@@ -88,6 +88,14 @@ export async function updateOwnedStep(
   return row;
 }
 
+/** Attempt notes accumulate atomically with one space between them. A producer with nothing
+ *  to report leaves earlier notes alone; only an explicit reset clears the column. */
+export function stepWarningAppend(note: string | null) {
+  const w = schema.taskSteps.warningMessage;
+  if (note === null) return sql`${w}`;
+  return sql`CASE WHEN strpos(coalesce(${w}, ''), ${note}::text) > 0 THEN ${w} ELSE concat_ws(' ', nullif(${w}, ''), ${note}::text) END`;
+}
+
 /** Adds `note` to the step's warning once, in one statement, so a warning another writer added since
  *  the caller read its row is kept. */
 export async function appendStepWarning(
@@ -95,10 +103,7 @@ export async function appendStepWarning(
   id: string,
   note: string,
 ): Promise<TaskStepRow> {
-  const w = schema.taskSteps.warningMessage;
-  return updateOwnedStep(db, id, {
-    warningMessage: sql`CASE WHEN strpos(coalesce(${w}, ''), ${note}::text) > 0 THEN ${w} ELSE concat_ws(' ', nullif(${w}, ''), ${note}::text) END`,
-  });
+  return updateOwnedStep(db, id, { warningMessage: stepWarningAppend(note) });
 }
 
 /** Hold a pass's row for the rest of a transaction while it is still the pass's own; false once a

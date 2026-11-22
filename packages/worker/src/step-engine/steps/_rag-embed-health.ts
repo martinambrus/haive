@@ -289,8 +289,7 @@ export function ragEmbedWarning(
 }
 
 /** Join the RAG step warnings into the single `task_steps.warning_message` column.
- *  Returns null when there is nothing to say, so a healthy run CLEARS a stale
- *  banner from a previous pass instead of leaving it behind. */
+ *  Returns null when there is nothing to add. Attempt notes are kept until reset. */
 export function composeRagWarning(...parts: Array<string | null>): string | null {
   const kept = parts.filter((p): p is string => !!p);
   return kept.length > 0 ? kept.join('\n\n') : null;

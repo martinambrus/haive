@@ -1,3 +1,4 @@
+import { applyWarningPatch } from './support/step-warning-patch.js';
 import { mkdir, mkdtemp, rename, rm, symlink, writeFile } from 'node:fs/promises';
 import { execFile } from 'node:child_process';
 import { tmpdir } from 'node:os';
@@ -296,7 +297,7 @@ beforeEach(async () => {
       set: (values: Record<string, unknown>) => ({
         where: async (condition: never) => {
           if (table === schema.taskSteps && 'warningMessage' in values)
-            warnings.push(values.warningMessage as string | null);
+            warnings.push(applyWarningPatch(warnings.at(-1) ?? null, values.warningMessage));
           if (table !== schema.repositories) return [];
           if ('scopeExcludeGlobs' in values || 'ragEmbedDegradedAt' in values) {
             if (failDegradedWrite && values.ragEmbedDegradedAt) throw new Error('database is down');
@@ -777,7 +778,7 @@ describe('greenfield RAG initialization at 11c', () => {
       const recovered = await sync();
       expect(recovered).toMatchObject({ inserted: 0, updated: 0, embedFailureReason: null });
       expect(repo.ragEmbedDegradedAt).toBeNull();
-      expect(warnings.at(-1)).toBeNull();
+      expect(warnings.at(-1)).toContain('RAG embeddings are failing');
     },
   );
 
@@ -1695,7 +1696,7 @@ describe('hash vectors written while an embedding endpoint is configured', () =>
     );
     expect(hashes().every(([, hash]) => hash !== null)).toBe(true);
     expect(repo.ragEmbedDegradedAt).toBeNull();
-    expect(warnings.at(-1)).toBeNull();
+    expect(warnings.at(-1)).toContain('RAG embeddings are failing');
   });
 
   it('writes no hashed row when the degradation could not be stored', async () => {
@@ -1725,7 +1726,7 @@ describe('hash vectors written while an embedding endpoint is configured', () =>
     repo.ragEmbedDegradedReason = 'earlier outage';
     await sync();
     expect(repo.ragEmbedDegradedAt).toBeNull();
-    expect(warnings.at(-1)).toBeNull();
+    expect(warnings.at(-1)).toContain('RAG embeddings are failing');
   });
 
   it('keeps the flag when the NULL-hash read fails', async () => {

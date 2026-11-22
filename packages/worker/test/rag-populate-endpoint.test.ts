@@ -1,3 +1,4 @@
+import { applyWarningPatch } from './support/step-warning-patch.js';
 import { execFileSync } from 'node:child_process';
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -193,7 +194,7 @@ beforeEach(async () => {
         set: (values: Record<string, unknown>) => ({
           where: async () => {
             if (table === schema.taskSteps && 'warningMessage' in values)
-              warnings.push(values.warningMessage as string | null);
+              warnings.push(applyWarningPatch(warnings.at(-1) ?? null, values.warningMessage));
             if (failDegradedWrite && table === schema.repositories && values.ragEmbedDegradedAt)
               throw new Error('database is down');
             if (table === schema.repositories && 'ragEmbedDegradedAt' in values)

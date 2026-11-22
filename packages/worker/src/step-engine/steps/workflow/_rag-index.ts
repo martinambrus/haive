@@ -1,3 +1,4 @@
+import { stepWarningAppend } from '../../step-ownership.js';
 import { lstatNoFollow, readTextNoFollow } from '@haive/shared/fs-safe';
 import path from 'node:path';
 import { and, desc, eq, isNull, sql } from 'drizzle-orm';
@@ -638,15 +639,16 @@ async function syncRepositoryIndex(
     }
     // Surface a CPU fallback and any carried-over embed degradation as a standalone
     // amber banner on the step (set once; a per-file progress line would otherwise
-    // bury it). Clears to null on a healthy/unknown run so a stale warning from a
-    // prior pass does not linger. Re-written after the loop with this run's result.
+    // bury it). Append this run's result after the loop; reset starts a clean attempt.
     const awaitingReembed = await startBannerAwaitsReembed(conn, health, repositoryId, ctx.logger);
     await ctx.db
       .update(schema.taskSteps)
       .set({
-        warningMessage: composeRagWarning(
-          embedDeviceWarning(embedDevice),
-          ragEmbedWarning(health, { skippedChunks: 0, awaitingReembed }),
+        warningMessage: stepWarningAppend(
+          composeRagWarning(
+            embedDeviceWarning(embedDevice),
+            ragEmbedWarning(health, { skippedChunks: 0, awaitingReembed }),
+          ),
         ),
       })
       .where(eq(schema.taskSteps.id, ctx.taskStepId));
@@ -1019,12 +1021,14 @@ async function syncRepositoryIndex(
     await ctx.db
       .update(schema.taskSteps)
       .set({
-        warningMessage: composeRagWarning(
-          embedDeviceWarning(embedDevice),
-          ragEmbedWarning(health, {
-            skippedChunks: embedSkippedChunks,
-            hashedChunks,
-          }),
+        warningMessage: stepWarningAppend(
+          composeRagWarning(
+            embedDeviceWarning(embedDevice),
+            ragEmbedWarning(health, {
+              skippedChunks: embedSkippedChunks,
+              hashedChunks,
+            }),
+          ),
         ),
       })
       .where(eq(schema.taskSteps.id, ctx.taskStepId));

@@ -4,7 +4,11 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createDatabase, schema, type Database } from '@haive/database';
 import { warnStep } from '../src/project-state/branch-revert.js';
 import { withMergeDirSection, claimMergeDir } from '../src/step-engine/merge-dir-claim.js';
-import { StepSupersededError, appendStepWarning } from '../src/step-engine/step-ownership.js';
+import {
+  StepSupersededError,
+  appendStepWarning,
+  stepWarningAppend,
+} from '../src/step-engine/step-ownership.js';
 import { resetStepAndDownstream } from '../src/queues/_step-reset.js';
 import { deleteUsers, seedStepRow, seedTask, seedUser } from './support/step-integrations-db.js';
 
@@ -59,6 +63,17 @@ describe.skipIf(!url)('a step warning appended in one statement, on Postgres', (
     await warnStep(ctx, [mine]);
     expect(raced).toBe(true);
     expect(await warningOf(row.id)).toBe(`${other} ${mine}`);
+  });
+
+  it('keeps attempt notes when a RAG producer has nothing to add', async () => {
+    const row = await seed({ warningMessage: 'fallback note' });
+    for (const note of ['retry note', null, 'retry note']) {
+      await db
+        .update(schema.taskSteps)
+        .set({ warningMessage: stepWarningAppend(note) })
+        .where(eq(schema.taskSteps.id, row.id));
+    }
+    expect(await warningOf(row.id)).toBe('fallback note retry note');
   });
 
   it('keeps the same text once', async () => {
