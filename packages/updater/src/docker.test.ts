@@ -1,6 +1,17 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { execFile, type ChildProcess } from 'node:child_process';
-import { buildOwnModules, composeUp, redactSecrets, resolveImageSettings } from './docker.js';
+import {
+  buildOwnModules,
+  composeUp,
+  redactSecrets,
+  resolveImageSettings,
+  requireNoRunningOneShots,
+  restoreVolume,
+  runOneShot,
+  snapshotVolume,
+  withOneShotOwner,
+} from './docker.js';
+import { UpgradeRefusal } from './refusal.js';
 
 const builderExec = vi.hoisted(() => vi.fn());
 vi.mock('node:child_process', () => ({
@@ -9,6 +20,91 @@ vi.mock('node:child_process', () => ({
 afterEach(() => {
   vi.resetAllMocks();
   vi.unstubAllEnvs();
+});
+
+describe('one-shot ownership after an updater dies', () => {
+  const install = 'org.haive.updater.install';
+  const attempt = 'org.haive.updater.attempt';
+  const role = 'org.haive.updater.role';
+  const labels = (argv: string[]): Record<string, string> =>
+    Object.fromEntries(
+      argv.flatMap((arg, i) => {
+        if (arg !== '--label') return [];
+        const [key, ...value] = argv[i + 1]!.split('=');
+        return [[key, value.join('=')]];
+      }),
+    );
+
+  it('labels snapshots, restores, migrations and builders with one attempt, renewed on recovery', async () => {
+    builderExec.mockResolvedValue({ stdout: '' });
+    await withOneShotOwner('team-network', async () => {
+      await snapshotVolume('pg', '/snapshots', 'pg.tgz');
+      await restoreVolume('pg', '/snapshots', 'pg.tgz');
+      await runOneShot('target', ['migrate'], {}, 'team-network');
+      await buildOwnModules('builder', '/modules', {});
+    });
+    await withOneShotOwner('team-network', () => runOneShot('target', ['commit'], {}));
+    const runs = builderExec.mock.calls
+      .map((call) => call[1] as string[])
+      .filter((argv) => argv[0] === 'run');
+    const owners = runs.map(labels);
+    expect(owners.map((owner) => owner[role])).toEqual([
+      'snapshot',
+      'restore',
+      'migration',
+      'builder',
+      'migration',
+    ]);
+    expect(owners.every((owner) => owner[install] === 'team-network')).toBe(true);
+    expect(owners[0]![attempt]).toMatch(/^[0-9a-f-]{36}$/);
+    expect(new Set(owners.slice(0, 4).map((owner) => owner[attempt])).size).toBe(1);
+    expect(owners[4]![attempt]).not.toBe(owners[0]![attempt]);
+  });
+
+  it('checks only active labelled children of this install, with bounded Docker I/O', async () => {
+    builderExec.mockResolvedValue({ stdout: '' });
+    await withOneShotOwner('team-network', requireNoRunningOneShots);
+    expect(builderExec).toHaveBeenCalledWith(
+      'docker',
+      [
+        'ps',
+        '--filter',
+        `label=${install}=team-network`,
+        '--filter',
+        `label=${attempt}`,
+        '--filter',
+        `label=${role}`,
+        '--format',
+        `{{.Label "${attempt}"}}`,
+      ],
+      { timeout: 30_000, maxBuffer: 1024 * 1024 },
+    );
+  });
+
+  it('ignores its own attempt, but refuses a child of an earlier attempt by class and code', async () => {
+    builderExec.mockResolvedValue({ stdout: '' });
+    await withOneShotOwner('team-network', async () => {
+      await snapshotVolume('pg', '/snapshots', 'pg.tgz');
+      const own = labels(builderExec.mock.calls[0]![1])[attempt];
+      builderExec.mockResolvedValue({ stdout: own + '\n' });
+      await expect(requireNoRunningOneShots()).resolves.toBeUndefined();
+      builderExec.mockResolvedValue({ stdout: own + '\nearlier-attempt\n' });
+      await expect(requireNoRunningOneShots()).rejects.toMatchObject({
+        refusal: 'updater-child-running',
+      });
+      await expect(requireNoRunningOneShots()).rejects.toBeInstanceOf(UpgradeRefusal);
+    });
+  });
+
+  it('refuses a Docker read failure without exposing its diagnostics', async () => {
+    builderExec.mockRejectedValue(new Error('secret-docker-diagnostic'));
+    await expect(withOneShotOwner('team-network', requireNoRunningOneShots)).rejects.toMatchObject({
+      refusal: 'updater-child-check-failed',
+    });
+    await expect(withOneShotOwner('team-network', requireNoRunningOneShots)).rejects.not.toThrow(
+      'secret-docker-diagnostic',
+    );
+  });
 });
 
 it('removes orphan services only when rollback requests it', async () => {

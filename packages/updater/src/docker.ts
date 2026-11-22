@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { CONTAINER_FAMILY, containerName } from '@haive/shared/naming';
 import { execFile, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
@@ -13,10 +14,82 @@ import { UpgradeRefusal } from './refusal.js';
 
 const exec = promisify(execFile);
 
+const ONE_SHOT_INSTALL = 'org.haive.updater.install';
+const ONE_SHOT_ATTEMPT = 'org.haive.updater.attempt';
+const ONE_SHOT_ROLE = 'org.haive.updater.role';
+export const ONE_SHOT_CHECK_TIMEOUT_MS = 30_000;
+export const ONE_SHOT_CHECK_MAX_BUFFER = 1024 * 1024;
+const oneShotOwner = new AsyncLocalStorage<{ install: string; attempt: string }>();
+
+/** Scope every one-shot, including preflight builders and recovery, to this invocation. The
+ * daemon's network name is stable across host/container paths and identifies the install. */
+export function withOneShotOwner<T>(network: string, work: () => T): T {
+  return oneShotOwner.run({ install: network, attempt: randomUUID() }, work);
+}
+
+function oneShotLabels(role: string): string[] {
+  const owner = oneShotOwner.getStore();
+  if (!owner) return [];
+  return [
+    '--label',
+    `${ONE_SHOT_INSTALL}=${owner.install}`,
+    '--label',
+    `${ONE_SHOT_ATTEMPT}=${owner.attempt}`,
+    '--label',
+    `${ONE_SHOT_ROLE}=${role}`,
+  ];
+}
+
+/** Called under the install lock, before recovery or upgrade phases. Docker owns the child
+ * containers after a client dies; a stale lease is therefore insufficient proof of quiescence. */
+export async function requireNoRunningOneShots(
+  options: { timeoutMs?: number; maxBuffer?: number } = {},
+): Promise<void> {
+  const owner = oneShotOwner.getStore();
+  if (!owner) throw new Error('one-shot ownership scope is missing');
+  let stdout: string;
+  try {
+    ({ stdout } = await exec(
+      'docker',
+      [
+        'ps',
+        '--filter',
+        `label=${ONE_SHOT_INSTALL}=${owner.install}`,
+        '--filter',
+        `label=${ONE_SHOT_ATTEMPT}`,
+        '--filter',
+        `label=${ONE_SHOT_ROLE}`,
+        '--format',
+        `{{.Label "${ONE_SHOT_ATTEMPT}"}}`,
+      ],
+      {
+        timeout: options.timeoutMs ?? ONE_SHOT_CHECK_TIMEOUT_MS,
+        maxBuffer: options.maxBuffer ?? ONE_SHOT_CHECK_MAX_BUFFER,
+      },
+    ));
+  } catch {
+    throw new UpgradeRefusal(
+      'updater-child-check-failed',
+      'could not check updater one-shot containers; check Docker availability and retry',
+    );
+  }
+  if (
+    stdout
+      .trim()
+      .split('\n')
+      .some((attempt) => attempt && attempt !== owner.attempt)
+  ) {
+    throw new UpgradeRefusal(
+      'updater-child-running',
+      'another updater attempt still has a running one-shot container for this install; ' +
+        'wait for it to finish, then retry',
+    );
+  }
+}
+
 /**
- * Thin shell wrappers. Deliberately thin: everything that DECIDES lives in `phases.ts` and
- * `preflight.ts`, which are pure and tested, so this module has no branching worth testing and
- * nothing to get subtly wrong.
+ * Docker transport wrappers. Upgrade decisions live in `phases.ts` and `preflight.ts`;
+ * one-shot ownership and the post-lock orphan check live here beside their Docker labels.
  *
  * `docker compose` rather than the API: the compose file IS the deployment description, and
  * re-implementing its dependency ordering and health gating against the daemon API would be
@@ -169,6 +242,7 @@ export async function snapshotVolume(
   await run('docker', [
     'run',
     '--rm',
+    ...oneShotLabels('snapshot'),
     '-v',
     `${volume}:/from:ro`,
     '-v',
@@ -192,6 +266,7 @@ export async function restoreVolume(volume: string, inDir: string, inFile: strin
   await run('docker', [
     'run',
     '--rm',
+    ...oneShotLabels('restore'),
     '-v',
     `${volume}:/to`,
     '-v',
@@ -215,6 +290,7 @@ export async function runOneShot(
   return run('docker', [
     'run',
     '--rm',
+    ...oneShotLabels('migration'),
     ...(network ? ['--network', network] : []),
     ...envArgs,
     image,
@@ -235,6 +311,7 @@ export async function buildOwnModules(
     [
       'run',
       '--rm',
+      ...oneShotLabels('builder'),
       '--mount',
       'type=bind,src=/var/run/docker.sock,dst=/var/run/docker.sock',
       '--mount',

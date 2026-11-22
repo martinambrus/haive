@@ -204,6 +204,11 @@ async function rollbackFailed(ctx: UpgradeContext, err: unknown): Promise<number
 }
 
 export async function main(options: { stackLock?: StackLockOptions } = {}): Promise<number> {
+  const network = arg('network', process.env.HAIVE_NETWORK ?? networkName('network'))!;
+  return dk.withOneShotOwner(network, () => upgrade(options));
+}
+
+async function upgrade(options: { stackLock?: StackLockOptions }): Promise<number> {
   if (flag('manifest') && flag('manifest-image')) {
     emit('error', { message: '--manifest and --manifest-image are mutually exclusive' });
     return EXIT.usage;
@@ -361,6 +366,9 @@ export async function main(options: { stackLock?: StackLockOptions } = {}): Prom
     if (live || !flag('check')) await cleanupInstallTemps(installDir);
     fromVersion = (await readEnvVar(envFile, 'HAIVE_VERSION')) ?? 'unknown';
     const { imageSettings, manifestOptions, missingTarget } = await readInstall();
+    // Use the same Docker config as the children we are about to launch, while still under the
+    // install lock and before recovery, image preparation or any volume/database upgrade work.
+    if (live || !flag('check')) await dk.requireNoRunningOneShots();
 
     // An interrupted run is finished or undone before anything new is considered. Starting a
     // second upgrade over a half-finished one is the one thing that must never happen.

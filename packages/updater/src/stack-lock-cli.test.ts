@@ -6,6 +6,12 @@ import { join } from 'node:path';
 const h = vi.hoisted(() => ({
   sql: Object.assign(vi.fn(), { end: vi.fn(), options: { parsers: {}, serializers: {} } }),
   initialize: vi.fn(),
+  dockerExec: vi.fn(),
+}));
+vi.mock('node:child_process', () => ({
+  execFile: Object.assign(vi.fn(), {
+    [Symbol.for('nodejs.util.promisify.custom')]: h.dockerExec,
+  }),
 }));
 vi.mock('postgres', () => ({ default: vi.fn(() => h.sql) }));
 import postgres from 'postgres';
@@ -116,6 +122,7 @@ const quick = { heartbeat: false, staleMs: 5, pollMs: 1 };
 
 beforeEach(async () => {
   vi.resetAllMocks();
+  h.dockerExec.mockResolvedValue({ stdout: '' });
   dir = await mkdtemp(join(tmpdir(), 'rbr-lock-'));
   lock = join(dir, LOCK);
   ext = { token: randomBytes(16).toString('hex'), seq: 1 };
@@ -352,6 +359,67 @@ describe('every exit path releases the lock', () => {
 });
 
 describe('crash recovery of an abandoned record', () => {
+  it.each([false, true])(
+    'refuses a surviving one-shot after breaking the dead holder lease (recovery=%s)',
+    async (recover) => {
+      await writeFile(lock, record(ext.token, 'updater', ext.seq));
+      if (recover) vi.mocked(journal.findLiveRun).mockResolvedValue(liveRun as never);
+      h.dockerExec.mockResolvedValue({ stdout: 'dead-holder-attempt\n' });
+      expect(await main({ stackLock: { ...quick, sleep: idleSleep } })).toBe(3);
+      expect(events()).toContain('stack-lock-broken');
+      expect(run.resume).not.toHaveBeenCalled();
+      expect(journal.startRun).not.toHaveBeenCalled();
+      expect(run.phaseDraining).not.toHaveBeenCalled();
+      expect(run.phaseSnapshot).not.toHaveBeenCalled();
+      expect(images.prepareImages).not.toHaveBeenCalled();
+      expect(fetch).not.toHaveBeenCalled();
+      expect(
+        vi.mocked(console.log).mock.calls.map(([line]) => JSON.parse(String(line))),
+      ).toContainEqual(
+        expect.objectContaining({ event: 'refused', refusal: 'updater-child-running' }),
+      );
+      expect(await heldBy()).toBeNull();
+      if (!recover) {
+        expect(journal.recordAttempt).toHaveBeenCalledWith(
+          h.sql,
+          expect.objectContaining({
+            status: 'refused',
+            metadata: { refusal: 'updater-child-running' },
+          }),
+        );
+      }
+    },
+  );
+  it('refuses an unavailable Docker check before recovery and releases the lease', async () => {
+    vi.mocked(journal.findLiveRun).mockResolvedValue(liveRun as never);
+    h.dockerExec.mockRejectedValue(new Error('docker unavailable'));
+    expect(await main({ stackLock: { ...quick, sleep: idleSleep } })).toBe(3);
+    expect(run.resume).not.toHaveBeenCalled();
+    expect(images.prepareImages).not.toHaveBeenCalled();
+    expect(await heldBy()).toBeNull();
+    expect(
+      vi.mocked(console.log).mock.calls.map(([line]) => JSON.parse(String(line))),
+    ).toContainEqual(
+      expect.objectContaining({ event: 'refused', refusal: 'updater-child-check-failed' }),
+    );
+  });
+  it('checks children using the install Docker config that subsequent launches use', async () => {
+    vi.stubEnv('DOCKER_CONFIG', '/ambient');
+    vi.mocked(images.readImageSettings).mockResolvedValue({
+      ...settings,
+      HAIVE_CHANNEL: 'acme',
+      DOCKER_CONFIG: join(dir, '.docker'),
+    });
+    let checkedConfig: string | undefined;
+    h.dockerExec.mockImplementation(async () => {
+      checkedConfig = process.env.DOCKER_CONFIG;
+      return { stdout: 'dead-holder-attempt\n' };
+    });
+    expect(await main({ stackLock: { ...quick, sleep: idleSleep } })).toBe(3);
+    expect(checkedConfig).toBe(join(dir, '.docker'));
+    expect(run.resume).not.toHaveBeenCalled();
+    expect(images.prepareImages).not.toHaveBeenCalled();
+  });
   it('breaks a record that never changes after exactly staleMs of sleeps, then proceeds', async () => {
     await writeFile(lock, record(ext.token, 'extension', ext.seq));
     expect(await main({ stackLock: { ...quick, sleep: idleSleep } })).toBe(0);

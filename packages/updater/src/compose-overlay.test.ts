@@ -74,6 +74,7 @@ beforeAll(async () => {
   );
 });
 beforeEach(async () => {
+  vi.spyOn(dk, 'requireNoRunningOneShots').mockResolvedValue(undefined);
   dir = await mkdtemp(join(tmpdir(), 'updater-overlay-install-'));
   await cp(fixture, dir, { recursive: true });
   process.argv = [

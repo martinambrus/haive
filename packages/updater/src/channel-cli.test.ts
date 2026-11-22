@@ -437,6 +437,7 @@ describe('bundle preflight', () => {
 });
 let argv: string[];
 beforeEach(() => {
+  vi.spyOn(dk, 'requireNoRunningOneShots').mockResolvedValue(undefined);
   vi.mocked(postgres)
     .mockReset()
     .mockReturnValue(h.sql as never);
