@@ -31,6 +31,11 @@ const lockReleasePause = 50 * time.Millisecond
 const upgradeActiveMessage = "An upgrade is running for this Haive Desktop install. Install, Start and Stop are refused to protect its database backup. Wait for the upgrade to finish, then refresh status. If the updater is hung, stop that updater container in Docker Desktop, then check the upgrade state before retrying."
 const extensionBusyMessage = "Another Haive Desktop operation holds the install lock. Wait for it to finish, then refresh status. If it was interrupted, the lock clears itself about a minute after its last sign of life."
 
+// Keeps two Desktop windows from changing one install together. It sits beside the install
+// directory because Install runs before that directory exists. It is a lease like the stack
+// lock; older bridges made this name a folder.
+const windowLockSuffix = ".extension-lock"
+
 // Zero values select the wire-contract defaults; the fields exist for tests.
 type lockConfig struct {
 	beat, stale, poll time.Duration
@@ -292,6 +297,10 @@ func lockBusy(path, holder string) error {
 	return lockUnavailable(path)
 }
 
+func legacyLockFolder(path string) error {
+	return errors.New("The lock folder " + path + " comes from an earlier Haive Desktop version, and a folder never clears itself. An operation of that version may still be running: check this install's containers in Docker Desktop, and if none is, delete that folder, then retry.")
+}
+
 // takeStackLock serialises Start and Stop with the updater for the whole call.
 func (b bridge) takeStackLock(ctx context.Context) (func(), error) {
 	l, err := b.acquireStackLock(ctx)
@@ -301,9 +310,28 @@ func (b bridge) takeStackLock(ctx context.Context) (func(), error) {
 	return l.releaseLock, nil
 }
 
+// takeWindowLock serialises Install, Start and Stop between Desktop windows for the whole call.
+func (b bridge) takeWindowLock(ctx context.Context) (func(), error) {
+	path := b.dir + windowLockSuffix
+	// A folder has no beat, so a live older operation cannot be told from a dead one:
+	// never take the name over or wait on it.
+	if info, err := os.Lstat(path); err == nil && info.IsDir() {
+		return nil, legacyLockFolder(path)
+	}
+	l, err := b.acquireLease(ctx, path)
+	if err != nil {
+		return nil, err
+	}
+	return l.releaseLock, nil
+}
+
 func (b bridge) acquireStackLock(ctx context.Context) (*stackLock, error) {
+	return b.acquireLease(ctx, filepath.Join(b.dir, stackLockName))
+}
+
+// acquireLease takes the lease at path, waits out a live holder, breaks a stale one.
+func (b bridge) acquireLease(ctx context.Context, path string) (*stackLock, error) {
 	cfg := b.lockCfg.resolved()
-	path := filepath.Join(b.dir, stackLockName)
 	sleep := b.sleep
 	if sleep == nil {
 		sleep = time.Sleep

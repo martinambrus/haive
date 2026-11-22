@@ -441,7 +441,7 @@ The updater and the Desktop extension exclude each other through one lock file, 
 install directory: the `/install` mount every launcher gives the updater, and the one path the extension's
 host bridge shares with it. Neither older guard can do the job alone. The updater's database lock is a session
 lock on the database that the snapshot phase stops, so it ends there. The extension's
-`<install>.extension-lock` directory is a sibling of the install directory, outside the mount. The
+`<install>.extension-lock` window lock is a sibling of the install directory, outside the mount. The
 extension's container check sees only a running updater container, so an upgrade launched after its final
 check could still have PostgreSQL stopped by the snapshot while Compose was starting or stopping services.
 Advisory file locks (flock, LockFileEx) are not used: host and container are different kernels behind a
@@ -500,8 +500,8 @@ of it at its next beat; between the rename and the restore of a displaced fresh 
 absent, so the displaced holder's next beat creates it again and a third party creating it first keeps it. A
 holder whose beat cannot be written (a full disk, say) stops refreshing the lock, which then lapses after 60 s;
 the extension's container-identity check still covers that case. A bridge process killed in the middle of Start
-(the Desktop window closes) can leave its Compose child running while the lease lapses, unlike the sibling
-directory lock, which never lapses. A container the updater started (the volume archive, a migration
+(the Desktop window closes) can leave its Compose child running while both of its leases lapse, this one and
+the [window lock](#docker-desktop-extension). A container the updater started (the volume archive, a migration
 one-shot) can outlive the updater, and neither the lock nor the container-identity check covers it then.
 Docker Desktop's file-sharing coherence is not verified: the create is exclusive and no decision rests on a
 negative lookup. Delete `.haive-stack-lock` by hand
@@ -742,11 +742,22 @@ the Dockerfile entrypoint to the extension guard and both install identity envir
 arguments in the API and generated POSIX/PowerShell upgrade launchers. The updater
 launch protocol is unchanged.
 
-A cross-process directory lock serializes extension mutations. If a hard termination leaves
-`~/haive_desktop.extension-lock`, inspect this install's containers and ensure no
-operation remains before removing that lock directory. Normal completion and handled
-signals release it. Start and Stop also take the install stack lock inside it, which a
-crash clears by itself after 60 s. Keep the tab open during long operations. Processes have a
+A cross-process window lock serializes extension mutations. `~/haive_desktop.extension-lock`, a
+sibling of the install directory, is taken for Install, Start and Stop (never Status) before the
+operation log is opened and released after everything else. It is a lease: a regular file holding the
+install stack lock's record, with the same beat, stale rule, break and release (`acquireLease` in
+`stack_lock.go`; controls in `window_lock_test.go`). The stack lock keeps its own file and wire
+contract, and the updater never sees this one. Install needs it because the install directory, and so
+the stack lock, does not exist yet; Start and Stop take the stack lock inside it. A live holder refuses
+a second window with a message that says the lock clears itself, once the contender has seen a beat
+(within about 5 s). A hard termination leaves the file, and the next operation clears it after 60 s
+without a change (up to two minutes when the stack lock was left too). Normal completion and handled
+signals release it. Earlier bridges took this name as a folder, which has no beat and never lapses: the
+bridge refuses a folder at once, naming it, and never deletes it or waits on it, since a live older
+operation cannot be told from a dead one. Its message says to check this install's containers and delete
+that folder by hand. An older bridge that meets the lock file refuses the same way (its `mkdir` finds the
+name taken), so old and new bridges still exclude each other.
+Keep the tab open during long operations. Processes have a
 30-minute deadline; a timeout or close can leave a completed install or partially
 started stack, so refresh status and inspect logs before retrying. Cancellation kills
 the direct child only; installer grandchildren can outlive it even after lock release. No automatic

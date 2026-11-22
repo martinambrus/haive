@@ -715,11 +715,11 @@ func (b bridge) handle(ctx context.Context, r request) (s state, err error) {
 		return b.inspect(ctx)
 	}
 	// Cross-process exclusion also protects against two open Desktop windows.
-	lock := b.dir + ".extension-lock"
-	if err := os.Mkdir(lock, 0700); err != nil {
-		return s, errors.New("Another operation is active. If Desktop closed during an operation, check its containers before removing " + lock)
+	releaseWindow, err := b.takeWindowLock(ctx)
+	if err != nil {
+		return s, err
 	}
-	defer os.Remove(lock)
+	defer releaseWindow()
 	// Refuse before any installer, Compose call or .env port rewrite.
 	if err := b.checkUpgrade(ctx); err != nil {
 		return s, err
