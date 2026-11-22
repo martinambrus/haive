@@ -771,7 +771,8 @@ projection or executable host policy. Module executable and local composable man
 `consumesRoles` using exact registered contracts, limited to roles without `hostPolicy`. Both declaration
 arrays reject review/audit policy roles. Boot checks parity; declarations cannot
 name another module's or core's physical step. Static seeds can carry `dataRoleBindings`,
-limited to their own listed steps. Unchanged seeds retain their timestamps. Executable `outputContract` registration and v1/v2 replacement decoding remain
+limited to their own listed steps, and `selectsOwnProviders` (only when every listed step is the
+module's own; the type then gets no model-health canary, see [Task types](task-types.md)). Unchanged seeds retain their timestamps. Executable `outputContract` registration and v1/v2 replacement decoding remain
 review/audit-only. Data role references are serialized in catalog entries and v3 pins
 through the separate declaration schema. Existing v1/v2 role bindings and `replaces` remain limited to review and audit.
 Prompt steps now expose own-line agent-only role tokens and host-parsed structured

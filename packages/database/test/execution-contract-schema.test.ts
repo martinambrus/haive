@@ -3,7 +3,12 @@ import { expect, it } from 'vitest';
 import { schema } from '../src/index.js';
 it('preserves the nullable execution storage append chain without defaults or backfills', () => {
   for (const [table, predecessor, name, successors] of [
-    [schema.taskTypeDefinitions, 'changes', 'execution_contract', ['data_role_bindings']],
+    [
+      schema.taskTypeDefinitions,
+      'changes',
+      'execution_contract',
+      ['data_role_bindings', 'selects_own_providers'],
+    ],
     [schema.tasks, 'data_edge_plan', 'execution_contract', []],
     [schema.taskSteps, 'provider_wait_provider_id', 'guard_state', []],
   ] as const) {

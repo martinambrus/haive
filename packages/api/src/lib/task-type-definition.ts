@@ -344,6 +344,11 @@ export async function definitionForCreate(
     (def.runListStrategy === 'static' ? def.stepIds : null);
   if (
     notBuiltin &&
+    !(
+      def.source.startsWith('module:') &&
+      def.runListStrategy === 'static' &&
+      def.selectsOwnProviders === true
+    ) &&
     snapshot !== null &&
     !snapshot.includes(MODEL_HEALTH_STEP_ID) &&
     snapshot.some((id) => promptIds.has(id) || catalog?.dispatchesCli.has(id))

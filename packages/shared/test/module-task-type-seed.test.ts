@@ -32,13 +32,55 @@ function problems(value: unknown): string[] {
 }
 
 describe('a module task type seed in a manifest', () => {
+  it('retains an explicit provider-selection flag and leaves it optional', () => {
+    for (const selectsOwnProviders of [true, false]) {
+      const parsed = moduleManifestSchema.parse(manifest([seed({ selectsOwnProviders })]));
+      expect(parsed.taskTypes?.[0]).toMatchObject({ selectsOwnProviders });
+    }
+    expect(problems(manifest([seed()]))).toEqual([]);
+    expect(problems(manifest([seed({ selectsOwnProviders: 'true' })]))).not.toEqual([]);
+  });
+
   it('accepts core step ids, its own module step ids, and both together', () => {
     for (const stepIds of [
       ['01-env-detect', '07-phase-2-implement'],
       ['module.fx.report', 'module.fx.send'],
       ['01-env-detect', 'module.fx.report', '12-worktree-cleanup'],
     ]) {
-      expect(problems(manifest([seed({ stepIds })]))).toEqual([]);
+      for (const selectsOwnProviders of [undefined, false]) {
+        expect(problems(manifest([seed({ stepIds, selectsOwnProviders })]))).toEqual([]);
+      }
+    }
+  });
+
+  it.each([
+    ['07-phase-2-implement'],
+    ['01-env-detect'],
+    ['module.fx.report', '07-phase-2-implement'],
+    ['module.fx-other.report'],
+    ['custom.mine.step'],
+  ])('refuses the own-provider run list beginning with %j', (...stepIds) => {
+    const found = problems(manifest([seed({ stepIds, selectsOwnProviders: true })]));
+    expect(found).toContain(
+      `taskTypes.0: task type "weekly": selectsOwnProviders requires only this module's steps; step "${stepIds.at(-1)}" must belong to module "fx"`,
+    );
+  });
+
+  it('accepts own-provider steps belonging to the manifest module id', () => {
+    for (const id of ['fx', 'gx']) {
+      expect(
+        problems(
+          manifest(
+            [
+              seed({
+                stepIds: [`module.${id}.report`, `module.${id}.send`],
+                selectsOwnProviders: true,
+              }),
+            ],
+            id,
+          ),
+        ),
+      ).toEqual([]);
     }
   });
 
