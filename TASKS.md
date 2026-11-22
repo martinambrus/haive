@@ -1051,7 +1051,7 @@ No workflow runs `go test`, `go vet`, `gofmt` or the cross builds for `docker/de
 
 ### T754 · Translator source form lists no upload on a new task (+1)
 
-status: open · kind: fix · found: T735 free-step walk 2026-11-22 · priority: P3
+status: done 2026-11-22 haive-module-translator#15 (2e78275), deployed: item 1, with no upload the source form shows only an upload-then-Retry note and an empty submit fails with that remedy; item 2, consent refusals (same conditions and position) name the consented rows and the step-CLI remedy, and the consent form says each translator step's CLI must be a ticked row; README and CHANGELOG updated. Lows: empty form drops the storage note; a PDF-only upload gets the same note without saying it was ignored; host shows Submit on a note-only form · kind: fix · found: T735 free-step walk 2026-11-22 · priority: P3
 
 In `martinambrus/haive-module-translator`.
 
