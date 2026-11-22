@@ -8,6 +8,7 @@ import {
   resetDagCurrentLevelForRetry,
   CLOSED_GAP_INTO_IDLE_MS,
   type Database,
+  type DbTx,
   ZERO_MERGE_RETRIES,
 } from '@haive/database';
 import { computeFoldContribution } from '@haive/shared/timing';
@@ -42,7 +43,7 @@ class ReviveBlocked extends Error {
  *  `superseded`, having changed nothing, once a Retry or another reset moved it on.
  *  Returns the downstream-reset count + the new epoch, or null when no target row exists. */
 export async function resetStepAndDownstream(
-  db: Database,
+  db: Database | DbTx,
   taskId: string,
   targetStepId: string,
   round: number,

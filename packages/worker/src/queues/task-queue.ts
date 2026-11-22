@@ -3026,8 +3026,10 @@ export async function resolveFixLoopGate(
     target: StepDefinition,
     targetRound: number,
     record: (tx: DbHandle) => Promise<void>,
+    resetTarget = false,
   ): Promise<boolean> => {
     let applied = false;
+    let appliedEpoch = fence.epoch;
     try {
       await db.transaction(async (tx) => {
         if (fence.reviveFailed) {
@@ -3035,9 +3037,37 @@ export async function resolveFixLoopGate(
           const refusal = await refuseRevive(tx, ctx.taskId);
           if (refusal) throw new GateAnswerOvertaken('revive_refused', refusal.reason);
         }
-        await updateOwnedStep(tx, gateRow.id, { status: 'done', endedAt: new Date() });
         try {
-          await record(tx);
+          // The savepoint lets an unavailable CLI re-offer the gate without retaining a
+          // reset. Reset takes the source with its ordered step batch before closing it;
+          // gate close, target reset, choice, events and pointer all commit together.
+          await tx.transaction(async (attempt) => {
+            if (resetTarget) {
+              const reset = await resetStepAndDownstream(
+                attempt,
+                ctx.taskId,
+                target.metadata.id,
+                targetRound,
+                fence.epoch,
+                false,
+                [gateRow.id],
+                ctx.executionContract,
+              );
+              if (reset === 'superseded') throw new GateAnswerOvertaken('task_moved');
+              appliedEpoch = reset?.newEpoch ?? fence.epoch;
+            }
+            await updateOwnedStep(attempt, gateRow.id, { status: 'done', endedAt: new Date() });
+            await record(attempt);
+            const pointed = await markTaskRunningWithStep(
+              attempt,
+              ctx.taskId,
+              target.metadata.id,
+              computeGlobalStepIndex(target.metadata.workflowType, target.metadata.index),
+              targetRound,
+              { ...fence, epoch: appliedEpoch },
+            );
+            if (!pointed) throw new GateAnswerOvertaken('task_moved');
+          });
         } catch (err) {
           if (!(err instanceof FixRoundCliUnavailable)) throw err;
           const form = gateRow.formSchema as FormSchema;
@@ -3082,17 +3112,9 @@ export async function resolveFixLoopGate(
           notApplied('cli_unavailable');
           return;
         }
-        const pointed = await markTaskRunningWithStep(
-          tx,
-          ctx.taskId,
-          target.metadata.id,
-          computeGlobalStepIndex(target.metadata.workflowType, target.metadata.index),
-          targetRound,
-          fence,
-        );
-        if (!pointed) throw new GateAnswerOvertaken('task_moved');
         applied = true;
       });
+      if (applied) ctx.orchestrationEpoch = appliedEpoch;
       return applied;
     } catch (err) {
       if (err instanceof GateAnswerOvertaken) {
@@ -3157,21 +3179,26 @@ export async function resolveFixLoopGate(
   const directive = instruction.trim();
   const prior =
     directive.length > 0 ? await loadRecordedDiagnosisForRound(db, ctx.taskId, nextRound) : null;
-  const landed = await reopen(target, nextRound, async (tx) => {
-    await recordFixRoundCliChoice(tx, ctx.userId, ctx.taskId, target, nextRound, cliProviderId);
-    if (prior) {
-      await recordFixLoopRequest(tx, ctx.taskId, gateRow.id, {
-        diagnosis: buildGateDirectiveDiagnosis(directive, prior.diagnosis),
-        sourceStepId: FIX_LOOP_GATE_SOURCE,
+  const landed = await reopen(
+    target,
+    nextRound,
+    async (tx) => {
+      await recordFixRoundCliChoice(tx, ctx.userId, ctx.taskId, target, nextRound, cliProviderId);
+      if (prior) {
+        await recordFixLoopRequest(tx, ctx.taskId, gateRow.id, {
+          diagnosis: buildGateDirectiveDiagnosis(directive, prior.diagnosis),
+          sourceStepId: FIX_LOOP_GATE_SOURCE,
+          round: nextRound,
+          guidance: prior.guidance,
+        });
+      }
+      await appendEvent(tx, ctx.taskId, gateRow.id, 'fix_loop.continued', {
         round: nextRound,
-        guidance: prior.guidance,
+        directed: directive.length > 0,
       });
-    }
-    await appendEvent(tx, ctx.taskId, gateRow.id, 'fix_loop.continued', {
-      round: nextRound,
-      directed: directive.length > 0,
-    });
-  });
+    },
+    true,
+  );
   if (!landed) return;
   await enqueueAdvance(
     ctx.taskId,

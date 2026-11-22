@@ -33,6 +33,7 @@ import { recordFixLoopRequest } from '../src/step-engine/steps/workflow/_fix-loo
 
 const h = vi.hoisted(() => ({
   db: undefined as unknown,
+  userId: '',
   adds: [] as { name: string; data: Record<string, unknown> }[],
   fence: vi.fn(),
 }));
@@ -58,6 +59,26 @@ vi.mock('../src/step-engine/execution-contract-support.js', async (importOrigina
   ...(await importOriginal<typeof import('../src/step-engine/execution-contract-support.js')>()),
   assertWorkerExecutionContractSupported: h.fence,
 }));
+
+vi.mock('../../api/src/db.js', () => ({ getDb: () => h.db }));
+vi.mock('../../api/src/queues.js', () => ({
+  getTaskQueue: () => ({
+    add: async (name: string, data: Record<string, unknown>) => h.adds.push({ name, data }),
+  }),
+}));
+vi.mock('../../api/src/lib/sandbox-kill.js', () => ({ killTaskSandboxes: async () => 0 }));
+vi.mock('../../api/src/middleware/auth.js', () => ({
+  requireAuth: async (c: { set: (k: string, v: string) => void }, next: () => Promise<void>) => {
+    c.set('userId', h.userId);
+    c.set('userRole', 'user');
+    await next();
+  },
+  requireAdmin: async (_c: unknown, next: () => Promise<void>) => next(),
+}));
+
+// Runtime cross-package seam, as in guard-api-e2e-db: exercise the real Retry route
+// without adding API source to the worker's TypeScript compilation root.
+const apiSource = (rel: string) => new URL(`../../api/src/${rel}`, import.meta.url).pathname;
 
 const url = process.env.CUSTOM_FIX_RECOVERY_TEST_URL;
 if (url && !new URL(url).pathname.startsWith('/custom_fix_recovery_test'))
@@ -96,6 +117,7 @@ const LEGS: Leg[] = [
 ];
 
 const applied: Record<string, number> = {};
+const reviewBlocks: Record<string, boolean> = {};
 const gate = { held: undefined as Promise<void> | undefined, stepId: '' };
 
 function stub(id: string, index: number, type: string, over: object = {}): void {
@@ -145,6 +167,7 @@ describe.skipIf(!url)('recovery of a fix round on Postgres', () => {
       })
       .returning();
     userId = user!.id;
+    h.userId = userId;
     const [repository] = await db
       .insert(schema.repositories)
       .values({
@@ -171,7 +194,12 @@ describe.skipIf(!url)('recovery of a fix round on Postgres', () => {
         leg.pin ? { fixConsumer: { version: 1 }, editsCodeOrTests: true } : {},
       );
       stub(leg.ids.REVIEW, 1, leg.type, {
-        fixLoop: { evaluate: () => ({ blocking: true, diagnosis: 'the review found a defect' }) },
+        fixLoop: {
+          evaluate: () =>
+            reviewBlocks[leg.ids.REVIEW] === false
+              ? null
+              : { blocking: true, diagnosis: 'the review found a defect' },
+        },
       });
       stub(leg.ids.AFTER, 2, leg.type);
     }
@@ -180,6 +208,7 @@ describe.skipIf(!url)('recovery of a fix round on Postgres', () => {
     h.adds.length = 0;
     h.fence.mockReset();
     for (const key of Object.keys(applied)) delete applied[key];
+    for (const key of Object.keys(reviewBlocks)) delete reviewBlocks[key];
     gate.held = undefined;
     vi.spyOn(configService, 'getFresh').mockResolvedValue('normal');
     vi.spyOn(configService, 'getBoolean').mockResolvedValue(false);
@@ -368,6 +397,125 @@ describe.skipIf(!url)('recovery of a fix round on Postgres', () => {
         applies: {},
       });
     });
+
+    if (!leg.pin)
+      describe('Retry of an earlier source card', () => {
+        const rewoundGate = async () => {
+          const id = await seedTask(leg, { maxFixRounds: 1 });
+          const source = await seedRow(leg, id, 'REVIEW', 0, 'done');
+          await loopBack(id, source, 'the original defect');
+          // Real execution creates terminal TARGET@1 and REVIEW@1, leaving AFTER current.
+          reviewBlocks[leg.ids.REVIEW] = false;
+          await processTaskJob(advance(leg, id, 'TARGET', 1, BASE_EPOCH));
+          await processTaskJob(advance(leg, id, 'REVIEW', 1, BASE_EPOCH));
+          const roundRow = async (role: Role) =>
+            (await db.query.taskSteps.findFirst({
+              where: and(
+                eq(schema.taskSteps.taskId, id),
+                eq(schema.taskSteps.stepId, leg.ids[role]),
+                eq(schema.taskSteps.round, 1),
+              ),
+            }))!;
+          expect((await roundRow('TARGET')).status).toBe('done');
+          expect((await roundRow('REVIEW')).status).toBe('done');
+          expect((await taskOf(id)).currentStepId).toBe(leg.ids.AFTER);
+          const { taskRoutes } = await import(apiSource('routes/tasks/index.ts'));
+          const { errorHandler } = await import(apiSource('middleware/error-handler.ts'));
+          taskRoutes.onError(errorHandler);
+          const retry = await taskRoutes.request(`/${id}/steps/${leg.ids.REVIEW}/action`, {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ action: 'retry', round: 0 }),
+          });
+          expect(retry.status, await retry.text()).toBe(200);
+          const rewound = await taskOf(id);
+          expect(rewound.currentRound).toBe(0);
+          expect(rewound.orchestrationEpoch).toBe(BASE_EPOCH + 1);
+          expect((await roundRow('TARGET')).status).toBe('done');
+          expect((await roundRow('REVIEW')).status).toBe('done');
+          reviewBlocks[leg.ids.REVIEW] = true;
+          await processTaskJob(advance(leg, id, 'REVIEW', 0, rewound.orchestrationEpoch));
+          const gateRow = await rowOf(source.id);
+          expect(gateRow.status).toBe('waiting_form');
+          return { id, source, roundRow, rewound, gateRow };
+        };
+
+        it('Continue reruns terminal next-round rows', async () => {
+          const { id, roundRow, rewound, gateRow } = await rewoundGate();
+          await resolveFixLoopGate(db, await ctxFor(leg, id), gateRow, 'continue', 0, '');
+          const continued = await taskOf(id);
+          await processTaskJob(advance(leg, id, 'TARGET', 1, continued.orchestrationEpoch));
+          // A fresh implementation must run; unchanged code walks past TARGET@1 done.
+          expect(applied[leg.ids.TARGET]).toBe(2);
+          expect((await roundRow('TARGET')).rerunGeneration).toBe(1);
+          expect((await roundRow('REVIEW')).status).toBe('pending');
+          expect((await roundRow('REVIEW')).output).toBeNull();
+          expect(continued.orchestrationEpoch).toBe(rewound.orchestrationEpoch + 1);
+        });
+
+        it('an unavailable CLI reoffers the gate without resetting the later round', async () => {
+          const { id, roundRow, rewound, gateRow } = await rewoundGate();
+          const targetBefore = await roundRow('TARGET');
+          const reviewBefore = await roundRow('REVIEW');
+          const eventsBefore = await eventsOf(id);
+          h.adds.length = 0;
+          const ctx = await ctxFor(leg, id);
+          await resolveFixLoopGate(
+            db,
+            ctx,
+            gateRow,
+            'continue',
+            0,
+            'try another fix',
+            randomUUID(),
+          );
+          expect(await roundRow('TARGET')).toEqual(targetBefore);
+          expect(await roundRow('REVIEW')).toEqual(reviewBefore);
+          expect(await eventsOf(id)).toEqual(eventsBefore);
+          expect((await rowOf(gateRow.id)).status).toBe('waiting_form');
+          expect((await taskOf(id)).orchestrationEpoch).toBe(rewound.orchestrationEpoch);
+          expect(ctx.orchestrationEpoch).toBe(rewound.orchestrationEpoch);
+          expect(h.adds).toEqual([]);
+        });
+
+        it('a stale epoch rolls back the next-round reset and leaves the answer unapplied', async () => {
+          const { id, roundRow, gateRow } = await rewoundGate();
+          const targetBefore = await roundRow('TARGET');
+          const reviewBefore = await roundRow('REVIEW');
+          const eventsBefore = await eventsOf(id);
+          const ctx = await ctxFor(leg, id);
+          await db
+            .update(schema.tasks)
+            .set({ orchestrationEpoch: ctx.orchestrationEpoch + 1 })
+            .where(eq(schema.tasks.id, id));
+          h.adds.length = 0;
+          await resolveFixLoopGate(db, ctx, gateRow, 'continue', 0, '');
+          expect(await roundRow('TARGET')).toEqual(targetBefore);
+          expect(await roundRow('REVIEW')).toEqual(reviewBefore);
+          expect(await rowOf(gateRow.id)).toEqual(gateRow);
+          expect(await eventsOf(id)).toEqual(eventsBefore);
+          expect(h.adds).toEqual([]);
+        });
+
+        it('a lost source row rolls back the next-round reset', async () => {
+          const { id, roundRow, gateRow } = await rewoundGate();
+          const targetBefore = await roundRow('TARGET');
+          const reviewBefore = await roundRow('REVIEW');
+          const taskBefore = await taskOf(id);
+          const eventsBefore = await eventsOf(id);
+          await db
+            .update(schema.taskSteps)
+            .set({ status: 'pending' })
+            .where(eq(schema.taskSteps.id, gateRow.id));
+          h.adds.length = 0;
+          await resolveFixLoopGate(db, await ctxFor(leg, id), gateRow, 'continue', 0, '');
+          expect(await roundRow('TARGET')).toEqual(targetBefore);
+          expect(await roundRow('REVIEW')).toEqual(reviewBefore);
+          expect(await taskOf(id)).toEqual(taskBefore);
+          expect(await eventsOf(id)).toEqual(eventsBefore);
+          expect(h.adds).toEqual([]);
+        });
+      });
 
     it('the cap parks the source gate with an escalation and starts no further round', async () => {
       const id = await seedTask(leg, { maxFixRounds: 2 });

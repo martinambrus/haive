@@ -612,6 +612,7 @@ describe('a fix round whose pinned custom target is valid', () => {
   });
 
   it('routes the round-limit Continue to the pinned step', async () => {
+    vi.mocked(resetStepAndDownstream).mockResolvedValueOnce(null);
     h.state.readsAnswer = true;
     await resolveFixLoopGate(
       db as never,

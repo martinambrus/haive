@@ -1265,6 +1265,11 @@ describe('a hand-off that a Retry overtakes after its epoch check', () => {
   });
 
   describe('resolving the fix-loop gate', () => {
+    // These gates enter a new round with no row for the shared reset to find.
+    beforeEach(() => vi.mocked(resetStepAndDownstream).mockResolvedValue(null));
+    afterEach(() =>
+      vi.mocked(resetStepAndDownstream).mockResolvedValue({ downstreamReset: 0, newEpoch: 7 }),
+    );
     const gate = { id: 'ts-1', stepId: 'epoch-chain-first', round: 1 };
 
     describe('says why it applied nothing', () => {
