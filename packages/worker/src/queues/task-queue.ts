@@ -2602,32 +2602,44 @@ export async function handleResult(
       // pointer has moved, and after escalation the source is already a parked gate.
       // Check both in the existing task read before appending any events. A real Retry
       // restores the pointer and resets the source, so its new diagnosis still lands.
+      const logRefusal = (reason: string) =>
+        logger.info(
+          { taskId: ctx.taskId, stepId, round: result.row.round, reason },
+          'fix loop not entered: hand-off refused',
+        );
       const taskRow = await db.query.tasks.findFirst({
-        where: and(
-          eq(schema.tasks.id, ctx.taskId),
-          or(
-            isNull(schema.tasks.currentStepId),
-            and(
-              eq(schema.tasks.currentStepId, stepId),
-              eq(schema.tasks.currentRound, result.row.round),
-            ),
-          ),
-          sql`not exists (
+        where: eq(schema.tasks.id, ctx.taskId),
+        columns: { maxFixRounds: true, currentStepId: true, currentRound: true },
+        extras: {
+          sourceParked: sql<boolean>`exists (
             select 1 from ${schema.taskSteps} as loop_source
             where loop_source.id = ${result.row.id}
               and loop_source.status = 'waiting_form'
-          )`,
-        ),
-        columns: { maxFixRounds: true },
+          )`.as('source_parked'),
+        },
       });
-      if (!taskRow) return;
+      if (!taskRow) {
+        logRefusal('task_missing');
+        return;
+      }
+      if (
+        taskRow.currentStepId != null &&
+        (taskRow.currentStepId !== stepId || taskRow.currentRound !== result.row.round)
+      ) {
+        logRefusal('task_pointer_moved');
+        return;
+      }
+      if (taskRow.sourceParked) {
+        logRefusal('source_parked');
+        return;
+      }
       if (stepId === '08-phase-5-verify')
         await recordGate3Check(db, ctx, result.row, 'verify_failed');
       // A downstream step found a blocking defect. Bump the round and re-enter at the
       // implementation step (which re-runs in fix mode with this diagnosis); the
       // forward walk then re-runs the whole post-implementation chain as round-N rows.
       const nextRound = result.row.round + 1;
-      const cap = taskRow?.maxFixRounds ?? DEFAULT_MAX_FIX_ROUNDS;
+      const cap = taskRow.maxFixRounds ?? DEFAULT_MAX_FIX_ROUNDS;
       await record(db, ctx.taskId, result.row.id, 'step.loop_back', {
         stepId,
         sourceStepId: result.sourceStepId,
@@ -2816,6 +2828,21 @@ export async function handleResult(
       // was sent. The row is taken first, as a Retry takes the steps before the task.
       const entered = await db.transaction(async (tx) => {
         if (!(await lockOwnedStep(tx, result.row.id))) return false;
+        // Another pass can have handed off after the unlocked guard. The shared
+        // source-row lock serializes those passes; re-read after taking it.
+        const current = await tx.query.tasks.findFirst({
+          where: eq(schema.tasks.id, ctx.taskId),
+          columns: { currentStepId: true, currentRound: true },
+        });
+        if (!current) {
+          logRefusal('task_missing_under_lock');
+          return false;
+        }
+        if (current.currentStepId !== stepId || current.currentRound !== result.row.round) {
+          logRefusal('task_pointer_moved_under_lock');
+          return false;
+        }
+
         const pointed = await markTaskRunningWithStep(
           tx,
           ctx.taskId,

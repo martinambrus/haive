@@ -123,6 +123,7 @@ const h = vi.hoisted(() => {
     landedTaskPatches: [] as Record<string, unknown>[],
     taskType: 'workflow',
     currentStepId: 'epoch-job-step',
+    currentRound: 0,
     /** Set when the task's repository is gone, so the job cannot resolve the task. */
     repoGone: false,
     /** Set when the task row itself cannot be read. */
@@ -181,7 +182,7 @@ const db = {
           ignoreSavedStepClis: false,
           executionPath: null,
           currentStepId: h.state.currentStepId,
-          currentRound: 0,
+          currentRound: h.state.currentRound,
           maxFixRounds: h.state.maxFixRounds,
         };
         h.state.onRead();
@@ -504,6 +505,7 @@ afterEach(() => {
   h.state.landedTaskPatches = [];
   h.state.taskType = 'workflow';
   h.state.currentStepId = 'epoch-job-step';
+  h.state.currentRound = 0;
   h.state.repoGone = false;
   h.state.taskReadFails = false;
   h.state.endedRuns = [];
@@ -899,6 +901,7 @@ describe('the fix request a loop_back records', () => {
   });
 
   it('puts the guidance of both sides in the form the oscillation park shows', async () => {
+    h.state.currentRound = 2;
     const GUIDANCE_B = 'Treat the other check as authoritative on naming.';
     const events = (guidance?: string) => [
       { payload: { diagnosis: 'a defect', sourceStepId: 'epoch-job-step', round: 1 } },
@@ -939,6 +942,7 @@ describe('the fix request a loop_back records', () => {
   });
 
   it('carries the guidance of the verdict on the oscillation park', async () => {
+    h.state.currentRound = 2;
     h.state.readsAnswer = true;
     h.state.requestedEvents = [
       { payload: { diagnosis: 'a defect', sourceStepId: 'epoch-job-step', round: 1 } },
@@ -1045,6 +1049,7 @@ describe('the fix request a loop_back records', () => {
         { payload: { diagnosis: stored.diagnosis, sourceStepId: QA, round: 1 } },
         { payload: { diagnosis: 'a different defect', sourceStepId: 'another-step', round: 2 } },
       ];
+      h.state.currentRound = 2;
       await handleResult(db as never, ctx() as never, 'epoch-job-step', {
         ...result,
         row: { id: 'ts-1', round: 2 },
@@ -1230,6 +1235,8 @@ describe('a hand-off that a Retry overtakes after its epoch check', () => {
   });
 
   it('raises no round-cap gate on a task a Retry moved on', async () => {
+    h.state.currentStepId = 'epoch-chain-first';
+    h.state.currentRound = 0;
     h.state.readsAnswer = true;
     h.state.maxFixRounds = 0;
     h.state.onSelect = retryLands;
@@ -1245,6 +1252,8 @@ describe('a hand-off that a Retry overtakes after its epoch check', () => {
   });
 
   it('raises no oscillation gate on a task a Retry moved on', async () => {
+    h.state.currentStepId = 'epoch-chain-first';
+    h.state.currentRound = 2;
     h.state.readsAnswer = true;
     h.state.onSelect = retryLands;
     // The same complaint two rounds back, and another step's between them.

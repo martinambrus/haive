@@ -3,7 +3,7 @@ import { and, asc, eq } from 'drizzle-orm';
 import { DelayedError } from 'bullmq';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createDatabase, schema, type Database } from '@haive/database';
-import { configService, TASK_JOB_NAMES, type WorkflowType } from '@haive/shared';
+import { configService, logger, TASK_JOB_NAMES, type WorkflowType } from '@haive/shared';
 import { ExecutionContractError } from '@haive/shared/modularity';
 import {
   enqueueRedrive,
@@ -437,6 +437,101 @@ describe.skipIf(!url)('recovery of a fix round on Postgres', () => {
       expect(await eventsOf(id, 'fix_loop.requested')).toHaveLength(1);
       expect(await eventsOf(id, 'fix_loop.escalated')).toHaveLength(1);
     });
+
+    if (!leg.pin)
+      it('two interleaved loop_back passes enter the fix round only once', async () => {
+        const id = await seedTask(leg);
+        const source = await seedRow(leg, id, 'REVIEW', 0, 'done');
+        const ctx = await ctxFor(leg, id);
+        const result = {
+          status: 'loop_back' as const,
+          row: source,
+          sourceStepId: source.stepId,
+          diagnosis: 'defect',
+        };
+        // Both real hand-offs must pass their unlocked guard before either transaction
+        // starts. PostgreSQL then serializes them on the same real source-row lock.
+        const refused = vi.spyOn(logger, 'info');
+        const bothReady = Promise.withResolvers<void>();
+        const transaction = db.transaction.bind(db);
+        let arrivals = 0;
+        const spy = vi.spyOn(db, 'transaction').mockImplementation(async (...args) => {
+          arrivals += 1;
+          if (arrivals === 2) bothReady.resolve();
+          await bothReady.promise;
+          return transaction(...args);
+        });
+        try {
+          await Promise.all([
+            handleResult(db, { ...ctx }, source.stepId, result),
+            handleResult(db, { ...ctx }, source.stepId, result),
+          ]);
+        } finally {
+          spy.mockRestore();
+        }
+        expect(refused).toHaveBeenCalledWith(
+          { taskId: id, stepId: source.stepId, round: 0, reason: 'task_pointer_moved_under_lock' },
+          expect.any(String),
+        );
+        refused.mockRestore();
+        expect(arrivals).toBe(2);
+        expect(await eventsOf(id, 'fix_loop.requested')).toHaveLength(1);
+        expect(await eventsOf(id, 'fix_loop.started')).toHaveLength(1);
+        expect(h.adds).toHaveLength(1);
+        expect(await taskOf(id)).toMatchObject({
+          currentStepId: leg.ids.TARGET,
+          currentRound: 1,
+          orchestrationEpoch: BASE_EPOCH,
+        });
+      });
+
+    if (!leg.pin)
+      it.each(['task_missing', 'task_pointer_moved', 'task_round_moved', 'source_parked'])(
+        'logs the %s loop_back refusal without writing events',
+        async (refusal) => {
+          const id = await seedTask(leg);
+          const source = await seedRow(leg, id, 'REVIEW', 0, 'done');
+          const ctx = await ctxFor(leg, id);
+          if (refusal === 'task_missing')
+            await db.delete(schema.tasks).where(eq(schema.tasks.id, id));
+          else if (refusal === 'source_parked')
+            await db
+              .update(schema.taskSteps)
+              .set({ status: 'waiting_form' })
+              .where(eq(schema.taskSteps.id, source.id));
+          else
+            await db
+              .update(schema.tasks)
+              .set(
+                refusal === 'task_round_moved'
+                  ? { currentRound: 1 }
+                  : { currentStepId: leg.ids.TARGET },
+              )
+              .where(eq(schema.tasks.id, id));
+          const logged = vi.spyOn(logger, 'info');
+          try {
+            await handleResult(db, ctx, source.stepId, {
+              status: 'loop_back',
+              row: source,
+              sourceStepId: source.stepId,
+              diagnosis: 'defect',
+            });
+            expect(logged).toHaveBeenCalledWith(
+              {
+                taskId: id,
+                stepId: source.stepId,
+                round: 0,
+                reason: refusal === 'task_round_moved' ? 'task_pointer_moved' : refusal,
+              },
+              expect.any(String),
+            );
+            expect(await eventsOf(id)).toEqual([]);
+            expect(h.adds).toEqual([]);
+          } finally {
+            logged.mockRestore();
+          }
+        },
+      );
 
     if (!leg.pin)
       describe('Retry of an earlier source card', () => {
