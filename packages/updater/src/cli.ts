@@ -20,7 +20,7 @@ import {
   type StackLock,
   type StackLockOptions,
 } from './stack-lock.js';
-import { attemptVersion } from './attempt-fields.js';
+import { attemptVersion, readAttemptInstallFields } from './attempt-fields.js';
 import {
   ensureJournal,
   findLiveRun,
@@ -293,6 +293,7 @@ export async function main(options: { stackLock?: StackLockOptions } = {}): Prom
   let stopSignals: (() => void) | undefined;
   let hasRun = false;
   let fromVersion = 'unknown';
+  let installFieldsStarted = false;
   let toVersion = attemptVersion(arg('version'));
   let envAdded: string[] = [];
   let terminal:
@@ -359,6 +360,7 @@ export async function main(options: { stackLock?: StackLockOptions } = {}): Prom
     }
     await requireRegularInstallFiles(installDir);
     if (live || !flag('check')) await cleanupInstallTemps(installDir);
+    installFieldsStarted = true;
     fromVersion = (await readEnvVar(envFile, 'HAIVE_VERSION')) ?? 'unknown';
     const { imageSettings, manifestOptions, missingTarget } = await readInstall();
 
@@ -603,7 +605,16 @@ export async function main(options: { stackLock?: StackLockOptions } = {}): Prom
   } finally {
     if (locked && !hasRun && !flag('check') && terminal) {
       try {
-        await recordAttempt(sql, { fromVersion, toVersion, channel, ...terminal });
+        const fields = installFieldsStarted
+          ? { fromVersion, channel }
+          : await readAttemptInstallFields(installDir);
+        await recordAttempt(sql, {
+          fromVersion: fields.fromVersion,
+          toVersion,
+          channel: fields.channel,
+          ...terminal,
+          error: fields.note ? `${terminal.error} ${fields.note}` : terminal.error,
+        });
       } catch (err) {
         emit('attempt-record-failed', { message: safeErrorMessage(err) });
       }

@@ -38,6 +38,7 @@ import * as images from './images.js';
 import * as dk from './docker.js';
 import * as journal from './journal.js';
 import * as run from './run.js';
+import * as stackLock from './stack-lock.js';
 const pin = (host: string) => `private/haive-acme-${host}@sha256:${'a'.repeat(64)}`;
 const refs = { api: pin('api'), worker: pin('worker'), web: pin('web'), builder: pin('builder') };
 const settings: images.ImageSettings = {
@@ -979,6 +980,98 @@ it('public dry-plan emits a usage error without reading a target or journal', as
   expect(h.initialize).not.toHaveBeenCalled();
   expect(dk.readReleaseManifestImage).not.toHaveBeenCalled();
   expect(dk.localImages).not.toHaveBeenCalled();
+});
+
+describe('early refusal install fields', () => {
+  let dir: string;
+  const env = 'HAIVE_CHANNEL=acme\nHAIVE_VERSION=1.2.3\n';
+  beforeEach(async () => {
+    dir = await mkdtemp(join(tmpdir(), 'early-attempt-'));
+    await writeFile(join(dir, '.env'), env);
+    process.argv = process.argv.filter((value) => value !== '--check');
+    process.argv[process.argv.indexOf('--install-dir') + 1] = dir;
+  });
+  afterEach(async () => rm(dir, { recursive: true, force: true }));
+
+  it('records safe install fields for install-locked without changing launch settings', async () => {
+    vi.spyOn(stackLock, 'acquireStackLock').mockResolvedValue({
+      status: 'busy',
+      holder: 'extension',
+    });
+    expect(await main()).toBe(3);
+    expect(journal.recordAttempt).toHaveBeenCalledWith(
+      h.sql,
+      expect.objectContaining({
+        channel: 'acme',
+        fromVersion: '1.2.3',
+        metadata: { refusal: 'install-locked' },
+      }),
+    );
+    expect(process.env.DOCKER_CONFIG).toBe('/ambient');
+    expect(images.readImageSettings).not.toHaveBeenCalled();
+    expect(run.readEnvVar).not.toHaveBeenCalled();
+    expect(dk.readReleaseManifestImage).not.toHaveBeenCalled();
+    expect(journal.startRun).not.toHaveBeenCalled();
+    expect(run.phaseDraining).not.toHaveBeenCalled();
+    expect(await readFile(join(dir, '.env'), 'utf8')).toBe(env);
+  });
+
+  it('records safe install fields for install-file-linked without following the compose link', async () => {
+    await symlink(join(dir, 'unread-compose'), join(dir, 'docker-compose.yml'));
+    expect(await main()).toBe(3);
+    expect(journal.recordAttempt).toHaveBeenCalledWith(
+      h.sql,
+      expect.objectContaining({
+        channel: 'acme',
+        fromVersion: '1.2.3',
+        metadata: { refusal: 'install-file-linked' },
+      }),
+    );
+    expect(images.readImageSettings).not.toHaveBeenCalled();
+    expect(journal.startRun).not.toHaveBeenCalled();
+  });
+
+  it('marks both fields not read when .env is linked, without leaking its target', async () => {
+    await writeFile(join(dir, 'private-env'), env + 'SECRET=must-stay-private\n');
+    await rm(join(dir, '.env'));
+    await symlink(join(dir, 'private-env'), join(dir, '.env'));
+    expect(await main()).toBe(3);
+    expect(journal.recordAttempt).toHaveBeenCalledWith(
+      h.sql,
+      expect.objectContaining({
+        channel: 'not-read',
+        fromVersion: 'not-read',
+        error: expect.stringContaining('Install channel and current version were not read'),
+        metadata: { refusal: 'install-file-linked' },
+      }),
+    );
+    expect(images.readImageSettings).not.toHaveBeenCalled();
+    expect(run.readEnvVar).not.toHaveBeenCalled();
+    expect(JSON.stringify(vi.mocked(journal.recordAttempt).mock.calls)).not.toContain(
+      'must-stay-private',
+    );
+  });
+
+  it('keeps install-locked when its display read encounters a linked .env', async () => {
+    vi.spyOn(stackLock, 'acquireStackLock').mockResolvedValue({
+      status: 'busy',
+      holder: 'extension',
+    });
+    await rm(join(dir, '.env'));
+    await symlink(join(dir, 'unread-env'), join(dir, '.env'));
+    expect(await main()).toBe(3);
+    expect(journal.recordAttempt).toHaveBeenCalledWith(
+      h.sql,
+      expect.objectContaining({
+        channel: 'not-read',
+        fromVersion: 'not-read',
+        metadata: { refusal: 'install-locked' },
+        error: expect.stringContaining('Install channel and current version were not read'),
+      }),
+    );
+    expect(images.readImageSettings).not.toHaveBeenCalled();
+    expect(journal.startRun).not.toHaveBeenCalled();
+  });
 });
 
 describe('terminal attempts before a run exists', () => {
