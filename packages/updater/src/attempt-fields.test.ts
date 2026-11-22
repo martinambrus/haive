@@ -3,7 +3,15 @@ import { mkdtemp, mkdir, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { attemptVersion, readAttemptInstallFields } from './attempt-fields.js';
+import {
+  ATTEMPT_ENV_MAX_BYTES,
+  attemptVersion,
+  readAttemptInstallFields,
+} from './attempt-fields.js';
+
+it('pins the production .env read limit at 256 KiB', () => {
+  expect(ATTEMPT_ENV_MAX_BYTES).toBe(262_144);
+});
 
 it('accepts 64-character versions and replaces 65-character versions with unknown', () => {
   const longest = '1'.repeat(64);

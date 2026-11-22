@@ -7,12 +7,15 @@ export function attemptVersion(version: string | undefined): string {
   return version && /^[0-9A-Za-z][0-9A-Za-z.+-]{0,63}$/.test(version) ? version : 'unknown';
 }
 
+/** Largest `.env` the attempt row's display read accepts. */
+export const ATTEMPT_ENV_MAX_BYTES = 256 * 1024;
+
 /** Best-effort history only, after an early refusal. Never feeds upgrade decisions or invokes
  * Compose while another holder may be changing the install. The held directory and O_NOFOLLOW
  * read protect .env even when another install file is linked or .env is replaced during a read. */
 export async function readAttemptInstallFields(
   installDir: string,
-  maxBytes = 256 * 1024,
+  maxBytes = ATTEMPT_ENV_MAX_BYTES,
 ): Promise<{ channel: string; fromVersion: string; note?: string }> {
   try {
     const file = await inInstall(installDir, async (dir) => {
