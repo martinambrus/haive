@@ -57,6 +57,8 @@ export const taskTypeDefinitions = pgTable(
     executionContract: jsonb('execution_contract').$type<unknown>(),
     /** Author choices; copied to immutable task data-edge pins only at INSERT. */
     dataRoleBindings: jsonb('data_role_bindings').$type<unknown>(),
+    /** Module-seed policy; ordinary task types retain their task-provider canary. */
+    selectsOwnProviders: boolean('selects_own_providers').notNull().default(false),
   },
   (table) => [
     check(

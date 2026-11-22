@@ -427,6 +427,52 @@ describe.skipIf(!url)('task type routes on Postgres', () => {
     ).toBe(frozen);
   });
 
+  it.each([true, false])(
+    'pins module provider selection at task creation (own=%s)',
+    async (selectsOwnProviders) => {
+      const slug = 'tt-module-own-providers';
+      const agent = 'module.acme.own-agent';
+      const canary = '00-model-health-workflow';
+      h.flags.set(MODULE_KEY, true);
+      h.add.mockReset();
+      h.add.mockResolvedValue(undefined);
+      await db.insert(schema.modules).values({
+        moduleId: 'acme',
+        packageName: '@haive/module-acme',
+        name: 'Acme',
+        installedVersion: '1.0.0',
+      });
+      await db.insert(schema.stepCatalog).values({
+        ...catalogRow(agent, true, entry(agent, { dispatchesCli: true }), 'module:acme'),
+        dispatchesCli: true,
+      });
+      await db.insert(schema.taskTypeDefinitions).values({
+        slug,
+        displayName: 'Own providers',
+        source: 'module:acme',
+        runListStrategy: 'static',
+        stepIds: [agent],
+        requiresRepository: false,
+        selectsOwnProviders,
+      });
+      const response = await send('POST', '/tasks', {
+        type: slug,
+        title: 'Translate',
+        description: 'Translate this',
+      });
+      const body = (await response.json()) as { task: { id: string } };
+      expect(response.status, JSON.stringify(body)).toBe(201);
+      const task = await db.query.tasks.findFirst({ where: eq(schema.tasks.id, body.task.id) });
+      const expected = selectsOwnProviders ? [agent] : [canary, agent];
+      expect(task?.cliProviderId).toBeNull();
+      expect(task?.runListSnapshot).toEqual(expected);
+      expect(task?.dataEdgePlan).toMatchObject({
+        candidates: [{ nodes: expected.map((id) => ({ id })) }],
+      });
+      expect(h.add).toHaveBeenCalledTimes(1);
+    },
+  );
+
   beforeAll(async () => {
     db = createDatabase(url as string);
     h.db = db;

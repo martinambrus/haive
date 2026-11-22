@@ -32,6 +32,15 @@ function problems(value: unknown): string[] {
 }
 
 describe('a module task type seed in a manifest', () => {
+  it('retains an explicit provider-selection flag and leaves it optional', () => {
+    for (const selectsOwnProviders of [true, false]) {
+      const parsed = moduleManifestSchema.parse(manifest([seed({ selectsOwnProviders })]));
+      expect(parsed.taskTypes?.[0]).toMatchObject({ selectsOwnProviders });
+    }
+    expect(problems(manifest([seed()]))).toEqual([]);
+    expect(problems(manifest([seed({ selectsOwnProviders: 'true' })]))).not.toEqual([]);
+  });
+
   it('accepts core step ids, its own module step ids, and both together', () => {
     for (const stepIds of [
       ['01-env-detect', '07-phase-2-implement'],

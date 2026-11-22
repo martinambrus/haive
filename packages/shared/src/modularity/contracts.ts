@@ -267,6 +267,8 @@ export const taskTypeDefinitionSeedSchema = z
     dataRoleBindings: dataRoleBindingsSchema.optional(),
     selectable: z.boolean(),
     requiresRepository: z.boolean(),
+    /** Module steps select their providers; no automatic task-provider canary. */
+    selectsOwnProviders: z.boolean().optional(),
     preAnswerDefaults: z.record(z.string(), z.record(z.string(), z.unknown())).optional(),
     stepLoopLimitDefaults: stepLoopLimitsSchema,
     sortOrder: z.number().int().min(-2147483648).max(2147483647).optional(),
