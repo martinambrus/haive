@@ -6,7 +6,7 @@ import { UpgradeRefusal } from './refusal.js';
 type EnvKeys = NonNullable<ReleaseManifest['bundle']>['env'];
 
 /** Read assignments, skipping comments and assignment-shaped lines inside quoted values.
- * Values stay private to this module; callers receive only names. A key whose unquoted or
+ * The required-key writer exposes names only; display readers select literals below. A key whose unquoted or
  * double-quoted value holds a `$` reference goes into `interpolated`: Compose substitutes it
  * when it reads `.env`, so the written text says nothing about the value it will use. */
 function values(text: string, interpolated: Set<string>): Map<string, string> {
@@ -42,6 +42,18 @@ function values(text: string, interpolated: Set<string>): Map<string, string> {
     result.set(match[1]!, value);
   }
   return result;
+}
+
+/** Display-only literals: an interpolated value needs Compose and is deliberately unresolved. */
+export function literalEnvValues(
+  text: string,
+  keys: readonly string[],
+): Record<string, string | undefined> {
+  const interpolated = new Set<string>();
+  const current = values(text, interpolated);
+  return Object.fromEntries(
+    keys.map((key) => [key, interpolated.has(key) ? undefined : (current.get(key) ?? '')]),
+  );
 }
 
 export class EnvKeyMissing extends UpgradeRefusal {
