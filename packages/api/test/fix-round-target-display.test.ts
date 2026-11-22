@@ -7,6 +7,7 @@ import { schema } from '@haive/database';
 import { createFakeDb } from '@haive/database/testing';
 import {
   enrichStepsWithCliPreferences,
+  enrichStepsWithSkipFlag,
   resolveCurrentStepCliProviderIds,
 } from '../src/routes/tasks/_helpers.js';
 import { staticStepFlags } from './step-flags-fixture.js';
@@ -27,6 +28,25 @@ const pin = (stepId: string) => ({
   guardedSpans: [],
   fixTarget: { stepId, capabilityVersion: 1 },
 });
+
+it.each([pin(CUSTOM), null, { version: 99 }])(
+  'projects only the pinned target to the public step history: %j',
+  async (contract) => {
+    const s = setup(contract);
+    const steps = [CUSTOM, LEGACY, OTHER_MODULE].map((stepId) => ({
+      id: stepId,
+      stepId,
+      status: 'done',
+    }));
+    const enriched = await enrichStepsWithSkipFlag(s.db, flags, TASK, steps);
+    expect(enriched.map((step) => step.isPinnedFixTarget)).toEqual([
+      contract && 'fixTarget' in contract ? true : undefined,
+      undefined,
+      undefined,
+    ]);
+    expect(enriched.every((step) => !('executionContract' in step))).toBe(true);
+  },
+);
 
 function setup(contract?: unknown, withTasks = true) {
   const fake = createFakeDb({

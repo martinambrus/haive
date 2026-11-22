@@ -23,7 +23,10 @@ vi.mock('@haive/shared/fs-safe', async (original) => ({
   readTextNoFollow: vi.fn(async () => null),
   lstatNoFollow: vi.fn(async () => null),
 }));
-const ctx = { db: {}, taskId: 'task' } as StepContext;
+const ctx = {
+  db: { query: { tasks: { findFirst: async () => undefined } } },
+  taskId: 'task',
+} as unknown as StepContext;
 beforeEach(() => {
   vi.clearAllMocks();
   vi.mocked(gitExec).mockImplementation(

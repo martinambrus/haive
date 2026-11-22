@@ -679,7 +679,7 @@ describe('08a re-test after a fix pass', () => {
       round: 0,
       repoPath: '/repos/u/r',
       workspacePath: runtime === 'ddev' ? '/repos/u/r' : dir,
-      db: {},
+      db: { query: { tasks: { findFirst: async () => undefined } } },
       emitProgress: vi.fn(async () => {}),
       logger: { info: vi.fn(), warn: vi.fn() },
     } as never;

@@ -225,14 +225,18 @@ async function loadFixTargetStepIds(
     .from(schema.tasks)
     .where(inArray(schema.tasks.id, taskIds));
   for (const r of rows) {
-    try {
-      out.set(r.id, fixLoopTargetStepId(r.executionContract));
-    } catch (err) {
-      if (!(err instanceof ExecutionContractError)) throw err;
-      out.set(r.id, null);
-    }
+    out.set(r.id, fixTargetStepIdOrNull(r.executionContract));
   }
   return out;
+}
+
+function fixTargetStepIdOrNull(contract: unknown): string | null {
+  try {
+    return fixLoopTargetStepId(contract);
+  } catch (err) {
+    if (!(err instanceof ExecutionContractError)) throw err;
+    return null;
+  }
 }
 
 const hasRoundSlot = (byRole: Map<string, TaskCliChoice> | undefined): boolean =>
@@ -1008,7 +1012,14 @@ export async function enrichStepsWithSkipFlag<
   flags: StepFlagMap,
   taskId: string,
   steps: T[],
-): Promise<(T & { manuallySkipped: boolean; canSkip: boolean; guardEntryRetryable: boolean })[]> {
+): Promise<
+  (T & {
+    manuallySkipped: boolean;
+    canSkip: boolean;
+    guardEntryRetryable: boolean;
+    isPinnedFixTarget?: true;
+  })[]
+> {
   // canSkip: the step opts into the user-facing Skip action (the skip handler
   // enforces the same rule). Task-aware so the worktree can be skipped where the run list allows.
   const task = await db.query.tasks.findFirst({
@@ -1021,8 +1032,12 @@ export async function enrichStepsWithSkipFlag<
       executionContract: true,
     },
   });
+  const fixTarget = fixTargetStepIdOrNull(task?.executionContract);
   const withFlags = (s: T, manuallySkipped: boolean) => ({
     ...s,
+    ...(fixTarget !== FIX_LOOP_TARGET_STEP_ID && s.stepId === fixTarget
+      ? { isPinnedFixTarget: true as const }
+      : {}),
     manuallySkipped,
     canSkip: isStepSkippable(flags, s.stepId, task ?? {}),
     // A guard-skipped span ENTRY looks auto-skipped, yet Retry on it is the one way to

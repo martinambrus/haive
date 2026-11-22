@@ -24,6 +24,28 @@ export function pinnedFixTarget(contract: unknown): PinnedFixTarget | null {
   return parseExecutionContract(contract).fixTarget ?? null;
 }
 
+/** Historical readers predate execution pins: absent or malformed pins retain their
+ * old 07 projection. This is never a routing/admission fallback; those fail closed. */
+export function historicalFixTargetStepId(contract: unknown): string {
+  try {
+    return pinnedFixTarget(contract)?.stepId ?? FIX_LOOP_TARGET_STEP_ID;
+  } catch (err) {
+    if (!(err instanceof ExecutionContractError)) throw err;
+    return FIX_LOOP_TARGET_STEP_ID;
+  }
+}
+
+export async function loadHistoricalFixTargetStepId(
+  db: StepContext['db'],
+  taskId: string,
+): Promise<string> {
+  const task = await db.query.tasks.findFirst({
+    where: eq(schema.tasks.id, taskId),
+    columns: { executionContract: true },
+  });
+  return historicalFixTargetStepId(task?.executionContract);
+}
+
 export function resolvePinnedFixConsumer(
   target: PinnedFixTarget,
   registry: Pick<StepRegistry, 'get'>,

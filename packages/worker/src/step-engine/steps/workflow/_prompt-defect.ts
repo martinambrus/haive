@@ -1,6 +1,9 @@
 import { readStepRole, STEP_ROLES, type RoleTaskPin } from '@haive/shared/step-outputs';
 import { createHash } from 'node:crypto';
 import type { StepGuidanceCause } from '@haive/database';
+import { historicalFixTargetStepId } from '../../fix-consumer.js';
+
+export type GuidanceTaskPin = RoleTaskPin & { executionContract?: unknown };
 
 // Prompt-defect capture (plan lexical-jingling-dawn.md §1). Haive already learns
 // from finished runs, but only about the user's CODE: 11-phase-8-learning requires
@@ -87,29 +90,34 @@ export function promptDefectFingerprint(stepId: string, cause: string, guidance:
  *
  *  Every capture site is a step that reviews an IMPLEMENTATION and can route the
  *  run back to it, so the instruction they are complaining about is the one the
- *  implementer was given. Kept as an explicit map rather than reading
- *  PATH_REQUIRED_TARGETS: that table exists to keep execution-path filtering closed
- *  over loop targets, and borrowing it here would silently re-point this feature
- *  the next time a loop target moves. */
-const GUIDANCE_TARGET: Record<string, string> = {
-  '07b-phase-4-validate': '07-phase-2-implement',
-  '08a-browser-verify': '07-phase-2-implement',
-  '08d-adversarial-qa': '07-phase-2-implement',
-};
+ *  implementer was given. Capture sources stay explicit rather than borrowing
+ *  PATH_REQUIRED_TARGETS, which owns path filtering. Their guidance attaches to
+ *  this task's pinned target independently of output-role bindings. */
+const GUIDANCE_SOURCES = new Set([
+  '07b-phase-4-validate',
+  '08a-browser-verify',
+  '08d-adversarial-qa',
+]);
 
 /** The step whose prompt guidance from `sourceStep` is appended to, or null when
  *  the reporting step has no registered target (an unknown step id — never store
  *  guidance we cannot place). */
-export function guidanceTargetStep(sourceStep: string, task: RoleTaskPin): string | null {
+export function guidanceTargetStep(sourceStep: string, task: GuidanceTaskPin): string | null {
   return guidanceTargetForReview(
     sourceStep,
     readStepRole(task, STEP_ROLES.codeReview, (b) => b.stepId),
+    task.executionContract,
   );
 }
 
-function guidanceTargetForReview(sourceStep: string, reviewId: string | null): string | null {
-  if (reviewId === sourceStep) return '07-phase-2-implement';
-  return GUIDANCE_TARGET[sourceStep] ?? null;
+function guidanceTargetForReview(
+  sourceStep: string,
+  reviewId: string | null,
+  contract: unknown,
+): string | null {
+  return reviewId === sourceStep || GUIDANCE_SOURCES.has(sourceStep)
+    ? historicalFixTargetStepId(contract)
+    : null;
 }
 
 /** Parse `## PROMPT-DEFECT` blocks from a list of raw agent outputs. Direct
@@ -119,14 +127,14 @@ function guidanceTargetForReview(sourceStep: string, reviewId: string | null): s
  *  invents a category has not answered the question. */
 export function parsePromptDefects(
   outputs: { stepId: string; raw: string }[],
-  task: RoleTaskPin,
+  task: GuidanceTaskPin,
 ): PromptDefect[] {
   const reviewId = readStepRole(task, STEP_ROLES.codeReview, (b) => b.stepId);
   const seen = new Set<string>();
   const out: PromptDefect[] = [];
   for (const { stepId, raw } of outputs) {
     if (!raw) continue;
-    const target = guidanceTargetForReview(stepId, reviewId);
+    const target = guidanceTargetForReview(stepId, reviewId, task.executionContract);
     if (!target) continue;
     const m = /##\s*PROMPT-DEFECT\b([\s\S]*?)(?:\n##\s|\n```|$)/i.exec(raw);
     if (!m) continue;

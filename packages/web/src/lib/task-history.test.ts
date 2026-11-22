@@ -85,6 +85,14 @@ describe('hydrated visit boundary', () => {
 });
 
 describe('implementation overview', () => {
+  it('includes a pinned module fix target without output roles or filesTouched', () => {
+    const custom = step({ stepId: 'module.fix-demo.repair', isPinnedFixTarget: true, output: {} });
+    expect(buildTaskHistory([custom])).toMatchObject([
+      { message: 'The agent completed a fix pass.', round: 3 },
+    ]);
+    expect(buildTaskHistory([{ ...custom, isPinnedFixTarget: undefined }])).toEqual([]);
+    expect(buildTaskHistory([step()])[0]?.message).toBe('The agent completed a fix pass.');
+  });
   it('keeps separate rounds and sorts from first to last by completion time', () => {
     const history = buildTaskHistory([
       step(),

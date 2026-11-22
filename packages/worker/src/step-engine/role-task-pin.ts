@@ -4,7 +4,10 @@ import { DerivedRunPlanError } from '@haive/shared/modularity';
 import type { RoleTaskPin } from '@haive/shared/step-outputs';
 
 /** Read immutable task state, never reconstruct a binding from today's catalog. */
-export async function loadRoleTaskPin(db: Database, taskId: string): Promise<RoleTaskPin> {
+export async function loadRoleTaskPin(
+  db: Database,
+  taskId: string,
+): Promise<RoleTaskPin & { executionContract?: unknown }> {
   const task = await db.query.tasks.findFirst({
     where: eq(schema.tasks.id, taskId),
     columns: {
@@ -13,6 +16,7 @@ export async function loadRoleTaskPin(db: Database, taskId: string): Promise<Rol
       executionPath: true,
       runListSnapshot: true,
       type: true,
+      executionContract: true,
     },
   });
   if (!task) throw new DerivedRunPlanError();

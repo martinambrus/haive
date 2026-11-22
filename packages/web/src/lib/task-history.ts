@@ -19,6 +19,7 @@ export type HistoryStep = Pick<
   | 'round'
   | 'status'
   | 'outputRoles'
+  | 'isPinnedFixTarget'
   | 'output'
   | 'usesCli'
   | 'cliInvocationCount'
@@ -291,7 +292,11 @@ function outcome(
       return { message: 'Application outcomes were not confirmed per insight.', tone: 'warning' };
     }
   }
-  if (step.stepId === '07-phase-2-implement' || Array.isArray(output.filesTouched)) {
+  if (
+    step.isPinnedFixTarget ||
+    step.stepId === '07-phase-2-implement' ||
+    Array.isArray(output.filesTouched)
+  ) {
     const files = new Set(list(output.filesTouched).map(text).filter(Boolean)).size;
     const activity = step.round > 0 ? 'completed a fix pass' : 'implemented the changes';
     return {
@@ -318,6 +323,7 @@ export function buildTaskHistory(
     .flatMap((step) => {
       if (
         (!IMPLEMENTATION_STEPS.has(step.stepId) &&
+          !step.isPinnedFixTarget &&
           !step.outputRoles?.some((role) => Object.values(STEP_ROLES).includes(role))) ||
         !['done', 'failed'].includes(step.status) ||
         !step.endedAt ||

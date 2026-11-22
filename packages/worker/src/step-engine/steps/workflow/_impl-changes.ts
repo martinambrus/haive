@@ -18,6 +18,7 @@ import { GIT_MAX_BUFFER } from '../../../repo/git-push.js';
 import { gitExec, gitRun } from '../../../repo/git-exec.js';
 import { parsePorcelainZ } from './_commit-diff.js';
 import { nestedRepositoryHead } from '../../../repo/nested-repository.js';
+import { loadHistoricalFixTargetStepId } from '../../fix-consumer.js';
 
 /** How many changed files a prompt lists. The cap is for prompt size; what matters
  *  is that a list cut down to it says so — see changedFilesBlock. */
@@ -486,7 +487,7 @@ async function reportedFiles(ctx: StepContext, maxRound?: number): Promise<Set<s
   const implement = await loadPreviousStepOutput(
     ctx.db,
     ctx.taskId,
-    '07-phase-2-implement',
+    await loadHistoricalFixTargetStepId(ctx.db, ctx.taskId),
     maxRound,
   );
   const touched = (implement?.output as { filesTouched?: string[] } | null)?.filesTouched;

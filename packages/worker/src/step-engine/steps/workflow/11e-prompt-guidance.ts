@@ -1,4 +1,3 @@
-import type { RoleTaskPin } from '@haive/shared/step-outputs';
 import { loadRoleTaskPin } from '../../role-task-pin.js';
 import { and, eq, inArray, sql } from 'drizzle-orm';
 import { schema } from '@haive/database';
@@ -8,7 +7,12 @@ import type { StepContext, StepDefinition } from '../../step-definition.js';
 import { isStepGuidanceEnabled } from '../../guidance-context.js';
 import { loadRepoStackAnchors } from '../_repo-stack.js';
 import { sanitizeGlobalArticle } from '../_global-kb-promote.js';
-import { guidanceTargetStep, parsePromptDefects, type PromptDefect } from './_prompt-defect.js';
+import {
+  guidanceTargetStep,
+  parsePromptDefects,
+  type PromptDefect,
+  type GuidanceTaskPin,
+} from './_prompt-defect.js';
 
 // Prompt-defect triage (plan lexical-jingling-dawn.md §2). Structurally a copy of
 // 08e-insights-triage: scan this run's raw agent outputs for a markdown block the
@@ -76,7 +80,7 @@ interface GuidanceApply {
 /** Parse every CLI invocation this task made, from the four capture steps.
  *  Same query shape as 08e's collectInsights — the block rides on output that was
  *  already produced and stored, so this costs one SELECT and no tokens. */
-async function collectDefects(ctx: StepContext, task: RoleTaskPin): Promise<PromptDefect[]> {
+async function collectDefects(ctx: StepContext, task: GuidanceTaskPin): Promise<PromptDefect[]> {
   const rows = await ctx.db
     .select({ stepId: schema.taskSteps.stepId, raw: schema.cliInvocations.rawOutput })
     .from(schema.cliInvocations)
@@ -136,7 +140,7 @@ export interface ExistingGuidanceRow {
 export function filterCandidates(
   defects: PromptDefect[],
   existing: ExistingGuidanceRow[],
-  task: RoleTaskPin,
+  task: GuidanceTaskPin,
 ): GuidanceCandidate[] {
   const out: GuidanceCandidate[] = [];
   for (const d of defects) {

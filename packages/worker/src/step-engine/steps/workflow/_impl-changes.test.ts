@@ -23,12 +23,14 @@ const {
 } = await import('./_impl-changes.js');
 type StepContextLike = Parameters<typeof collectImplementationFiles>[0];
 
-/** The helper only touches ctx.db when filesTouched is empty; every case here supplies
- *  files, and the worktree path is deliberately bogus so `git status` fails and the
- *  dirty-file union contributes nothing. */
+/** The pin lookup answers legacy. Every case supplies reported files, and the
+ * worktree path is deliberately bogus so the dirty-file union contributes nothing. */
 function ctxWith(files: string[]): StepContextLike {
   loadPreviousStepOutput.mockResolvedValue({ output: { filesTouched: files } });
-  return { db: {}, taskId: 'test-task' } as unknown as StepContextLike;
+  return {
+    db: { query: { tasks: { findFirst: async () => undefined } } },
+    taskId: 'test-task',
+  } as unknown as StepContextLike;
 }
 
 function names(n: number): string[] {
@@ -341,7 +343,10 @@ describe('collectImplementationFiles — untracked directories', () => {
     loadPreviousStepOutput.mockResolvedValue({ output: { filesTouched: [] } });
     return {
       taskId: 't1',
-      db: { select: () => ({ from: () => ({ where: () => Promise.resolve([]) }) }) },
+      db: {
+        query: { tasks: { findFirst: async () => undefined } },
+        select: () => ({ from: () => ({ where: () => Promise.resolve([]) }) }),
+      },
     } as unknown as StepContextLike;
   }
 
@@ -834,6 +839,7 @@ describe('collectImplementationFiles — line notes against a real repo', () => 
     return {
       taskId: 't1',
       db: {
+        query: { tasks: { findFirst: async () => undefined } },
         select: () => ({
           from: () => ({ where: () => Promise.resolve([{ filesModified: dagFiles }]) }),
         }),
@@ -926,6 +932,7 @@ describe('collectChangedLineMap', () => {
     return {
       taskId: 't1',
       db: {
+        query: { tasks: { findFirst: async () => undefined } },
         select: () => ({
           from: () => ({ where: () => Promise.resolve([{ filesModified: reported.dag ?? [] }]) }),
         }),
