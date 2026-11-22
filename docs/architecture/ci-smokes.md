@@ -26,6 +26,7 @@ A hung smoke or step costs its limit in place of its usual time, so each job's l
 largest hang. The former combined `smokes` job is now two independent jobs: `smokes` retains the check name
 **End-to-end smokes** (api/worker/migration smokes and Redis scripts), and `postgres-gated` adds **Postgres-gated tests**.
 The latter owns the unchanged, ordered GATED list (115 rows at the split on 2026-11-01); files still run serially.
+`pnpm test:gated` runs rows of that list locally (see Workflow scanners and [Testing](testing.md)).
 Neither job waits for the other, shares a service or passes database state/artifacts to it. Each has its own Postgres
 and Redis; only `postgres-gated` needs pgvector. Both build shared/database, web-kit and modules, generate module
 registrations, set Redis to noeviction and apply the migrations before running checks. The module preparation used
@@ -120,6 +121,14 @@ runner and that every `smoke:ci` goes through it.
 `ci-browser-budget`). It uses Prettier's YAML parser, fails on a duplicate key and keeps scalars as strings, so
 indentation and comments cannot satisfy a pin. `ci-gated-loop.test.mjs` runs the real gated step script of `ci.yml`
 against stubbed `docker` and `pnpm` over a three-row fixture list.
+
+`pnpm test:gated` (`scripts/run-gated-tests.mjs`, see [Testing](testing.md)) runs the GATED list on a developer
+machine. It reads the rows, images and env of the `postgres-gated` job through that same reader and holds no list of
+its own. `run-gated-tests.test.mjs` runs the real gated step script against stubs for one row per package and
+server, and pins that the runner makes the same row, file, variable, database and server choice, passes the same
+argv to migrate and vitest, sets every variable the loop adds to those calls and reaches the same completeness
+verdict, and that the `migrate` step runs what the runner runs at setup: a change to the loop in `ci.yml` (row
+columns, argv, env, migrate, completeness check) needs the matching change in the runner.
 
 `scripts/test/shell-source.mjs` is a test-only lexical scan of a step's `run` script, used by `ci-step-independence`
 for two things: `swallowedFailure` (a command failure that does not fail the step) and `redisDatabases` (the Redis
