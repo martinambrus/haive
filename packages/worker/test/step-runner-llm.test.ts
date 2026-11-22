@@ -449,6 +449,14 @@ describe('attempt-scoped retry warnings', () => {
       state.cliInvocationRow = { ...invocation };
       expect((await run()).status).toBe('waiting_cli');
       expect(state.taskStepRow.warningMessage).toBe(warning);
+      // The next completed invocation is a distinct retry inside this same step attempt.
+      const second = { ...invocation, id: 'run-2' };
+      state.cliInvocationRow = { ...second };
+      state.cliInvocationHistory = [second, { ...invocation, consumedAt: new Date() }];
+      expect((await run()).status).toBe('waiting_cli');
+      expect(String(state.taskStepRow.warningMessage)).toContain(
+        `${warning} Attempt 2 of 3 was rejected:`,
+      );
     },
   );
 });

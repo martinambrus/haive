@@ -88,11 +88,9 @@ export async function updateOwnedStep(
   return row;
 }
 
-/** Attempt notes accumulate atomically with one space between them. A producer with nothing
- *  to report leaves earlier notes alone; only an explicit reset clears the column. */
-export function stepWarningAppend(note: string | null) {
+/** Attempt notes accumulate atomically with one space between them; an explicit reset clears them. */
+export function stepWarningAppend(note: string) {
   const w = schema.taskSteps.warningMessage;
-  if (note === null) return sql`${w}`;
   return sql`CASE WHEN strpos(coalesce(${w}, ''), ${note}::text) > 0 THEN ${w} ELSE concat_ws(' ', nullif(${w}, ''), ${note}::text) END`;
 }
 

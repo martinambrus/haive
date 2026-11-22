@@ -1,4 +1,3 @@
-import { stepWarningAppend } from '../../step-ownership.js';
 import { readTextNoFollow } from '@haive/shared/fs-safe';
 import { eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
@@ -440,13 +439,11 @@ async function embedAndStore(opts: {
       await opts.ctx.db
         .update(schema.taskSteps)
         .set({
-          warningMessage: stepWarningAppend(
-            ragEmbedWarning({
-              degradedAt: new Date(),
-              degradedReason: outcome.reason,
-              lexicalOnly: false,
-            }),
-          ),
+          warningMessage: ragEmbedWarning({
+            degradedAt: new Date(),
+            degradedReason: outcome.reason,
+            lexicalOnly: false,
+          }),
         })
         .where(eq(schema.taskSteps.id, opts.ctx.taskStepId));
       throw new RagEmbedFailureError(outcome.reason);
@@ -800,7 +797,8 @@ export const ragPopulateStep: StepDefinition<RagPopulateDetect, RagPopulateApply
         }
         // Surface a CPU fallback and any carried-over embed degradation as a standalone
         // amber banner on the step (set once; a per-file progress line would otherwise
-        // bury it). Notes stay with this attempt until an explicit reset.
+        // bury it). Clears to null on a healthy/unknown run so a stale warning from a
+        // prior pass does not linger.
         const health = await loadRagEmbedHealth(ctx.db, repositoryId ?? null);
         const awaitingReembed = await startBannerAwaitsReembed(
           conn,
@@ -811,11 +809,9 @@ export const ragPopulateStep: StepDefinition<RagPopulateDetect, RagPopulateApply
         await ctx.db
           .update(schema.taskSteps)
           .set({
-            warningMessage: stepWarningAppend(
-              composeRagWarning(
-                embedDeviceWarning(embedDevice),
-                ragEmbedWarning(health, { skippedChunks: 0, awaitingReembed }),
-              ),
+            warningMessage: composeRagWarning(
+              embedDeviceWarning(embedDevice),
+              ragEmbedWarning(health, { skippedChunks: 0, awaitingReembed }),
             ),
           })
           .where(eq(schema.taskSteps.id, ctx.taskStepId));
@@ -1004,17 +1000,15 @@ export const ragPopulateStep: StepDefinition<RagPopulateDetect, RagPopulateApply
           await ctx.db
             .update(schema.taskSteps)
             .set({
-              warningMessage: stepWarningAppend(
-                composeRagWarning(
-                  embedDeviceWarning(embedDevice),
-                  ragEmbedWarning(
-                    {
-                      degradedAt: health.degradedAt ?? new Date(),
-                      degradedReason: HASH_WITH_ENDPOINT_REASON,
-                      lexicalOnly: false,
-                    },
-                    { skippedChunks: 0, hashedChunks: hashed.chunks },
-                  ),
+              warningMessage: composeRagWarning(
+                embedDeviceWarning(embedDevice),
+                ragEmbedWarning(
+                  {
+                    degradedAt: health.degradedAt ?? new Date(),
+                    degradedReason: HASH_WITH_ENDPOINT_REASON,
+                    lexicalOnly: false,
+                  },
+                  { skippedChunks: 0, hashedChunks: hashed.chunks },
                 ),
               ),
             })
