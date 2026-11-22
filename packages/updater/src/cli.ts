@@ -6,6 +6,7 @@ import postgres from 'postgres';
 import { safeErrorMessage, scrubErrorPaths } from '@haive/shared/logger';
 import { configService, encryptionKeyBootDatabase, networkName } from '@haive/shared';
 import { CHANNEL_PATTERN, parseReleaseManifest, type ReleaseManifest } from '@haive/shared/release';
+import { installId } from '@haive/shared/naming';
 import * as dk from './docker.js';
 import { readComposeContext } from './compose-context.js';
 import { classifyBundle, requireUnmodifiedBundle, stageBundle } from './bundle.js';
@@ -204,11 +205,6 @@ async function rollbackFailed(ctx: UpgradeContext, err: unknown): Promise<number
 }
 
 export async function main(options: { stackLock?: StackLockOptions } = {}): Promise<number> {
-  const network = arg('network', process.env.HAIVE_NETWORK ?? networkName('network'))!;
-  return dk.withOneShotOwner(network, () => upgrade(options));
-}
-
-async function upgrade(options: { stackLock?: StackLockOptions }): Promise<number> {
   if (flag('manifest') && flag('manifest-image')) {
     emit('error', { message: '--manifest and --manifest-image are mutually exclusive' });
     return EXIT.usage;
@@ -224,6 +220,12 @@ async function upgrade(options: { stackLock?: StackLockOptions }): Promise<numbe
     return EXIT.usage;
   }
 
+  return dk.withOneShotOwner(installId(), () => upgradeOwned(options));
+}
+
+async function upgradeOwned(options: { stackLock?: StackLockOptions }): Promise<number> {
+  const databaseUrl = process.env.DATABASE_URL;
+  const redisUrl = process.env.REDIS_URL;
   const installDir = arg('install-dir', process.env.HAIVE_INSTALL_DIR ?? '/install')!;
   const registry = arg('registry', process.env.HAIVE_REGISTRY ?? 'ghcr.io/martinambrus')!;
   const apiUrl = arg('api-url', process.env.HAIVE_API_URL ?? 'http://api:3001')!;
@@ -580,6 +582,10 @@ async function upgrade(options: { stackLock?: StackLockOptions }): Promise<numbe
 
       verifyFailed = !(await phaseVerify(ctx));
     } catch (err) {
+      // A failed child cleanup leaves a possible writer alive: keep the run for recovery instead
+      // of rolling back concurrently with it. The next holder checks its labels before recovery.
+      if (err instanceof UpgradeRefusal && err.refusal === 'updater-child-cleanup-failed')
+        throw err;
       const message = err instanceof Error ? err.message : String(err);
       report('error', { message });
       // Anything that throws before commit is reversible by construction; say so and undo it

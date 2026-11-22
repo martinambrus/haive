@@ -43,6 +43,7 @@ vi.mock('./run.js', async (original) => ({
   phaseCommit: vi.fn(),
 }));
 import { main } from './cli.js';
+import { UpgradeRefusal } from './refusal.js';
 import { STACK_LOCK_BEAT_MS, StackLock } from './stack-lock.js';
 import * as images from './images.js';
 import * as dk from './docker.js';
@@ -309,6 +310,19 @@ describe('every exit path releases the lock', () => {
     await gone();
     await files();
   });
+  it('leaves the run for recovery when a cancelled child cannot be removed', async () => {
+    vi.mocked(run.phaseMigrate).mockRejectedValue(
+      new UpgradeRefusal(
+        'updater-child-cleanup-failed',
+        'could not stop migration containers (EACCES)',
+      ),
+    );
+    expect(await main(opts)).toBe(3);
+    expect(run.rollback).not.toHaveBeenCalled();
+    expect(run.phaseVerify).not.toHaveBeenCalled();
+    expect(journal.recordAttempt).not.toHaveBeenCalled();
+    await gone();
+  });
   it('verify failure rolled back 5', async () => {
     vi.mocked(run.phaseVerify).mockResolvedValue(false);
     vi.mocked(run.rollback).mockImplementation(mark);
@@ -364,7 +378,7 @@ describe('crash recovery of an abandoned record', () => {
     async (recover) => {
       await writeFile(lock, record(ext.token, 'updater', ext.seq));
       if (recover) vi.mocked(journal.findLiveRun).mockResolvedValue(liveRun as never);
-      h.dockerExec.mockResolvedValue({ stdout: 'dead-holder-attempt\n' });
+      h.dockerExec.mockResolvedValue({ stdout: 'abc123\tdead-holder-attempt\tmigration\n' });
       expect(await main({ stackLock: { ...quick, sleep: idleSleep } })).toBe(3);
       expect(events()).toContain('stack-lock-broken');
       expect(run.resume).not.toHaveBeenCalled();
@@ -403,6 +417,23 @@ describe('crash recovery of an abandoned record', () => {
       expect.objectContaining({ event: 'refused', refusal: 'updater-child-check-failed' }),
     );
   });
+  it('uses the install identity even when the network is overridden', async () => {
+    vi.stubEnv('HAIVE_INSTALL_ID', 'team_install');
+    process.argv.push('--network', 'custom-network');
+    h.dockerExec.mockResolvedValue({ stdout: 'abc123\tprior\tmigration\n' });
+    expect(await main({ stackLock: { ...quick, sleep: idleSleep } })).toBe(3);
+    expect(h.dockerExec.mock.calls[0]![1]).toEqual([
+      'ps',
+      '--filter',
+      'label=haive.install=team_install',
+      '--filter',
+      'label=org.haive.updater.attempt',
+      '--filter',
+      'label=org.haive.updater.role',
+      '--format',
+      '{{.ID}}\t{{.Label "org.haive.updater.attempt"}}\t{{.Label "org.haive.updater.role"}}',
+    ]);
+  });
   it('checks children using the install Docker config that subsequent launches use', async () => {
     vi.stubEnv('DOCKER_CONFIG', '/ambient');
     vi.mocked(images.readImageSettings).mockResolvedValue({
@@ -413,10 +444,18 @@ describe('crash recovery of an abandoned record', () => {
     let checkedConfig: string | undefined;
     h.dockerExec.mockImplementation(async () => {
       checkedConfig = process.env.DOCKER_CONFIG;
-      return { stdout: 'dead-holder-attempt\n' };
+      return { stdout: 'abc123\tdead-holder-attempt\tmigration\n' };
     });
     expect(await main({ stackLock: { ...quick, sleep: idleSleep } })).toBe(3);
     expect(checkedConfig).toBe(join(dir, '.docker'));
+    expect(journal.recordAttempt).toHaveBeenCalledWith(
+      h.sql,
+      expect.objectContaining({
+        channel: 'acme',
+        fromVersion: '1.0.0',
+        metadata: { refusal: 'updater-child-running' },
+      }),
+    );
     expect(run.resume).not.toHaveBeenCalled();
     expect(images.prepareImages).not.toHaveBeenCalled();
   });
@@ -524,6 +563,7 @@ describe('read-only and absent installs', () => {
     });
     expect(await main({ stackLock: { ...quick, sleep } })).toBe(0);
     expect(sleep).not.toHaveBeenCalled();
+    expect(h.dockerExec).not.toHaveBeenCalled();
     expect(await readFile(lock, 'utf8')).toBe(record(ext.token, 'extension', ext.seq));
     expect(await readdir(dir)).toHaveLength(4);
   });

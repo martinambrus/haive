@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { AsyncLocalStorage } from 'node:async_hooks';
-import { CONTAINER_FAMILY, containerName } from '@haive/shared/naming';
+import { CONTAINER_FAMILY, containerName, INSTALL_LABEL } from '@haive/shared/naming';
 import { execFile, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
 import { dirname, isAbsolute, resolve } from 'node:path';
@@ -14,22 +14,21 @@ import { UpgradeRefusal } from './refusal.js';
 
 const exec = promisify(execFile);
 
-const ONE_SHOT_INSTALL = 'org.haive.updater.install';
+const ONE_SHOT_INSTALL = INSTALL_LABEL;
 const ONE_SHOT_ATTEMPT = 'org.haive.updater.attempt';
 const ONE_SHOT_ROLE = 'org.haive.updater.role';
 export const ONE_SHOT_CHECK_TIMEOUT_MS = 30_000;
 export const ONE_SHOT_CHECK_MAX_BUFFER = 1024 * 1024;
 const oneShotOwner = new AsyncLocalStorage<{ install: string; attempt: string }>();
 
-/** Scope every one-shot, including preflight builders and recovery, to this invocation. The
- * daemon's network name is stable across host/container paths and identifies the install. */
-export function withOneShotOwner<T>(network: string, work: () => T): T {
-  return oneShotOwner.run({ install: network, attempt: randomUUID() }, work);
+/** Scope every one-shot, including preflight builders and recovery, to this install invocation. */
+export function withOneShotOwner<T>(install: string, work: () => T): T {
+  return oneShotOwner.run({ install, attempt: randomUUID() }, work);
 }
 
 function oneShotLabels(role: string): string[] {
   const owner = oneShotOwner.getStore();
-  if (!owner) return [];
+  if (!owner) throw new Error('one-shot ownership scope is missing');
   return [
     '--label',
     `${ONE_SHOT_INSTALL}=${owner.install}`,
@@ -60,29 +59,34 @@ export async function requireNoRunningOneShots(
         '--filter',
         `label=${ONE_SHOT_ROLE}`,
         '--format',
-        `{{.Label "${ONE_SHOT_ATTEMPT}"}}`,
+        `{{.ID}}\t{{.Label "${ONE_SHOT_ATTEMPT}"}}\t{{.Label "${ONE_SHOT_ROLE}"}}`,
       ],
       {
         timeout: options.timeoutMs ?? ONE_SHOT_CHECK_TIMEOUT_MS,
         maxBuffer: options.maxBuffer ?? ONE_SHOT_CHECK_MAX_BUFFER,
       },
     ));
-  } catch {
+  } catch (error) {
+    const diagnostic = errorCodeOrClass(error);
     throw new UpgradeRefusal(
       'updater-child-check-failed',
-      'could not check updater one-shot containers; check Docker availability and retry',
+      `could not check updater one-shot containers (${diagnostic}); check Docker availability and retry`,
     );
   }
-  if (
-    stdout
-      .trim()
-      .split('\n')
-      .some((attempt) => attempt && attempt !== owner.attempt)
-  ) {
+  const blockers = stdout
+    .split('\n')
+    .filter((line) => line.length > 0)
+    .map((line) => {
+      const [id, attempt, role] = line.split('\t');
+      return { id, attempt, role };
+    })
+    .filter((child) => child.attempt !== owner.attempt);
+  if (blockers.length) {
     throw new UpgradeRefusal(
       'updater-child-running',
-      'another updater attempt still has a running one-shot container for this install; ' +
-        'wait for it to finish, then retry',
+      `another updater attempt still has running one-shot containers for this install: ${blockers
+        .map((child) => `${child.id} (${child.role || 'unknown role'})`)
+        .join(', ')}; wait for them to finish, then retry`,
     );
   }
 }
@@ -114,20 +118,69 @@ export function redactSecrets(text: string): string {
   return text.replace(SECRET_ARG, '$1<redacted>');
 }
 
+function errorCodeOrClass(error: unknown): string | number {
+  const code = (error as NodeJS.ErrnoException | null)?.code;
+  return code ?? (error instanceof Error ? error.constructor.name : typeof error);
+}
+
+/** A cancelled Docker client does not stop its container. Remove only this attempt's role
+ * before its caller can roll back or release the lock. Never swallow a failed cleanup. */
+async function stopOneShots(install: string, attempt: string, roleLabel: string): Promise<void> {
+  const options = {
+    timeout: ONE_SHOT_CHECK_TIMEOUT_MS,
+    maxBuffer: ONE_SHOT_CHECK_MAX_BUFFER,
+    killSignal: 'SIGKILL' as const,
+  };
+  try {
+    const { stdout } = await exec(
+      'docker',
+      [
+        'ps',
+        '-aq',
+        '--filter',
+        `label=${ONE_SHOT_INSTALL}=${install}`,
+        '--filter',
+        `label=${ONE_SHOT_ATTEMPT}=${attempt}`,
+        '--filter',
+        `label=${roleLabel}`,
+      ],
+      options,
+    );
+    const ids = stdout.split(/\s+/).filter(Boolean);
+    if (ids.length) await exec('docker', ['rm', '-f', ...ids], options);
+  } catch (error) {
+    throw new UpgradeRefusal(
+      'updater-child-cleanup-failed',
+      `could not stop updater one-shot containers (${errorCodeOrClass(error)}); ` +
+        'leave the upgrade for recovery, check Docker availability and retry',
+    );
+  }
+}
+
 async function run(
   cmd: string,
   args: string[],
   cwd?: string,
   timeoutMs = 600_000,
 ): Promise<string> {
+  const roleLabel =
+    cmd === 'docker' && args[0] === 'run'
+      ? args.find((arg) => arg.startsWith(`${ONE_SHOT_ROLE}=`))
+      : undefined;
+  const owner = roleLabel ? oneShotOwner.getStore() : undefined;
   try {
     const { stdout } = await exec(cmd, args, {
       cwd,
       timeout: timeoutMs,
+      ...(owner ? { killSignal: 'SIGKILL' as const } : {}),
       maxBuffer: 32 * 1024 * 1024,
     });
     return stdout.trim();
   } catch (err) {
+    const failure = err as (NodeJS.ErrnoException & { killed?: boolean }) | null;
+    if (owner && roleLabel && (failure?.killed === true || failure?.code === 'ABORT_ERR')) {
+      await stopOneShots(owner.install, owner.attempt, roleLabel);
+    }
     throw new Error(redactSecrets(err instanceof Error ? err.message : String(err)));
   }
 }

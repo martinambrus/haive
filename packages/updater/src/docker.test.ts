@@ -18,12 +18,13 @@ vi.mock('node:child_process', () => ({
   execFile: Object.assign(vi.fn(), { [Symbol.for('nodejs.util.promisify.custom')]: builderExec }),
 }));
 afterEach(() => {
+  vi.useRealTimers();
   vi.resetAllMocks();
   vi.unstubAllEnvs();
 });
 
 describe('one-shot ownership after an updater dies', () => {
-  const install = 'org.haive.updater.install';
+  const install = 'haive.install';
   const attempt = 'org.haive.updater.attempt';
   const role = 'org.haive.updater.role';
   const labels = (argv: string[]): Record<string, string> =>
@@ -35,15 +36,26 @@ describe('one-shot ownership after an updater dies', () => {
       }),
     );
 
+  it.each([
+    () => snapshotVolume('pg', '/snapshots', 'pg.tgz'),
+    () => restoreVolume('pg', '/snapshots', 'pg.tgz'),
+    () => runOneShot('target', ['migrate'], {}),
+    () => buildOwnModules('builder', '/modules', {}),
+  ])('refuses to launch a one-shot without an ownership scope', async (launch) => {
+    builderExec.mockResolvedValue({ stdout: '' });
+    await expect(launch()).rejects.toThrow('one-shot ownership scope is missing');
+    expect(builderExec.mock.calls.some((call) => call[1][0] === 'run')).toBe(false);
+  });
+
   it('labels snapshots, restores, migrations and builders with one attempt, renewed on recovery', async () => {
     builderExec.mockResolvedValue({ stdout: '' });
-    await withOneShotOwner('team-network', async () => {
+    await withOneShotOwner('team_install', async () => {
       await snapshotVolume('pg', '/snapshots', 'pg.tgz');
       await restoreVolume('pg', '/snapshots', 'pg.tgz');
-      await runOneShot('target', ['migrate'], {}, 'team-network');
+      await runOneShot('target', ['migrate'], {}, 'team_install');
       await buildOwnModules('builder', '/modules', {});
     });
-    await withOneShotOwner('team-network', () => runOneShot('target', ['commit'], {}));
+    await withOneShotOwner('team_install', () => runOneShot('target', ['commit'], {}));
     const runs = builderExec.mock.calls
       .map((call) => call[1] as string[])
       .filter((argv) => argv[0] === 'run');
@@ -55,7 +67,7 @@ describe('one-shot ownership after an updater dies', () => {
       'builder',
       'migration',
     ]);
-    expect(owners.every((owner) => owner[install] === 'team-network')).toBe(true);
+    expect(owners.every((owner) => owner[install] === 'team_install')).toBe(true);
     expect(owners[0]![attempt]).toMatch(/^[0-9a-f-]{36}$/);
     expect(new Set(owners.slice(0, 4).map((owner) => owner[attempt])).size).toBe(1);
     expect(owners[4]![attempt]).not.toBe(owners[0]![attempt]);
@@ -63,19 +75,19 @@ describe('one-shot ownership after an updater dies', () => {
 
   it('checks only active labelled children of this install, with bounded Docker I/O', async () => {
     builderExec.mockResolvedValue({ stdout: '' });
-    await withOneShotOwner('team-network', requireNoRunningOneShots);
+    await withOneShotOwner('team_install', requireNoRunningOneShots);
     expect(builderExec).toHaveBeenCalledWith(
       'docker',
       [
         'ps',
         '--filter',
-        `label=${install}=team-network`,
+        `label=${install}=team_install`,
         '--filter',
         `label=${attempt}`,
         '--filter',
         `label=${role}`,
         '--format',
-        `{{.Label "${attempt}"}}`,
+        `{{.ID}}\t{{.Label "${attempt}"}}\t{{.Label "${role}"}}`,
       ],
       { timeout: 30_000, maxBuffer: 1024 * 1024 },
     );
@@ -83,12 +95,14 @@ describe('one-shot ownership after an updater dies', () => {
 
   it('ignores its own attempt, but refuses a child of an earlier attempt by class and code', async () => {
     builderExec.mockResolvedValue({ stdout: '' });
-    await withOneShotOwner('team-network', async () => {
+    await withOneShotOwner('team_install', async () => {
       await snapshotVolume('pg', '/snapshots', 'pg.tgz');
       const own = labels(builderExec.mock.calls[0]![1])[attempt];
-      builderExec.mockResolvedValue({ stdout: own + '\n' });
+      builderExec.mockResolvedValue({ stdout: `abc123\t${own}\tsnapshot\n` });
       await expect(requireNoRunningOneShots()).resolves.toBeUndefined();
-      builderExec.mockResolvedValue({ stdout: own + '\nearlier-attempt\n' });
+      builderExec.mockResolvedValue({
+        stdout: `abc123\t${own}\tsnapshot\ndef456\tearlier-attempt\tmigration\n`,
+      });
       await expect(requireNoRunningOneShots()).rejects.toMatchObject({
         refusal: 'updater-child-running',
       });
@@ -96,12 +110,107 @@ describe('one-shot ownership after an updater dies', () => {
     });
   });
 
+  it('names every blocking container and role, including an empty attempt value', async () => {
+    builderExec.mockResolvedValue({ stdout: 'abc123\tprior\tsnapshot\ndef456\t\tmigration\n' });
+    await expect(withOneShotOwner('team_install', requireNoRunningOneShots)).rejects.toThrow(
+      /abc123.*snapshot.*def456.*migration/,
+    );
+    builderExec.mockResolvedValue({ stdout: 'def456\t\tmigration\n' });
+    await expect(withOneShotOwner('team_install', requireNoRunningOneShots)).rejects.toMatchObject({
+      refusal: 'updater-child-running',
+    });
+  });
+
+  it.each([
+    [Object.assign(new Error('secret stderr'), { code: 'ENOENT' }), 'ENOENT'],
+    [new TypeError('secret stderr'), 'TypeError'],
+  ])('records a safe Docker failure code or class', async (error, diagnostic) => {
+    builderExec.mockRejectedValue(error);
+    await expect(withOneShotOwner('team_install', requireNoRunningOneShots)).rejects.toThrow(
+      diagnostic,
+    );
+    await expect(withOneShotOwner('team_install', requireNoRunningOneShots)).rejects.not.toThrow(
+      'secret stderr',
+    );
+  });
+
+  it.each([{ killed: true, signal: 'SIGKILL' }, { code: 'ABORT_ERR' }])(
+    'removes only this attempt and role before propagating a cancellation (%j)',
+    async (fields) => {
+      vi.useFakeTimers();
+      const failure = Object.assign(new Error('client stopped -e DATABASE_URL=secret'), fields);
+      builderExec
+        .mockRejectedValueOnce(failure)
+        .mockResolvedValueOnce({ stdout: 'abc123\ndef456\n' });
+      let release: () => void = () => {};
+      builderExec.mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            release = () => resolve({ stdout: '' });
+          }),
+      );
+      await withOneShotOwner('team_install', async () => {
+        let propagated = false;
+        const result = runOneShot('target', ['migrate'], { DATABASE_URL: 'secret' }).catch(
+          (error: unknown) => {
+            propagated = true;
+            return error;
+          },
+        );
+        await vi.waitFor(() => expect(builderExec).toHaveBeenCalledTimes(3));
+        expect(propagated).toBe(false);
+        const runArgs = builderExec.mock.calls[0]![1] as string[];
+        const owner = labels(runArgs)[attempt];
+        expect(builderExec.mock.calls[1]![1]).toEqual([
+          'ps',
+          '-aq',
+          '--filter',
+          'label=haive.install=team_install',
+          '--filter',
+          `label=${attempt}=${owner}`,
+          '--filter',
+          `label=${role}=migration`,
+        ]);
+        expect(builderExec.mock.calls[2]![1]).toEqual(['rm', '-f', 'abc123', 'def456']);
+        for (const call of builderExec.mock.calls)
+          expect(call[2]).toMatchObject({ killSignal: 'SIGKILL' });
+        release();
+        const error = await result;
+        expect(error).toBeInstanceOf(Error);
+        expect((error as Error).message).toContain('<redacted>');
+        expect((error as Error).message).not.toContain('secret');
+      });
+    },
+  );
+
+  it('does not remove containers for an ordinary nonzero exit', async () => {
+    builderExec.mockRejectedValue(Object.assign(new Error('exit 1'), { code: 1 }));
+    await expect(
+      withOneShotOwner('team_install', () => runOneShot('target', [], {})),
+    ).rejects.toThrow('exit 1');
+    expect(builderExec).toHaveBeenCalledTimes(1);
+  });
+
+  it('refuses cleanup failure with a safe diagnostic', async () => {
+    builderExec.mockRejectedValueOnce(Object.assign(new Error('timeout'), { killed: true }));
+    builderExec.mockResolvedValueOnce({ stdout: 'abc123\n' });
+    builderExec.mockRejectedValueOnce(
+      Object.assign(new Error('secret stderr'), { code: 'EACCES' }),
+    );
+    await expect(
+      withOneShotOwner('team_install', () => runOneShot('target', [], {})),
+    ).rejects.toMatchObject({
+      refusal: 'updater-child-cleanup-failed',
+      message: expect.stringContaining('EACCES'),
+    });
+  });
+
   it('refuses a Docker read failure without exposing its diagnostics', async () => {
     builderExec.mockRejectedValue(new Error('secret-docker-diagnostic'));
-    await expect(withOneShotOwner('team-network', requireNoRunningOneShots)).rejects.toMatchObject({
+    await expect(withOneShotOwner('team_install', requireNoRunningOneShots)).rejects.toMatchObject({
       refusal: 'updater-child-check-failed',
     });
-    await expect(withOneShotOwner('team-network', requireNoRunningOneShots)).rejects.not.toThrow(
+    await expect(withOneShotOwner('team_install', requireNoRunningOneShots)).rejects.not.toThrow(
       'secret-docker-diagnostic',
     );
   });
@@ -258,13 +367,21 @@ it('pins the credential-mounted own-module builder to its mounted Docker socket 
   builderExec.mockResolvedValue({ stdout: '' });
   const image = 'registry.test/haive-builder:9.9.9';
   const plan = { version: '9.9.9' };
-  await buildOwnModules(image, '/host/modules', plan, '/host/install/.docker');
+  await withOneShotOwner('team_install', () =>
+    buildOwnModules(image, '/host/modules', plan, '/host/install/.docker'),
+  );
   expect(builderExec.mock.calls[0]?.slice(0, 2)).toEqual(['docker', ['pull', image]]);
   const [command, argv] = builderExec.mock.calls[1]!;
   expect(command).toBe('docker');
   expect(argv).toEqual([
     'run',
     '--rm',
+    '--label',
+    'haive.install=team_install',
+    '--label',
+    expect.stringMatching(/^org\.haive\.updater\.attempt=[0-9a-f-]{36}$/),
+    '--label',
+    'org.haive.updater.role=builder',
     '--mount',
     'type=bind,src=/var/run/docker.sock,dst=/var/run/docker.sock',
     '--mount',
