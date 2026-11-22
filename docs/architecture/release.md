@@ -500,8 +500,9 @@ of it at its next beat; between the rename and the restore of a displaced fresh 
 absent, so the displaced holder's next beat creates it again and a third party creating it first keeps it. A
 holder whose beat cannot be written (a full disk, say) stops refreshing the lock, which then lapses after 60 s;
 the extension's container-identity check still covers that case. A bridge process killed in the middle of Start
-(the Desktop window closes) can leave its Compose child running while both of its leases lapse, this one and
-the [window lock](#docker-desktop-extension). A container the updater started (the volume archive, a migration
+or Stop (the Desktop window closes) can leave its Compose child running while both of its leases lapse, this
+one and the [window lock](#docker-desktop-extension); killed in the middle of Install, it can leave the
+installer running while the window lock lapses. A container the updater started (the volume archive, a migration
 one-shot) can outlive the updater, and neither the lock nor the container-identity check covers it then.
 Docker Desktop's file-sharing coherence is not verified: the create is exclusive and no decision rests on a
 negative lookup. Delete `.haive-stack-lock` by hand
@@ -751,7 +752,8 @@ contract, and the updater never sees this one. Install needs it because the inst
 the stack lock, does not exist yet; Start and Stop take the stack lock inside it. A live holder refuses
 a second window with a message that says the lock clears itself, once the contender has seen a beat
 (within about 5 s). A hard termination leaves the file, and the next operation clears it after 60 s
-without a change (up to two minutes when the stack lock was left too). Normal completion and handled
+without a change (up to two minutes when the stack lock was left too); a tomb that cannot be removed stays
+beside it, harmless. Normal completion and handled
 signals release it. Earlier bridges took this name as a folder, which has no beat and never lapses: the
 bridge refuses a folder at once, naming it, and never deletes it or waits on it, since a live older
 operation cannot be told from a dead one. Its message says to check this install's containers and delete
