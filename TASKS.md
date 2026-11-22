@@ -1089,6 +1089,25 @@ status: open · kind: fix · found: T741 review 2026-11-23 · priority: P3
 3. `packages/worker/src/queues/insight-continuation.ts` ~:120: the `tx as unknown as Database` cast is redundant now that `resetStepAndDownstream` takes `Database | DbTx`. Minor.
 4. `task-queue.ts` ~:3201-3221 `reopen(target, nextRound, record, true)`: bare boolean; a named option reads better. Minor.
 
+### T758 · Desktop bridge: a killed bridge leaves its Compose child running past its install lease
+
+status: open · kind: design · found: T744 driver 2026-11-23 · priority: P3
+
+A SIGKILLed bridge cannot cancel `docker compose` (`docker/desktop-extension/bridge/main.go` ~:781, `runCommand` ~:795 uses `exec.CommandContext` with no process group or parent-death setup); its install lease (`stack_lock.go`, beats 5 s, broken after 60 s unchanged) lapses while Compose still starts or stops services, and an updater may then snapshot or migrate concurrently. PRE-EXISTING, consequential. Options with costs (design note `.claude/tmp/codex-run/T744-S/codex-1/bridge-design.md`): Linux process group plus `PR_SET_PDEATHSIG`; macOS parent-pipe watcher; Windows kill-on-close Job Object; lease renewal tied to a child-owning supervisor. Compose project labels cannot prove an in-flight client. Recommendation: OS-specific child supervision with group/Job cancellation, the lease held until the supervised command exits; ambiguous interrupted operations keep refusing for manual recovery. Needs an owner decision on scope (all three OSes vs Linux first).
+
+### T759 · Updater: losing the stack lease does not fence the holder's later phases
+
+status: open · kind: design · found: T744 review 2026-11-23 · priority: P3
+
+`packages/updater/src/stack-lock.ts` ~:146-149: lease loss only stops heartbeats. A holder frozen over 60 s that resumes after a takeover keeps running its phases and can start one-shots the new holder's child check (T744) never saw. PRE-EXISTING, consequential. Fix direction: check lease ownership (a fencing token) before each phase and each container start, and abort on loss.
+
+### T760 · FNF[updater-takeover-order] · a takeover may fail before it reaches the child check (+1)
+
+status: open · kind: fix · found: T744 review 2026-11-23 · priority: P4
+
+1. `packages/updater/src/cli.ts` ~:336: `ensureJournal` and the database bootstrap run before the lock and the child check, so after an updater killed mid-snapshot (Postgres stopped by `composeStop`) a takeover probably fails at the journal connection with no named refusal. PRE-EXISTING, unverified: probe first.
+2. `packages/updater/src/docker.ts` ~:262 `restoreVolume` has no caller. PRE-EXISTING, minor.
+
 ### T721 · The Claude usage grant reaches sandbox environments
 
 status: open (items 2-5 and 10-12; item 1 done #1281; items 6-9 done by #1300, 9cc4e4382, deployed 2026-11-21 04:30Z) · kind: security · found: login-set design (T720) 2026-11-19 · priority: P3 (was P1 until #1281)
