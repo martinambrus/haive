@@ -297,7 +297,10 @@ func TestStackLockTwoWindows(t *testing.T) {
 	b := fixture(t)
 	second := b
 	second.lockCfg = lockConfig{stale: 20 * time.Millisecond, poll: time.Millisecond}
-	second.sleep = func(time.Duration) { beatRecord(t, lockPathOf(b)) }
+	second.sleep = func(time.Duration) {
+		beatRecord(t, lockPathOf(b))
+		beatRecord(t, b.dir+".extension-lock")
+	}
 	var handleErr, lockErr error
 	inCompose := 0
 	wrapRun(&b, nil, func() {
@@ -311,8 +314,8 @@ func TestStackLockTwoWindows(t *testing.T) {
 	if inCompose != 1 {
 		t.Fatalf("compose ran %d times", inCompose)
 	}
-	if handleErr == nil || !strings.Contains(handleErr.Error(), "Another operation is active") {
-		t.Fatalf("second window not refused by the sibling lock: %v", handleErr)
+	if handleErr == nil || handleErr.Error() != extensionBusyMessage {
+		t.Fatalf("second window not refused by the window lock: %v", handleErr)
 	}
 	if lockErr == nil || lockErr.Error() != extensionBusyMessage {
 		t.Fatalf("second window not refused by the shared lock: %v", lockErr)
