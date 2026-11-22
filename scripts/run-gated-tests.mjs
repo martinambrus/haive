@@ -40,7 +40,7 @@ function readLimits(raw) {
   }
   for (const [key, value] of Object.entries(given)) {
     if (!(key in LIMITS)) throw new Error(`RUN_GATED_TESTS_LIMITS: unknown key "${key}"`);
-    if (typeof value !== 'number' || !(value > 0)) {
+    if (typeof value !== 'number' || !Number.isFinite(value) || !(value > 0)) {
       throw new Error(`RUN_GATED_TESTS_LIMITS: "${key}" must be a positive number`);
     }
     limits[key] = value;
@@ -48,7 +48,9 @@ function readLimits(raw) {
   return limits;
 }
 
+// pnpm forwards the `--` of `pnpm test:gated -- <selection>`; drop that one.
 const args = process.argv.slice(2);
+if (args[0] === '--') args.shift();
 if (args.length === 0 || args.includes('-h') || args.includes('--help')) fail2();
 
 let limits;
@@ -208,7 +210,7 @@ async function cleanup() {
     if (result.code === 0 && !result.timedOut) removed = true;
     else
       console.error(
-        `run-gated-tests: COULD NOT REMOVE containers, remove by hand: ${names.join(' ')}`,
+        `run-gated-tests: could not confirm these are removed (docker missing or its daemon down?): ${names.join(' ')}; if they exist run: docker rm -fv ${names.join(' ')}`,
       );
   }
   if (tmp) rmSync(tmp, { recursive: true, force: true });
@@ -216,6 +218,7 @@ async function cleanup() {
 
 // A last resort for an exit that skipped the cleanup above.
 process.on('exit', () => {
+  if (current) killGroup(current, 'SIGKILL');
   if (names.length > 0 && !removed) {
     spawnSync('docker', ['rm', '-fv', ...names], {
       stdio: 'ignore',

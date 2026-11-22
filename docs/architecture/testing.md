@@ -81,9 +81,11 @@ before any container starts. Rows run one at a time in list order; a failed row 
 The runner keeps no list of its own. `scripts/lib/ci-gated.mjs` reads the rows, the service images and the job and
 step env from the `postgres-gated` job of `.github/workflows/ci.yml` through the reader the workflow pins use
 (`scripts/test/workflow.mjs`). `scripts/test/run-gated-tests.test.mjs` pins that: it compares the rows with the raw
-heredoc text and runs the real CI step script and the runner against stub `docker` and `pnpm`, so both must run the
-same package, file, variable, database and server for every row and reach the same completeness verdict. A change
-to the loop's row handling, env or completeness check is a change to the runner too.
+heredoc text and runs the real CI step script and the runner against stub `docker` and `pnpm`, one row per package
+and server. Both must pick the same package, file, variable, database and server, pass the same argv to the row's
+migrate and vitest calls, reach the same completeness verdict, and the runner must set every variable the loop adds
+to those calls; the job's `migrate` step must run what the runner runs at setup. A change to the loop in `ci.yml`
+is a change to the runner too.
 
 Per row it does what the loop does: probe for the database and create it when missing, apply
 `pnpm --filter @haive/database migrate` to it, run `vitest run <file>` with the row's variable set to the database
@@ -95,10 +97,15 @@ It starts its own throwaway containers, `gated-tests-<id>-postgres`, `-pgvector`
 and only the servers the selection needs (Redis only for a file that reads a Redis variable of the gated step). Each
 uses the image the CI job declares, is published on an ephemeral port of `127.0.0.1` and has a random password.
 `docker rm -fv` removes them after success, failure and interrupt (SIGINT, SIGTERM, SIGHUP), and every wait has a
-deadline: a row that overruns its limit is killed and reported TIMEOUT. SIGKILL cannot be handled: list what a killed
-run left with `docker ps -a --filter name=gated-tests-` and remove it with `docker rm -fv`. The test process gets the CI job and step env with every Postgres
-and Redis URL pointed at these containers, or dropped when that server is not running, so a `DATABASE_URL` or
-`REDIS_URL` in the developer's shell never reaches it.
+deadline: a row that overruns its limit is killed and reported TIMEOUT. SIGKILL cannot be handled and also leaves the
+running test process and a `gated-tests-*` temp directory behind: list the containers with
+`docker ps -a --filter name=gated-tests-` and remove them with `docker rm -fv`.
+
+The test process gets the CI job and step env with every Postgres and Redis URL pointed at these containers, or
+dropped when that server is not running, so a `DATABASE_URL` or `REDIS_URL` in the developer's shell never reaches
+it. Two things differ from CI: every row also gets `<variable minus _URL>_PORT` set to its container's port (the
+api task-integration admission test accepts a 127.0.0.1 URL only when its port equals that variable, where CI
+relies on `CI=true` and `localhost:5432`), and `CI` is not set.
 
 The CI setup steps are not repeated: run `pnpm install`, build `@haive/shared`, `@haive/database` and
 `@haive/web-kit`, build the modules and, for api and worker rows, run `node scripts/gen-modules.mjs` (see Running

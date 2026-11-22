@@ -125,9 +125,10 @@ against stubbed `docker` and `pnpm` over a three-row fixture list.
 `pnpm test:gated` (`scripts/run-gated-tests.mjs`, see [Testing](testing.md)) runs the GATED list on a developer
 machine. It reads the rows, images and env of the `postgres-gated` job through that same reader and holds no list of
 its own. `run-gated-tests.test.mjs` runs the real gated step script against stubs for one row per package and
-server, and pins that the runner makes the same row, file, variable, database and server choice and the same
-completeness verdict: a change to the loop in `ci.yml` (row columns, env, migrate, completeness check) needs the
-matching change in the runner.
+server, and pins that the runner makes the same row, file, variable, database and server choice, passes the same
+argv to migrate and vitest, sets every variable the loop adds to those calls and reaches the same completeness
+verdict, and that the `migrate` step runs what the runner runs at setup: a change to the loop in `ci.yml` (row
+columns, argv, env, migrate, completeness check) needs the matching change in the runner.
 
 `scripts/test/shell-source.mjs` is a test-only lexical scan of a step's `run` script, used by `ci-step-independence`
 for two things: `swallowedFailure` (a command failure that does not fail the step) and `redisDatabases` (the Redis

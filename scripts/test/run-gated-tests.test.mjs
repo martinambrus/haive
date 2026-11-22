@@ -11,7 +11,7 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
-import { after, before, describe, it } from 'node:test';
+import { after, describe, it } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import {
   completeness,
@@ -44,6 +44,7 @@ const gatedRows = gated?.rows ?? [];
 const plainPgRows = gatedRows.filter((row) => row.server === 'pg' && !rowNeedsRedis(row));
 const PG_ROW = plainPgRows[0];
 const PG_ROW2 = plainPgRows.find((row) => row.file !== PG_ROW.file);
+const PG_ROW_B = plainPgRows.find((row) => row.db !== PG_ROW.db);
 const VECTOR_ROW = gatedRows.find((row) => row.server === 'pgvector');
 const REDIS_ROW = gatedRows.find(rowNeedsRedis);
 // Two rows with different files that share one database on one server.
@@ -67,6 +68,164 @@ const declared = {
   redis: { hostPorts: [6379], containerPort: 6379 },
 };
 
+// The CLI harness: stub docker and pnpm first on PATH, calls logged in a temp dir.
+const base = mkdtempSync(join(tmpdir(), 'gated-cli-'));
+const bin = join(base, 'bin');
+mkdirSync(bin);
+const stub = (name, source) =>
+  writeFileSync(
+    join(bin, name),
+    `#!/bin/bash
+n=$(( $(cat "$STUB_LOG/count" 2>/dev/null || echo 0) + 1 ))
+echo "$n" > "$STUB_LOG/count"
+printf '%s\\t%s\\t' "$n" "${name}" >> "$STUB_LOG/calls"
+printf '%s\\037' "$@" >> "$STUB_LOG/calls"
+printf '\\n' >> "$STUB_LOG/calls"
+env > "$STUB_LOG/env-$n"
+in_list() { case " $1 " in *" $2 "*) return 0 ;; esac; return 1; }
+${source}
+`,
+    { mode: 0o755 },
+  );
+stub(
+  'docker',
+  `case "$1" in
+run)
+  runs=$(( $(cat "$STUB_LOG/runs" 2>/dev/null || echo 0) + 1 ))
+  echo "$runs" > "$STUB_LOG/runs"
+  if [ "$runs" = "\${STUB_RUN_FAIL_AT:-0}" ]; then echo "stub: run refused" >&2; exit 125; fi
+  echo stubcontainerid ;;
+port)
+  case "$2" in
+    *-postgres) echo "127.0.0.1:54001" ;;
+    *-pgvector) echo "127.0.0.1:54002" ;;
+    *-redis) echo "127.0.0.1:54003" ;;
+  esac ;;
+exec)
+  case "$3" in
+    pg_isready) [ -z "\${STUB_NOT_READY:-}" ] || exit 2 ;;
+    redis-cli) if [ "$4" = ping ]; then echo PONG; else echo OK; fi ;;
+    psql)
+      if [ -n "\${STUB_PROBE_FAIL_DB:-}" ] && [ "$8" = -tAc ] && [[ "$9" == *"'$STUB_PROBE_FAIL_DB'"* ]]; then
+        echo "stub: probe refused" >&2; exit 1
+      fi
+      if [ -z "\${STUB_DB_ABSENT:-}" ] && [ "$7" = postgres ] && [ "$8" = -tAc ]; then echo 1; fi ;;
+  esac ;;
+logs) echo "stub log line" ;;
+rm) [ -z "\${STUB_RM_FAIL:-}" ] || { echo "stub: rm refused" >&2; exit 1; } ;;
+esac
+exit 0`,
+);
+stub(
+  'pnpm',
+  `case " $* " in
+*" migrate "*)
+    [ -z "\${STUB_MIGRATE_FAIL:-}" ] || { echo "stub: migrate refused" >&2; exit 9; }
+    if [ -n "\${STUB_MIGRATE_FAIL_DB:-}" ]; then
+      case "\${DATABASE_URL:-}" in */"$STUB_MIGRATE_FAIL_DB") echo "stub: migrate refused" >&2; exit 9 ;; esac
+    fi
+    exit 0 ;;
+esac
+file=""; take=0; report=""
+for arg in "$@"; do
+if [ "$take" = 1 ]; then file="$arg"; take=0; fi
+[ "$arg" = run ] && take=1
+case "$arg" in --outputFile.json=*) report="\${arg#*=}" ;; esac
+done
+if in_list "\${STUB_HANG_FILES:-}" "$file"; then
+  sleep 60 >/dev/null 2>&1 &
+  echo $! > "$STUB_LOG/child"
+  touch "$STUB_LOG/hung"
+  wait
+  exit 0
+fi
+if in_list "\${STUB_NO_REPORT_FILES:-}" "$file"; then exit 0; fi
+if in_list "\${STUB_SKIP_FILES:-}" "$file"; then
+printf '{"numPassedTests":3,"numFailedTests":0,"numPendingTests":1,"numTodoTests":0}' > "$report"
+else
+printf '{"numPassedTests":3,"numFailedTests":0,"numPendingTests":0,"numTodoTests":0}' > "$report"
+fi
+if in_list "\${STUB_FAIL_FILES:-}" "$file"; then exit 1; fi
+exit 0`,
+);
+after(() => rmSync(base, { recursive: true, force: true }));
+
+// A pid is gone once it has no process, or only a zombie that awaits its reaper.
+async function assertGone(pid) {
+  assert.ok(Number.isInteger(pid) && pid > 0, 'the stub recorded its child pid');
+  const deadline = Date.now() + 2000;
+  for (;;) {
+    let state = null;
+    try {
+      state = /^\S+ \(.*\) (\S)/.exec(readFileSync(`/proc/${pid}/stat`, 'utf8'))?.[1] ?? null;
+    } catch {
+      return;
+    }
+    if (state === null || state === 'Z') return;
+    assert.ok(Date.now() < deadline, `child ${pid} is still running (state ${state})`);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+}
+
+const pnpmOf = (out, word) =>
+  out.calls.filter((call) => call.tool === 'pnpm' && call.args.includes(word));
+
+function cli(args, { env = {}, onStart } = {}) {
+  const log = mkdtempSync(join(base, 'log-'));
+  return new Promise((resolve) => {
+    const child = spawn(process.execPath, [runner, ...args], {
+      cwd: base,
+      env: {
+        PATH: `${bin}:${dirname(process.execPath)}:/usr/bin:/bin`,
+        HOME: base,
+        STUB_LOG: log,
+        ...env,
+      },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    let output = '';
+    child.stdout.on('data', (chunk) => (output += chunk));
+    child.stderr.on('data', (chunk) => (output += chunk));
+    const guard = setTimeout(() => child.kill('SIGKILL'), 30_000);
+    let poll;
+    if (onStart) {
+      poll = setInterval(() => {
+        if (existsSync(join(log, 'hung'))) {
+          clearInterval(poll);
+          onStart(child);
+        }
+      }, 20);
+    }
+    child.on('close', (status, signal) => {
+      clearTimeout(guard);
+      clearInterval(poll);
+      const calls = existsSync(join(log, 'calls'))
+        ? readFileSync(join(log, 'calls'), 'utf8')
+            .split('\n')
+            .filter(Boolean)
+            .map((line) => {
+              const [n, tool, joined] = line.split('\t');
+              const environment = {};
+              for (const entry of readFileSync(join(log, `env-${n}`), 'utf8').split('\n')) {
+                const at = entry.indexOf('=');
+                if (at > 0) environment[entry.slice(0, at)] = entry.slice(at + 1);
+              }
+              return {
+                tool,
+                args: joined.split('\x1f').slice(0, -1),
+                env: environment,
+              };
+            })
+        : [];
+      const childPid = existsSync(join(log, 'child'))
+        ? Number(readFileSync(join(log, 'child'), 'utf8'))
+        : null;
+      rmSync(log, { recursive: true, force: true });
+      resolve({ status, signal, output, calls, childPid });
+    });
+  });
+}
+
 describe('the gated list', () => {
   it('parses strictly, as ci.yml has it', () => {
     if (gatedError) throw gatedError;
@@ -87,17 +246,30 @@ describe('the gated list', () => {
   });
 
   it('carries the services and the env the job declares', () => {
-    assert.deepEqual(gated.services.postgres.hostPorts, [5432]);
-    assert.equal(gated.services.postgres.containerPort, 5432);
-    assert.deepEqual(gated.services.pgvector.hostPorts, [5433]);
-    assert.equal(gated.services.pgvector.containerPort, 5432);
-    assert.deepEqual(gated.services.redis.hostPorts, [6379]);
-    assert.equal(gated.services.redis.containerPort, 6379);
-    assert.equal(gated.services.postgres.env.POSTGRES_USER, 'haive');
-    assert.equal(gated.services.postgres.env.POSTGRES_DB, 'haive');
-    assert.match(gated.services.redis.image, /^redis:/);
-    assert.ok(gated.jobEnv.DATABASE_URL.startsWith('postgres://'));
-    assert.equal(gated.stepEnv.T117_REDIS_URL, 'redis://127.0.0.1:6379/14');
+    const job = readWorkflow('ci.yml').jobs['postgres-gated'];
+    const step = job.steps.find((candidate) => /<<'GATED'/.test(candidate.run ?? ''));
+    const declaredServices = Object.entries(job.services);
+    assert.deepEqual(Object.keys(gated.services).sort(), Object.keys(job.services).sort());
+    assert.ok(declaredServices.length >= 3);
+    for (const [name, service] of declaredServices) {
+      const ports = service.ports.map((port) => String(port).split(':').map(Number));
+      assert.ok(ports.length > 0, name);
+      assert.equal(gated.services[name].image, service.image, name);
+      assert.deepEqual(gated.services[name].env, service.env ?? {}, name);
+      assert.deepEqual(
+        gated.services[name].hostPorts,
+        ports.map(([host]) => host),
+        name,
+      );
+      assert.equal(gated.services[name].containerPort, ports[0].at(-1), name);
+    }
+    // An env value built from a `${{ }}` expression has no meaning here, so it is dropped.
+    const literal = (env) =>
+      Object.fromEntries(Object.entries(env).filter(([, value]) => !value.includes('${{')));
+    assert.ok(Object.keys(job.env).length > 0 && Object.keys(step.env).length > 0);
+    assert.deepEqual(gated.jobEnv, literal(job.env));
+    assert.deepEqual(gated.stepEnv, literal(step.env));
+    assert.ok(Object.values(step.env).some((value) => value.includes('${{')));
     assert.equal('PG_CONTAINER' in gated.stepEnv, false);
   });
 
@@ -117,6 +289,7 @@ describe('the gated loop agrees with the runner', () => {
   );
   assert.ok(step, 'ci.yml must contain a step with a GATED list');
   const fullList = listPattern.exec(step.run)[1];
+  const passing = { numPassedTests: 3, numFailedTests: 0, numPendingTests: 0, numTodoTests: 0 };
 
   function loop(list, report) {
     const dir = mkdtempSync(join(tmpdir(), 'gated-loop-'));
@@ -126,7 +299,8 @@ describe('the gated loop agrees with the runner', () => {
       stub('docker', 'if [[ "$*" == *-tAc* ]]; then echo 1; fi');
       stub(
         'pnpm',
-        `if [[ "$*" == *vitest* ]]; then
+        `printf '%s\\t%s\\n' "$(printf '%s\\037' "$@")" "$(compgen -e | sort | tr '\\n' ' ')" >> "$ALL"
+if [[ "$*" == *vitest* ]]; then
   printf '%s\\t%s\\n' "$*" "$(env | /usr/bin/grep '=postgres://' | tr '\\n' ' ')" >> "$CALLS"
   for arg in "$@"; do
     case "$arg" in --outputFile.json=*) printf '%s' "$STUB_REPORT" > "\${arg#*=}" ;; esac
@@ -134,17 +308,19 @@ describe('the gated loop agrees with the runner', () => {
 fi`,
       );
       const script = step.run.replace(fullList, list.join('\n'));
+      const loopEnv = {
+        PATH: `${dir}:${dirname(process.execPath)}:/usr/bin:/bin`,
+        HOME: dir,
+        RUNNER_TEMP: dir,
+        PG_CONTAINER: 'postgres-stub',
+        PGVECTOR_CONTAINER: 'pgvector-stub',
+        CALLS: join(dir, 'calls'),
+        ALL: join(dir, 'all'),
+        STUB_REPORT: JSON.stringify(report),
+      };
       const out = spawnSync('bash', ['-e', '-c', script], {
         cwd: dir,
-        env: {
-          PATH: `${dir}:${dirname(process.execPath)}:/usr/bin:/bin`,
-          HOME: dir,
-          RUNNER_TEMP: dir,
-          PG_CONTAINER: 'postgres-stub',
-          PGVECTOR_CONTAINER: 'pgvector-stub',
-          CALLS: join(dir, 'calls'),
-          STUB_REPORT: JSON.stringify(report),
-        },
+        env: loopEnv,
         encoding: 'utf8',
         timeout: 20_000,
       });
@@ -152,7 +328,21 @@ fi`,
       const calls = existsSync(join(dir, 'calls'))
         ? readFileSync(join(dir, 'calls'), 'utf8').trim().split('\n')
         : [];
-      return { status: out.status, output: out.stdout + out.stderr, calls };
+      // Every pnpm call: its argv and the env names that reached it beyond the harness's own.
+      const harness = new Set([...Object.keys(loopEnv), 'PWD', 'SHLVL', '_', 'OLDPWD']);
+      const all = existsSync(join(dir, 'all'))
+        ? readFileSync(join(dir, 'all'), 'utf8')
+            .trim()
+            .split('\n')
+            .map((line) => {
+              const [argv, names] = line.split('\t');
+              return {
+                argv: argv.split('\x1f').slice(0, -1),
+                added: names.split(' ').filter((name) => name && !harness.has(name)),
+              };
+            })
+        : [];
+      return { status: out.status, output: out.stdout + out.stderr, calls, all };
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -166,7 +356,6 @@ fi`,
     seen.add(`${pkg} ${server}`);
     reduced.push(line);
   }
-  const passing = { numPassedTests: 3, numFailedTests: 0, numPendingTests: 0, numTodoTests: 0 };
 
   it('runs the same pkg, file, var, db and server for every row', () => {
     const out = loop(reduced, passing);
@@ -204,6 +393,48 @@ fi`,
         `the runner has no row ${JSON.stringify(row)}`,
       );
     }
+  });
+
+  const normalized = (argv) =>
+    argv.map((arg) => arg.replace(/^(--outputFile\.json=).*/, '$1REPORT'));
+
+  it('passes the same argv and env names to migrate and vitest as the runner does', async () => {
+    const out = loop(reduced, passing);
+    assert.equal(out.all.length, reduced.length * 2, 'one migrate and one vitest call per row');
+    for (const [at, line] of reduced.entries()) {
+      const [pkg, file, variable] = line.split(' ');
+      const ciMigrate = out.all[at * 2];
+      const ciVitest = out.all[at * 2 + 1];
+      const mine = await cli([`${pkg}/${file}`]);
+      assert.equal(mine.status, 0, mine.output);
+      const myMigrate = pnpmOf(mine, 'migrate').at(-1);
+      const myVitest = pnpmOf(mine, 'vitest')[0];
+      assert.deepEqual(ciMigrate.argv, myMigrate.args, `${file} migrate argv`);
+      assert.deepEqual(normalized(ciVitest.argv), normalized(myVitest.args), `${file} vitest argv`);
+      assert.ok(ciMigrate.added.includes('DATABASE_URL'), `${file}: ${ciMigrate.added}`);
+      assert.ok(ciVitest.added.includes(variable), `${file}: ${ciVitest.added}`);
+      for (const [what, ci, theirs] of [
+        ['migrate', ciMigrate, myMigrate],
+        ['vitest', ciVitest, myVitest],
+      ]) {
+        for (const name of ci.added) {
+          assert.ok(
+            name in theirs.env,
+            `${file}: the CI ${what} call sets ${name}, the runner does not`,
+          );
+        }
+      }
+    }
+  });
+
+  it('runs the migrate step of the job as the runner does at setup', async () => {
+    const mine = await cli([sel(PG_ROW)]);
+    assert.equal(mine.status, 0, mine.output);
+    const migrate = readWorkflow('ci.yml').jobs['postgres-gated'].steps.find(
+      (candidate) => candidate.id === 'migrate',
+    );
+    assert.ok(migrate, 'the job has a step with id migrate');
+    assert.equal(migrate.run.trim(), `pnpm ${pnpmOf(mine, 'migrate')[0].args.join(' ')}`);
   });
 
   const reports = [
@@ -411,129 +642,6 @@ describe('the gated Redis need', () => {
 
 // The CLI against stub docker and pnpm: no real docker, no real pnpm.
 describe('the gated runner', () => {
-  let base;
-  let bin;
-  before(() => {
-    base = mkdtempSync(join(tmpdir(), 'gated-cli-'));
-    bin = join(base, 'bin');
-    mkdirSync(bin);
-    const stub = (name, source) =>
-      writeFileSync(
-        join(bin, name),
-        `#!/bin/bash
-n=$(( $(cat "$STUB_LOG/count" 2>/dev/null || echo 0) + 1 ))
-echo "$n" > "$STUB_LOG/count"
-printf '%s\\t%s\\t' "$n" "${name}" >> "$STUB_LOG/calls"
-printf '%s\\037' "$@" >> "$STUB_LOG/calls"
-printf '\\n' >> "$STUB_LOG/calls"
-env > "$STUB_LOG/env-$n"
-in_list() { case " $1 " in *" $2 "*) return 0 ;; esac; return 1; }
-${source}
-`,
-        { mode: 0o755 },
-      );
-    stub(
-      'docker',
-      `case "$1" in
-  run)
-    runs=$(( $(cat "$STUB_LOG/runs" 2>/dev/null || echo 0) + 1 ))
-    echo "$runs" > "$STUB_LOG/runs"
-    if [ "$runs" = "\${STUB_RUN_FAIL_AT:-0}" ]; then echo "stub: run refused" >&2; exit 125; fi
-    echo stubcontainerid ;;
-  port)
-    case "$2" in
-      *-postgres) echo "127.0.0.1:54001" ;;
-      *-pgvector) echo "127.0.0.1:54002" ;;
-      *-redis) echo "127.0.0.1:54003" ;;
-    esac ;;
-  exec)
-    case "$3" in
-      pg_isready) [ -z "\${STUB_NOT_READY:-}" ] || exit 2 ;;
-      redis-cli) if [ "$4" = ping ]; then echo PONG; else echo OK; fi ;;
-      psql) if [ -z "\${STUB_DB_ABSENT:-}" ] && [ "$7" = postgres ] && [ "$8" = -tAc ]; then echo 1; fi ;;
-    esac ;;
-  logs) echo "stub log line" ;;
-  rm) ;;
-esac
-exit 0`,
-    );
-    stub(
-      'pnpm',
-      `case " $* " in
-  *" migrate "*) [ -z "\${STUB_MIGRATE_FAIL:-}" ] || { echo "stub: migrate refused" >&2; exit 9; }; exit 0 ;;
-esac
-file=""; take=0; report=""
-for arg in "$@"; do
-  if [ "$take" = 1 ]; then file="$arg"; take=0; fi
-  [ "$arg" = run ] && take=1
-  case "$arg" in --outputFile.json=*) report="\${arg#*=}" ;; esac
-done
-if in_list "\${STUB_HANG_FILES:-}" "$file"; then touch "$STUB_LOG/hung"; sleep 60; exit 0; fi
-if in_list "\${STUB_NO_REPORT_FILES:-}" "$file"; then exit 0; fi
-if in_list "\${STUB_SKIP_FILES:-}" "$file"; then
-  printf '{"numPassedTests":3,"numFailedTests":0,"numPendingTests":1,"numTodoTests":0}' > "$report"
-else
-  printf '{"numPassedTests":3,"numFailedTests":0,"numPendingTests":0,"numTodoTests":0}' > "$report"
-fi
-if in_list "\${STUB_FAIL_FILES:-}" "$file"; then exit 1; fi
-exit 0`,
-    );
-  });
-  after(() => rmSync(base, { recursive: true, force: true }));
-
-  function cli(args, { env = {}, onStart } = {}) {
-    const log = mkdtempSync(join(base, 'log-'));
-    return new Promise((resolve) => {
-      const child = spawn(process.execPath, [runner, ...args], {
-        cwd: base,
-        env: {
-          PATH: `${bin}:${dirname(process.execPath)}:/usr/bin:/bin`,
-          HOME: base,
-          STUB_LOG: log,
-          ...env,
-        },
-        stdio: ['ignore', 'pipe', 'pipe'],
-      });
-      let output = '';
-      child.stdout.on('data', (chunk) => (output += chunk));
-      child.stderr.on('data', (chunk) => (output += chunk));
-      const guard = setTimeout(() => child.kill('SIGKILL'), 30_000);
-      let poll;
-      if (onStart) {
-        poll = setInterval(() => {
-          if (existsSync(join(log, 'hung'))) {
-            clearInterval(poll);
-            onStart(child);
-          }
-        }, 20);
-      }
-      child.on('close', (status, signal) => {
-        clearTimeout(guard);
-        clearInterval(poll);
-        const calls = existsSync(join(log, 'calls'))
-          ? readFileSync(join(log, 'calls'), 'utf8')
-              .split('\n')
-              .filter(Boolean)
-              .map((line) => {
-                const [n, tool, joined] = line.split('\t');
-                const environment = {};
-                for (const entry of readFileSync(join(log, `env-${n}`), 'utf8').split('\n')) {
-                  const at = entry.indexOf('=');
-                  if (at > 0) environment[entry.slice(0, at)] = entry.slice(at + 1);
-                }
-                return {
-                  tool,
-                  args: joined.split('\x1f').slice(0, -1),
-                  env: environment,
-                };
-              })
-          : [];
-        rmSync(log, { recursive: true, force: true });
-        resolve({ status, signal, output, calls });
-      });
-    });
-  }
-
   const dockerCalls = (out, verb) =>
     out.calls.filter((call) => call.tool === 'docker' && call.args[0] === verb);
   const pnpmCalls = (out, word) =>
@@ -561,7 +669,13 @@ exit 0`,
   });
 
   it('rejects a bad limit override before any container', async () => {
-    for (const limits of ['{"bogusS":1}', '{"rowS":0}', '{"rowS":-3}', '{"rowS":"x"}']) {
+    for (const limits of [
+      '{"bogusS":1}',
+      '{"rowS":0}',
+      '{"rowS":-3}',
+      '{"rowS":"x"}',
+      '{"rowS":1e999}',
+    ]) {
       const out = await cli(['database'], { env: { RUN_GATED_TESTS_LIMITS: limits } });
       assert.equal(out.status, 2, out.output);
       assert.equal(out.calls.length, 0, out.output);
@@ -731,21 +845,112 @@ exit 0`,
     assertRemoved(out);
   });
 
-  it('counts a failed migration as a failed row and runs the rest', async () => {
+  it('stops before any row when the job database migration fails', async () => {
     const out = await cli([sel(PG_ROW)], { env: { STUB_MIGRATE_FAIL: '1' } });
     assert.equal(out.status, 1, out.output);
     assert.match(out.output, /stub: migrate refused/);
+    assert.match(out.output, /setup failed, no row ran/);
     assert.equal(pnpmCalls(out, 'vitest').length, 0);
     assertRemoved(out);
   });
 
-  it('removes its containers and exits 130 on SIGINT mid-test', async () => {
-    const out = await cli([sel(PG_ROW)], {
-      env: { STUB_HANG_FILES: PG_ROW.file },
-      onStart: (child) => child.kill('SIGINT'),
+  it('counts a row whose own migration fails as FAILED and runs the next row', async () => {
+    const out = await cli([sel(PG_ROW), sel(PG_ROW_B)], {
+      env: { STUB_MIGRATE_FAIL_DB: PG_ROW.db },
     });
-    assert.equal(out.status, 130, out.output);
+    assert.equal(out.status, 1, out.output);
+    assert.ok(out.output.includes(`migrate failed for ${PG_ROW.db}`), out.output);
+    assert.match(out.output, /stub: migrate refused/);
+    assert.doesNotMatch(out.output, /setup failed/);
+    assert.equal(pnpmCalls(out, 'vitest').length, 1);
+    assert.equal(pnpmCalls(out, 'vitest')[0].args[5], PG_ROW_B.file);
+    assert.match(out.output, new RegExp(`FAILED [0-9.]+s ${PG_ROW.pkg} ${PG_ROW.file}`));
+    assert.match(out.output, new RegExp(`passed [0-9.]+s ${PG_ROW_B.pkg} ${PG_ROW_B.file}`));
     assertRemoved(out);
+  });
+
+  it('counts a failed database probe as FAILED, runs nothing for that row, then the next', async () => {
+    const out = await cli([sel(PG_ROW), sel(PG_ROW_B)], {
+      env: { STUB_PROBE_FAIL_DB: PG_ROW.db },
+    });
+    assert.equal(out.status, 1, out.output);
+    assert.ok(out.output.includes(`database probe failed for ${PG_ROW.file}`), out.output);
+    const forFirst = out.calls.filter(
+      (call) => call.tool === 'pnpm' && call.env.DATABASE_URL?.endsWith(`/${PG_ROW.db}`),
+    );
+    assert.deepEqual(forFirst, []);
+    assert.equal(pnpmCalls(out, 'vitest').length, 1);
+    assert.equal(pnpmCalls(out, 'vitest')[0].args[5], PG_ROW_B.file);
+    assert.match(out.output, new RegExp(`FAILED [0-9.]+s ${PG_ROW.pkg} ${PG_ROW.file}`));
+    assert.match(out.output, new RegExp(`passed [0-9.]+s ${PG_ROW_B.pkg} ${PG_ROW_B.file}`));
+    assertRemoved(out);
+  });
+
+  for (const [signal, code] of [
+    ['SIGINT', 130],
+    ['SIGTERM', 143],
+    ['SIGHUP', 129],
+  ]) {
+    it(`removes its containers, leaves no child and exits ${code} on ${signal} mid-test`, async () => {
+      const out = await cli([sel(PG_ROW)], {
+        env: { STUB_HANG_FILES: PG_ROW.file },
+        onStart: (child) => child.kill(signal),
+      });
+      assert.equal(out.status, code, out.output);
+      assertRemoved(out);
+      await assertGone(out.childPid);
+    });
+  }
+
+  it('keeps a failing first row from stopping the second', async () => {
+    const out = await cli([sel(PG_ROW), sel(PG_ROW2)], {
+      env: { STUB_FAIL_FILES: PG_ROW.file },
+    });
+    assert.equal(out.status, 1, out.output);
+    assert.equal(pnpmCalls(out, 'vitest').length, 2);
+    assert.match(out.output, new RegExp(`FAILED [0-9.]+s ${PG_ROW.pkg} ${PG_ROW.file}`));
+    assert.match(out.output, new RegExp(`passed [0-9.]+s ${PG_ROW2.pkg} ${PG_ROW2.file}`));
+    assertRemoved(out);
+  });
+
+  it('names the containers to remove when it cannot confirm their removal', async () => {
+    for (const env of [{}, { STUB_FAIL_FILES: PG_ROW.file }]) {
+      const out = await cli([sel(PG_ROW)], { env: { STUB_RM_FAIL: '1', ...env } });
+      assert.equal(out.status, env.STUB_FAIL_FILES ? 1 : 0, out.output);
+      const [name] = names(out);
+      assert.ok(
+        out.output
+          .split('\n')
+          .some(
+            (line) =>
+              /docker rm -fv\b.*gated-tests-[0-9a-f]{8}-postgres/.test(line) && line.includes(name),
+          ),
+        out.output,
+      );
+      assert.doesNotMatch(out.output, /remove by hand/);
+    }
+  });
+
+  it('takes one leading -- as pnpm forwards it, and -- alone as no selection', async () => {
+    const out = await cli(['--', sel(PG_ROW)]);
+    assert.equal(out.status, 0, out.output);
+    assert.equal(pnpmCalls(out, 'vitest').length, 1);
+    assert.equal(pnpmCalls(out, 'vitest')[0].args[5], PG_ROW.file);
+    assertRemoved(out);
+    const none = await cli(['--']);
+    assert.equal(none.status, 2, none.output);
+    assert.equal(none.calls.length, 0, none.output);
+  });
+
+  it('strips the variable of a row it did not select from the test process', async () => {
+    const other = gatedRows.find((row) => row.var !== PG_ROW.var && row.server === 'pg');
+    assert.ok(other, 'the list has a row whose variable differs from the selected one');
+    const leak = 'postgres://leak:leak@leak.invalid:1/leak';
+    const out = await cli([sel(PG_ROW)], { env: { [other.var]: leak } });
+    assert.equal(out.status, 0, out.output);
+    for (const call of out.calls.filter((c) => c.tool === 'pnpm')) {
+      assert.equal(call.env[other.var], undefined, other.var);
+    }
   });
 
   it('gives up on a server that is never ready, with its logs, and removes it', async () => {
@@ -781,6 +986,7 @@ exit 0`,
     assert.equal(out.status, 1, out.output);
     assert.match(out.output, /TIMEOUT/);
     assertRemoved(out);
+    await assertGone(out.childPid);
   });
 
   it('never lets a developer shell value reach the test process', async () => {
