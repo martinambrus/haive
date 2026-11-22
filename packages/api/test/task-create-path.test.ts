@@ -16,15 +16,23 @@ const h = vi.hoisted(() => ({
   add: vi.fn(async (..._args: unknown[]): Promise<unknown> => undefined),
   beforeQueued: undefined as (() => Promise<void>) | undefined,
   lockTimeoutMs: 30_000,
+  /** Null keeps the real task-start lock bound. */
+  startLockTimeoutMs: null as number | null,
 }));
 
 vi.mock('../src/db.js', () => ({ getDb: () => h.db }));
-vi.mock('@haive/database', async (importOriginal) => ({
-  ...(await importOriginal<typeof import('@haive/database')>()),
-  get REPOSITORY_TASKS_LOCK_TIMEOUT_MS() {
-    return h.lockTimeoutMs;
-  },
-}));
+vi.mock('@haive/database', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@haive/database')>();
+  return {
+    ...actual,
+    get REPOSITORY_TASKS_LOCK_TIMEOUT_MS() {
+      return h.lockTimeoutMs;
+    },
+    get TASK_START_LOCK_TIMEOUT_MS() {
+      return h.startLockTimeoutMs ?? actual.TASK_START_LOCK_TIMEOUT_MS;
+    },
+  };
+});
 vi.mock('../src/queues.js', () => ({
   getTaskQueue: () => ({ add: h.add }),
   getRepoQueue: () => h.repoQueue,
@@ -1363,11 +1371,14 @@ describe.skipIf(!url)('POST /tasks create path on Postgres', () => {
       );
     };
 
+    // Plan, root-merge and global-kb waits use the task-start bound, so both are lowered.
     beforeAll(() => {
       h.lockTimeoutMs = BOUND_MS;
+      h.startLockTimeoutMs = BOUND_MS;
     });
     afterAll(() => {
       h.lockTimeoutMs = 30_000;
+      h.startLockTimeoutMs = null;
     });
     beforeEach(async () => {
       h.add.mockReset();
