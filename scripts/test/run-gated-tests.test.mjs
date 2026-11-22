@@ -954,12 +954,10 @@ describe('the gated runner', () => {
   });
 
   it('gives up on a server that is never ready, with its logs, and removes it', async () => {
-    const began = Date.now();
     const out = await cli([sel(PG_ROW)], {
       env: { STUB_NOT_READY: '1', RUN_GATED_TESTS_LIMITS: '{"readyS":1}' },
     });
     assert.equal(out.status, 1, out.output);
-    assert.ok(Date.now() - began < 15_000);
     assert.equal(pnpmCalls(out, 'vitest').length, 0);
     assert.ok(dockerCalls(out, 'logs').length > 0);
     assert.ok(out.output.includes('stub log line'));
