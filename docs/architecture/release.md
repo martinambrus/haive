@@ -90,7 +90,10 @@ normal upgrades and interrupted-run recovery check `.env`, all four allowlisted 
 `.haive-bundle.json` with `lstat`. Every present file must be a regular file. A symlink refuses with
 `install-file-linked`, exit 3, and the filename only; another non-regular entry refuses with
 `install-file-not-regular`. This policy also applies to targets without a bundle. Replace linked
-files with regular files containing the intended bytes before retrying.
+files with regular files containing the intended bytes before retrying. The one read before this
+check is the attempt row's display read (below): it opens only `.env`, only after `lstat` shows a
+regular file, through a held directory descriptor with `O_NOFOLLOW`, and its values reach only that
+row, never a decision.
 
 At that same start, the updater removes abandoned `.<name>.<uuid>` files left by the install-file
 writer, including `.env` copies. It accepts only the writer's known filenames and exact lowercase
@@ -409,9 +412,13 @@ gone. When the updater held the database and the lock, then neither created nor 
 the start was not `--check` or a dry plan, its last step (`recordAttempt`) writes one row with
 phase `preflight`: status `refused` with `metadata.refusal` (channel-changed,
 rollback-images-missing, install-locked, a preflight refusal), or `failed` for an error. `error` is capped at 2048
-characters, `channel` is the resolved one, and an unusable `--version` is stored as `unknown`. A refusal
-raised before the install settings are read (`install-locked`, `install-file-linked`) records `public` and an
-unknown current version. In
+characters, `channel` is the resolved one, and an unusable `--version` is stored as `unknown`. When the
+start ends before the install settings were read (`install-locked`, `install-file-linked`, a failure inside
+that read), the row records the literal `HAIVE_CHANNEL` and `HAIVE_VERSION` of `.env` instead
+(`readAttemptInstallFields`; an empty channel is `public`). A value that is absent, invalid or interpolated is
+stored as `unknown`, and a `.env` that is missing, linked, not a regular file, over 256 KiB or unparsable puts
+`not-read` in both columns; either way a sentence appended to `error` says which. The read runs without the
+stack lock in the `install-locked` case, so it shows what `.env` held at that moment. In
 the same transaction, after the insert, it deletes the attempt rows beyond the newest 50 (ordered
 `started_at DESC, id DESC`, never the row it just wrote), so repeated refusals cannot grow the
 table. An attempt row is exactly `phase = 'preflight' AND status IN ('refused', 'failed')`; no real
