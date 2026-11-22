@@ -98,7 +98,7 @@ export async function skipGuardSpan(
   if (!initial) throw new GuardDecisionError('task-unavailable');
   if (initial.executionContract == null) return null;
   const contract = parseExecutionContract(initial.executionContract);
-  if (!contract.guardedSpans.length && !contract.fixTarget) return null;
+  if (!contract.guardedSpans.length) return null;
   if (ctx.epoch == null || ctx.rerunGeneration == null)
     throw new GuardDecisionError('missing-fence');
   const bounds = validateGuardBounds(limits);
@@ -220,7 +220,17 @@ export async function advanceGuardSpan(
     skipped = await skipGuardSpan(ctx, spanId, predicates);
   } catch (err) {
     if (isRetryableGuardError(err)) return { kind: 'retry' };
-    if (err instanceof GuardDecisionError) return { kind: 'refused', reason: err.reason };
+    if (err instanceof GuardDecisionError) {
+      if (
+        err.reason === 'fix-round-decision-unavailable' &&
+        err.cause instanceof GuardDecisionError
+      )
+        ctx.logger.warn(
+          { taskId: ctx.taskId, spanId, reason: err.reason, causeReason: err.cause.reason },
+          'guard decision reuse refused',
+        );
+      return { kind: 'refused', reason: err.reason };
+    }
     throw err;
   }
   if (!skipped) return { kind: 'ordinary' };

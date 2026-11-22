@@ -128,7 +128,15 @@ export function prepareGuardDecision(
   const span = spans.find((s) => s.id === spanId);
   if (!span) throw new GuardDecisionError('unknown-span');
   const hash = guardContractHash(ids, contract);
-  return { task, ids, spans, span, hash, reuseRoundZero: !!contract.fixTarget && ctx.round > 0 };
+  return {
+    task,
+    ids,
+    spans,
+    span,
+    hash,
+    fixTarget: contract.fixTarget,
+    reuseRoundZero: !!contract.fixTarget && ctx.round > 0,
+  };
 }
 
 /** The predicate receives only structural identity and the supplied transaction capability. */
@@ -173,7 +181,7 @@ export async function decideLoadedGuardDecision(
   tx: StepContext['db'],
   bounds: Bounds,
 ): Promise<{ decision: GuardDecision; entry: StepRow; replay: boolean }> {
-  const { task, ids, spans, span, hash, reuseRoundZero } = prepared;
+  const { task, ids, spans, span, hash, fixTarget, reuseRoundZero } = prepared;
   const spanId = span.id;
   const decisionRound = reuseRoundZero ? 0 : ctx.round;
   const entry = (s: Span) =>
@@ -256,6 +264,14 @@ export async function decideLoadedGuardDecision(
       if (!(err instanceof GuardDecisionError)) throw err;
       throw new GuardDecisionError('fix-round-decision-unavailable', { cause: err });
     }
+    if (
+      !original.run &&
+      fixTarget &&
+      ids
+        .slice(ids.indexOf(span.firstStepId), ids.indexOf(span.lastStepId) + 1)
+        .includes(fixTarget.stepId)
+    )
+      throw new GuardDecisionError('fix-target-suppressed');
     // Keep a current-round receipt for the existing skip/reopen protocols, while
     // retaining round-zero source, dependency and predecessor references.
     const decision = { ...original, round: ctx.round, generation: current.rerunGeneration };
@@ -365,7 +381,7 @@ export async function evaluateGuardDecision(
   if (!initial) throw new GuardDecisionError('task-unavailable');
   if (initial.executionContract == null) return null;
   const initialContract = parseExecutionContract(initial.executionContract);
-  if (!initialContract.guardedSpans.length && !initialContract.fixTarget) return null;
+  if (!initialContract.guardedSpans.length) return null;
   if (ctx.epoch == null || ctx.rerunGeneration == null)
     throw new GuardDecisionError('missing-fence');
   ctx.throwIfCancelled();

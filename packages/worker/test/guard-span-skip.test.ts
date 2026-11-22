@@ -208,21 +208,26 @@ describe('explicit reset versus recovery', () => {
   });
 });
 
-it.each([null, { version: 1, guardedSpans: [] }])(
-  'ordinary/inert advance and skip are byte-identical no-ops: %j',
-  async (executionContract) => {
-    const transaction = vi.fn();
-    const task = { executionContract };
-    const db = { query: { tasks: { findFirst: async () => task } }, transaction };
-    const ctx = { db, taskId: 't' } as unknown as StepContext;
-    const handoff = vi.fn();
-    expect(await advanceGuardSpan(ctx, 'unused', new Map(), handoff)).toEqual({ kind: 'ordinary' });
-    expect(await skipGuardSpan(ctx, 'unused', new Map())).toBeNull();
-    expect(transaction).not.toHaveBeenCalled();
-    expect(handoff).not.toHaveBeenCalled();
-    expect(task).toEqual({ executionContract });
+it.each([
+  null,
+  { version: 1, guardedSpans: [] },
+  {
+    version: 1,
+    guardedSpans: [],
+    fixTarget: { stepId: 'module.fx.repair', capabilityVersion: 1 },
   },
-);
+])('ordinary/inert advance and skip are byte-identical no-ops: %j', async (executionContract) => {
+  const transaction = vi.fn();
+  const task = { executionContract };
+  const db = { query: { tasks: { findFirst: async () => task } }, transaction };
+  const ctx = { db, taskId: 't' } as unknown as StepContext;
+  const handoff = vi.fn();
+  expect(await skipGuardSpan(ctx, 'unused', new Map())).toBeNull();
+  expect(await advanceGuardSpan(ctx, 'unused', new Map(), handoff)).toEqual({ kind: 'ordinary' });
+  expect(transaction).not.toHaveBeenCalled();
+  expect(handoff).not.toHaveBeenCalled();
+  expect(task).toEqual({ executionContract });
+});
 
 it.each(['statementTimeoutMs', 'lockTimeoutMs', 'predicateTimeoutMs'] as const)(
   'both SQL services refuse an overflowing %s before a transaction',
@@ -298,3 +303,39 @@ it.each([
   ).toEqual({ kind: 'refused', reason });
   expect(handoff).not.toHaveBeenCalled();
 });
+
+it.each(['shared-decision-unavailable', 'malformed-state', 'stale-producer', 'stale-decision'])(
+  'logs the underlying %s while retaining the outer fix-round refusal',
+  async (causeReason) => {
+    const error = new GuardDecisionError('fix-round-decision-unavailable', {
+      cause: new GuardDecisionError(causeReason),
+    });
+    const db = {
+      query: {
+        tasks: {
+          findFirst: async () => {
+            throw error;
+          },
+        },
+      },
+    };
+    const warn = vi.fn();
+    const handoff = vi.fn();
+    const ctx = { db, taskId: 'task', logger: { warn } } as unknown as StepContext;
+    expect(await advanceGuardSpan(ctx, 'work', new Map(), handoff)).toEqual({
+      kind: 'refused',
+      reason: 'fix-round-decision-unavailable',
+    });
+    expect(warn).toHaveBeenCalledExactlyOnceWith(
+      {
+        taskId: 'task',
+        spanId: 'work',
+        reason: 'fix-round-decision-unavailable',
+        causeReason,
+      },
+      'guard decision reuse refused',
+    );
+    expect(handoff).not.toHaveBeenCalled();
+    expect(isRetryableGuardError(error)).toBe(false);
+  },
+);

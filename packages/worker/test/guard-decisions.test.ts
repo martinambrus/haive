@@ -23,7 +23,15 @@ import { sql } from 'drizzle-orm';
 
 it('ordinary and inert tasks return without a transaction, predicate or state write', async () => {
   const transaction = vi.fn();
-  for (const executionContract of [null, { version: 1, guardedSpans: [] }]) {
+  for (const executionContract of [
+    null,
+    { version: 1, guardedSpans: [] },
+    {
+      version: 1,
+      guardedSpans: [],
+      fixTarget: { stepId: 'module.fx.repair', capabilityVersion: 1 },
+    },
+  ]) {
     const db = {
       query: { tasks: { findFirst: async () => ({ executionContract }) } },
       transaction,
@@ -272,6 +280,43 @@ describe('guard decisions from loaded rows', () => {
       expect(evaluate).toHaveBeenCalledOnce();
     },
   );
+  it.each(['work', 'tail', 'cleanup', 'plan', 'report'])(
+    'refuses a suppressed fix target inside the span, but permits one outside: %s',
+    async (target) => {
+      currentContract().fixTarget = { stepId: target, capabilityVersion: 1 };
+      currentContract().guardedSpans = [{ ...span('work', 'work'), lastStepId: 'cleanup' }];
+      evaluate.mockResolvedValue(false);
+      const original = await save();
+      const current = nextRound();
+      evaluate.mockRejectedValue(new Error('must not re-evaluate a suppressed fix target'));
+      const before = structuredClone(rows);
+      const result = decide();
+      if (['work', 'tail', 'cleanup'].includes(target)) {
+        await expect(result).rejects.toMatchObject({
+          name: 'GuardDecisionError',
+          code: 'guard-decision-invalid',
+          reason: 'fix-target-suppressed',
+        });
+      } else {
+        expect(await result).toEqual({ ...original, round: 1, generation: 7 });
+      }
+      expect(rows).toEqual(before);
+      expect(current.guardState).toBeNull();
+      expect(evaluate).toHaveBeenCalledOnce();
+    },
+  );
+  it('permits a running span containing the fix target on reuse and replay', async () => {
+    currentContract().fixTarget = { stepId: 'tail', capabilityVersion: 1 };
+    currentContract().guardedSpans = [{ ...span('work', 'work'), lastStepId: 'cleanup' }];
+    const original = await save();
+    const current = nextRound();
+    evaluate.mockRejectedValue(new Error('must not re-evaluate a running fix target'));
+    const decision = { ...original, round: 1, generation: 7 };
+    expect(await decide()).toEqual(decision);
+    current.guardState = decision;
+    expect(await decide()).toEqual(decision);
+    expect(evaluate).toHaveBeenCalledOnce();
+  });
   it('keeps same-round evaluation for a no-target pin at round one', async () => {
     await save();
     nextRound();

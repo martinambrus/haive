@@ -353,6 +353,30 @@
   },
   {
     "file": "packages/worker/src/step-engine/steps/workflow/_prompt-defect.ts",
+    "symbol": "GUIDANCE_SOURCES",
+    "context": "Set",
+    "value": "07b-phase-4-validate",
+    "count": 1,
+    "reason": "Physical learned-guidance source identity; the immutable fix-target pin selects its target, never a result-role binding."
+  },
+  {
+    "file": "packages/worker/src/step-engine/steps/workflow/_prompt-defect.ts",
+    "symbol": "GUIDANCE_SOURCES",
+    "context": "Set",
+    "value": "08a-browser-verify",
+    "count": 1,
+    "reason": "Physical learned-guidance source identity; the immutable fix-target pin selects its target, never a result-role binding."
+  },
+  {
+    "file": "packages/worker/src/step-engine/steps/workflow/_prompt-defect.ts",
+    "symbol": "GUIDANCE_SOURCES",
+    "context": "Set",
+    "value": "08d-adversarial-qa",
+    "count": 1,
+    "reason": "Physical learned-guidance source identity; the immutable fix-target pin selects its target, never a result-role binding."
+  },
+  {
+    "file": "packages/worker/src/step-engine/steps/workflow/_prompt-defect.ts",
     "symbol": "guidanceTargetStep",
     "context": "readStepRole",
     "value": "@roles",
@@ -2880,14 +2904,6 @@
     "reason": "Implementation summary producer/learning input declaration; physical execution identity remains host-owned."
   },
   {
-    "file": "packages/worker/src/step-engine/steps/workflow/_impl-changes.ts",
-    "symbol": "reportedFiles.implement",
-    "context": "loadPreviousStepOutput",
-    "value": "07-phase-2-implement",
-    "count": 1,
-    "reason": "Physical implementation report fallback only; git and DAG scope collection must never use the summary role."
-  },
-  {
     "file": "packages/worker/src/step-engine/steps/workflow/_insight-loader.ts",
     "symbol": "loadInsightOutputs.sourceRefs.stepId",
     "context": "PropertyAssignment",
@@ -2902,46 +2918,6 @@
     "value": "06c-dag-execute",
     "count": 2,
     "reason": "Physical execution/fix target or historical provenance; summary data grants no routing authority."
-  },
-  {
-    "file": "packages/worker/src/step-engine/steps/workflow/_prompt-defect.ts",
-    "symbol": "GUIDANCE_TARGET.'07b-phase-4-validate'",
-    "context": "PropertyAssignment",
-    "value": "07-phase-2-implement",
-    "count": 1,
-    "reason": "Physical execution/fix target or historical provenance; summary data grants no routing authority."
-  },
-  {
-    "file": "packages/worker/src/step-engine/steps/workflow/_prompt-defect.ts",
-    "symbol": "GUIDANCE_TARGET.'08a-browser-verify'",
-    "context": "PropertyAssignment",
-    "value": "07-phase-2-implement",
-    "count": 1,
-    "reason": "Physical execution/fix target or historical provenance; summary data grants no routing authority."
-  },
-  {
-    "file": "packages/worker/src/step-engine/steps/workflow/_prompt-defect.ts",
-    "symbol": "GUIDANCE_TARGET.'08d-adversarial-qa'",
-    "context": "PropertyAssignment",
-    "value": "07-phase-2-implement",
-    "count": 1,
-    "reason": "Physical execution/fix target or historical provenance; summary data grants no routing authority."
-  },
-  {
-    "file": "packages/worker/src/step-engine/steps/workflow/_prompt-defect.ts",
-    "symbol": "guidanceTargetForReview",
-    "context": "ReturnStatement",
-    "value": "07-phase-2-implement",
-    "count": 1,
-    "reason": "Physical execution/fix target or historical provenance; summary data grants no routing authority."
-  },
-  {
-    "file": "packages/worker/src/step-engine/steps/workflow/_similar-sites.ts",
-    "symbol": "loadTaskSimilarSites.rounds",
-    "context": "eq",
-    "value": "07-phase-2-implement",
-    "count": 1,
-    "reason": "Historical inventory of every physical 07 round; a current-run data edge must never redirect it."
   },
   {
     "file": "packages/worker/src/step-engine/steps/workflow/index.ts",
@@ -3614,14 +3590,6 @@
     "value": "08-phase-5-verify",
     "count": 1,
     "reason": "Retained physical host execution/control or historical provenance identity in INSIGHT_VERIFY; result-role bindings cannot retarget it."
-  },
-  {
-    "file": "packages/worker/src/step-engine/steps/workflow/_prompt-defect.ts",
-    "symbol": "GUIDANCE_TARGET.'07b-phase-4-validate'",
-    "context": "PropertyAssignment",
-    "value": "07b-phase-4-validate",
-    "count": 1,
-    "reason": "Retained physical host execution/control or historical provenance identity in GUIDANCE_TARGET.'07b-phase-4-validate'; result-role bindings cannot retarget it."
   },
   {
     "file": "packages/worker/src/step-engine/steps/workflow/_task-history-digest.ts",
@@ -4590,22 +4558,6 @@
     "value": "08a-browser-verify",
     "count": 1,
     "reason": "Physical browser constraint history for host fix routing; result roles grant no loop authority."
-  },
-  {
-    "file": "packages/worker/src/step-engine/steps/workflow/_prompt-defect.ts",
-    "symbol": "GUIDANCE_TARGET.'08a-browser-verify'",
-    "context": "PropertyAssignment",
-    "value": "08a-browser-verify",
-    "count": 1,
-    "reason": "Physical learned-guidance provenance/target identity, not current-run result selection."
-  },
-  {
-    "file": "packages/worker/src/step-engine/steps/workflow/_prompt-defect.ts",
-    "symbol": "GUIDANCE_TARGET.'08d-adversarial-qa'",
-    "context": "PropertyAssignment",
-    "value": "08d-adversarial-qa",
-    "count": 1,
-    "reason": "Physical learned-guidance provenance/target identity, not current-run result selection."
   },
   {
     "file": "packages/worker/src/step-engine/steps/workflow/_task-history-digest.ts",
