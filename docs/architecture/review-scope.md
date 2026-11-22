@@ -30,8 +30,8 @@ high or critical finding's automatic repair diagnosis. Review dimensions assess 
 and existing project contracts; they do not mandate new translation or other subsystems.
 
 Every reviewing step (07a, 07b, 08a, 08b, 08c, 08c2, 08d) is scoped by ONE collector,
-`collectImplementationFiles` (`_impl-changes.ts`). It unions 07's agent-reported
-`filesTouched`, the DAG issues' `filesModified`, the dirty worktree (`git status --porcelain -z`,
+`collectImplementationFiles` (`_impl-changes.ts`). It unions the fix target's agent-reported
+`filesTouched` (07's, or a pinned custom target's), the DAG issues' `filesModified`, the dirty worktree (`git status --porcelain -z`,
 so no name arrives C-quoted and counts twice), every file the change added or changed since the
 fork point (the fork point against the working tree: a DAG coder commits and merges each issue, so
 a file it did not report is in no other source) and every file a commit since then deleted
@@ -170,7 +170,7 @@ round and every DAG issue as a status row after its checks, and the person acts 
 with feedback that names it, which reaches 07 as a human directive. A site whose file a round after
 its last report edited is MARKED, not dropped (`editedInRound`): that round may have edited the file
 for something else, and dropping the site would then hide one still left unchanged. The mark reads
-07's `filesTouched`, the agent's own and possibly incomplete account, so it is a hint and never
+the fix target's `filesTouched` (07's, or a pinned custom target's), the agent's own and possibly incomplete account, so it is a hint and never
 proof, and the row says the agent LEFT each site unchanged when it reported it rather than
 asserting the site is unchanged now. A manual retry of 07 replaces that round's pass, its reports
 included, exactly as it replaces the pass's summary and `filesTouched`: a retry means "redo this
