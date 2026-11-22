@@ -6,6 +6,7 @@ import { logger } from '@haive/shared';
 import { TaskCancelledError, type StepContext, type StepDefinition } from '@haive/shared/step';
 import { z } from 'zod';
 import { evaluateGuardDecision } from '../src/step-engine/guard-decisions.js';
+import { skipGuardSpan } from '../src/step-engine/guard-span-skip.js';
 
 const url = process.env.GUARD_DECISIONS_TEST_URL;
 if (url && !new URL(url).pathname.startsWith('/guard_decisions_test'))
@@ -143,6 +144,60 @@ describe.skipIf(!url)('durable guard decisions on Postgres', () => {
     before.steps.find((r) => r.id === rows.work!.id)!.guardState = decision;
     expect(after).toEqual(before);
   });
+  it.each([true, false])(
+    'persists a generation-bound round-one copy (%s) and replays without evaluating',
+    async (run) => {
+      evaluate.mockResolvedValue(run);
+      await db
+        .update(schema.tasks)
+        .set({
+          runListSnapshot: ['module.fx.repair', ...ids],
+          executionContract: {
+            ...contract,
+            fixTarget: { stepId: 'module.fx.repair', capabilityVersion: 1 },
+          },
+        })
+        .where(eq(schema.tasks.id, taskId));
+      const original = await evaluateGuardDecision(ctx, 'work', predicates);
+      const [current] = await db
+        .insert(schema.taskSteps)
+        .values({
+          taskId,
+          stepId: 'work',
+          title: 'work',
+          stepIndex: 1,
+          round: 1,
+          rerunGeneration: 4,
+          status: 'pending',
+        })
+        .returning();
+      await db.update(schema.tasks).set({ currentRound: 1 }).where(eq(schema.tasks.id, taskId));
+      const next = { ...ctx, round: 1, taskStepId: current!.id, rerunGeneration: 4 };
+      evaluate.mockRejectedValue(new Error('must not evaluate against the changed tree'));
+      const [decision, duplicate] = await Promise.all([
+        evaluateGuardDecision(next, 'work', predicates),
+        evaluateGuardDecision(next, 'work', predicates),
+      ]);
+      expect(decision).toEqual({ ...original, round: 1, generation: 4 });
+      expect(duplicate).toEqual(decision);
+      expect(await evaluateGuardDecision(next, 'work', predicates)).toEqual(decision);
+      expect((await row('work'))!.guardState).toEqual(original);
+      expect(
+        (await db.query.taskSteps.findFirst({ where: eq(schema.taskSteps.id, current!.id) }))!
+          .guardState,
+      ).toEqual(decision);
+      expect(evaluate).toHaveBeenCalledOnce();
+      if (!run) {
+        expect(await skipGuardSpan(next, 'work', predicates)).toEqual({ nextStepId: 'tail' });
+        expect(await skipGuardSpan(next, 'work', predicates)).toEqual({ nextStepId: 'tail' });
+        expect(
+          (await db.query.taskSteps.findFirst({ where: eq(schema.taskSteps.id, current!.id) }))!
+            .status,
+        ).toBe('skipped');
+        expect(evaluate).toHaveBeenCalledOnce();
+      }
+    },
+  );
   it('serializes duplicate advances and replays after an acknowledgement loss or epoch recovery', async () => {
     const decisions = await Promise.all(
       Array.from({ length: 4 }, () => evaluateGuardDecision(ctx, 'work', predicates)),

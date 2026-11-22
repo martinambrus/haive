@@ -116,19 +116,19 @@ export function prepareGuardDecision(
   )
     throw new GuardDecisionError('task-fence-lost');
   const contract = parseExecutionContract(task.executionContract);
-  if (contract.fixTarget) throw new GuardDecisionError('custom-fix-unavailable');
   const ids = task.runListSnapshot;
   if (!ids || new Set(ids).size !== ids.length)
     throw new GuardDecisionError('missing-run-list-pin');
-  // Reuse PR3's strict endpoint/dependency/shared-args/schema checks; never a live catalog.
-  executionContractPaths(ids, new Map(), contract, predicates);
+  // Validate guard declarations without inventing a capability catalog. Admission
+  // and the fix router own target capability checks; both admission fences stay closed.
+  executionContractPaths(ids, new Map(), { ...contract, fixTarget: undefined }, predicates);
   const spans = [...contract.guardedSpans].sort(
     (a, b) => ids.indexOf(a.firstStepId) - ids.indexOf(b.firstStepId),
   );
   const span = spans.find((s) => s.id === spanId);
   if (!span) throw new GuardDecisionError('unknown-span');
   const hash = guardContractHash(ids, contract);
-  return { task, ids, spans, span, hash };
+  return { task, ids, spans, span, hash, reuseRoundZero: !!contract.fixTarget && ctx.round > 0 };
 }
 
 /** The predicate receives only structural identity and the supplied transaction capability. */
@@ -173,10 +173,12 @@ export async function decideLoadedGuardDecision(
   tx: StepContext['db'],
   bounds: Bounds,
 ): Promise<{ decision: GuardDecision; entry: StepRow; replay: boolean }> {
-  const { task, ids, spans, span, hash } = prepared;
+  const { task, ids, spans, span, hash, reuseRoundZero } = prepared;
   const spanId = span.id;
-  const entry = (s: Span) => rows.find((r) => r.stepId === s.firstStepId && r.round === ctx.round);
-  const current = entry(span);
+  const decisionRound = reuseRoundZero ? 0 : ctx.round;
+  const entry = (s: Span) =>
+    rows.find((r) => r.stepId === s.firstStepId && r.round === decisionRound);
+  const current = rows.find((r) => r.stepId === span.firstStepId && r.round === ctx.round);
   if (
     !current ||
     current.id !== ctx.taskStepId ||
@@ -189,7 +191,7 @@ export async function decideLoadedGuardDecision(
   const predecessor = (s: Span) => {
     const id = ids[ids.indexOf(s.firstStepId) - 1];
     const row = rows
-      .filter((r) => r.stepId === id && r.round <= ctx.round)
+      .filter((r) => r.stepId === id && r.round <= decisionRound)
       .sort((a, b) => b.round - a.round)[0];
     if (!row || row.status !== 'done') throw new GuardDecisionError('producer-not-settled');
     return row;
@@ -203,7 +205,7 @@ export async function decideLoadedGuardDecision(
     const saved = parseGuardDecision(row.guardState);
     if (
       saved.taskId !== task.id ||
-      saved.round !== ctx.round ||
+      saved.round !== decisionRound ||
       saved.spanId !== s.id ||
       saved.generation !== row.rerunGeneration ||
       saved.contractHash !== hash
@@ -244,6 +246,25 @@ export async function decideLoadedGuardDecision(
     loaded.set(s.id, saved);
     return saved;
   };
+  if (reuseRoundZero) {
+    let original: GuardDecision;
+    try {
+      // Round zero's own generation and references remain authoritative. A later
+      // round/generation cannot reinterpret its branch against the changed tree.
+      original = read(span);
+    } catch (err) {
+      if (!(err instanceof GuardDecisionError)) throw err;
+      throw new GuardDecisionError('fix-round-decision-unavailable', { cause: err });
+    }
+    // Keep a current-round receipt for the existing skip/reopen protocols, while
+    // retaining round-zero source, dependency and predecessor references.
+    const decision = { ...original, round: ctx.round, generation: current.rerunGeneration };
+    if (current.guardState != null && !same(parseGuardDecision(current.guardState), decision))
+      throw new GuardDecisionError('stale-decision');
+    if (current.status === 'skipped' && decision.run)
+      throw new GuardDecisionError('entry-fence-lost');
+    return { decision, entry: current, replay: current.guardState != null };
+  }
   if (current.guardState != null) {
     const decision = read(span);
     if (current.status === 'skipped' && decision.run)
