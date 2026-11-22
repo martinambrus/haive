@@ -71,6 +71,11 @@ and one shared job for all other packages. Each job lists its 15 slowest files i
 report only, because a timing gate on shared runners would flake. Env-gated real-store tests run in the
 **Postgres-gated tests** job, or in the step their exemption names.
 
+The **desktop-bridge-go** job runs `gofmt -l`, `go vet` for linux, windows and darwin on amd64 and arm64, and
+`go test -p 1 ./...` for `docker/desktop-extension/bridge/`, in the golang image the extension's Dockerfile pins
+(`scripts/test/ci-desktop-bridge.test.mjs` keeps the two equal). It always starts and reports; its checks run only
+when the bridge, its embedded installers, the Dockerfile or the job's own files changed against the base commit.
+
 ## Running the gated files locally
 
 `pnpm test:gated <selection...>` (`scripts/run-gated-tests.mjs`) runs rows of the CI GATED list the way the CI loop
