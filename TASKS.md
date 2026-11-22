@@ -1039,7 +1039,7 @@ Follow-ups found by the #1316 driver:
 
 ### T752 · FNF[task-create-path-busy-race] · a task-create test races its sleep against the start lock's timeout
 
-status: open · kind: test · found: #1316 driver 2026-11-22 · priority: P4
+status: DONE in #1318 (2026-11-22: the busy block lowered only the repository-tasks bound; plan, root-merge and global-kb waits kept the real 5 s task-start bound. Both now drop to 400 ms; 65/65 via `pnpm test:gated`) · kind: test · found: #1316 driver 2026-11-22 · priority: P4
 
 `packages/api/test/task-create-path.test.ts` ~:1346 races `sleep(5_000)` against `TASK_START_LOCK_TIMEOUT_MS = 5_000` (`packages/database/src/repository-task-lock.ts` ~:28); the margin is about one poll, so host load flips it. It failed once in a full local gated run and passed 3 of 3 alone. Drive the timeout with an injected or fake clock, or a lock held until released, instead of a real sleep (`docs/architecture/testing.md` "No real waiting"). PRE-EXISTING.
 
