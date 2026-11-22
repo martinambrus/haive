@@ -175,7 +175,7 @@ in-progress task steps.
   handles type-loading rejections itself. `tsx watch` does not restart a crash.
   Dependabot may update postgres again. Deploy dependency changes with `pnpm docker rebuild`.
 - Secrets are stored via envelope encryption: per-user DEK encrypts the secret, master KEK from `CONFIG_ENCRYPTION_KEY` encrypts the DEK. AES-256-GCM throughout.
-- Drizzle schema lives in `packages/database/src/schema/`. Migrations are hand-written SQL in `packages/database/migrations/`, applied in filename order by the runner in `packages/database/src/migrate/`, one transaction per file with its `schema_migrations` row written inside it. **To add one:** iterate with `pnpm db:push`, then write `NNNN_name.sql` in that directory, keeping the guarded idempotent style (`ADD COLUMN IF NOT EXISTS`, `DO $$ … EXCEPTION WHEN duplicate_object`) — a developer's database is often legitimately AHEAD of the baseline and must survive your file. Declare a new column LAST in its Drizzle table: `ALTER TABLE ADD COLUMN` appends while `drizzle-kit push` builds the table in declaration order, so a column declared anywhere else makes the two schemas differ by column ORDER and turns `schema-parity` red — a failure no migration can fix. Never edit an applied migration: its sha256 is recorded, and a change hard-fails every install that ran it. `0000_baseline.sql` is generated and FROZEN; re-cutting the schema means a later numbered baseline, never an edit to that one. `pre-baseline/` is the record written before the directory was executable and is NEVER run — see its README: 19 of those files are unsafe to replay and one is destructive.
+- Drizzle schema lives in `packages/database/src/schema/`; migrations are hand-written SQL in `packages/database/migrations/`. Before adding, editing or removing one, read [Database migrations](docs/architecture/migrations.md): new columns go LAST, applied files are never edited, deleted or reverted (rollback is roll-forward), the baseline is frozen, `pre-baseline/` never runs.
 - Each router in `api/src/routes/` mounts its own `requireAuth`, except the WebSocket, task/MCP-token and
   editor routers, which authenticate themselves. Any other route it does not cover (one above it, or in a
   router without it) is public and must be in `PUBLIC` (`api/test/anonymous-routes.test.ts`) with its
@@ -369,6 +369,8 @@ listed here, and keep this file under 32 KiB: Codex CLI reads no more of it than
 
 ### Releases
 
+- [Database migrations](docs/architecture/migrations.md): adding one, never edit, delete or revert an
+  applied file, roll-forward rollback, baseline adoption, `DROPPED_SINCE_BASELINE`, exit codes.
 - [Cutting a release](docs/architecture/release.md): the tag is the release, images,
   `release.json`. `release.yml`.
 
