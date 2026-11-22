@@ -1020,9 +1020,21 @@ status: open · kind: docs · found: #1311 driver 2026-11-21 · priority: P4
 
 ### T751 · FNF[gated-test-local-runner] · no local runner for the CI-only database tests
 
-status: open · kind: chore · found: #1313 driver 2026-11-21 · priority: P4
+status: open for follow-ups 1-3; main item DONE in #1316 (2026-11-22: `pnpm test:gated <file|package|all>`, reads the CI GATED list, throwaway containers removed on every exit) · kind: chore · found: #1313 driver 2026-11-21 · priority: P4
 
 The real-Postgres test files in the CI gated list skip without their env var, so a driver only runs them by hand-building a throwaway Postgres and the right URL per file; a change that breaks one (as #1313's first build did) is caught only by CI or by luck. Add a script that starts a throwaway Postgres 18, migrates it, and runs a named gated file (or all of them) with the env var the list declares. PRE-EXISTING.
+
+Follow-ups found by the #1316 driver:
+
+1. A signal during an in-flight `docker run -d` could let `docker rm -fv` run before the daemon creates the container (`scripts/run-gated-tests.mjs` ~:154-157, cleanup ~:203-216); remove once more after a short pause. NEW, unverified, narrow.
+2. Not pinned by a test: the double-signal guard and first-signal exit code (~:91-92), the exit-handler cleanup (~:220), `pg_isready -h 127.0.0.1` (~:172), the Redis PONG and noeviction checks (~:178-187), the `docker port` multi-line parse (~:161). NEW, coverage.
+3. `scripts/lib/ci-gated.mjs` ~:3 imports the test helper `scripts/test/workflow.mjs` from non-test tooling. Harmless now. Low.
+
+### T752 · FNF[task-create-path-busy-race] · a task-create test races its sleep against the start lock's timeout
+
+status: open · kind: test · found: #1316 driver 2026-11-22 · priority: P4
+
+`packages/api/test/task-create-path.test.ts` ~:1346 races `sleep(5_000)` against `TASK_START_LOCK_TIMEOUT_MS = 5_000` (`packages/database/src/repository-task-lock.ts` ~:28); the margin is about one poll, so host load flips it. It failed once in a full local gated run and passed 3 of 3 alone. Drive the timeout with an injected or fake clock, or a lock held until released, instead of a real sleep (`docs/architecture/testing.md` "No real waiting"). PRE-EXISTING.
 
 ### T721 · The Claude usage grant reaches sandbox environments
 
