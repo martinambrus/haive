@@ -753,12 +753,13 @@ the stack lock, does not exist yet; Start and Stop take the stack lock inside it
 a second window with a message that says the lock clears itself, once the contender has seen a beat
 (within about 5 s). A hard termination leaves the file, and the next operation clears it after 60 s
 without a change (up to two minutes when the stack lock was left too); a tomb that cannot be removed stays
-beside it, harmless. Normal completion and handled
-signals release it. Earlier bridges took this name as a folder, which has no beat and never lapses: the
-bridge refuses a folder at once, naming it, and never deletes it or waits on it, since a live older
-operation cannot be told from a dead one. Its message says to check this install's containers and delete
-that folder by hand. An older bridge that meets the lock file refuses the same way (its `mkdir` finds the
-name taken), so old and new bridges still exclude each other.
+beside it, harmless. Normal completion and handled signals release it. Earlier bridges took this name as
+a folder, which has no beat and never lapses: the bridge refuses a folder at once, naming it, and never
+deletes it or waits on it, since a live older operation cannot be told from a dead one. Its message says
+to check this install's containers and delete that folder by hand. An older bridge that meets the lock
+file refuses the same way (its `mkdir` finds the name taken), so old and new bridges still exclude each
+other. If an older bridge makes its folder at that name in the instant a stale file is being broken, the
+break renames the folder back; a file created there first keeps the name.
 Keep the tab open during long operations. Processes have a
 30-minute deadline; a timeout or close can leave a completed install or partially
 started stack, so refresh status and inspect logs before retrying. Cancellation kills

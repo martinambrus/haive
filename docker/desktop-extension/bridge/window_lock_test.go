@@ -425,3 +425,33 @@ func TestWindowLockInstallTakesItStatusDoesNot(t *testing.T) {
 		t.Fatal("status made no engine call to observe")
 	}
 }
+
+func TestWindowLockBreakKeepsAFolderMadeInTheGap(t *testing.T) {
+	b := fixture(t)
+	path := windowPathOf(b)
+	if err := os.WriteFile(path, rawRecord(randomHex(t), "extension", 1), 0644); err != nil {
+		t.Fatal(err)
+	}
+	b.sleep = func(time.Duration) {}
+	b.lockCfg = lockConfig{stale: 3 * time.Millisecond, poll: time.Millisecond}
+	b.lockCfg.beforeBreak = func() {
+		os.Remove(path)
+		os.Mkdir(path, 0o700)
+	}
+	if _, err := b.takeWindowLock(context.Background()); err == nil {
+		t.Fatal("the first take succeeded over a folder")
+	}
+	if info, err := os.Lstat(path); err != nil || !info.IsDir() {
+		t.Errorf("the folder is not at the lock path: %v", err)
+	}
+	if entries, err := os.ReadDir(path); err != nil || len(entries) != 0 {
+		t.Errorf("the folder is not empty: %v %v", entries, err)
+	}
+	if tombs, _ := filepath.Glob(path + ".stale.*"); len(tombs) != 0 {
+		t.Errorf("a tomb was left: %v", tombs)
+	}
+	b.lockCfg.beforeBreak = nil
+	if _, err := b.takeWindowLock(context.Background()); err == nil || !strings.Contains(err.Error(), "delete that folder") {
+		t.Errorf("second take: %v", err)
+	}
+}

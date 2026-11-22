@@ -418,6 +418,10 @@ func (b bridge) breakStale(path string, expected []byte, cfg lockConfig) bool {
 	}
 	displaced, err := readLockFile(tomb, cfg.maxBytes)
 	if err != nil {
+		if errors.Is(err, errLockNotRegular) {
+			// A folder an older bridge made here is its live lock: put it back.
+			rename(tomb, path)
+		}
 		return false
 	}
 	if bytes.Equal(displaced, expected) {
