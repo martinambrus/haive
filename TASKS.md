@@ -976,7 +976,7 @@ Refusals raised before `readInstall()` (`install-locked`, `install-file-linked`;
 
 ### T746 · FNF[dead-judge-missing-type] · the dead-task judge throws on a live task whose type definition is gone
 
-status: open · kind: fix · found: #1305 driver 2026-11-21 · priority: P4
+status: dropped 2026-11-22 (unreachable): both type deletes lock the type row and refuse while any task row of that type exists, any status (`api/src/routes/task-types.ts` ~:869-886 admin delete; `api/src/modules/purge.ts` ~:113-161 module purge, locking type rows in the create path's order); the create path reads the row FOR SHARE. Only a manual SQL delete leaves a live task without a definition. Reopen on a measured occurrence · kind: fix · found: #1305 driver 2026-11-21 · priority: P4
 
 `judgeCandidate` (`worker/src/queues/dead-task-boot.ts` ~:390) reaches `run-list.ts` ~:327, which throws "has no definition" for a live task whose type definition is missing: an error log at every boot and the task is never judged. Same for snapshot-bearing tasks; #1305 also makes it reachable for snapshot-less pinned ones. Admin type delete is refused while tasks exist (`api/src/routes/task-types.ts` ~:880); module-seeded types were not checked, so verify reachability first. PRE-EXISTING.
 
@@ -1020,7 +1020,7 @@ status: open · kind: design · found: #1307 driver 2026-11-21 · priority: P4
 
 ### T750 · FNF[migration-rules-docs] · migration rules live only in code
 
-status: open · kind: docs · found: #1311 driver 2026-11-21 · priority: P4
+status: done 2026-11-22 #1319 (2c7ab90a9): new `docs/architecture/migrations.md` states never edit, delete or revert an applied migration (ahead vs fork, exit 7), roll-forward rollback, `DROPPED_SINCE_BASELINE`, adoption and exit codes; AGENTS.md migration bullet moved there (32,758 -> 32,055 bytes) and indexed · kind: docs · found: #1311 driver 2026-11-21 · priority: P4
 
 1. No doc says an applied migration must never be deleted or reverted (a database that applied a migration its code lacks is refused as a fork once a later one is pending); the rule lives only in `database/src/migrate/plan.ts` ~:33-36 and `migrate/index.ts` ~:274-281. Rollback after apply is roll-forward only. PRE-EXISTING.
 2. Dropping a baseline table needs a `DROPPED_SINCE_BASELINE` entry (`migrate/baseline.ts`, pinned by `baseline.test.ts`), or journal-less adoption refuses the database; documented only in code. AGENTS.md has 10 bytes spare, so this belongs in a new `docs/architecture/` topic file listed in its index (shrink an entry to make room). PRE-EXISTING.
