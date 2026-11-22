@@ -17,17 +17,18 @@ types only), `pre_answer_defaults`, `step_loop_limit_defaults`, `fix_loop`, `ena
 `source` (`builtin`, `admin` or `module:<moduleId>`), `requires_repository`, `sort_order`,
 `content_hash`, `prompt_steps`, nullable `base_slug varchar(128)` and `changes jsonb`, then nullable
 `execution_contract jsonb` appended by guarded migration 0245, then nullable
-`data_role_bindings jsonb` appended last by guarded migration 0246. Author choices are copied into
+`data_role_bindings jsonb` appended by guarded migration 0246, then `selects_own_providers boolean NOT NULL
+DEFAULT false` appended last by guarded migration 0249. Author choices are copied into
 the immutable v3 task pin at INSERT; they never update an existing task.
 
 Each source owns its own columns, and every upsert carries `setWhere source = <own source> AND some
 owned column IS DISTINCT FROM excluded`:
 
-| source        | written by                        | owns on re-sync                                                                          | an admin may PATCH                                                                                            |
-| ------------- | --------------------------------- | ---------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------- |
-| `builtin`     | the worker's boot seeder          | strategy, step ids, content hash, source, selectable, requires repository                | display name, description, sort order; `enabled` only on a selectable type other than onboarding and workflow |
-| `module:<id>` | the boot seeder from the manifest | strategy, step ids, description, defaults, selectable, requires repository, content hash | enabled, sort order, display name                                                                             |
-| `admin`       | the admin api only                | —                                                                                        | every field of `taskTypeUpdateSchema`                                                                         |
+| source        | written by                        | owns on re-sync                                                                                                 | an admin may PATCH                                                                                            |
+| ------------- | --------------------------------- | --------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------- |
+| `builtin`     | the worker's boot seeder          | strategy, step ids, content hash, source, selectable, requires repository                                       | display name, description, sort order; `enabled` only on a selectable type other than onboarding and workflow |
+| `module:<id>` | the boot seeder from the manifest | strategy, step ids, description, defaults, selectable, requires repository, selects own providers, content hash | enabled, sort order, display name                                                                             |
+| `admin`       | the admin api only                | —                                                                                                               | every field of `taskTypeUpdateSchema`                                                                         |
 
 So a row held by another source is never overwritten, and an unchanged row is never rewritten: its
 `updated_at` is the version the editor's save precondition reads, and a no-op rewrite at every boot
@@ -130,7 +131,9 @@ into a built-in fails the boot loudly instead of being converted.
 
 **Module seeds.** Static strategy only; steps are core or the module's own `module.<id>.*`, never a
 prompt step or another module's step, never repeated (a repeated step made the queue hand the step to
-itself forever). Those rules are manifest checks: a seed that breaks them fails its manifest, and the
+itself forever). A seed with `selectsOwnProviders: true` lists only its own module's steps: its steps choose
+their providers themselves (for example from a consent step), so the type gets no model-health canary,
+and a core CLI step in it would lose its probe. Those rules are manifest checks: a seed that breaks them fails its manifest, and the
 worker does not boot. A seed is also checked like an admin type — defaults always, composition only
 when every step has a composable entry (an internal step's needs are unknown). A seed that fails those
 checks is logged, reported and not written; a slug held by another source is left alone and reported.
@@ -252,7 +255,9 @@ detail and static PATCH routes still pass a stored inert contract to the contrac
 returns the same verdict with different issue indexes.
 
 **Traits returned with the definition:** the run list snapshot (a non-built-in static list that
-dispatches a CLI and has no canary gets `00-model-health-workflow` prepended; a prompt step counts as a
+dispatches a CLI and has no canary gets `00-model-health-workflow` prepended, except a module-seeded
+static type whose seed sets `selectsOwnProviders`, since the canary would probe the task's CLI, a provider
+such a type never calls; a prompt step counts as a
 CLI step even with an unsynced catalog); the prompt steps the snapshot uses, copied as stored; preset
 answers and loop limits for non-built-ins (request limits win); `simplifyCode` (a non-built-in with
 `07a-code-simplify`); `takesRootLock` (workflow, or a list with `00a-sync-base`, `01-worktree-setup` or
