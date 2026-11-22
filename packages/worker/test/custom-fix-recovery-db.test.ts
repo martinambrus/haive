@@ -398,6 +398,46 @@ describe.skipIf(!url)('recovery of a fix round on Postgres', () => {
       });
     });
 
+    it('a direct duplicate loop_back leaves the entered round and events unchanged', async () => {
+      const id = await seedTask(leg);
+      const source = await seedRow(leg, id, 'REVIEW', 0, 'done', { endedAt: new Date() });
+      const ctx = await ctxFor(leg, id);
+      const result = {
+        status: 'loop_back' as const,
+        row: source,
+        sourceStepId: source.stepId,
+        diagnosis: 'defect',
+      };
+      await handleResult(db, ctx, source.stepId, result);
+      const before = await trace(leg, id);
+      await handleResult(db, ctx, source.stepId, result);
+      expect(await trace(leg, id)).toEqual(before);
+      expect(await eventsOf(id, 'fix_loop.requested')).toHaveLength(1);
+      expect(await eventsOf(id, 'fix_loop.started')).toHaveLength(1);
+      expect(await eventsOf(id, 'step.loop_back')).toHaveLength(1);
+    });
+
+    it('a direct duplicate loop_back does not reoffer an already parked cap gate', async () => {
+      const id = await seedTask(leg, { maxFixRounds: 0 });
+      const source = await seedRow(leg, id, 'REVIEW', 0, 'done', { endedAt: new Date() });
+      const ctx = await ctxFor(leg, id);
+      const result = {
+        status: 'loop_back' as const,
+        row: source,
+        sourceStepId: source.stepId,
+        diagnosis: 'defect',
+      };
+      await handleResult(db, ctx, source.stepId, result);
+      const before = await trace(leg, id);
+      const parked = await rowOf(source.id);
+      expect(parked.status).toBe('waiting_form');
+      await handleResult(db, ctx, source.stepId, result);
+      expect(await trace(leg, id)).toEqual(before);
+      expect(await rowOf(source.id)).toEqual(parked);
+      expect(await eventsOf(id, 'fix_loop.requested')).toHaveLength(1);
+      expect(await eventsOf(id, 'fix_loop.escalated')).toHaveLength(1);
+    });
+
     if (!leg.pin)
       describe('Retry of an earlier source card', () => {
         const rewoundGate = async () => {

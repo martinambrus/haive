@@ -335,13 +335,13 @@ describe.skipIf(!url)('a hand-off write that loses its row or task says so, on P
     before: string[];
   }
   const open = async (site: Site, ctx: Partial<ResolvedTaskContext> = {}): Promise<Case> => {
-    const taskId = await makeTask(site.task);
+    const taskId = await makeTask({ currentRound: site.row.round ?? 0, ...site.task });
     const row = await makeRow(taskId, site.row);
     await site.seed?.(taskId);
     return {
       taskId,
       row,
-      ctx: ctxFor(taskId, { ...site.ctx, ...ctx }),
+      ctx: ctxFor(taskId, { currentRound: row.round, ...site.ctx, ...ctx }),
       before: await eventTypes(taskId),
     };
   };
@@ -711,6 +711,11 @@ describe.skipIf(!url)('a hand-off write that loses its row or task says so, on P
                   .returning()
               )[0]!
             : await makeRow(w.taskId, { stepId: validateId, round, status: 'done', output });
+        // Simulate the forward walk returning to this check before handing its result off.
+        await db
+          .update(schema.tasks)
+          .set({ currentStepId: validateId, currentRound: round })
+          .where(eq(schema.tasks.id, w.taskId));
         await handleResult(db, { ...ctx, currentRound: round }, validateId, {
           status: 'done',
           row,
@@ -739,6 +744,10 @@ describe.skipIf(!url)('a hand-off write that loses its row or task says so, on P
         issues: [{ severity: 'high', file: 'a.ts', description: 'still blocking' }],
       };
       const row = await makeRow(w.taskId, { stepId: validateId, round: 3, status: 'done', output });
+      await db
+        .update(schema.tasks)
+        .set({ currentStepId: validateId, currentRound: 3 })
+        .where(eq(schema.tasks.id, w.taskId));
       h.adds.length = 0;
       await handleResult(db, { ...ctx, currentRound: 3 }, validateId, {
         status: 'done',

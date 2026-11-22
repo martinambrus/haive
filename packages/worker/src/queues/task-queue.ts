@@ -2598,16 +2598,35 @@ export async function handleResult(
       return;
     }
     case 'loop_back': {
+      // Mirror the advance guard for a direct replay of this hand-off: after entry the
+      // pointer has moved, and after escalation the source is already a parked gate.
+      // Check both in the existing task read before appending any events. A real Retry
+      // restores the pointer and resets the source, so its new diagnosis still lands.
+      const taskRow = await db.query.tasks.findFirst({
+        where: and(
+          eq(schema.tasks.id, ctx.taskId),
+          or(
+            isNull(schema.tasks.currentStepId),
+            and(
+              eq(schema.tasks.currentStepId, stepId),
+              eq(schema.tasks.currentRound, result.row.round),
+            ),
+          ),
+          sql`not exists (
+            select 1 from ${schema.taskSteps} as loop_source
+            where loop_source.id = ${result.row.id}
+              and loop_source.status = 'waiting_form'
+          )`,
+        ),
+        columns: { maxFixRounds: true },
+      });
+      if (!taskRow) return;
       if (stepId === '08-phase-5-verify')
         await recordGate3Check(db, ctx, result.row, 'verify_failed');
       // A downstream step found a blocking defect. Bump the round and re-enter at the
       // implementation step (which re-runs in fix mode with this diagnosis); the
       // forward walk then re-runs the whole post-implementation chain as round-N rows.
       const nextRound = result.row.round + 1;
-      const taskRow = await db.query.tasks.findFirst({
-        where: eq(schema.tasks.id, ctx.taskId),
-        columns: { maxFixRounds: true },
-      });
       const cap = taskRow?.maxFixRounds ?? DEFAULT_MAX_FIX_ROUNDS;
       await record(db, ctx.taskId, result.row.id, 'step.loop_back', {
         stepId,
