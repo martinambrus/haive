@@ -10,6 +10,7 @@ import {
   setContainerCleanupRunner,
 } from '../src/queues/task-queue.js';
 import { resetStepAndDownstream } from '../src/queues/_step-reset.js';
+import * as stepOwnership from '../src/step-engine/step-ownership.js';
 import { advanceStep } from '../src/step-engine/index.js';
 import { runtimeAdmission } from '../src/sandbox/runtime-admission.js';
 import { PROVIDER_FATAL_HEADLINES } from '../src/queues/cli-exec/failure-class.js';
@@ -759,14 +760,51 @@ describe('a job that resets steps itself', () => {
     expect(h.state.add).not.toHaveBeenCalled();
   });
 
+  it('resets the ordered batch before locking the source and re-reading the pointer', async () => {
+    h.state.readsAnswer = true;
+    const reset = vi.mocked(resetStepAndDownstream).mockResolvedValueOnce(null);
+    const lock = vi.spyOn(stepOwnership, 'lockOwnedStep');
+    const read = vi.spyOn(db.query.tasks, 'findFirst');
+    try {
+      const ctx = workflowTaskContext();
+      await handleResult(db as never, ctx as never, 'epoch-job-step', loopBack as never);
+      expect(reset).toHaveBeenLastCalledWith(
+        db,
+        'task-1',
+        '07-phase-2-implement',
+        1,
+        5,
+        false,
+        ['ts-1'],
+        undefined,
+      );
+      expect(lock).toHaveBeenCalledExactlyOnceWith(db, 'ts-1');
+      expect(reset.mock.invocationCallOrder.at(-1)).toBeLessThan(lock.mock.invocationCallOrder[0]!);
+      expect(lock.mock.invocationCallOrder[0]).toBeLessThan(read.mock.invocationCallOrder.at(-1)!);
+      expect(h.state.add.mock.lastCall?.[1]).toMatchObject({ round: 1, epoch: 5 });
+    } finally {
+      lock.mockRestore();
+      read.mockRestore();
+    }
+  });
+
   it('enters no fix round once a Retry reset its source step, whatever the epoch', async () => {
     h.state.readsAnswer = true;
     // The Retry has written the steps and not yet the task, so the epoch still matches.
     h.state.sourceOwned = false;
-    vi.mocked(resetStepAndDownstream).mockClear();
+    vi.mocked(resetStepAndDownstream).mockResolvedValueOnce(null);
     const ctx = workflowTaskContext();
     await handleResult(db as never, ctx as never, 'epoch-job-step', loopBack as never);
-    expect(vi.mocked(resetStepAndDownstream)).not.toHaveBeenCalled();
+    expect(vi.mocked(resetStepAndDownstream)).toHaveBeenLastCalledWith(
+      db,
+      'task-1',
+      '07-phase-2-implement',
+      1,
+      5,
+      false,
+      ['ts-1'],
+      undefined,
+    );
     expect(h.state.taskWrites).toEqual([]);
     expect(h.state.events).toEqual(['step.loop_back']);
     expect(h.state.add).not.toHaveBeenCalled();

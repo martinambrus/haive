@@ -528,6 +528,7 @@ describe.skipIf(!url)('recovery of a fix round on Postgres', () => {
         await finishTarget.promise;
         return apply(...args);
       });
+      const refused = vi.spyOn(logger, 'info');
       const loser = handleResult(db, { ...ctx }, source.stepId, result);
       let winnerAdvance: Promise<void> | undefined;
       try {
@@ -546,6 +547,10 @@ describe.skipIf(!url)('recovery of a fix round on Postgres', () => {
         expect(running?.status).toBe('running');
         resumeLoser.resolve();
         await loser;
+        expect(refused).toHaveBeenCalledExactlyOnceWith(
+          { taskId: id, stepId: source.stepId, round: 0, reason: 'task_pointer_moved_under_lock' },
+          expect.any(String),
+        );
         expect(await taskOf(id)).toMatchObject({
           currentStepId: leg.ids.TARGET,
           currentRound: 1,
@@ -563,10 +568,137 @@ describe.skipIf(!url)('recovery of a fix round on Postgres', () => {
         } finally {
           read.mockRestore();
           applying.mockRestore();
+          refused.mockRestore();
         }
       }
       expect((await taskOf(id)).currentStepId).toBe(leg.ids.REVIEW);
       expect(h.adds.at(-1)?.data).toMatchObject({ round: 1, epoch: BASE_EPOCH });
+    });
+
+    it('loop_back resets stale next-round rows and enqueues at the bumped epoch', async () => {
+      const id = await seedTask(leg);
+      const source = await seedRow(leg, id, 'REVIEW', 0, 'done');
+      const target = await seedRow(leg, id, 'TARGET', 1, 'done', { output: { stale: true } });
+      const review = await seedRow(leg, id, 'REVIEW', 1, 'done', { output: { stale: true } });
+      const ctx = await ctxFor(leg, id);
+      await handleResult(db, ctx, source.stepId, {
+        status: 'loop_back',
+        row: source,
+        sourceStepId: source.stepId,
+        diagnosis: 'defect',
+      });
+      for (const row of [target, review])
+        expect(await rowOf(row.id)).toMatchObject({
+          status: 'pending',
+          output: null,
+          rerunGeneration: 1,
+        });
+      expect(await rowOf(source.id)).toEqual(source);
+      expect(await taskOf(id)).toMatchObject({
+        currentStepId: leg.ids.TARGET,
+        currentRound: 1,
+        orchestrationEpoch: BASE_EPOCH + 1,
+      });
+      expect(ctx.orchestrationEpoch).toBe(BASE_EPOCH + 1);
+      expect(h.adds).toEqual([
+        {
+          name: TASK_JOB_NAMES.ADVANCE_STEP,
+          data: expect.objectContaining({
+            stepId: leg.ids.TARGET,
+            round: 1,
+            epoch: BASE_EPOCH + 1,
+          }),
+        },
+      ]);
+      expect(await eventsOf(id, 'fix_loop.requested')).toHaveLength(1);
+      expect(await eventsOf(id, 'fix_loop.started')).toHaveLength(1);
+    });
+
+    it('a Stop rolls back the stale next-round reset when the task write refuses', async () => {
+      const id = await seedTask(leg);
+      const source = await seedRow(leg, id, 'REVIEW', 0, 'done');
+      const target = await seedRow(leg, id, 'TARGET', 1, 'done', { output: { stale: true } });
+      const review = await seedRow(leg, id, 'REVIEW', 1, 'done', { output: { stale: true } });
+      const ctx = await ctxFor(leg, id);
+      // A crash-left live invocation lets the real Stop fail the task while leaving
+      // these finished rows alone; Stop does not move the task epoch.
+      await db.insert(schema.cliInvocations).values({
+        taskId: id,
+        taskStepId: source.id,
+        mode: 'cli',
+        prompt: 'crash-left run',
+      });
+      const { stopActiveCliInvocations } = await import(apiSource('lib/task-control.ts'));
+      expect(await stopActiveCliInvocations(db, id, { failTask: true })).toMatchObject({
+        cancelled: 1,
+        stopped: 0,
+        failedAt: expect.any(String),
+      });
+      const stopped = await taskOf(id);
+      expect(stopped).toMatchObject({ status: 'failed', orchestrationEpoch: BASE_EPOCH });
+      const refused = vi.spyOn(logger, 'info');
+      try {
+        await handleResult(db, ctx, source.stepId, {
+          status: 'loop_back',
+          row: source,
+          sourceStepId: source.stepId,
+          diagnosis: 'defect',
+        });
+        expect(await rowOf(target.id)).toEqual(target);
+        expect(await rowOf(review.id)).toEqual(review);
+        expect(await rowOf(source.id)).toEqual(source);
+        expect(await taskOf(id)).toEqual(stopped);
+        expect(ctx.orchestrationEpoch).toBe(BASE_EPOCH);
+        expect(h.adds).toEqual([]);
+        expect(await eventsOf(id, 'fix_loop.requested')).toEqual([]);
+        expect(await eventsOf(id, 'fix_loop.started')).toEqual([]);
+        expect(refused).toHaveBeenCalledExactlyOnceWith(
+          { taskId: id, stepId: source.stepId, round: 0, reason: 'task_write_refused' },
+          expect.any(String),
+        );
+      } finally {
+        refused.mockRestore();
+      }
+    });
+
+    it('a lost source rolls back the stale next-round reset', async () => {
+      const id = await seedTask(leg);
+      const source = await seedRow(leg, id, 'REVIEW', 0, 'done');
+      const target = await seedRow(leg, id, 'TARGET', 1, 'done');
+      const review = await seedRow(leg, id, 'REVIEW', 1, 'done');
+      const ctx = await ctxFor(leg, id);
+      // Retry writes the source before moving the task epoch.
+      await db
+        .update(schema.taskSteps)
+        .set({ status: 'pending' })
+        .where(eq(schema.taskSteps.id, source.id));
+      const refused = vi.spyOn(logger, 'info');
+      try {
+        await handleResult(db, ctx, source.stepId, {
+          status: 'loop_back',
+          row: source,
+          sourceStepId: source.stepId,
+          diagnosis: 'defect',
+        });
+        expect(await rowOf(target.id)).toEqual(target);
+        expect(await rowOf(review.id)).toEqual(review);
+        expect((await rowOf(source.id)).status).toBe('pending');
+        expect(await taskOf(id)).toMatchObject({
+          currentStepId: source.stepId,
+          currentRound: 0,
+          orchestrationEpoch: BASE_EPOCH,
+        });
+        expect(ctx.orchestrationEpoch).toBe(BASE_EPOCH);
+        expect(h.adds).toEqual([]);
+        expect(await eventsOf(id, 'fix_loop.requested')).toEqual([]);
+        expect(await eventsOf(id, 'fix_loop.started')).toEqual([]);
+        expect(refused).toHaveBeenCalledExactlyOnceWith(
+          { taskId: id, stepId: source.stepId, round: 0, reason: 'source_not_owned' },
+          expect.any(String),
+        );
+      } finally {
+        refused.mockRestore();
+      }
     });
 
     it('a null task pointer is not evidence of a move, including under the source lock', async () => {
@@ -586,6 +718,8 @@ describe.skipIf(!url)('recovery of a fix round on Postgres', () => {
     it('logs only task_missing_under_lock when the locked task read finds nothing', async () => {
       const id = await seedTask(leg);
       const source = await seedRow(leg, id, 'REVIEW', 0, 'done');
+      const target = await seedRow(leg, id, 'TARGET', 1, 'done');
+      const review = await seedRow(leg, id, 'REVIEW', 1, 'done');
       const transaction = db.transaction.bind(db);
       const logged = vi.spyOn(logger, 'info');
       // Deleting a real task cascades its source, failing lockOwnedStep first. Inject
@@ -609,6 +743,8 @@ describe.skipIf(!url)('recovery of a fix round on Postgres', () => {
         expect(await eventsOf(id, 'fix_loop.requested')).toEqual([]);
         expect(await eventsOf(id, 'fix_loop.started')).toEqual([]);
         expect(h.adds).toEqual([]);
+        expect(await rowOf(target.id)).toEqual(target);
+        expect(await rowOf(review.id)).toEqual(review);
         expect(await taskOf(id)).toMatchObject({
           currentStepId: source.stepId,
           currentRound: 0,
