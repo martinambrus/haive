@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { eq } from 'drizzle-orm';
+import { eq, sql } from 'drizzle-orm';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createDatabase, schema, type Database } from '@haive/database';
 import { warnStep } from '../src/project-state/branch-revert.js';
@@ -9,8 +9,15 @@ import {
   appendStepWarning,
   stepWarningAppend,
 } from '../src/step-engine/step-ownership.js';
+import { appendInvocationStepWarning } from '../src/queues/cli-exec/handlers.js';
 import { resetStepAndDownstream } from '../src/queues/_step-reset.js';
-import { deleteUsers, seedStepRow, seedTask, seedUser } from './support/step-integrations-db.js';
+import {
+  deleteUsers,
+  seedStepRow,
+  seedTask,
+  seedUser,
+  runValues,
+} from './support/step-integrations-db.js';
 
 const url = process.env.STEP_WARNING_APPEND_TEST_URL;
 if (url && !new URL(url).pathname.startsWith('/step_warning_append_test'))
@@ -107,6 +114,87 @@ describe.skipIf(!url)('a step warning appended in one statement, on Postgres', (
       await appendStepWarning(db, row.id, 'added');
       expect(await warningOf(row.id)).toBe('before added');
     }
+  });
+
+  describe('invocation attempt fence', () => {
+    const seedRun = async (stepId: string, runTaskId = taskId) => {
+      const [run] = await db
+        .insert(schema.cliInvocations)
+        .values(runValues(runTaskId, stepId))
+        .returning();
+      return run!;
+    };
+
+    it('appends live invocation notes once, preserving earlier notes', async () => {
+      const row = await seed({ warningMessage: 'merge note' });
+      const run = await seedRun(row.id);
+      await appendInvocationStepWarning(db, run.id, row.id, 'fallback note');
+      await appendInvocationStepWarning(db, run.id, row.id, 'fallback note');
+      expect(await warningOf(row.id)).toBe('merge note fallback note');
+    });
+
+    it('writes nothing after Retry resets and reclaims the same step row', async () => {
+      const retryTaskId = await seedTask(db, userId, null);
+      const row = await seedStepRow(db, retryTaskId, {
+        status: 'waiting_cli',
+        warningMessage: 'old attempt',
+      });
+      const run = await seedRun(row.id, retryTaskId);
+      expect(await resetStepAndDownstream(db, retryTaskId, row.stepId, row.round)).not.toBeNull();
+      await db
+        .update(schema.taskSteps)
+        .set({ status: 'running', warningMessage: 'new attempt' })
+        .where(eq(schema.taskSteps.id, row.id));
+      await appendInvocationStepWarning(db, run.id, row.id, 'late fallback');
+      expect(await warningOf(row.id)).toBe('new attempt');
+    });
+
+    it('waits for an uncommitted supersede before deciding whether to append', async () => {
+      const row = await seed({ warningMessage: 'new attempt' });
+      const run = await seedRun(row.id);
+      const held = Promise.withResolvers<number>();
+      const release = Promise.withResolvers<void>();
+      const resetting = db.transaction(async (tx) => {
+        const [pid] = await tx.execute<{ pid: number }>(sql`select pg_backend_pid() as pid`);
+        await tx
+          .update(schema.cliInvocations)
+          .set({ supersededAt: new Date() })
+          .where(eq(schema.cliInvocations.id, run.id));
+        held.resolve(pid!.pid);
+        await release.promise;
+      });
+      void resetting.catch(held.reject);
+      const pid = await held.promise;
+      const writing = appendInvocationStepWarning(db, run.id, row.id, 'late fallback');
+      try {
+        // Observe a real database lock, rather than guessing how long the writer takes.
+        await expect
+          .poll(
+            async () => {
+              const [waiter] = await db.execute<{ blocked: boolean }>(sql`
+            select exists (select 1 from pg_stat_activity
+              where wait_event_type = 'Lock'
+                and ${pid}::int = any(pg_blocking_pids(pid))) as blocked`);
+              return waiter!.blocked;
+            },
+            { timeout: 2000, interval: 10 },
+          )
+          .toBe(true);
+      } finally {
+        release.resolve();
+        await Promise.all([resetting, writing]);
+      }
+      expect(await warningOf(row.id)).toBe('new attempt');
+    });
+
+    it('does not annotate a step through another invocation link or a missing run', async () => {
+      const row = await seed({ warningMessage: 'before' });
+      const other = await seed();
+      const run = await seedRun(other.id);
+      await appendInvocationStepWarning(db, run.id, row.id, 'wrong link');
+      await appendInvocationStepWarning(db, randomUUID(), row.id, 'missing run');
+      expect(await warningOf(row.id)).toBe('before');
+    });
   });
 
   describe('inside a merge-dir section', () => {

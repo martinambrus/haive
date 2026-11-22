@@ -202,6 +202,28 @@ export async function writeStepSummary(
   });
 }
 
+/** A fallback note belongs to its invocation's attempt. Take the run before the step, as
+ *  Retry does, and hold it through the append so a reset cannot slip between check and write. */
+export async function appendInvocationStepWarning(
+  db: Database,
+  invocationId: string,
+  stepId: string,
+  note: string,
+): Promise<void> {
+  await db.transaction(async (tx) => {
+    const [run] = await tx
+      .select({
+        supersededAt: schema.cliInvocations.supersededAt,
+        taskStepId: schema.cliInvocations.taskStepId,
+      })
+      .from(schema.cliInvocations)
+      .where(eq(schema.cliInvocations.id, invocationId))
+      .for('update');
+    if (!run || run.supersededAt || run.taskStepId !== stepId) return;
+    await appendStepWarning(tx, stepId, note);
+  });
+}
+
 /** Lands only while its run stands, since a Retry supersedes a step's runs before it resets the row;
  *  a row left `pending` or `skipped` is not the failure it describes. */
 async function writeLoginHint(
@@ -391,8 +413,9 @@ async function runCliExecJob(
             'codex app-server transport failed; the task continues on codex exec',
           );
           if (payload.taskStepId)
-            await appendStepWarning(
+            await appendInvocationStepWarning(
               db,
+              row.id,
               payload.taskStepId,
               codexAppServerFallbackWarning(codexAppServerFailure, codexBinaryVersion),
             );
