@@ -321,16 +321,28 @@ export function releaseOnSignal(
   lock: StackLock,
   exit: (code: number) => never = process.exit,
   signals: NodeJS.Signals[] = ['SIGTERM'],
-): () => void {
+  cleanup: { beforeRelease?: () => Promise<void>; onError?: (error: unknown) => void } = {},
+): () => Promise<void> | undefined {
+  let stopping: Promise<void> | undefined;
   const handlers = signals.map((signal) => {
     const handler = () => {
-      void lock.release().finally(() => exit(128 + (constants.signals[signal] ?? 0)));
+      stopping ??= (async () => {
+        try {
+          await cleanup.beforeRelease?.();
+        } catch (error) {
+          cleanup.onError?.(error);
+        } finally {
+          await lock.release();
+          exit(128 + (constants.signals[signal] ?? 0));
+        }
+      })();
     };
     process.on(signal, handler);
     return [signal, handler] as const;
   });
   return () => {
     for (const [signal, handler] of handlers) process.off(signal, handler);
+    return stopping;
   };
 }
 

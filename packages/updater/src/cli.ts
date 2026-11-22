@@ -204,6 +204,10 @@ async function rollbackFailed(ctx: UpgradeContext, err: unknown): Promise<number
   return EXIT.rollbackFailed;
 }
 
+function isChildCleanupRefusal(err: unknown): err is UpgradeRefusal {
+  return err instanceof UpgradeRefusal && err.refusal === 'updater-child-cleanup-failed';
+}
+
 export async function main(options: { stackLock?: StackLockOptions } = {}): Promise<number> {
   if (flag('manifest') && flag('manifest-image')) {
     emit('error', { message: '--manifest and --manifest-image are mutually exclusive' });
@@ -297,8 +301,9 @@ async function upgradeOwned(options: { stackLock?: StackLockOptions }): Promise<
 
   let locked = false;
   let stackLock: StackLock | undefined;
-  let stopSignals: (() => void) | undefined;
+  let stopSignals: (() => Promise<void> | undefined) | undefined;
   let hasRun = false;
+  let errorRunId: string | undefined;
   let fromVersion = 'unknown';
   let installFieldsStarted = false;
   let toVersion = attemptVersion(arg('version'));
@@ -356,7 +361,11 @@ async function upgradeOwned(options: { stackLock?: StackLockOptions }): Promise<
         throw new UpgradeRefusal('install-locked', describeBusy(outcome));
       if (outcome.status === 'held') {
         stackLock = outcome.lock;
-        stopSignals = releaseOnSignal(stackLock);
+        stopSignals = releaseOnSignal(stackLock, process.exit, ['SIGTERM'], {
+          beforeRelease: dk.oneShotSignalCleanup(),
+          onError: (err) =>
+            emit('updater-child-cleanup-failed', { message: safeErrorMessage(err) }),
+        });
       }
       // Waiting for the lock can outlast what the first read saw: the snapshot's database restart
       // ends the first updater's session lock, so a second updater can pass it and wait while the
@@ -365,6 +374,7 @@ async function upgradeOwned(options: { stackLock?: StackLockOptions }): Promise<
       live = await findLiveRun(sql);
       hasRun = live !== null;
     }
+    errorRunId = live?.id;
     await requireRegularInstallFiles(installDir);
     if (live || !flag('check')) await cleanupInstallTemps(installDir);
     fromVersion = (await readEnvVar(envFile, 'HAIVE_VERSION')) ?? 'unknown';
@@ -412,7 +422,7 @@ async function upgradeOwned(options: { stackLock?: StackLockOptions }): Promise<
       try {
         await resume(ctx, live.phase);
       } catch (err) {
-        if (decideResume(live.phase).action !== 'reverse') throw err;
+        if (isChildCleanupRefusal(err) || decideResume(live.phase).action !== 'reverse') throw err;
         return rollbackFailed(ctx, err);
       }
       return EXIT.ok;
@@ -548,6 +558,7 @@ async function upgradeOwned(options: { stackLock?: StackLockOptions }): Promise<
     });
 
     hasRun = true;
+    errorRunId = runId;
     const ctx: UpgradeContext = {
       sql,
       runId,
@@ -584,8 +595,7 @@ async function upgradeOwned(options: { stackLock?: StackLockOptions }): Promise<
     } catch (err) {
       // A failed child cleanup leaves a possible writer alive: keep the run for recovery instead
       // of rolling back concurrently with it. The next holder checks its labels before recovery.
-      if (err instanceof UpgradeRefusal && err.refusal === 'updater-child-cleanup-failed')
-        throw err;
+      if (isChildCleanupRefusal(err)) throw err;
       const message = err instanceof Error ? err.message : String(err);
       report('error', { message });
       // Anything that throws before commit is reversible by construction; say so and undo it
@@ -601,12 +611,18 @@ async function upgradeOwned(options: { stackLock?: StackLockOptions }): Promise<
       await phaseCommit(ctx);
       return EXIT.ok;
     } catch (err) {
+      if (isChildCleanupRefusal(err)) throw err;
       const message = err instanceof Error ? err.message : String(err);
       report('error', { message, phase: 'commit', next: 'run the updater again to finish it' });
       return EXIT.failed;
     }
   } catch (err) {
     if (err instanceof UpgradeRefusal) {
+      if (errorRunId && isChildCleanupRefusal(err)) {
+        await recordRunError(sql, errorRunId, scrubErrorPaths(safeErrorMessage(err))).catch(
+          () => {},
+        );
+      }
       report('refused', { refusal: err.refusal, message: err.message });
       return EXIT.refused;
     }
@@ -635,7 +651,8 @@ async function upgradeOwned(options: { stackLock?: StackLockOptions }): Promise<
         emit('attempt-record-failed', { message: safeErrorMessage(err) });
       }
     }
-    stopSignals?.();
+    // A child can settle while SIGTERM cleanup is still running. Join it before releasing.
+    await stopSignals?.();
     await stackLock?.release();
     await sql.end({ timeout: 5 }).catch(() => {});
   }

@@ -583,6 +583,32 @@ describe('releaseOnSignal', () => {
     expect(await exited).toBe(exitCode);
     expect(await readdir(dir)).toEqual([]);
   });
+  it('waits for one cleanup across repeated signals before releasing', async () => {
+    const lock = await held();
+    let finish: () => void = () => {};
+    const cleanup = vi.fn(
+      () =>
+        new Promise<void>((resolve) => {
+          finish = resolve;
+        }),
+    );
+    let done: (code: number) => void = () => {};
+    const exited = new Promise<number>((resolve) => {
+      done = resolve;
+    });
+    const exit = vi.fn((code: number) => done(code) as never);
+    releaseOnSignal(lock, exit, ['SIGTERM'], { beforeRelease: cleanup });
+    process.emit('SIGTERM');
+    process.emit('SIGTERM');
+    await Promise.resolve();
+    expect(cleanup).toHaveBeenCalledTimes(1);
+    expect(exit).not.toHaveBeenCalled();
+    expect(await parse()).toMatchObject({ token: lock.token });
+    finish();
+    expect(await exited).toBe(143);
+    expect(exit).toHaveBeenCalledTimes(1);
+    expect(await readdir(dir)).toEqual([]);
+  });
   it('handles SIGTERM only by default, leaving SIGINT alone', async () => {
     const lock = await held();
     const dispose = releaseOnSignal(lock, vi.fn() as never);

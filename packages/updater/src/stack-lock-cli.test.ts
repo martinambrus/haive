@@ -310,19 +310,41 @@ describe('every exit path releases the lock', () => {
     await gone();
     await files();
   });
-  it('leaves the run for recovery when a cancelled child cannot be removed', async () => {
-    vi.mocked(run.phaseMigrate).mockRejectedValue(
-      new UpgradeRefusal(
+  it.each(['migrate', 'commit', 'resume', 'resume-commit'] as const)(
+    'journals a cleanup refusal and exits 3 without rollback during %s',
+    async (phase) => {
+      const refusal = new UpgradeRefusal(
         'updater-child-cleanup-failed',
-        'could not stop migration containers (EACCES)',
-      ),
-    );
-    expect(await main(opts)).toBe(3);
-    expect(run.rollback).not.toHaveBeenCalled();
-    expect(run.phaseVerify).not.toHaveBeenCalled();
-    expect(journal.recordAttempt).not.toHaveBeenCalled();
-    await gone();
-  });
+        'could not stop migration containers (EACCES); original client failure: ERR_CHILD_PROCESS_STDIO_MAXBUFFER',
+      );
+      if (phase.startsWith('resume')) {
+        vi.mocked(journal.findLiveRun).mockResolvedValue({
+          ...liveRun,
+          phase: phase === 'resume-commit' ? 'commit' : 'migrate',
+        } as never);
+        vi.mocked(run.resume).mockRejectedValueOnce(refusal);
+      } else {
+        vi.mocked(phase === 'commit' ? run.phaseCommit : run.phaseMigrate).mockRejectedValueOnce(
+          refusal,
+        );
+      }
+      vi.mocked(journal.recordRunError).mockResolvedValueOnce(undefined);
+      expect(await main(opts)).toBe(3);
+      expect(run.rollback).not.toHaveBeenCalled();
+      expect(journal.recordRunError).toHaveBeenCalledWith(
+        h.sql,
+        phase.startsWith('resume') ? 'live' : 'new-run',
+        expect.stringContaining('ERR_CHILD_PROCESS_STDIO_MAXBUFFER'),
+      );
+      expect(journal.recordAttempt).not.toHaveBeenCalled();
+      expect(
+        vi.mocked(console.log).mock.calls.map(([line]) => JSON.parse(String(line))),
+      ).toContainEqual(
+        expect.objectContaining({ event: 'refused', refusal: 'updater-child-cleanup-failed' }),
+      );
+      await gone();
+    },
+  );
   it('verify failure rolled back 5', async () => {
     vi.mocked(run.phaseVerify).mockResolvedValue(false);
     vi.mocked(run.rollback).mockImplementation(mark);
@@ -582,4 +604,157 @@ describe('read-only and absent installs', () => {
     expect(events()).toContain('stack-lock-skipped');
     expect(run.resume).toHaveBeenCalled();
   });
+});
+
+describe('SIGTERM while a one-shot is running', () => {
+  it('keeps the lock when the Docker client settles before SIGTERM cleanup finishes', async () => {
+    const saved = process.listeners('SIGTERM') as NodeJS.SignalsListener[];
+    process.removeAllListeners('SIGTERM');
+    let started: () => void = () => {};
+    let removed: () => void = () => {};
+    let committed: () => void = () => {};
+    let finishChild: () => void = () => {};
+    let finishRemoval: () => void = () => {};
+    const running = new Promise<void>((resolve) => {
+      started = resolve;
+    });
+    const removing = new Promise<void>((resolve) => {
+      removed = resolve;
+    });
+    const commit = new Promise<void>((resolve) => {
+      committed = resolve;
+    });
+    const child = new Promise<{ stdout: string }>((resolve) => {
+      finishChild = () => resolve({ stdout: '' });
+    });
+    const removal = new Promise<{ stdout: string }>((resolve) => {
+      finishRemoval = () => resolve({ stdout: '' });
+    });
+    h.dockerExec.mockImplementation(async (_cmd, args) => {
+      if (args[0] === 'run') {
+        started();
+        return child;
+      }
+      if (args[1] === '-aq') return { stdout: 'abc123\n' };
+      if (args[0] === 'rm') {
+        removed();
+        return removal;
+      }
+      return { stdout: '' };
+    });
+    vi.mocked(run.phaseMigrate).mockImplementation(async () => {
+      await dk.runOneShot('target', ['migrate'], {});
+    });
+    vi.mocked(run.phaseCommit).mockImplementation(async () => {
+      committed();
+    });
+    const release = vi.spyOn(StackLock.prototype, 'release');
+    let exitDone: () => void = () => {};
+    const exited = new Promise<void>((resolve) => {
+      exitDone = resolve;
+    });
+    vi.spyOn(process, 'exit').mockImplementation(() => {
+      exitDone();
+      return undefined as never;
+    });
+    const result = main({ stackLock: { ...quick, sleep: idleSleep } });
+    try {
+      await running;
+      process.emit('SIGTERM');
+      await removing;
+      finishChild();
+      await commit;
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(release).not.toHaveBeenCalled();
+      expect(await heldBy()).toBe('updater');
+    } finally {
+      finishChild();
+      finishRemoval();
+      await exited;
+      await result;
+      process.removeAllListeners('SIGTERM');
+      for (const listener of saved) process.on('SIGTERM', listener);
+    }
+  });
+
+  it.each([false, true])(
+    'removes owned children before release even when cleanup fails (%s)',
+    async (fails) => {
+      const saved = process.listeners('SIGTERM') as NodeJS.SignalsListener[];
+      process.removeAllListeners('SIGTERM');
+      let finish: () => void = () => {};
+      let started: () => void = () => {};
+      const running = new Promise<void>((resolve) => {
+        started = resolve;
+      });
+      const child = new Promise<{ stdout: string }>((resolve) => {
+        finish = () => resolve({ stdout: '' });
+      });
+      const checks: Array<string | null> = [];
+      h.dockerExec.mockImplementation(async (_cmd, args) => {
+        if (args[0] === 'run') {
+          started();
+          return child;
+        }
+        if (args[0] === 'ps' && args[1] === '-aq') {
+          checks.push(await heldBy());
+          return { stdout: 'abc123\n' };
+        }
+        if (args[0] === 'rm') {
+          checks.push(await heldBy());
+          if (fails) throw Object.assign(new Error('secret stderr'), { code: 'EACCES' });
+        }
+        return { stdout: '' };
+      });
+      vi.mocked(run.phaseMigrate).mockImplementation(async () => {
+        await dk.runOneShot('target', ['migrate'], {});
+      });
+      let exitDone: (code: number) => void = () => {};
+      const exited = new Promise<number>((resolve) => {
+        exitDone = resolve;
+      });
+      vi.spyOn(process, 'exit').mockImplementation((code) => {
+        exitDone(Number(code));
+        return undefined as never;
+      });
+      const result = main({ stackLock: { ...quick, sleep: idleSleep } });
+      try {
+        await running;
+        process.emit('SIGTERM');
+        expect(await exited).toBe(143);
+        expect(checks).toEqual(fails ? ['updater', 'updater', 'updater'] : ['updater', 'updater']);
+        expect(await heldBy()).toBeNull();
+        const launch = h.dockerExec.mock.calls.find(
+          ([, args]) => args[0] === 'run',
+        )![1] as string[];
+        const attemptLabel = launch.find((arg) => arg.startsWith('org.haive.updater.attempt='));
+        expect(h.dockerExec.mock.calls.find(([, args]) => args[1] === '-aq')?.[1]).toEqual([
+          'ps',
+          '-aq',
+          '--filter',
+          'label=haive.install=haive',
+          '--filter',
+          `label=${attemptLabel}`,
+          '--filter',
+          'label=org.haive.updater.role',
+        ]);
+        if (fails) {
+          expect(
+            vi.mocked(console.log).mock.calls.map(([line]) => JSON.parse(String(line))),
+          ).toContainEqual(
+            expect.objectContaining({
+              event: 'updater-child-cleanup-failed',
+              message: expect.stringContaining('EACCES'),
+            }),
+          );
+        }
+      } finally {
+        finish();
+        await result;
+        process.removeAllListeners('SIGTERM');
+        for (const listener of saved) process.on('SIGTERM', listener);
+      }
+    },
+  );
 });

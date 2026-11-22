@@ -86,7 +86,9 @@ export async function requireNoRunningOneShots(
       'updater-child-running',
       `another updater attempt still has running one-shot containers for this install: ${blockers
         .map((child) => `${child.id} (${child.role || 'unknown role'})`)
-        .join(', ')}; wait for them to finish, then retry`,
+        .join(
+          ', ',
+        )}; wait for them to finish, or if a survivor is known dead or hung, remove it with docker rm -f <id>, then retry`,
     );
   }
 }
@@ -123,31 +125,49 @@ function errorCodeOrClass(error: unknown): string | number {
   return code ?? (error instanceof Error ? error.constructor.name : typeof error);
 }
 
-/** A cancelled Docker client does not stop its container. Remove only this attempt's role
- * before its caller can roll back or release the lock. Never swallow a failed cleanup. */
-async function stopOneShots(install: string, attempt: string, roleLabel: string): Promise<void> {
+/** Capture ownership while registering the handler: process signal callbacks have no owner scope. */
+export function oneShotSignalCleanup(): () => Promise<void> {
+  const owner = oneShotOwner.getStore();
+  if (!owner) throw new Error('one-shot ownership scope is missing');
+  return () => stopOneShots(owner.install, owner.attempt);
+}
+
+/** A terminated Docker client does not stop its container. Remove only this attempt's role
+ * (all its roles on SIGTERM) before its caller can roll back or release the lock. */
+async function stopOneShots(
+  install: string,
+  attempt: string,
+  roleLabel = ONE_SHOT_ROLE,
+): Promise<void> {
   const options = {
     timeout: ONE_SHOT_CHECK_TIMEOUT_MS,
     maxBuffer: ONE_SHOT_CHECK_MAX_BUFFER,
     killSignal: 'SIGKILL' as const,
   };
+  const filters = [
+    'ps',
+    '-aq',
+    '--filter',
+    `label=${ONE_SHOT_INSTALL}=${install}`,
+    '--filter',
+    `label=${ONE_SHOT_ATTEMPT}=${attempt}`,
+    '--filter',
+    `label=${roleLabel}`,
+  ];
+  const list = async () => {
+    const { stdout } = await exec('docker', filters, options);
+    return stdout.split(/\s+/).filter(Boolean);
+  };
   try {
-    const { stdout } = await exec(
-      'docker',
-      [
-        'ps',
-        '-aq',
-        '--filter',
-        `label=${ONE_SHOT_INSTALL}=${install}`,
-        '--filter',
-        `label=${ONE_SHOT_ATTEMPT}=${attempt}`,
-        '--filter',
-        `label=${roleLabel}`,
-      ],
-      options,
-    );
-    const ids = stdout.split(/\s+/).filter(Boolean);
-    if (ids.length) await exec('docker', ['rm', '-f', ...ids], options);
+    const ids = await list();
+    if (ids.length) {
+      try {
+        await exec('docker', ['rm', '-f', ...ids], options);
+      } catch (error) {
+        // --rm can win this race. Only a fresh listing with identical filters proves success.
+        if ((await list()).length) throw error;
+      }
+    }
   } catch (error) {
     throw new UpgradeRefusal(
       'updater-child-cleanup-failed',
@@ -171,15 +191,27 @@ async function run(
   try {
     const { stdout } = await exec(cmd, args, {
       cwd,
-      timeout: timeoutMs,
+      // Main's SIGTERM timeout was proxied to PID 1 and did not bound these one-shots.
+      // Keep long snapshots, migrations and builds unbounded; SIGKILL still bounds maxBuffer kills.
+      timeout: owner ? 0 : timeoutMs,
       ...(owner ? { killSignal: 'SIGKILL' as const } : {}),
       maxBuffer: 32 * 1024 * 1024,
     });
     return stdout.trim();
   } catch (err) {
-    const failure = err as (NodeJS.ErrnoException & { killed?: boolean }) | null;
-    if (owner && roleLabel && (failure?.killed === true || failure?.code === 'ABORT_ERR')) {
-      await stopOneShots(owner.install, owner.attempt, roleLabel);
+    const failure = err as (NodeJS.ErrnoException & { signal?: string | null }) | null;
+    if (
+      owner &&
+      roleLabel &&
+      (failure?.signal != null || failure?.code === 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER')
+    ) {
+      try {
+        await stopOneShots(owner.install, owner.attempt, roleLabel);
+      } catch (cleanupError) {
+        if (cleanupError instanceof UpgradeRefusal)
+          cleanupError.message += `; original client failure: ${errorCodeOrClass(err)}`;
+        throw cleanupError;
+      }
     }
     throw new Error(redactSecrets(err instanceof Error ? err.message : String(err)));
   }

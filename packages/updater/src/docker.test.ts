@@ -3,6 +3,7 @@ import { execFile, type ChildProcess } from 'node:child_process';
 import {
   buildOwnModules,
   composeUp,
+  localImages,
   redactSecrets,
   resolveImageSettings,
   requireNoRunningOneShots,
@@ -118,6 +119,7 @@ describe('one-shot ownership after an updater dies', () => {
     builderExec.mockResolvedValue({ stdout: 'def456\t\tmigration\n' });
     await expect(withOneShotOwner('team_install', requireNoRunningOneShots)).rejects.toMatchObject({
       refusal: 'updater-child-running',
+      message: expect.stringContaining('docker rm -f <id>'),
     });
   });
 
@@ -134,7 +136,11 @@ describe('one-shot ownership after an updater dies', () => {
     );
   });
 
-  it.each([{ killed: true, signal: 'SIGKILL' }, { code: 'ABORT_ERR' }])(
+  it.each([
+    { code: null, killed: true, signal: 'SIGKILL' },
+    { code: null, killed: false, signal: 'SIGKILL' },
+    { code: 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER' },
+  ])(
     'removes only this attempt and role before propagating a cancellation (%j)',
     async (fields) => {
       vi.useFakeTimers();
@@ -172,7 +178,7 @@ describe('one-shot ownership after an updater dies', () => {
           `label=${role}=migration`,
         ]);
         expect(builderExec.mock.calls[2]![1]).toEqual(['rm', '-f', 'abc123', 'def456']);
-        for (const call of builderExec.mock.calls)
+        for (const call of builderExec.mock.calls.slice(1))
           expect(call[2]).toMatchObject({ killSignal: 'SIGKILL' });
         release();
         const error = await result;
@@ -192,16 +198,109 @@ describe('one-shot ownership after an updater dies', () => {
   });
 
   it('refuses cleanup failure with a safe diagnostic', async () => {
-    builderExec.mockRejectedValueOnce(Object.assign(new Error('timeout'), { killed: true }));
+    builderExec.mockRejectedValueOnce(
+      Object.assign(new Error('client killed'), {
+        killed: true,
+        code: 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER',
+      }),
+    );
     builderExec.mockResolvedValueOnce({ stdout: 'abc123\n' });
     builderExec.mockRejectedValueOnce(
       Object.assign(new Error('secret stderr'), { code: 'EACCES' }),
     );
+    builderExec.mockResolvedValueOnce({ stdout: 'abc123\n' });
     await expect(
       withOneShotOwner('team_install', () => runOneShot('target', [], {})),
     ).rejects.toMatchObject({
       refusal: 'updater-child-cleanup-failed',
       message: expect.stringContaining('EACCES'),
+    });
+    // No raw client message or Docker stderr is retained, but its original stable code is.
+    builderExec.mockReset();
+    builderExec
+      .mockRejectedValueOnce(
+        Object.assign(new TypeError('secret client'), { killed: true, signal: 'SIGKILL' }),
+      )
+      .mockRejectedValueOnce(Object.assign(new Error('secret stderr'), { code: 'EACCES' }));
+    await expect(
+      withOneShotOwner('team_install', () => runOneShot('target', [], {})),
+    ).rejects.toMatchObject({
+      refusal: 'updater-child-cleanup-failed',
+      message: expect.stringContaining('original client failure: TypeError'),
+    });
+  });
+
+  it('keeps the original buffer error code in a cleanup refusal', async () => {
+    builderExec
+      .mockRejectedValueOnce(
+        Object.assign(new Error('secret client'), {
+          killed: true,
+          code: 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER',
+        }),
+      )
+      .mockRejectedValueOnce(Object.assign(new Error('secret stderr'), { code: 'EACCES' }));
+    await expect(
+      withOneShotOwner('team_install', () => runOneShot('target', [], {})),
+    ).rejects.toMatchObject({
+      refusal: 'updater-child-cleanup-failed',
+      message: expect.stringContaining(
+        'original client failure: ERR_CHILD_PROCESS_STDIO_MAXBUFFER',
+      ),
+    });
+  });
+
+  it('leaves every labelled one-shot unbounded and unlabelled calls unchanged', async () => {
+    builderExec.mockResolvedValue({ stdout: '' });
+    await withOneShotOwner('team_install', async () => {
+      await snapshotVolume('pg', '/snapshots', 'pg.tgz');
+      await restoreVolume('pg', '/snapshots', 'pg.tgz');
+      await runOneShot('target', ['migrate'], {});
+      await buildOwnModules('builder', '/modules', {});
+      await localImages();
+    });
+    for (const [, args, options] of builderExec.mock.calls) {
+      if (args[0] === 'run') expect(options.timeout).toBe(0);
+      else {
+        expect(options).toEqual({
+          cwd: undefined,
+          timeout: args[0] === 'pull' ? 1_800_000 : 600_000,
+          maxBuffer: 32 * 1024 * 1024,
+        });
+      }
+    }
+  });
+
+  it.each(['already removing', 'unrelated secret stderr'])(
+    'accepts a failed removal only after the same filters prove absence (%s)',
+    async (stderr) => {
+      builderExec
+        .mockRejectedValueOnce(
+          Object.assign(new Error('client stopped'), { killed: true, signal: 'SIGKILL' }),
+        )
+        .mockResolvedValueOnce({ stdout: 'abc123\n' })
+        .mockRejectedValueOnce(Object.assign(new Error(stderr), { code: 1 }))
+        .mockResolvedValueOnce({ stdout: '' });
+      await expect(
+        withOneShotOwner('team_install', () => runOneShot('target', [], {})),
+      ).rejects.toThrow('client stopped');
+      expect(builderExec).toHaveBeenCalledTimes(4);
+      expect(builderExec.mock.calls[3]).toEqual(builderExec.mock.calls[1]);
+    },
+  );
+
+  it('refuses when a failed removal cannot be re-checked', async () => {
+    builderExec
+      .mockRejectedValueOnce(
+        Object.assign(new TypeError('client stopped'), { killed: true, signal: 'SIGKILL' }),
+      )
+      .mockResolvedValueOnce({ stdout: 'abc123\n' })
+      .mockRejectedValueOnce(Object.assign(new Error('secret stderr'), { code: 1 }))
+      .mockRejectedValueOnce(Object.assign(new Error('secret stderr'), { code: 'EACCES' }));
+    await expect(
+      withOneShotOwner('team_install', () => runOneShot('target', [], {})),
+    ).rejects.toMatchObject({
+      refusal: 'updater-child-cleanup-failed',
+      message: expect.stringContaining('TypeError'),
     });
   });
 
