@@ -18,7 +18,11 @@ test('desktop bridge has an independent, bounded Go job using the Dockerfile too
   );
   const image = dockerfile.match(/golang:[^\s@]+@sha256:[a-f\d]{64}/)?.[0];
   assert.ok(image);
-  assert.equal(job.env.GO_IMAGE, image);
+  assert.equal(
+    job.env.GO_IMAGE,
+    image,
+    'desktop-bridge-go GO_IMAGE in ci.yml must equal the Dockerfile Go stage image; copy it over',
+  );
   assert.equal(job.needs, undefined);
   assert.equal(job.if, undefined);
   assert.equal(job['continue-on-error'], undefined);

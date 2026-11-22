@@ -115,7 +115,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     env:
-      # Keep the bridge's toolchain identical to its extension image build.
+      # Keep the bridge's toolchain identical to its extension image build. Dependabot bumps only the
+      # Dockerfile; copy its new reference here when ci-desktop-bridge.test.mjs reports the mismatch.
       GO_IMAGE: golang:1.25-alpine@sha256:1ae0735f00daffa3aaf1363a5184c0d2dc55c78e3db4ec70241cdac97bf84b59
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -175,7 +176,8 @@ jobs:
 
       - name: Go vet
         if: ${{ !cancelled() && steps.prepare.conclusion == 'success' }}
-        timeout-minutes: 4
+        # Six cold-cache targets on 2 CPUs took 104 s locally; leave room for a slower runner.
+        timeout-minutes: 8
         run: |
           docker run --rm --cpus=2 --memory=1g \
             -e CGO_ENABLED=0 -e GOMAXPROCS=2 \
