@@ -763,9 +763,10 @@ describe('a job that resets steps itself', () => {
     h.state.readsAnswer = true;
     // The Retry has written the steps and not yet the task, so the epoch still matches.
     h.state.sourceOwned = false;
-    vi.mocked(resetStepAndDownstream).mockResolvedValueOnce(null);
+    vi.mocked(resetStepAndDownstream).mockClear();
     const ctx = workflowTaskContext();
     await handleResult(db as never, ctx as never, 'epoch-job-step', loopBack as never);
+    expect(vi.mocked(resetStepAndDownstream)).not.toHaveBeenCalled();
     expect(h.state.taskWrites).toEqual([]);
     expect(h.state.events).toEqual(['step.loop_back']);
     expect(h.state.add).not.toHaveBeenCalled();

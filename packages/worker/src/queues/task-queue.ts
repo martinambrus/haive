@@ -2800,78 +2800,72 @@ export async function handleResult(
         logLost('fix_target'),
       );
       if (!target) return;
-      // If a prior attempt at this round left a terminal row (e.g. a reaped/failed CLI
-      // whose invocation was never superseded — a worker reload mid-CLI), reset it so the
-      // re-entry runs a FRESH invocation instead of re-consuming the dead one. Returns null
-      // (no-op) when the round is new, which is the normal case. Mirrors the revise reset.
-      const reentryReset = await resetStepAndDownstream(
-        db,
-        ctx.taskId,
-        target.metadata.id,
-        nextRound,
-        ctx.orchestrationEpoch,
-        false,
-        [],
-        ctx.executionContract,
-      );
-      if (reentryReset === 'superseded') {
-        logger.info(
-          { taskId: ctx.taskId, stepId },
-          'fix loop not entered: the task moved to a newer epoch before its reset',
-        );
-        return;
-      }
-      if (reentryReset) ctx.orchestrationEpoch = reentryReset.newEpoch;
-      // The round is recorded with the pointer write that hands the task to it, and only while the
-      // source row is still this pass's and the task is still at the epoch this job holds: a round
-      // a Retry overtook would leave a `started` that counts toward the cap, and a diagnosis nobody
-      // was sent. The row is taken first, as a Retry takes the steps before the task.
-      const entered = await db.transaction(async (tx) => {
-        if (!(await lockOwnedStep(tx, result.row.id))) return false;
-        // Another pass can have handed off after the unlocked guard. The shared
-        // source-row lock serializes those passes; re-read after taking it.
-        const current = await tx.query.tasks.findFirst({
-          where: eq(schema.tasks.id, ctx.taskId),
-          columns: { currentStepId: true, currentRound: true },
-        });
-        if (!current) {
-          logRefusal('task_missing_under_lock');
-          return false;
-        }
-        if (current.currentStepId !== stepId || current.currentRound !== result.row.round) {
-          logRefusal('task_pointer_moved_under_lock');
-          return false;
-        }
+      // The reset, round events and pointer commit together, only after the source lock
+      // and pointer re-read prove this pass can still enter. A concurrent loser must not
+      // reset the target the winner has just created or bump its advance's epoch.
+      let entered;
+      try {
+        entered = await db.transaction(async (tx) => {
+          if (!(await lockOwnedStep(tx, result.row.id))) return 'source_not_owned';
+          const current = await tx.query.tasks.findFirst({
+            where: eq(schema.tasks.id, ctx.taskId),
+            columns: { currentStepId: true, currentRound: true },
+          });
+          if (!current) return 'task_missing_under_lock';
+          if (
+            current.currentStepId != null &&
+            (current.currentStepId !== stepId || current.currentRound !== result.row.round)
+          )
+            return 'task_pointer_moved_under_lock';
 
-        const pointed = await markTaskRunningWithStep(
-          tx,
-          ctx.taskId,
-          target.metadata.id,
-          computeGlobalStepIndex(target.metadata.workflowType, target.metadata.index),
-          nextRound,
-          { epoch: ctx.orchestrationEpoch },
-        );
-        if (!pointed) return false;
-        await recordFixLoopRequest(tx, ctx.taskId, result.row.id, {
-          diagnosis: result.diagnosis,
-          sourceStepId: result.sourceStepId,
-          round: nextRound,
-          guidance: result.guidance,
-          unfencedLegacy: result.unfencedLegacy,
+          // A prior attempt at this round may have left a terminal row. As in Continue,
+          // reset on this transaction and include the owned source in the held row batch.
+          // A genuinely new round has no target row, so the reset is a no-op.
+          const reset = await resetStepAndDownstream(
+            tx,
+            ctx.taskId,
+            target.metadata.id,
+            nextRound,
+            ctx.orchestrationEpoch,
+            false,
+            [result.row.id],
+            ctx.executionContract,
+          );
+          if (reset === 'superseded') return 'reset_superseded';
+          const epoch = reset?.newEpoch ?? ctx.orchestrationEpoch;
+          const pointed = await markTaskRunningWithStep(
+            tx,
+            ctx.taskId,
+            target.metadata.id,
+            computeGlobalStepIndex(target.metadata.workflowType, target.metadata.index),
+            nextRound,
+            { epoch },
+          );
+          // Roll back the reset too when a Stop or Retry refuses the pointer write.
+          if (!pointed) throw new StepSupersededError(result.row.id);
+          await recordFixLoopRequest(tx, ctx.taskId, result.row.id, {
+            diagnosis: result.diagnosis,
+            sourceStepId: result.sourceStepId,
+            round: nextRound,
+            guidance: result.guidance,
+            unfencedLegacy: result.unfencedLegacy,
+          });
+          await appendEvent(tx, ctx.taskId, result.row.id, 'fix_loop.started', {
+            sourceStepId: result.sourceStepId,
+            round: nextRound,
+          });
+          return { epoch };
         });
-        await appendEvent(tx, ctx.taskId, result.row.id, 'fix_loop.started', {
-          sourceStepId: result.sourceStepId,
-          round: nextRound,
-        });
-        return true;
-      });
-      if (!entered) {
-        logger.info(
-          { taskId: ctx.taskId, stepId },
-          'fix loop not entered: a Retry overtook its hand-off',
-        );
+      } catch (err) {
+        if (!(err instanceof StepSupersededError)) throw err;
+        logRefusal('task_write_refused');
         return;
       }
+      if (typeof entered === 'string') {
+        logRefusal(entered);
+        return;
+      }
+      ctx.orchestrationEpoch = entered.epoch;
       await enqueueAdvance(
         ctx.taskId,
         ctx.userId,

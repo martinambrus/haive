@@ -466,24 +466,159 @@ describe.skipIf(!url)('recovery of a fix round on Postgres', () => {
             handleResult(db, { ...ctx }, source.stepId, result),
             handleResult(db, { ...ctx }, source.stepId, result),
           ]);
+          expect(refused).toHaveBeenCalledExactlyOnceWith(
+            {
+              taskId: id,
+              stepId: source.stepId,
+              round: 0,
+              reason: 'task_pointer_moved_under_lock',
+            },
+            expect.any(String),
+          );
+          expect(arrivals).toBe(2);
+          expect(await eventsOf(id, 'fix_loop.requested')).toHaveLength(1);
+          expect(await eventsOf(id, 'fix_loop.started')).toHaveLength(1);
+          expect(h.adds).toHaveLength(1);
+          expect(await taskOf(id)).toMatchObject({
+            currentStepId: leg.ids.TARGET,
+            currentRound: 1,
+            orchestrationEpoch: BASE_EPOCH,
+          });
         } finally {
           spy.mockRestore();
+          refused.mockRestore();
         }
-        expect(refused).toHaveBeenCalledWith(
-          { taskId: id, stepId: source.stepId, round: 0, reason: 'task_pointer_moved_under_lock' },
-          expect.any(String),
-        );
-        refused.mockRestore();
-        expect(arrivals).toBe(2);
-        expect(await eventsOf(id, 'fix_loop.requested')).toHaveLength(1);
-        expect(await eventsOf(id, 'fix_loop.started')).toHaveLength(1);
-        expect(h.adds).toHaveLength(1);
+      });
+
+    it('a losing loop_back cannot reset the target created by the winner', async () => {
+      const id = await seedTask(leg);
+      const source = await seedRow(leg, id, 'REVIEW', 0, 'done');
+      const ctx = await ctxFor(leg, id);
+      const result = {
+        status: 'loop_back' as const,
+        row: source,
+        sourceStepId: source.stepId,
+        diagnosis: 'defect',
+      };
+      const guardRead = Promise.withResolvers<void>();
+      const resumeLoser = Promise.withResolvers<void>();
+      const targetRunning = Promise.withResolvers<void>();
+      const finishTarget = Promise.withResolvers<void>();
+      const findFirst = db.query.tasks.findFirst.bind(db.query.tasks);
+      const read = vi
+        .spyOn(db.query.tasks, 'findFirst')
+        // The epoch read precedes the unlocked pointer/park guard.
+        .mockImplementationOnce(findFirst)
+        .mockImplementationOnce((...args) => {
+          const query = findFirst(...args);
+          const execute = query.execute.bind(query);
+          // Preserve Drizzle's query builder and delay only its actual execution.
+          query.execute = async () => {
+            const row = await execute();
+            guardRead.resolve();
+            await resumeLoser.promise;
+            return row;
+          };
+          return query;
+        });
+      const target = stepRegistry.require(leg.ids.TARGET);
+      const apply = target.apply.bind(target);
+      const applying = vi.spyOn(target, 'apply').mockImplementation(async (...args) => {
+        targetRunning.resolve();
+        await finishTarget.promise;
+        return apply(...args);
+      });
+      const loser = handleResult(db, { ...ctx }, source.stepId, result);
+      let winnerAdvance: Promise<void> | undefined;
+      try {
+        await guardRead.promise;
+        // The loser retains the source pointer it read before the winner commits.
+        await handleResult(db, { ...ctx }, source.stepId, result);
+        winnerAdvance = processTaskJob(advance(leg, id, 'TARGET', 1, BASE_EPOCH));
+        await targetRunning.promise;
+        const running = await db.query.taskSteps.findFirst({
+          where: and(
+            eq(schema.taskSteps.taskId, id),
+            eq(schema.taskSteps.stepId, leg.ids.TARGET),
+            eq(schema.taskSteps.round, 1),
+          ),
+        });
+        expect(running?.status).toBe('running');
+        resumeLoser.resolve();
+        await loser;
         expect(await taskOf(id)).toMatchObject({
           currentStepId: leg.ids.TARGET,
           currentRound: 1,
           orchestrationEpoch: BASE_EPOCH,
         });
+        expect(await rowOf(running!.id)).toEqual(running);
+        expect(await eventsOf(id, 'fix_loop.requested')).toHaveLength(1);
+        expect(await eventsOf(id, 'fix_loop.started')).toHaveLength(1);
+        expect(h.adds).toHaveLength(1);
+      } finally {
+        resumeLoser.resolve();
+        finishTarget.resolve();
+        try {
+          await Promise.all([loser, winnerAdvance]);
+        } finally {
+          read.mockRestore();
+          applying.mockRestore();
+        }
+      }
+      expect((await taskOf(id)).currentStepId).toBe(leg.ids.REVIEW);
+      expect(h.adds.at(-1)?.data).toMatchObject({ round: 1, epoch: BASE_EPOCH });
+    });
+
+    it('a null task pointer is not evidence of a move, including under the source lock', async () => {
+      const id = await seedTask(leg, { currentStepId: null, currentRound: 42 });
+      const source = await seedRow(leg, id, 'REVIEW', 0, 'done');
+      await loopBack(id, source, 'defect');
+      expect(await taskOf(id)).toMatchObject({
+        currentStepId: leg.ids.TARGET,
+        currentRound: 1,
+        orchestrationEpoch: BASE_EPOCH,
       });
+      expect(await eventsOf(id, 'fix_loop.requested')).toHaveLength(1);
+      expect(await eventsOf(id, 'fix_loop.started')).toHaveLength(1);
+      expect(h.adds).toHaveLength(1);
+    });
+
+    it('logs only task_missing_under_lock when the locked task read finds nothing', async () => {
+      const id = await seedTask(leg);
+      const source = await seedRow(leg, id, 'REVIEW', 0, 'done');
+      const transaction = db.transaction.bind(db);
+      const logged = vi.spyOn(logger, 'info');
+      // Deleting a real task cascades its source, failing lockOwnedStep first. Inject
+      // the missing read only inside the transaction, after taking the real row lock.
+      const spy = vi.spyOn(db, 'transaction').mockImplementation((callback, config) =>
+        transaction(async (tx) => {
+          const read = vi.spyOn(tx.query.tasks, 'findFirst').mockResolvedValueOnce(undefined);
+          try {
+            return await callback(tx);
+          } finally {
+            read.mockRestore();
+          }
+        }, config),
+      );
+      try {
+        await loopBack(id, source, 'defect');
+        expect(logged).toHaveBeenCalledExactlyOnceWith(
+          { taskId: id, stepId: source.stepId, round: 0, reason: 'task_missing_under_lock' },
+          expect.any(String),
+        );
+        expect(await eventsOf(id, 'fix_loop.requested')).toEqual([]);
+        expect(await eventsOf(id, 'fix_loop.started')).toEqual([]);
+        expect(h.adds).toEqual([]);
+        expect(await taskOf(id)).toMatchObject({
+          currentStepId: source.stepId,
+          currentRound: 0,
+          orchestrationEpoch: BASE_EPOCH,
+        });
+      } finally {
+        spy.mockRestore();
+        logged.mockRestore();
+      }
+    });
 
     if (!leg.pin)
       it.each(['task_missing', 'task_pointer_moved', 'task_round_moved', 'source_parked'])(
