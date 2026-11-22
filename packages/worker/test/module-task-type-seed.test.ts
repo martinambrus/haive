@@ -550,8 +550,12 @@ describe.skipIf(!url)('module task type seeds on Postgres', () => {
         const before = await one('fx__weekly');
         const warn = vi.spyOn(logger, 'warn');
 
-        const outcome = await sync(moduleOf([seedOf(), seedOf({ slug: 'daily' })]));
+        expect(before?.selectsOwnProviders).toBe(false);
+        const outcome = await sync(
+          moduleOf([seedOf({ selectsOwnProviders: true }), seedOf({ slug: 'daily' })]),
+        );
 
+        expect((await one('fx__weekly'))?.selectsOwnProviders).toBe(false);
         expect(await one('fx__weekly')).toEqual(before);
         expect(outcome).toEqual({
           fx: { seeded: ['fx__daily'], conflicts: [{ slug: 'fx__weekly', heldBy: holder }] },

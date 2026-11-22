@@ -456,6 +456,14 @@ export const moduleManifestSchema = z
           fail(`step "${stepId}" is longer than ${STEP_ID_MAX_LENGTH} characters`);
         }
         const parsed = parseStepId(stepId);
+        if (
+          seed.selectsOwnProviders === true &&
+          (parsed?.kind !== 'module' || parsed.moduleId !== m.id)
+        ) {
+          fail(
+            `selectsOwnProviders requires only this module's steps; step "${stepId}" must belong to module "${m.id}"`,
+          );
+        }
         if (parsed?.kind === 'custom') {
           fail(
             `step "${stepId}" is a custom step; a module task type names core steps and its own`,

@@ -11,7 +11,7 @@ it('appends the storage-only derived strategy without changing existing enum ord
   ]);
 });
 
-it('appends nullable definition columns with named checks and a restrictive self-FK', () => {
+it('appends definition columns with their nullability, defaults, named checks and restrictive self-FK', () => {
   const table = getTableConfig(schema.taskTypeDefinitions);
   expect(
     table.columns
