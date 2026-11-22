@@ -1041,7 +1041,8 @@ describe('early refusal install fields', () => {
       expect.objectContaining({
         channel: 'not-read',
         fromVersion: 'not-read',
-        error: expect.stringContaining('Install channel and current version were not read'),
+        error:
+          'install file must be a regular file: .env. Install channel and current version were not read: .env was unavailable, unsafe, oversized or invalid.',
         metadata: { refusal: 'install-file-linked' },
       }),
     );
@@ -1071,6 +1072,58 @@ describe('early refusal install fields', () => {
     );
     expect(images.readImageSettings).not.toHaveBeenCalled();
     expect(journal.startRun).not.toHaveBeenCalled();
+    expect(vi.mocked(journal.recordAttempt).mock.calls[0]![1].error).toContain(
+      'without activity. Install channel and current version were not read',
+    );
+  });
+
+  it('records safe display fields when reading install image settings fails', async () => {
+    const failure = new Error('compose config failed');
+    vi.mocked(images.readImageSettings).mockRejectedValueOnce(failure);
+    await expect(main()).rejects.toBe(failure);
+    expect(journal.recordAttempt).toHaveBeenCalledExactlyOnceWith(h.sql, {
+      status: 'failed',
+      channel: 'acme',
+      fromVersion: '1.2.3',
+      toVersion: '9.9.9',
+      error: 'compose config failed',
+      metadata: {},
+    });
+    expect(dk.readReleaseManifestImage).not.toHaveBeenCalled();
+    expect(journal.startRun).not.toHaveBeenCalled();
+    expect(process.env.DOCKER_CONFIG).toBe('/ambient');
+    expect(await readFile(join(dir, '.env'), 'utf8')).toBe(env);
+  });
+
+  it('records channel validation failures after acquiring the lock', async () => {
+    process.argv[process.argv.indexOf('--channel') + 1] = 'other';
+    await expect(main()).rejects.toThrow('disagrees');
+    expect(journal.recordAttempt).toHaveBeenCalledExactlyOnceWith(h.sql, {
+      status: 'failed',
+      channel: 'acme',
+      fromVersion: '1.2.3',
+      toVersion: '9.9.9',
+      error: '--channel disagrees with install HAIVE_CHANNEL',
+      metadata: {},
+    });
+  });
+
+  it('never records the raw invalid install channel', async () => {
+    await writeFile(join(dir, '.env'), 'HAIVE_CHANNEL=INVALID/channel\nHAIVE_VERSION=1.2.3\n');
+    vi.mocked(images.readImageSettings).mockResolvedValue({
+      ...settings,
+      HAIVE_CHANNEL: 'INVALID/channel',
+    });
+    await expect(main()).rejects.toThrow('invalid install channel');
+    expect(journal.recordAttempt).toHaveBeenCalledExactlyOnceWith(h.sql, {
+      status: 'failed',
+      channel: 'unknown',
+      fromVersion: '1.2.3',
+      toVersion: '9.9.9',
+      error:
+        'invalid install channel. Install channel could not be resolved from literal .env settings.',
+      metadata: {},
+    });
   });
 });
 
@@ -1174,14 +1227,6 @@ describe('terminal attempts before a run exists', () => {
     process.argv.push('--change-channel', 'BAD');
     expect(await main()).toBe(2);
     expectAttempt('failed');
-  });
-  it('records channel validation failures after acquiring the lock', async () => {
-    process.argv[process.argv.indexOf('--channel') + 1] = 'other';
-    await expect(main()).rejects.toThrow('disagrees');
-    expect(attempts()).toHaveBeenCalledWith(
-      h.sql,
-      expect.objectContaining({ status: 'failed', channel: 'acme' }),
-    );
   });
   it('uses unknown when the installed version is absent', async () => {
     vi.mocked(run.readEnvVar).mockResolvedValue(null);
@@ -1288,19 +1333,6 @@ it('scrubs filesystem paths before recording an attempt', async () => {
   expect(journal.recordAttempt).toHaveBeenCalledWith(
     h.sql,
     expect.objectContaining({ error: 'cannot read [path]' }),
-  );
-});
-
-it('never records the raw invalid install channel', async () => {
-  process.argv = process.argv.filter((v) => v !== '--check');
-  vi.mocked(images.readImageSettings).mockResolvedValue({
-    ...settings,
-    HAIVE_CHANNEL: 'INVALID/channel',
-  });
-  await expect(main()).rejects.toThrow('invalid install channel');
-  expect(journal.recordAttempt).toHaveBeenCalledWith(
-    h.sql,
-    expect.objectContaining({ channel: 'public' }),
   );
 });
 

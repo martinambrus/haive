@@ -360,9 +360,9 @@ export async function main(options: { stackLock?: StackLockOptions } = {}): Prom
     }
     await requireRegularInstallFiles(installDir);
     if (live || !flag('check')) await cleanupInstallTemps(installDir);
-    installFieldsStarted = true;
     fromVersion = (await readEnvVar(envFile, 'HAIVE_VERSION')) ?? 'unknown';
     const { imageSettings, manifestOptions, missingTarget } = await readInstall();
+    installFieldsStarted = true;
 
     // An interrupted run is finished or undone before anything new is considered. Starting a
     // second upgrade over a half-finished one is the one thing that must never happen.
@@ -613,7 +613,9 @@ export async function main(options: { stackLock?: StackLockOptions } = {}): Prom
           toVersion,
           channel: fields.channel,
           ...terminal,
-          error: fields.note ? `${terminal.error} ${fields.note}` : terminal.error,
+          error: fields.note
+            ? `${terminal.error}${/[.!?]\s*$/.test(terminal.error) ? '' : '.'} ${fields.note}`
+            : terminal.error,
         });
       } catch (err) {
         emit('attempt-record-failed', { message: safeErrorMessage(err) });

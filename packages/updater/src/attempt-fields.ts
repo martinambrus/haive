@@ -15,7 +15,10 @@ export async function readAttemptInstallFields(
   maxBytes = 256 * 1024,
 ): Promise<{ channel: string; fromVersion: string; note?: string }> {
   try {
-    const file = await inInstall(installDir, (dir) => dir.read('.env', maxBytes));
+    const file = await inInstall(installDir, async (dir) => {
+      if (!(await dir.entry('.env'))) return undefined;
+      return dir.read('.env', maxBytes);
+    });
     if (!file || file.bytes.length > maxBytes) throw new Error('unread install settings');
     const fields = literalEnvValues(file.bytes.toString('utf8'), [
       'HAIVE_CHANNEL',

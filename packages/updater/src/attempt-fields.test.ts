@@ -1,3 +1,4 @@
+import { execFileSync } from 'node:child_process';
 import { mkdtemp, mkdir, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -83,4 +84,13 @@ describe('safe display fields for an early attempt', () => {
       fromVersion: '1.2.3',
     });
   });
+
+  it('returns not-read for a FIFO .env without blocking', async () => {
+    execFileSync('mkfifo', [join(dir, '.env')]);
+    expect(await readAttemptInstallFields(dir)).toEqual({
+      channel: 'not-read',
+      fromVersion: 'not-read',
+      note: 'Install channel and current version were not read: .env was unavailable, unsafe, oversized or invalid.',
+    });
+  }, 1000);
 });
