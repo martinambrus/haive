@@ -110,6 +110,104 @@ jobs:
       - name: Installer boot-failure paths
         run: sh install/test/boot-failures.sh
 
+  desktop-bridge-go:
+    name: Desktop bridge Go checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      # Keep the bridge's toolchain identical to its extension image build.
+      GO_IMAGE: golang:1.25-alpine@sha256:1ae0735f00daffa3aaf1363a5184c0d2dc55c78e3db4ec70241cdac97bf84b59
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        timeout-minutes: 2
+        with:
+          # Both the PR base and a push's previous tip must be available for the diff.
+          fetch-depth: 0
+
+      - name: Detect bridge changes
+        id: changes
+        timeout-minutes: 2
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: |
+          set -euo pipefail
+          if [ -z "$BASE_SHA" ] || [ "$BASE_SHA" = 0000000000000000000000000000000000000000 ]; then
+            echo 'changed=true' >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          files=$(git diff --name-only "$BASE_SHA" HEAD -- \
+            docker/desktop-extension/bridge/ docker/desktop-extension/Dockerfile \
+            install/install.sh install/install.ps1 .github/workflows/ci.yml \
+            scripts/ci-retry.sh scripts/test/ci-desktop-bridge.test.mjs)
+          if [ -n "$files" ]; then
+            echo 'changed=true' >> "$GITHUB_OUTPUT"
+          else
+            echo 'changed=false' >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Pull the pinned Go toolchain
+        id: prepare
+        if: steps.changes.outputs.changed == 'true'
+        timeout-minutes: 3
+        run: scripts/ci-retry.sh docker pull "$GO_IMAGE"
+
+      # Each check runs after a failed sibling, provided the toolchain was pulled.
+      # Installers are embedded by Go; stage the same two files as the image build.
+      # Sources stay read-only on the host and all generated files stay in the container.
+      - name: Go format
+        if: ${{ !cancelled() && steps.prepare.conclusion == 'success' }}
+        timeout-minutes: 2
+        run: |
+          docker run --rm --cpus=2 --memory=1g \
+            -e CGO_ENABLED=0 -e GOMAXPROCS=2 \
+            -v "$PWD/docker/desktop-extension:/src:ro" -v "$PWD/install:/install:ro" \
+            -w /src/bridge "$GO_IMAGE" sh -ec '
+              cp -R /src/bridge /tmp/bridge
+              mkdir -p /tmp/bridge/install
+              cp /install/install.sh /install/install.ps1 /tmp/bridge/install/
+              cd /tmp/bridge
+              files=$(gofmt -l .)
+              if [ -n "$files" ]; then
+                printf "%s\n" "$files"
+                exit 1
+              fi
+            '
+
+      - name: Go vet
+        if: ${{ !cancelled() && steps.prepare.conclusion == 'success' }}
+        timeout-minutes: 4
+        run: |
+          docker run --rm --cpus=2 --memory=1g \
+            -e CGO_ENABLED=0 -e GOMAXPROCS=2 \
+            -v "$PWD/docker/desktop-extension:/src:ro" -v "$PWD/install:/install:ro" \
+            -w /src/bridge "$GO_IMAGE" sh -ec '
+              cp -R /src/bridge /tmp/bridge
+              mkdir -p /tmp/bridge/install
+              cp /install/install.sh /install/install.ps1 /tmp/bridge/install/
+              cd /tmp/bridge
+              for os in linux windows darwin; do
+                for arch in amd64 arm64; do
+                  echo "go vet: $os/$arch"
+                  GOOS=$os GOARCH=$arch go vet -p 1 ./... || exit 1
+                done
+              done
+            '
+
+      - name: Go test
+        if: ${{ !cancelled() && steps.prepare.conclusion == 'success' }}
+        timeout-minutes: 3
+        run: |
+          docker run --rm --cpus=2 --memory=1g \
+            -e CGO_ENABLED=0 -e GOMAXPROCS=2 \
+            -v "$PWD/docker/desktop-extension:/src:ro" -v "$PWD/install:/install:ro" \
+            -w /src/bridge "$GO_IMAGE" sh -ec '
+              cp -R /src/bridge /tmp/bridge
+              mkdir -p /tmp/bridge/install
+              cp /install/install.sh /install/install.ps1 /tmp/bridge/install/
+              cd /tmp/bridge
+              go test -p 1 -v ./...
+            '
+
   unit-tests:
     name: Unit tests (${{ matrix.name }})
     runs-on: ubuntu-latest
