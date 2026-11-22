@@ -951,9 +951,16 @@ Follow-ups found by the #1314 driver:
 
 ### T743 · FNF[extension-lock-recovery] · the extension's window lock has no stale recovery
 
-status: open · kind: fix · found: #1304 driver 2026-11-21 · priority: P4
+status: open for follow-ups 1-2; main item DONE in #1317 (2026-11-22: the window lock is a lease at the same name; a legacy folder is refused with instructions, never deleted) · kind: fix · found: #1304 driver 2026-11-21 · priority: P4
 
 The sibling `<dir>.extension-lock` (`docker/desktop-extension/bridge/main.go` ~:718, an `os.Mkdir`) stays after a crashed or closed Desktop window and needs manual removal. Reuse the lease record from `stack_lock.go`. PRE-EXISTING.
+
+Follow-ups found by the #1317 driver:
+
+1. A lost lease is silent: `docker/desktop-extension/bridge/stack_lock.go` ~:195 sets `lost`, ~:230 stops the heartbeat, nothing is logged; now also for the window lease. Documented in `release.md`. PRE-EXISTING, low.
+2. On Windows `beat()` truncates the lease file (~:198) with no no-follow flag (`stack_lock_windows.go` ~:3) after the ownership read (~:172), so a symlink swapped in between would be followed; the window lease adds a second site beside the install directory. Same-user only, unverified on real Windows. PRE-EXISTING pattern, low.
+
+A killed bridge can leave a Compose or installer child running while both leases lapse after 60 s (the old window folder never lapsed); `release.md` names Start, Stop and Install. Tracked under T744.
 
 ### T744 · FNF[orphan-children-vs-lease] · a lock holder's children outlive its lease
 
@@ -1035,6 +1042,12 @@ Follow-ups found by the #1316 driver:
 status: open · kind: test · found: #1316 driver 2026-11-22 · priority: P4
 
 `packages/api/test/task-create-path.test.ts` ~:1346 races `sleep(5_000)` against `TASK_START_LOCK_TIMEOUT_MS = 5_000` (`packages/database/src/repository-task-lock.ts` ~:28); the margin is about one poll, so host load flips it. It failed once in a full local gated run and passed 3 of 3 alone. Drive the timeout with an injected or fake clock, or a lock held until released, instead of a real sleep (`docs/architecture/testing.md` "No real waiting"). PRE-EXISTING.
+
+### T753 · FNF[extension-bridge-ci] · no CI job runs the Desktop bridge's Go checks
+
+status: open · kind: chore · found: #1317 driver 2026-11-22 · priority: P4
+
+No workflow runs `go test`, `go vet`, `gofmt` or the cross builds for `docker/desktop-extension/bridge/`; only the regex pins in `scripts/test/desktop-extension.test.mjs` run in CI (`ci.yml` ~:74). The Go suite runs only when the extension image is built (`docker/desktop-extension/Dockerfile` ~:9-20 via `scripts/build-desktop-extension.sh`). Add a CI job in the pinned golang image that runs vet (linux, windows, darwin), gofmt and the tests on changes under that directory. PRE-EXISTING.
 
 ### T721 · The Claude usage grant reaches sandbox environments
 
