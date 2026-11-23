@@ -47,6 +47,7 @@ const guarded = {
     },
   ],
 };
+// A capable core step still fails the module-target shape requirement.
 const fixed = { ...empty, fixTarget: { stepId: 'report', capabilityVersion: 1 } };
 function setup(contract: unknown = null) {
   const fake = createFakeDb({
@@ -182,7 +183,7 @@ it.each([
   'plan_merge',
   'type_draft',
 ])(
-  'the common locked admission for %s refuses a custom fix target before pinning',
+  'the common locked admission for %s refuses a non-module fix target or malformed pin before pinning',
   async (slug) => {
     for (const contract of [fixed, { version: 99 }]) {
       const fake = setup(contract);
@@ -573,9 +574,14 @@ it.each([null, empty, guarded])(
 
 it.each([
   {
-    label: 'a custom fix target',
+    label: 'a non-module fix target',
     pin: fixed,
     admitted: false,
+  },
+  {
+    label: 'a supported module fix-target pin',
+    pin: { ...empty, fixTarget: { stepId: 'module.fx.repair', capabilityVersion: 1 } },
+    admitted: true,
   },
   {
     label: 'a guarded mid-span pin',
@@ -589,6 +595,10 @@ it.each([
   'allows Stop on $label; the following Resume is admitted only when supported',
   async ({ pin, admitted }) => {
     const fake = stopped(pin, 'running');
+    if ('fixTarget' in pin && pin.fixTarget.stepId === 'module.fx.repair') {
+      // This API gate reads the pin; the Postgres agreement harness checks live module support.
+      fake.patch(schema.tasks, TASK, { runListSnapshot: [pin.fixTarget.stepId, STEP, 'report'] });
+    }
     await fake.db.update(schema.tasks).set({ status: 'running' }).where(eq(schema.tasks.id, TASK));
     const app = new Hono<AppEnv>();
     app.route('/tasks', taskRoutes);

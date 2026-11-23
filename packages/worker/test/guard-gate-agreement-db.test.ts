@@ -90,6 +90,7 @@ const apiPath = (rel: string) => new URL(`../../api/src/${rel}`, import.meta.url
 const EMAIL_INDEX = 'guard-gates-test-user';
 const IDS = ['gg-plan', 'gg-a', 'gg-b', 'gg-report'];
 const ENTRY = 'gg-a';
+const MODULE_TARGET = 'module.gg.repair';
 const DEAD_AT = new Date('2026-10-14T08:00:00.000Z');
 const ADVANCE = TASK_JOB_NAMES.ADVANCE_STEP;
 const START = TASK_JOB_NAMES.START;
@@ -136,7 +137,7 @@ interface Shape {
 // the run list strategy, the derived plan, the snapshot and which predicates its steps provide,
 // so it marks the task dead (pin kept) for anything it cannot run, and boot and revival repeat
 // that judgement. A shape the API admits and the worker kills is the intended asymmetry, not a
-// disagreement; a custom fix target and a malformed pin are refused by every gate.
+// disagreement; non-module fix targets and malformed pins are refused by every gate.
 const API_ADMITS = {
   apiStart: 'admitted',
   apiRetry: 'admitted',
@@ -182,6 +183,19 @@ const SHAPES: Shape[] = [
     },
   },
   {
+    name: 'supported module fix target',
+    contract: { ...EMPTY, fixTarget: { stepId: MODULE_TARGET, capabilityVersion: 1 } },
+    strategy: 'static',
+    snapshot: [...IDS, MODULE_TARGET],
+    expected: {
+      availability: 'available',
+      create: 'admitted',
+      ...API_ADMITS,
+      workerStart: 'runs-no-guard-call',
+      ...WORKER_RUNS,
+    },
+  },
+  {
     name: 'entry at first index',
     contract: {
       version: 1,
@@ -192,14 +206,14 @@ const SHAPES: Shape[] = [
     expected: { availability: 'refused', create: 'refused', ...API_ADMITS, ...WORKER_KILLS },
   },
   {
-    name: 'valid custom fix target',
+    name: 'non-module fix target on the run list',
     contract: { ...EMPTY, fixTarget: { stepId: ENTRY, capabilityVersion: 1 } },
     strategy: 'static',
     snapshot: IDS,
     expected: FIX_TARGET_REFUSED,
   },
   {
-    name: 'invalid custom fix target',
+    name: 'non-module fix target off the run list',
     contract: { ...EMPTY, fixTarget: { stepId: 'gg-missing', capabilityVersion: 1 } },
     strategy: 'static',
     snapshot: IDS,
@@ -294,6 +308,7 @@ function stub(id: string, index: number): StepDefinition {
       return {};
     },
     ...(id === IDS[0] ? { guardPredicates: { guard: predicate } } : {}),
+    ...(id === MODULE_TARGET ? { fixConsumer: { version: 1 }, editsCodeOrTests: true } : {}),
   } as StepDefinition;
 }
 
@@ -456,12 +471,18 @@ describe.skipIf(!url)('every gate agrees on the same pin, on Postgres', () => {
       .returning();
     repositoryId = repo!.id;
 
-    for (const [index, stepId] of IDS.entries())
+    await db.insert(schema.modules).values({
+      moduleId: 'gg',
+      packageName: '@haive/module-gg',
+      name: 'Gg',
+      installedVersion: '1',
+    });
+    for (const [index, stepId] of [...IDS, MODULE_TARGET].entries())
       await db
         .insert(schema.stepCatalog)
         .values({
           stepId,
-          source: 'core',
+          source: stepId === MODULE_TARGET ? 'module:gg' : 'core',
           title: stepId,
           workflowType: 'gg',
           stepIndex: index + 1,
@@ -476,6 +497,7 @@ describe.skipIf(!url)('every gate agrees on the same pin, on Postgres', () => {
             requires: [],
             provides: [],
             dispatchesCli: false,
+            ...(stepId === MODULE_TARGET ? { fixConsumer: { version: 1 } } : {}),
           },
         })
         .onConflictDoNothing();
@@ -506,12 +528,12 @@ describe.skipIf(!url)('every gate agrees on the same pin, on Postgres', () => {
           slug: slugOf(index),
           displayName: slugOf(index),
           runListStrategy: shape.strategy,
-          stepIds: shape.strategy === 'static' ? IDS : null,
+          stepIds: shape.strategy === 'static' ? shape.snapshot : null,
           ...(shape.strategy === 'derived' ? { baseSlug: BASE_SLUG, changes: [] } : {}),
           executionContract: shape.contract,
         })
         .onConflictDoNothing();
-    IDS.forEach((id, index) => stepRegistry.override(stub(id, index)));
+    [...IDS, MODULE_TARGET].forEach((id, index) => stepRegistry.override(stub(id, index)));
     setContainerCleanupRunner(async () => 0);
   });
 
@@ -525,6 +547,7 @@ describe.skipIf(!url)('every gate agrees on the same pin, on Postgres', () => {
         .delete(schema.taskTypeDefinitions)
         .where(eq(schema.taskTypeDefinitions.source, 'admin'));
       await db.delete(schema.stepCatalog).where(eq(schema.stepCatalog.workflowType, 'gg'));
+      await db.delete(schema.modules).where(eq(schema.modules.moduleId, 'gg'));
       await db.$client.end({ timeout: 5 });
     }
     vi.restoreAllMocks();
@@ -573,8 +596,8 @@ describe.skipIf(!url)('every gate agrees on the same pin, on Postgres', () => {
         taskId,
         stepId,
         title: stepId,
-        stepIndex: IDS.indexOf(stepId),
-        runSeq: IDS.indexOf(stepId),
+        stepIndex: [...IDS, MODULE_TARGET].indexOf(stepId),
+        runSeq: [...IDS, MODULE_TARGET].indexOf(stepId),
         round: 0,
         status: 'pending',
         ...over,
@@ -619,7 +642,7 @@ describe.skipIf(!url)('every gate agrees on the same pin, on Postgres', () => {
       const result = resolveTaskTypeAvailability({
         definition: def!,
         switches: { customEnabled: true, moduleEnabled: true },
-        modules: new Map(),
+        modules: new Map([['gg', { name: 'Gg', missing: false, deactivated: false }]]),
         catalog: stored.synced ? mergePromptStepCatalog(stored, def!) : null,
         generic: false,
         predicates: executionPredicates(),
@@ -745,7 +768,7 @@ describe.skipIf(!url)('every gate agrees on the same pin, on Postgres', () => {
         .select()
         .from(schema.taskSteps)
         .where(eq(schema.taskSteps.taskId, id));
-      for (const stepId of IDS)
+      for (const stepId of SHAPES[index]!.snapshot ?? IDS)
         if (!existing.some((r) => r.stepId === stepId && r.round === 0))
           await stepRow(id, stepId, { round: 0 });
       h.adds.length = 0;
@@ -826,9 +849,9 @@ describe.skipIf(!url)('every gate agrees on the same pin, on Postgres', () => {
     expect(h.adds).toEqual([]);
   });
 
-  it('the global-pause lift holds a fix-target task and lists it, and leaves a supported pin alone', async () => {
+  it('the global-pause lift holds a non-module fix-target task and lists it, and leaves a supported pin alone', async () => {
     const supported = SHAPES.findIndex((s) => s.name === 'supported guarded pin');
-    const fixTarget = SHAPES.findIndex((s) => s.name === 'valid custom fix target');
+    const fixTarget = SHAPES.findIndex((s) => s.name === 'non-module fix target on the run list');
     const keep = await make(supported, { status: 'queued' });
     const [held] = await db
       .insert(schema.tasks)

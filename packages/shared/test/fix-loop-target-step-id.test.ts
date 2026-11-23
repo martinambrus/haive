@@ -19,6 +19,20 @@ describe('fence parity', () => {
   it('admits a static contract that pins a module fix target', () => {
     expect(() => assertExecutionContractSupported(pin, { staticPinnedList: true })).not.toThrow();
   });
+  it('checks module-target membership when the caller supplies the pinned list', () => {
+    expect(() =>
+      assertExecutionContractSupported(pin, {
+        staticPinnedList: true,
+        stepIds: [CUSTOM],
+      }),
+    ).not.toThrow();
+    expect(() =>
+      assertExecutionContractSupported(pin, {
+        staticPinnedList: true,
+        stepIds: ['other'],
+      }),
+    ).toThrow(`fix-target ${CUSTOM} must be a module step in the pinned run list`);
+  });
 });
 
 it.each([

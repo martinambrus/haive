@@ -1006,6 +1006,70 @@ describe.skipIf(!url)('recovery of a fix round on Postgres', () => {
     });
 
     describe('the supported execution fence', () => {
+      if (leg.pin)
+        it.each(['unregistered', 'incapable', 'off-list'] as const)(
+          'the real fence marks a task dead at boot for an %s fix target',
+          async (failure) => {
+            const actual = await vi.importActual<
+              typeof import('../src/step-engine/execution-contract-support.js')
+            >('../src/step-engine/execution-contract-support.js');
+            h.fence.mockImplementation(actual.assertWorkerExecutionContractSupported);
+            const target = failure === 'unregistered' ? 'module.cfr-fix.missing' : leg.ids.TARGET;
+            const pin = {
+              version: 1,
+              guardedSpans: [],
+              fixTarget: { stepId: target, capabilityVersion: 1 },
+            };
+            const original = stepRegistry.require(leg.ids.TARGET);
+            if (failure === 'incapable')
+              stepRegistry.override({ ...original, fixConsumer: undefined });
+            try {
+              const id = await seedTask(leg, {
+                currentStepId: leg.ids.REVIEW,
+                executionContract: pin,
+                runListSnapshot:
+                  failure === 'off-list'
+                    ? [leg.ids.REVIEW, leg.ids.AFTER]
+                    : [target, leg.ids.REVIEW, leg.ids.AFTER],
+              });
+              await seedRow(leg, id, 'REVIEW', 0, 'pending');
+              const before = await db
+                .select()
+                .from(schema.taskSteps)
+                .where(eq(schema.taskSteps.taskId, id));
+              const deps = {
+                enqueueStart: async () => undefined,
+                enqueueAdvance: enqueueRedrive,
+                redriveRetryDelaysMs: [],
+              };
+              expect(await reconcileDeadTasks(db, deps)).toMatchObject({
+                marked: 1,
+                revived: 0,
+                failed: 0,
+              });
+              const task = await taskOf(id);
+              expect(task.deadAt).not.toBeNull();
+              expect(task.deadReason).toContain('invalid-execution-contract');
+              expect(task.deadReason).toContain(target);
+              expect(task).toMatchObject({
+                status: 'running',
+                orchestrationEpoch: BASE_EPOCH,
+                executionContract: pin,
+              });
+              expect(
+                await db.select().from(schema.taskSteps).where(eq(schema.taskSteps.taskId, id)),
+              ).toEqual(before);
+              const events = await eventsOf(id, 'task.dead');
+              expect(events).toHaveLength(1);
+              expect(events[0]!.payload).toMatchObject({ reason: expect.stringContaining(target) });
+              expect(await reconcileDeadTasks(db, deps)).toMatchObject({ marked: 0, revived: 0 });
+              expect(await eventsOf(id, 'task.dead')).toHaveLength(1);
+              expect(h.adds).toEqual([]);
+            } finally {
+              stepRegistry.override(original);
+            }
+          },
+        );
       it('the real fence admits both capable custom and ordinary tasks without changing their rows', async () => {
         const actual = await vi.importActual<
           typeof import('../src/step-engine/execution-contract-support.js')

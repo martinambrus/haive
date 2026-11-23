@@ -241,6 +241,17 @@ it.each([[], [span()]].map((guardedSpans) => ({ guardedSpans })))(
     const pin = { version: 1, guardedSpans, fixTarget: { stepId: target, capabilityVersion: 1 } };
     const scope = { runListStrategy: 'static' as const, runListSnapshot: [target, ...ids] };
     expect(() => assertWorkerExecutionContractSupported(pin, scope, registry)).not.toThrow();
+    // Isolate membership: this executable is registered and capable, but off-list.
+    expect(() =>
+      assertWorkerExecutionContractSupported(
+        pin,
+        {
+          ...scope,
+          runListSnapshot: ids,
+        },
+        registry,
+      ),
+    ).toThrow(target);
     for (const stepId of ['module.fx.gone', 'fx-a', 'custom.fx.repair']) {
       expect(() =>
         assertWorkerExecutionContractSupported(
