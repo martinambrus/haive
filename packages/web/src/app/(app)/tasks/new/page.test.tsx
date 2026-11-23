@@ -292,6 +292,33 @@ async function submitForm(view: Renderer) {
   await view.flush();
 }
 
+describe('task-level CLI selection from the public type traits', () => {
+  it.each([true, false])(
+    'shows CLI pickers only when dispatchesCli is %s',
+    async (dispatchesCli) => {
+      const types = GETS['/task-types'] as { taskTypes: ReturnType<typeof taskType>[] };
+      const own = taskType('fx__agent', { requiresRepository: false, dispatchesCli });
+      types.taskTypes.push(own);
+      try {
+        const view = await mount();
+        chooseType(view, own.slug);
+        await view.flush();
+        expect(controls(view.tree(), /^cli provider/)).toHaveLength(dispatchesCli ? 1 : 0);
+        expect(controls(view.tree(), /^summary cli/)).toHaveLength(dispatchesCli ? 1 : 0);
+        fire.type(controls(view.tree(), /^title$/)[0]!, 'Provider selection control');
+        view.draw();
+        await submitForm(view);
+        expect(posted).toHaveLength(1);
+        expect(posted[0]).toMatchObject({ type: own.slug });
+        expect(Object.hasOwn(posted[0]!, 'cliProviderId')).toBe(dispatchesCli);
+        expect(Object.hasOwn(posted[0]!, 'summaryCliProviderId')).toBe(dispatchesCli);
+      } finally {
+        types.taskTypes.splice(types.taskTypes.indexOf(own), 1);
+      }
+    },
+  );
+});
+
 describe('the onboarding status beside the repository select', () => {
   it('is the answer for the repository now selected, however late an earlier one comes', async () => {
     const view = await mount();

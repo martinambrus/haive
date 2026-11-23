@@ -132,6 +132,59 @@ describe('/admin/task-types for a regular user', () => {
 });
 
 describe('GET /task-types', () => {
+  it.each([
+    { source: 'module:fx', flag: true, synced: true, expected: false },
+    { source: 'module:fx', flag: true, synced: false, expected: false },
+    { source: 'module:fx', flag: false, synced: true, expected: true },
+    { source: 'module:fx', flag: undefined, synced: true, expected: true },
+    { source: 'admin', flag: true, synced: true, expected: true },
+    { source: 'builtin', flag: true, synced: true, expected: true },
+    { source: 'admin', flag: false, synced: false, expected: true },
+  ])(
+    'reports task-level CLI selection for $source (own providers: $flag, synced: $synced)',
+    async ({ source, flag, synced, expected }) => {
+      const fake = createFakeDb({
+        taskTypeDefinitions: schema.taskTypeDefinitions,
+        stepCatalog: schema.stepCatalog,
+        modules: schema.modules,
+      });
+      h.db = fake.db;
+      fake.insert(schema.taskTypeDefinitions, {
+        slug: 'fx__agent',
+        displayName: 'Agent',
+        description: null,
+        source,
+        runListStrategy: 'static',
+        stepIds: ['module.fx.agent'],
+        selectsOwnProviders: flag,
+        enabled: true,
+        selectable: true,
+        requiresRepository: false,
+        sortOrder: 0,
+      });
+      fake.insert(schema.modules, {
+        moduleId: 'fx',
+        name: 'Fixture',
+        missingAt: null,
+        deactivatedAt: null,
+        drainingAt: null,
+      });
+      if (synced) {
+        fake.insert(schema.stepCatalog, {
+          stepId: 'module.fx.agent',
+          source: 'module:fx',
+          dispatchesCli: true,
+          composable: false,
+        });
+      }
+      const response = await send('GET', '/task-types');
+      expect(response.status).toBe(200);
+      expect(await response.json()).toMatchObject({
+        taskTypes: [{ slug: 'fx__agent', dispatchesCli: expected }],
+      });
+    },
+  );
+
   it('a structural static PATCH refuses a stored guard with an unregistered predicate and leaves definition/audit state intact', async () => {
     h.role = 'admin';
     const fake = createFakeDb({

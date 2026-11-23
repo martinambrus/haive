@@ -158,6 +158,13 @@ function editableFieldsOf(row: DefinitionRow): string[] {
 }
 
 function dispatchesCliOf(row: DefinitionRow, catalog: Catalog): boolean {
+  // These module steps choose their own providers rather than the task's default CLI.
+  if (
+    row.source.startsWith('module:') &&
+    row.runListStrategy === 'static' &&
+    row.selectsOwnProviders === true
+  )
+    return false;
   // Unsynced, the catalog cannot rule an agent out, so the form keeps its CLI pickers.
   if (!catalog.synced || row.runListStrategy !== 'static' || row.stepIds === null) return true;
   const { dispatchesCli } = mergePromptStepCatalog(catalog, row);
