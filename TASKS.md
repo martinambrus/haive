@@ -1082,7 +1082,7 @@ status: open · kind: fix · found: #1321 reviews 2026-11-22 · priority: P4
 
 ### T757 · FNF[fix-loop-escalation-atomicity] · cap/oscillation escalation is four separate writes (+7)
 
-status: open · kind: fix · found: T741 review 2026-11-23 · priority: P3
+status: done (#1329 3c14e71c8, deployed 2026-11-23: items 1, 3, 6, 7, 8 and 9's unpinned half fixed; item 4 stale; item 5 recovered by the stalled re-drive, control added; item 2 and 9's pinned half moved to T766 now that PR7b is merged) · kind: fix · found: T741 review 2026-11-23 · priority: P3
 
 1. `packages/worker/src/queues/task-queue.ts` ~:2660 (oscillation) / ~:2742 (cap): parking the row, `recordFixLoopRequest`, `markTaskWaiting` and the `fix_loop.escalated` event are four awaits outside one transaction. A crash after the park leaves a gate with no recorded next-round request and no event; since the duplicate guard refuses a replay at a parked gate, nothing completes the hand-off, and Continue enters a round with no diagnosis. PRE-EXISTING, by code reading (probe first). Fix direction: one transaction under the existing fences.
 2. `packages/worker/test/custom-fix-recovery-db.test.ts` ~:441 skips the pinned custom-target leg for the Continue reset (`if (!leg.pin)`); the pinned path is only unit-stubbed (`fix-consumer-router.test.ts` ~:614-628). Minor; dormant while the custom-fix fence is closed (T689 PR7b).
@@ -1102,7 +1102,7 @@ A SIGKILLed bridge cannot cancel `docker compose` (`docker/desktop-extension/bri
 
 ### T759 · Updater: losing the stack lease does not fence the holder's later phases
 
-status: open · kind: design · found: T744 review 2026-11-23 · priority: P3
+status: in review (#1330: ownership proved from the stored record before each phase, write and container start; proven loss `stack-lock-lost` sticks, unproven `stack-lock-unproven` refuses forward work but lets recovery run; residual T765; the postgres-down takeover stays T760 item 1) · kind: design · found: T744 review 2026-11-23 · priority: P3
 
 `packages/updater/src/stack-lock.ts` ~:146-149: lease loss only stops heartbeats. A holder frozen over 60 s that resumes after a takeover keeps running its phases and can start one-shots the new holder's child check (T744) never saw. PRE-EXISTING, consequential. Fix direction: check lease ownership (a fencing token) before each phase and each container start, and abort on loss.
 
@@ -1164,6 +1164,22 @@ All low unless noted; PRE-EXISTING means older than #1328.
 8. Refusal text for a mining step with `fixConsumer` does not say "fan-out" (`fix-consumer.ts` ~:81, `run-list.ts` ~:353, `execution-contract-support.ts` ~:47); the loader withholds the capability silently, so log a boot warning per withheld step.
 9. Rolling-deploy window: the catalog is synced at worker boot, so availability and create admit a mining target until a capable worker booted (the task dies at START by name). Optional release note.
 10. `guard-gate-agreement-db.test.ts` ~:605 leaves `module.gg.*` catalog rows (deletes `workflowType = 'gg'`, the loader stamps `module.gg`); the `source:` ternary at ~:539 is dead.
+
+### T765 · Updater: recovery under an unproven lease proof is not time-bounded
+
+status: open · kind: design · found: T759 review 2 2026-11-23 · priority: P4
+
+`packages/updater/src/lease-fence.ts` ~:30-36, `stack-lock.ts` ~:141-153 (after #1330): failure recovery tolerates `stack-lock-unproven`, so a takeover whose record this holder cannot read (lock unreadable or absent to it for 60 s or more while another holder took over) is not fenced during rollback, restore or the postgres restart. Narrower than before #1330. Fix direction: bound the tolerance by time since the last good proof or beat (refuse as lost past the stale window). Also from the same review (D4, low): no control for an unproven proof in the reverse-resume path or the commit phase (`cli.ts` ~:453-463, ~:670), and no CLI-level control for the full-disk trace (torn own record, failing snapshot, postgres restarted); the heartbeat's read-then-overwrite can truncate a lock a contender created between the two (`stack-lock.ts` ~:180-196, PRE-EXISTING); the fence defaults open when no lease scope is bound and docker fencing is an allow-list (`lease-fence.ts` ~:17-19, `docker.ts` ~:194).
+
+### T766 · FNF[T757]: fix-loop handoff follow-ups (+5)
+
+status: open · kind: fix · found: T757 reviews 2026-11-23 · priority: P4
+
+1. T757 item 2 and the pinned half of item 9 (deferred until PR7b): apply the T757 controls to a pinned custom fix target (the `atomic revise` block in `custom-fix-recovery-db.test.ts` runs only `if (!leg.pin)`).
+2. A lost revise logs one bare `revise not entered` line with no reason (`worker/src/queues/task-queue.ts` ~:3047-3052); add the refusal reason as loop_back's `logRefusal` does.
+3. No revise control with a non-empty `guardedSpans` pin (guarded reset branch, source held at another round).
+4. The `findIndex` guards reuse `UnresolvedStepError`, so the dead-task reason says the install does not register a step that is registered but absent from the run list (`task-queue.ts` ~:908-913 `deadReasonFor`).
+5. Continue's Accept branch accepts remaining findings outside the transaction; a crash between leaves a window (PRE-EXISTING, informational).
 
 ### T721 · The Claude usage grant reaches sandbox environments
 
