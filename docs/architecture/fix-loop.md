@@ -28,8 +28,7 @@ is HARDCODED. Nine steps emit one (07b, 07c, 08, 08a, 08b, 08c, 08d2, 09), and 0
 reader of `loadFixLoopDiagnosis`, so a round in which 07 does not run is a round in which
 nobody reads the defect.
 
-A task pin may name a module step as the fix target instead (see Task types); every gate
-still refuses such a pin. The router then resolves that step in place of 07 and fails the
+A task pin may name a module step as the fix target instead (see Task types); every gate admits it when the step is a capable module step on a static pinned run list. The router then resolves that step in place of 07 and fails the
 task before any reset when it is unregistered, is not a module step declaring the pinned
 `fixConsumer` version, is off the run list, or belongs to a module that is deactivated or
 whose schema setup failed. The round is not entered then: a `loop_back` records no
