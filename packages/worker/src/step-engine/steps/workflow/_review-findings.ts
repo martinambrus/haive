@@ -248,8 +248,12 @@ export async function dispositionReviewFindings(
  *  so a refuter's `dismissed_refuted` and a gate-1.5 `dismissed_human` both keep the more
  *  specific verdict.
  *
- *  Takes a db rather than a StepContext because its caller is the queue's gate resolver,
- *  which runs outside any step. Best-effort in the same way: never throws. */
+ *  Takes a database or transaction handle rather than a StepContext because its caller is
+ *  the queue's gate resolver, outside any step. A database handle opens a transaction;
+ *  a transaction handle opens a savepoint, so acceptance commits or rolls back with the
+ *  caller's gate decision. Statement failures roll back to that savepoint and are logged,
+ *  leaving the caller's transaction usable. Best-effort: this helper never throws; a lost
+ *  connection or commit failure can still make the caller's transaction fail. */
 export async function acceptRemainingReviewFindings(
   db: Database | DbTx,
   taskId: string,
