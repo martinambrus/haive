@@ -1114,7 +1114,7 @@ status: open · kind: fix · found: T744 review 2026-11-23 · priority: P4
 2. `packages/updater/src/docker.ts` ~:262 `restoreVolume` has no caller. PRE-EXISTING, minor.
 3. A `docker run` already exec'd when the SIGTERM cleanup marks the attempt stopping (`docker.ts` `stoppingAttempts`, #1325) can create its container after the cleanup's list, so it survives the exit; the next start's child check refuses on it (fails closed). Close it by re-listing once after removal. Low.
 
-### T761 · FNF[T755]: own-provider type follow-ups (+3)
+### T761 · FNF[T755]: own-provider type follow-ups (+6)
 
 status: open · kind: fix · found: T755 reviews 2026-11-22 · priority: P3
 
@@ -1123,7 +1123,10 @@ All PRE-EXISTING, minor, unless noted.
 1. `GET /task-types` still reports `dispatchesCli: true` for a type with `selects_own_providers` (`api/src/routes/task-types.ts` ~:160-165 `dispatchesCliOf` ignores the flag). Unverified effect: whether the New Task form then shows a CLI picker the module never uses. Check the form first; change only if it does.
 2. Admin JSON carries `selects_own_providers` (whole-row spread, `task-types.ts` ~:188,465,559,630,845,855), but `AdminTaskType` (`web/src/lib/api-client.ts` ~:2640-2662) declares neither it nor `executionContract`, so an admin cannot see which module types skip the canary. A read-only badge on the admin task-types list.
 3. `api/test/task-type-own-providers.test.ts` ~:30-62 stubs the exact Drizzle select chain; a refactor of `readStepCatalog`/`readModuleStates` breaks it for unrelated reasons. Move the control into the real-Postgres matrix `task-type-definition.test.ts` (`TRAIT_ROWS`) as an own-providers row.
-4. Translator module (`martinambrus/haive-module-translator`), consequential: `README.md` ~:638 (M6) storage headroom. A tight consent quota can pass setup and then fail translation or render after paid work; the setup form's minimum does not reserve the headroom later passes need.
+4. DONE (translator #17 ea898f8, deployed 2026-11-23: consent projects accounted + setup + 8 x units x 381,312 B, refuses a short quota before any paid call, measured on real Postgres). OWNER QUESTION open: the reserve caps a document at about 175 units (about 175k words; was 1,000 units) and counts against the 2 GiB owner quota. Translator module (`martinambrus/haive-module-translator`), consequential: `README.md` ~:638 (M6) storage headroom. A tight consent quota can pass setup and then fail translation or render after paid work; the setup form's minimum does not reserve the headroom later passes need.
+5. Translator, low: a Retry of consent after spend counts the unspent allowance twice (#17 review 1 D5). PRE-EXISTING.
+6. Translator, PRE-EXISTING (#17 driver): storage written after consent with no lifetime bound in the projection: human review decisions and patch histories (`src/db/review-patches.ts` ~:118), rendered artifacts (`src/db/artifacts.ts` ~:108), repeated metadata rewrites and operator histories (`src/db/passes.ts` ~:348, ~:818). Each can still exhaust the quota after paid work; bound each writer or reserve for it.
+7. Translator, low: the full `test:ingest` wrapper's `check:host` needs the module installed in the host worktree (`pnpm module add translator`) and api/worker dist; a driver brief should say so.
 
 ### T762 · FNF[T749]: step warning column follow-ups (+3)
 
