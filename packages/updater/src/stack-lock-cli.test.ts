@@ -343,6 +343,62 @@ describe('real recovery under stack lease proofs', () => {
     expect(events()).toContain('stack-lock-lost');
   });
 
+  it.each(['before-prune', 'during-prune', 'heartbeat-during-prune'] as const)(
+    'keeps exit 0 and stops real pruning on lease loss %s after done',
+    async (point) => {
+      const bundle = await interrupted();
+      vi.mocked(journal.findLiveRun).mockResolvedValue({
+        ...liveRun,
+        phase: 'commit',
+        metadata: { ...liveRun.metadata, bundle },
+      } as never);
+      const proof = vi.spyOn(StackLock.prototype, 'assertOwned');
+      const foreign = record(ext.token, 'extension', 1);
+      let done = false;
+      let displaced = false;
+      let removed = 0;
+      const lose = async () => {
+        displaced = true;
+        await writeFile(lock, foreign);
+        if (point === 'heartbeat-during-prune')
+          expect(await (proof.mock.contexts[0] as StackLock).beat()).toBe('lost');
+      };
+      vi.mocked(journal.finishRun).mockImplementation(async () => {
+        await assertStackLease();
+        done = true;
+        if (point === 'before-prune') await lose();
+      });
+      const remove = install.InstallDirectory.prototype.remove;
+      vi.spyOn(install.InstallDirectory.prototype, 'remove').mockImplementation(async function (
+        this: install.InstallDirectory,
+        name,
+      ) {
+        await remove.call(this, name);
+        if (done) {
+          removed++;
+          if (!displaced) await lose();
+        }
+      });
+      expect(await main(opts)).toBe(0);
+      expect(journal.finishRun).toHaveBeenCalledExactlyOnceWith(h.sql, 'live', 'done');
+      expect(removed).toBe(point === 'before-prune' ? 0 : 1);
+      expect(await readdir(join(dir, '.haive-upgrade/pending/new'))).toHaveLength(
+        point === 'before-prune' ? 2 : 1,
+      );
+      expect(await readFile(join(dir, bundle.backupDir, 'docker-compose.yml'), 'utf8')).toBe(
+        'services: {}\n',
+      );
+      expect(await readFile(lock, 'utf8')).toBe(foreign);
+      expect(events()).toEqual(
+        expect.arrayContaining(['stack-lock-lost', 'bundle-prune-failed', 'done']),
+      );
+      expect(events()).not.toContain('refused');
+      expect(events()).not.toContain('rolled-back');
+      expect(journal.recordRunError).not.toHaveBeenCalled();
+      expect(run.rollback).not.toHaveBeenCalled();
+    },
+  );
+
   it('keeps forward commit recovery strict for an unproven record', async () => {
     await interrupted();
     vi.mocked(journal.findLiveRun).mockResolvedValue({ ...liveRun, phase: 'commit' } as never);

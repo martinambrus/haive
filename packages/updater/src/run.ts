@@ -13,7 +13,7 @@ import {
 import type { ReleaseManifest } from '@haive/shared/release';
 import { safeErrorMessage } from '@haive/shared/logger';
 import * as dk from './docker.js';
-import { assertStackLease, isLeaseLoss, withStackLeaseRecovery } from './lease-fence.js';
+import { assertStackLease, withStackLeaseRecovery } from './lease-fence.js';
 import { inInstall } from './install-files.js';
 import { IMAGE_KEYS, imageFor, type ImageOverrides } from './images.js';
 import {
@@ -490,7 +490,8 @@ export async function phaseCommit(ctx: UpgradeContext): Promise<void> {
     try {
       await pruneBundles(ctx.compose, ctx.bundle, ctx.log);
     } catch (err) {
-      if (isLeaseLoss(err)) throw err;
+      // The journal is already done. A lease refusal stops pruning at its first fenced
+      // write, but cannot replace the completed upgrade's result.
       ctx.log('bundle-prune-failed', {
         reason: 'commit succeeded; keeping remaining backup and staging files',
         message: safeErrorMessage(err),
