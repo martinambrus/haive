@@ -291,6 +291,10 @@ function checkJob(job, spec, workflow = workflows[spec.file]) {
     const { gated, rows, gatedSeconds, greenSeconds } = model(checks, spec.budget);
     let raise = '';
     if (gated) {
+      assert.ok(
+        Number.isInteger(rowHeadroom) && rowHeadroom >= 0,
+        'gated budget rowHeadroom must be a non-negative integer',
+      );
       const { stepMinutes, jobMinutes } = minimumLimits(rows + rowHeadroom, spec.budget);
       raise = `; raise the gated step's timeout-minutes to at least ${stepMinutes} and the job's to at least ${jobMinutes}, which hold these ${rows} rows and ${rowHeadroom} more`;
     }
@@ -820,6 +824,16 @@ describe('the limits the gated budget names', () => {
       namedInMessage,
     );
   });
+
+  for (const value of [undefined, -1, 1.5, NaN, '25']) {
+    it(`rejects an invalid gated rowHeadroom: ${String(value)}`, () => {
+      const broken = { ...spec, budget: { ...spec.budget, rowHeadroom: value } };
+      assert.throws(
+        () => checkJob(live, broken),
+        /gated budget rowHeadroom must be a non-negative integer/,
+      );
+    });
+  }
 
   it('has a rowHeadroom that the 2x ceiling allows for the list as it is', () => {
     const { stepMinutes, jobMinutes } = minimumLimits(rows + spec.budget.rowHeadroom, spec.budget);
