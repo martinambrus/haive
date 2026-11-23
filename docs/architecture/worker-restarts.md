@@ -128,8 +128,7 @@ whole step row.
 
 Before saving a provider disable, Save and Rebuild read the authenticated, owner-scoped
 `GET /cli-providers/:id/disable-impact`. It counts remaining fresh default-slot bindings to that
-provider on non-dead, nonterminal tasks (including tasks waiting to start or resume), using the
-same CLI preference resolution as the step display. Continuations, deterministic steps that are
+provider on non-dead, nonterminal tasks (including tasks waiting to start or resume), using the same CLI preference resolution as the step display. On a composed-LSP task it counts the binding after the lock: a saved pick the lock skips is not counted, and neither is an implicit fallthrough to the allowed set's default. Continuations, deterministic steps that are
 not provider-sensitive, implicit defaults and other owners' tasks are excluded. Repository-dependent
 `shouldRun` skips are not predicted, and the confirmation says so. A successful nonzero preview
 asks for confirmation; two zero counts skip it. A failed preview also proceeds without a dialog,
