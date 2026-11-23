@@ -42,6 +42,25 @@ function transaction(candidates: ReturnType<typeof candidate>[]) {
 }
 
 describe('login set seed without decryption', () => {
+  it('does no per-candidate work after the first configured candidate', async () => {
+    const source = candidate(randomBytes(1).toString('hex'));
+    const later = candidate('');
+    const laterRead = vi.fn((): string => {
+      throw new Error('candidate after the selected source must not be inspected');
+    });
+    Object.defineProperty(later, 'encryptedValue', { get: laterRead });
+    const { tx, values } = transaction([candidate(''), source, later]);
+    const result = await seedJoinerFromSet(tx, {
+      userId: 'user',
+      joinerId: 'joiner',
+      members: [{ id: 'joiner' }, { id: source.providerId }, { id: later.providerId }],
+      assertHeld: vi.fn(),
+    });
+    expect(result.row?.id).toBe('joiner');
+    expect(values.mock.calls[0]?.[0]?.encryptedValue === source.encryptedValue).toBe(true);
+    expect(laterRead).not.toHaveBeenCalled();
+  });
+
   it.each([' ', randomBytes(1).toString('hex')])(
     'skips an exact-empty candidate and copies the next envelope (%#)',
     async (value) => {

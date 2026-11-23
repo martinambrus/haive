@@ -232,7 +232,7 @@ export async function seedJoinerFromSet(
       ),
     )
     .orderBy(desc(schema.cliProviderSecrets.updatedAt), asc(schema.cliProviderSecrets.providerId));
-  const [source] = candidates.filter((candidate) => !isEmptyEnvelope(candidate.encryptedValue));
+  const source = candidates.find((candidate) => !isEmptyEnvelope(candidate.encryptedValue));
   if (!source) return { events: [] };
   const event: AuditEvent = {
     actorUserId: userId,
