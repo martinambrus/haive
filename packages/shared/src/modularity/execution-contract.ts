@@ -3,6 +3,14 @@ import { MODULE_ID_PATTERN_SOURCE } from './module-id.js';
 import type { ComposableStepEntry } from './contracts.js';
 
 const id = z.string().min(1).max(128);
+const moduleTargetId = z
+  .string()
+  .max(128)
+  .regex(new RegExp(`^module\\.${MODULE_ID_PATTERN_SOURCE}\\.[a-z0-9][a-z0-9_-]*$`));
+const moduleLocalId = z
+  .string()
+  .max(128)
+  .regex(new RegExp(`^module\\.${MODULE_ID_PATTERN_SOURCE}\\.[a-z0-9_-]+$`));
 /** Bounds the exponential path walk. Repeated predicate ids consume only one decision. */
 export const MAX_EXECUTION_PREDICATES = 8;
 /** Canonical legacy fix consumer; planner and worker routing must agree. */
@@ -18,10 +26,7 @@ export const executionContractSchema = z.strictObject({
         id,
         firstStepId: id,
         lastStepId: id,
-        predicateId: z
-          .string()
-          .max(128)
-          .regex(new RegExp(`^module\\.${MODULE_ID_PATTERN_SOURCE}\\.[a-z0-9_-]+$`)),
+        predicateId: moduleLocalId,
         args: z.record(z.string(), json),
         /** Select the false branch of the same durable predicate decision. Omitted means true. */
         when: z.boolean().optional(),
@@ -64,8 +69,20 @@ export function assertExecutionContractSupported(
 ): void {
   if (raw == null) return;
   const contract = parseExecutionContract(raw);
-  if (contract.fixTarget)
-    throw new ExecutionContractError('custom fix target not yet supported by this worker');
+  if (contract.fixTarget && !scope.staticPinnedList)
+    throw new ExecutionContractError(
+      `fix-target ${contract.fixTarget.stepId} needs a static pinned run list`,
+    );
+  if (contract.fixTarget) {
+    const target = contract.fixTarget.stepId;
+    if (
+      !moduleTargetId.safeParse(target).success ||
+      (scope.stepIds && !scope.stepIds.includes(target))
+    )
+      throw new ExecutionContractError(
+        `fix-target ${target} must be a module step in the pinned run list`,
+      );
+  }
   if (contract.guardedSpans.length > 0 && !scope.staticPinnedList)
     throw new ExecutionContractError('guarded spans need a static pinned run list');
   const { stepIds } = scope;

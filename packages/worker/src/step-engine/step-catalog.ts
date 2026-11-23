@@ -1,4 +1,5 @@
 import { assertMatchingOutputDeclaration } from './step-output-contract.js';
+import { fixConsumerCapability } from './fix-consumer-capability.js';
 import { notInArray } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
 import {
@@ -25,8 +26,14 @@ export async function syncStepCatalog(
       const meta = def.metadata;
       const parsed = parseStepId(meta.id);
       const composables = parsed?.kind === 'module' ? moduleComposables : coreComposables;
-      const entry = composables.get(meta.id);
-      if (entry) assertMatchingOutputDeclaration(def, entry, parsed?.kind === 'module');
+      let entry = composables.get(meta.id);
+      const fixConsumer = fixConsumerCapability(def);
+      if (entry && fixConsumer !== def.fixConsumer) {
+        const { fixConsumer: _unsupported, ...supported } = entry;
+        entry = supported;
+      }
+      if (entry)
+        assertMatchingOutputDeclaration({ ...def, fixConsumer }, entry, parsed?.kind === 'module');
       const composableRow = {
         composable: composables.has(meta.id),
         // Data contracts and fixConsumer are versioned references; executable parity

@@ -305,8 +305,7 @@ keeps the live registry list. `custom.*` ids resolve from the task's pinned copy
 the registry. The dead-task contract (boot reconcile, revive, admission, display, the api's 409
 `task_dead`) is in [Worker restarts](worker-restarts.md).
 
-**Fix loops.** The target is the definition's `fix_loop.targetStepId`, else `07-phase-2-implement`, and
-any target other than 07 fails, because only 07 reads the recorded diagnosis. `routableFixLoopTarget` is
+**Fix loops.** The target is the step the task's execution contract pins as its fix target (a capable module step, see the execution contract below), else the definition's `fix_loop.targetStepId`, else `07-phase-2-implement`; an unpinned target other than 07 fails, because only 07 and a capable module step read the recorded diagnosis. `routableFixLoopTarget` is
 the only router; an unroutable target fails the task by name (`fix_loop.unroutable`) before any reset —
 before, a run list without 07 ran 07 off-list and then completed the task.
 
@@ -587,7 +586,7 @@ bindings remain errors. Definition edits and recovery never remap a binding.
 
 Validation rechecks, snapshot comparisons, fix-round decisions, iteration caps,
 loop and gate-revise destinations, closing and commit control stay physical.
-`07-phase-2-implement` remains the only fix target. No migration is needed.
+Fix targets stay physical: 07, or the step a task's execution contract pins (below). No migration is needed.
 Rollback first stops new v3 admission and retains capable readers and workers
 while any affected task can resume. Keep every persisted result and immutable
 pin; never erase, downgrade, regenerate or backfill one to permit an older worker.
@@ -842,7 +841,7 @@ stored static detail and structural edits, guarded author-binding checks and the
 final locked `buildDataEdgePlan` call inside `definitionForCreate`. All INSERT
 callers share that writer. Schema registration changes no pin bytes or recovery
 protocol. Guard decisions and span skipping run in the worker (see Guard decisions);
-custom-fix execution does not exist.
+a pinned custom fix target runs through the worker's fix router (below).
 
 An optional `fixTarget: {stepId, capabilityVersion: 1}` must be an earlier,
 capable run-list target on every path where an emitter runs. For validation,
@@ -852,8 +851,7 @@ This declares no output replacement role or host policy. At the fix router a pin
 target replaces the live `fix_loop` target; one that is not a registered module step with
 the pinned capability, is not in the run list, or belongs to a deactivated module or one whose
 schema setup failed, fails the task with `fix_loop.unroutable` before any reset. The next-round CLI choice, the gates' provider options
-and the api's round-slot display follow the pinned target's own step id (see Fix loop). No
-gate admits a pin that selects a fix target.
+and the api's round-slot display follow the pinned target's own step id (see Fix loop). Every gate admits a supported fix-target pin (next paragraphs) and refuses the rest by name.
 
 The seeder owns execution declarations with its existing source-guarded upsert,
 no-op test and hash; absent contracts preserve the previous hash bytes. All five
@@ -862,17 +860,14 @@ task creators copy the locked definition's execution contract beside
 by definition edits, Retry, Resume, boot or revival. Existing definitions and
 tasks retain NULL semantics. An explicit empty contract is inert and pinnable.
 
-A pin is supported when it selects no fix target and, if it declares guarded
-spans, belongs to a static type with a pinned run list. Every gate refuses the rest
-with `invalid-execution-contract`: a pin that selects a fix target, a malformed pin,
-and a guarded pin on a derived, dynamic, workflow-path or run-app-mode type.
+A pin is supported when, if it declares guarded spans or selects a fix target, it belongs to a static type with a pinned run list, and any fix target it selects is module-shaped (`module.<id>.<step>`) and on that list. Every gate refuses the rest with `invalid-execution-contract`: a malformed pin, a fix target that is not a module step, and a guarded or fix-target pin on a derived, dynamic, workflow-path or run-app-mode type.
 Availability and create additionally validate a guarded static type's composition,
 data roles and registered predicate schemas, so an unknown predicate, a bad
 endpoint or a span whose first step leads the run list (START runs that step itself,
 and a decision needs a predecessor) keeps the type unavailable. The worker checks the pin against its own state
 at START, advance, boot and revival: static strategy, a unique non-null run-list
 snapshot and no derived plan, every span predicate provided by a registered module
-step with valid args, a feasible path set, and no span entry at the first step.
+step with valid args, a feasible path set, no span entry at the first step, and a fix target that is a registered module step declaring the pinned `fixConsumer` version (not a mining step) on the snapshot.
 The worker is authoritative. A rejected create or API START writes no task state,
 event or job. A worker START or ADVANCE refusal instead marks the existing task dead
 under its held epoch, keeps its status and immutable pin, and records one `task.dead`
@@ -887,7 +882,7 @@ The API also checks the immutable execution pin before task Retry at a step
 or clarification submission, and step CLI changes. Turning on auto-continue
 while a task awaits an answer uses the same refusal. Owner and administrator
 pause Resume refuse unsupported pins before clearing a standing hold.
-A pin that selects a fix target, or a malformed one, returns 409 `invalid-execution-contract`
+An unsupported pin (a malformed one, or a fix target that is not a module step) returns 409 `invalid-execution-contract`
 before any row reset, answer/event write, sandbox kill or job enqueue. At these gates
 only the stored pin is known; the registered-predicate and run-list checks belong to
 availability and to the worker. A task with a supported guarded pin passes every gate.
@@ -935,8 +930,7 @@ by the next capable worker's boot). A new worker behind an older API sees guarde
 START, Retry, Resume, Skip, AI Retry, submit, clarify, CLI change and pause Resume refused
 with 409 `invalid-execution-contract` and the pins held in a global-pause lift; tasks
 already running keep running. Workers that predate the execution-contract refusal have no
-check at all and must never receive guarded tasks. Custom fix targets stay refused by every
-gate.
+check at all and must never receive guarded tasks. A worker that predates custom fix targets refuses a fix-target pin at START or advance the same way, marking the task dead until a capable worker's boot revives it.
 
 Rollback stops creation of guarded types (disable them) and retains nullable columns,
 the applied migration, every immutable pin and every guard decision. Keep a capable
@@ -1006,15 +1000,16 @@ write, after it or at commit leaves no decision and may evaluate again. This is
 exactly-once committed persistence, not exactly-once invocation of a callback.
 Malformed, stale and inconsistent references refuse rather than recomputing.
 It currently requires same-round span-entry decisions and a pinned static list, except in a
-pin with a fix target: there every round after 0 reuses the span's persisted round-0 decision
-(the span decision and every `requiresSpan` shared read) and never evaluates the predicate again,
-the owner's decision of 2026-11-22. The reused copy binds to the current round's entry row and
-generation; its references keep pointing at round-0 rows. A missing, stale or malformed round-0
-decision fails closed with `fix-round-decision-unavailable` (the underlying reason is logged), and
-a reused `run:false` whose span contains the pinned fix target fails with `fix-target-suppressed`
-rather than skipping the target. Admission still refuses every pin with a fix target, so this path
-is dormant until the fence opens. Reuse is keyed on round > 0, not on fix rounds only; whether a
-revise or restart round should re-evaluate instead is open for that change.
+pin with a fix target on a fix round: there the span reuses the persisted decision of the latest earlier round that is
+not itself a fix round and holds a decision for that span, and never evaluates the predicate again. A `requiresSpan` dependency or a shared predicate's source is read at the row the reused decision names, not at its own baseline, so the reused decision's own references always come from one consistent round; a named row that was reset or no longer holds that decision is refused. The dependency span itself, when the fix round reaches it, still reuses its own latest decision, so after a revise round that flipped it the two spans may act on different rounds' results; that pairing is accepted rather than refused, since refusing it would strand the task. With no revise round between, that is round 0, the owner's decision of 2026-11-22
+(item d). After a revise round it is that round's decision, since the fix round repairs what the revise round ran;
+round 0 may hold no decision at all when a spec gate forked the round before the span was reached. A fix round is one
+with a `fix_loop.requested` event for its number, read inside the held transaction (a restartLoop round records one, a
+revise round does not, so a revise round evaluates as a pin without a fix target does). The reused copy binds to the
+current round's entry row and generation; its references keep pointing at the source round's rows. No earlier decision,
+or a stale or malformed one, fails closed with `fix-round-decision-unavailable` (the underlying reason is logged), and a
+reused `run:false` whose span contains the pinned fix target fails with `fix-target-suppressed` rather than skipping the
+target.
 A stored decision also replays on its skipped entry; no predicate runs again.
 
 No migration is needed: 0245 already appended the nullable column. Rollback reverts
@@ -1647,7 +1642,7 @@ tasks are listed in the task list like any other task (a product decision).
 9. Create admits on the definition read `FOR SHARE` inside the insert transaction at all five task INSERT sites; DELETE takes `FOR UPDATE`; module rows are read
    `FOR KEY SHARE`.
 10. The availability order is fixed and the create switch is exhaustive.
-11. Only `07-phase-2-implement` is a fix-loop target; an unroutable target fails by name before any reset.
+11. A fix-loop target is `07-phase-2-implement` or the capable module step a task's execution contract pins; an unroutable target fails by name before any reset.
 12. Composition ordering rules never contradict the shipped built-in order (the guard test above).
 13. Module steps are namespaced and register after the static-list asserts.
 14. A quote comes only from agent-authored output; persona markers resolve only from the step's own

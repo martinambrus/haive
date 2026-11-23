@@ -43,7 +43,9 @@ export function houseRulesFor(
   estimatedFiles?: readonly string[],
   capabilities?: readonly string[],
   namedText?: string,
+  pinnedFixConsumer = false,
 ): HouseRulesRequest | undefined {
+  if (pinnedFixConsumer && parseStepId(stepId)?.kind === 'module') return { mode: 'write' };
   if (parseStepId(stepId)?.kind === 'custom') {
     if (!capabilities?.includes('file_write')) return undefined;
     return namedText === undefined ? { mode: 'write' } : { mode: 'write', namedText };

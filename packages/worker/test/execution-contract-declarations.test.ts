@@ -7,6 +7,8 @@ import type { StepDefinition } from '@haive/shared/step';
 import { validateComposition } from '@haive/shared/modularity';
 import { buildRunList } from '../src/queues/run-list.js';
 import { assertMatchingOutputDeclaration } from '../src/step-engine/step-output-contract.js';
+import { syncStepCatalog } from '../src/step-engine/step-catalog.js';
+import type { Database } from '@haive/database';
 const evaluate = vi.fn(async () => true);
 const composable = {
   stepId: 'fix',
@@ -100,6 +102,38 @@ it('refuses a fix consumer that does not declare it edits code or tests, and acc
     'fix-consumer-edits-code-required',
   );
   expect(() => load({ ...def, editsCodeOrTests: true })).not.toThrow();
+});
+it('does not advertise a mining step as a fix consumer in the loaded module catalog', () => {
+  const module = load({ ...def, agentMining: {} } as StepDefinition);
+  expect(module.composable[0]?.fixConsumer).toBeUndefined();
+});
+it('catalog sync removes mining fix capability even from an unprojected declaration', async () => {
+  const registry = new StepRegistry();
+  const stepId = 'module.fx.fix';
+  registry.register({
+    ...def,
+    metadata: { ...def.metadata, id: stepId },
+    agentMining: {},
+  } as StepDefinition);
+  const rows: { entry: unknown }[] = [];
+  const tx = {
+    insert: () => ({
+      values: (row: { entry: unknown }) => ({
+        onConflictDoUpdate: async () => {
+          rows.push(row);
+        },
+      }),
+    }),
+    delete: () => ({ where: async () => undefined }),
+  };
+  const db = { transaction: async (run: (handle: typeof tx) => Promise<void>) => run(tx) };
+  await syncStepCatalog(
+    db as unknown as Database,
+    registry,
+    new Map([[stepId, { ...composable, stepId }]]),
+  );
+  expect(rows).toHaveLength(1);
+  expect(rows[0]!.entry).not.toHaveProperty('fixConsumer');
 });
 it('refuses declarative predicates without executable trusted code', () => {
   const bad = {

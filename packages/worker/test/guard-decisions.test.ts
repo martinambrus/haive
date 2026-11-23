@@ -16,7 +16,13 @@ import {
   type ExecutionContract,
 } from '@haive/shared/modularity';
 import { randomBytes, randomUUID } from 'node:crypto';
-import type { schema } from '@haive/database';
+import { schema } from '@haive/database';
+import { createFakeDb } from '@haive/database/testing';
+import {
+  FIX_LOOP_REQUESTED,
+  isFixRound,
+  recordFixLoopRequest,
+} from '../src/step-engine/steps/workflow/_fix-loop.js';
 import { TaskCancelledError, type StepContext, type StepDefinition } from '@haive/shared/step';
 import { z } from 'zod';
 import { sql } from 'drizzle-orm';
@@ -181,7 +187,9 @@ describe('guard decisions from loaded rows', () => {
         } as StepRow,
       ]),
     );
-    tx = {} as StepContext['db'];
+    tx = {
+      select: () => ({ from: () => ({ where: async () => [{ payload: { round: 1 } }] }) }),
+    } as unknown as StepContext['db'];
     ctx = {
       taskId: task.id,
       taskStepId: rows.work!.id,
@@ -317,6 +325,61 @@ describe('guard decisions from loaded rows', () => {
     expect(await decide()).toEqual(decision);
     expect(evaluate).toHaveBeenCalledOnce();
   });
+  it('reads fix rounds once through the held transaction and ignores unneeded spans', async () => {
+    pinFixTarget();
+    const original = await save();
+    const current = nextRound();
+    current.round = ctx.round = task.currentRound = 3;
+    const from = vi.fn(() => ({
+      where: async () => [{ payload: { round: 2 } }, { payload: { round: 3 } }],
+    }));
+    const select = vi.fn(() => ({ from }));
+    tx = { select } as unknown as StepContext['db'];
+    Object.defineProperty(rows.cleanup!, 'guardState', {
+      get() {
+        throw new Error('the current evaluation does not need this span');
+      },
+    });
+    expect(await decide()).toEqual({ ...original, round: 3, generation: 7 });
+    expect(select).toHaveBeenCalledOnce();
+    expect(from).toHaveBeenCalledExactlyOnceWith(schema.taskEvents);
+    expect(evaluate).toHaveBeenCalledOnce();
+  });
+  it.each(['revise', 'restart'])(
+    're-evaluates revise and reuses restart decisions: %s',
+    async (kind) => {
+      pinFixTarget();
+      const original = await save();
+      nextRound();
+      const events = createFakeDb({ taskEvents: schema.taskEvents });
+      tx = events.db as unknown as StepContext['db'];
+      if (kind === 'restart') {
+        // restartLoop returns loop_back, whose handler records this durable request.
+        await recordFixLoopRequest(tx, task.id, rows.plan!.id, {
+          round: 1,
+          sourceStepId: '09-gate-2-verify-approval',
+          diagnosis: 'Restart requested',
+        });
+        expect(events.rows(schema.taskEvents)).toEqual([
+          expect.objectContaining({
+            eventType: FIX_LOOP_REQUESTED,
+            payload: expect.objectContaining({ round: 1 }),
+          }),
+        ]);
+      } else {
+        expect(events.rows(schema.taskEvents)).toEqual([]);
+      }
+      expect(await isFixRound({ ...ctx, db: tx })).toBe(kind === 'restart');
+      evaluate.mockResolvedValue(false);
+      if (kind === 'restart') {
+        expect(await decide()).toEqual({ ...original, round: 1, generation: 7 });
+        expect(evaluate).toHaveBeenCalledOnce();
+      } else {
+        expect(await decide()).toMatchObject({ round: 1, generation: 7, run: false });
+        expect(evaluate).toHaveBeenCalledTimes(2);
+      }
+    },
+  );
   it('keeps same-round evaluation for a no-target pin at round one', async () => {
     await save();
     nextRound();
@@ -367,6 +430,55 @@ describe('guard decisions from loaded rows', () => {
     nextRound('cleanup');
     await expect(decide('cleanup')).rejects.toMatchObject({
       reason: 'shared-decision-unavailable',
+    });
+    expect(evaluate).toHaveBeenCalledOnce();
+  });
+  it.each(
+    (['required', 'source'] as const).flatMap((reference) =>
+      [
+        'missing-row',
+        'missing-state',
+        'malformed-state',
+        'row-task',
+        'row-step',
+        'task',
+        'span',
+        'round',
+        'hash',
+        'generation',
+        'reference-span',
+        'reference-generation',
+        'self-source',
+      ].map((change) => ({ reference, change })),
+    ),
+  )('fails closed for a damaged named $reference row: $change', async ({ reference, change }) => {
+    pinFixTarget();
+    if (reference === 'required') currentContract().guardedSpans[1]!.requiresSpan = 'work';
+    const parent = await save();
+    at('cleanup');
+    const dependent = await save('cleanup');
+    const savedRef = reference === 'required' ? dependent.required! : dependent.predicate!.source;
+    if (change === 'missing-row') savedRef.stepRowId = randomUUID();
+    else if (change === 'missing-state') rows.work!.guardState = null;
+    else if (change === 'malformed-state') rows.work!.guardState = {};
+    else if (change === 'row-task') rows.work!.taskId = randomUUID();
+    else if (change === 'row-step') rows.work!.stepId = 'tail';
+    else if (change === 'task') parent.taskId = randomUUID();
+    else if (change === 'span') parent.spanId = 'cleanup';
+    else if (change === 'round') parent.round = 1;
+    else if (change === 'hash') parent.contractHash = 'f'.repeat(64);
+    else if (change === 'generation') rows.work!.rerunGeneration++;
+    else if (change === 'reference-span') savedRef.spanId = 'cleanup';
+    else if (change === 'reference-generation') savedRef.generation++;
+    else parent.predicate!.source.stepRowId = rows.tail!.id;
+    if (['task', 'span', 'round', 'hash', 'self-source'].includes(change))
+      rows.work!.guardState = parent;
+    rows.cleanup!.guardState = dependent;
+    nextRound('cleanup');
+    await expect(decide('cleanup')).rejects.toMatchObject({
+      name: 'GuardDecisionError',
+      code: 'guard-decision-invalid',
+      reason: 'fix-round-decision-unavailable',
     });
     expect(evaluate).toHaveBeenCalledOnce();
   });

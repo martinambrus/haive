@@ -47,6 +47,7 @@ const guarded = {
     },
   ],
 };
+// A capable core step still fails the module-target shape requirement.
 const fixed = { ...empty, fixTarget: { stepId: 'report', capabilityVersion: 1 } };
 function setup(contract: unknown = null) {
   const fake = createFakeDb({
@@ -182,7 +183,7 @@ it.each([
   'plan_merge',
   'type_draft',
 ])(
-  'the common locked admission for %s refuses a custom fix target before pinning',
+  'the common locked admission for %s refuses a non-module fix target or malformed pin before pinning',
   async (slug) => {
     for (const contract of [fixed, { version: 99 }]) {
       const fake = setup(contract);
@@ -573,9 +574,14 @@ it.each([null, empty, guarded])(
 
 it.each([
   {
-    label: 'a custom fix target',
+    label: 'a non-module fix target',
     pin: fixed,
     admitted: false,
+  },
+  {
+    label: 'a supported module fix-target pin',
+    pin: { ...empty, fixTarget: { stepId: 'module.fx.repair', capabilityVersion: 1 } },
+    admitted: true,
   },
   {
     label: 'a guarded mid-span pin',
@@ -589,6 +595,10 @@ it.each([
   'allows Stop on $label; the following Resume is admitted only when supported',
   async ({ pin, admitted }) => {
     const fake = stopped(pin, 'running');
+    if ('fixTarget' in pin && pin.fixTarget.stepId === 'module.fx.repair') {
+      // This API gate reads the pin; the Postgres agreement harness checks live module support.
+      fake.patch(schema.tasks, TASK, { runListSnapshot: [pin.fixTarget.stepId, STEP, 'report'] });
+    }
     await fake.db.update(schema.tasks).set({ status: 'running' }).where(eq(schema.tasks.id, TASK));
     const app = new Hono<AppEnv>();
     app.route('/tasks', taskRoutes);
@@ -643,4 +653,57 @@ it.each([
     expect.objectContaining({ taskId: TASK }),
     expect.anything(),
   );
+});
+
+it('admits a capable module target and copies the execution pin at locked admission', async () => {
+  const target = 'module.fx.repair';
+  const pin = { ...empty, fixTarget: { stepId: target, capabilityVersion: 1 } };
+  const fake = setup(pin);
+  fake.insert(schema.modules, {
+    moduleId: 'fx',
+    packageName: '@haive/module-fx',
+    name: 'Fx',
+    installedVersion: '1',
+  });
+  fake.insert(schema.stepCatalog, {
+    stepId: target,
+    source: 'module:fx',
+    workflowType: 'module.fx',
+    composable: true,
+    dispatchesCli: false,
+    stepIndex: 2,
+    entry: {
+      stepId: target,
+      label: 'Repair',
+      group: 'build',
+      dispatchesCli: false,
+      requires: [],
+      provides: [],
+      fixConsumer: { version: 1 },
+    },
+  });
+  await fake.db
+    .update(schema.taskTypeDefinitions)
+    .set({ stepIds: ['lead', target, 'tail'] })
+    .where(eq(schema.taskTypeDefinitions.slug, 'test'));
+  const definition = await fake.db.transaction((tx) =>
+    definitionForCreate(tx as never, 'test', { generic: true, locked: true }),
+  );
+  expect(definition.executionContract).toEqual(pin);
+  expect(definition.runListSnapshot).toContain(target);
+  // The catalog cannot grant a capability the step never declared.
+  const stored = fake.rows(schema.stepCatalog).find((row) => row.stepId === target)!;
+  await fake.db
+    .update(schema.stepCatalog)
+    .set({ entry: { ...(stored.entry as object), fixConsumer: undefined } })
+    .where(eq(schema.stepCatalog.stepId, target));
+  await expect(
+    fake.db.transaction((tx) =>
+      definitionForCreate(tx as never, 'test', { generic: true, locked: true }),
+    ),
+  ).rejects.toMatchObject({
+    status: 409,
+    code: 'invalid-execution-contract',
+    message: expect.stringContaining(target),
+  });
 });

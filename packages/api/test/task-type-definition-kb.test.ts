@@ -104,7 +104,7 @@ describe('POST /enrich pins the kb_author step list', () => {
         assertExecutionContractUsable({
           version: 1,
           guardedSpans: [],
-          fixTarget: { stepId: 'module.scan.fix', capabilityVersion: 1 },
+          fixTarget: { stepId: '07-phase-2-implement', capabilityVersion: 1 },
         }),
       );
       const res = await enrich();
