@@ -1328,11 +1328,16 @@ cliProviderRoutes.get('/:providerId/secrets', async (c) => {
       id: true,
       secretName: true,
       fingerprint: true,
+      encryptedValue: true,
+      encryptedDek: true,
       createdAt: true,
       updatedAt: true,
     },
   });
-  return c.json({ secrets: rows });
+  const secrets = (await configuredProviderSecrets(rows)).map(
+    ({ encryptedValue: _value, encryptedDek: _dek, ...metadata }) => metadata,
+  );
+  return c.json({ secrets });
 });
 
 cliProviderRoutes.post('/:providerId/secrets', async (c) => {

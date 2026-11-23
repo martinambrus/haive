@@ -1001,3 +1001,42 @@ describe('T748.1 clone ignores unconfigured secrets', () => {
     expect((await response.text()).includes(real)).toBe(false);
   });
 });
+
+describe('T748.4 configured secrets list', () => {
+  it('omits empty and whitespace rows and exposes metadata only, including short real secrets', async () => {
+    const fake = setup(true);
+    const short = randomBytes(2).toString('hex');
+    const padded = ` ${randomBytes(16).toString('hex')}\n`;
+    for (const [name, value] of Object.entries({
+      EMPTY: '',
+      BLANK: ' \t\n\u00a0',
+      LONG_BLANK: ' '.repeat(20),
+      SHORT: short,
+      PADDED: padded,
+    })) {
+      fake.insert(schema.cliProviderSecrets, {
+        providerId: PROVIDER,
+        secretName: name,
+        ...envelopeEncrypt(value, KEK),
+        fingerprint: '****',
+      });
+    }
+    const before = fake.rows(schema.cliProviderSecrets);
+    const response = await app.request(`/${PROVIDER}/secrets`);
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as { secrets: Record<string, unknown>[] };
+    expect(body.secrets.map((row) => row.secretName).sort()).toEqual(['PADDED', 'SHORT']);
+    expect(
+      body.secrets.every(
+        (row) => !('encryptedValue' in row) && !('encryptedDek' in row) && !('value' in row),
+      ),
+    ).toBe(true);
+    expect(JSON.stringify(body).includes(padded)).toBe(false);
+    expect(fake.rows(schema.cliProviderSecrets)).toEqual(before);
+  });
+  it('does not load the KEK for an empty list', async () => {
+    setup(true);
+    expect((await app.request(`/${PROVIDER}/secrets`)).status).toBe(200);
+    expect(secretsService.getMasterKek).not.toHaveBeenCalled();
+  });
+});
