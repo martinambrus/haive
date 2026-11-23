@@ -4,6 +4,7 @@ import {
   buildOwnModules,
   composeUp,
   localImages,
+  oneShotSignalCleanup,
   redactSecrets,
   resolveImageSettings,
   requireNoRunningOneShots,
@@ -46,6 +47,30 @@ describe('one-shot ownership after an updater dies', () => {
     builderExec.mockResolvedValue({ stdout: '' });
     await expect(launch()).rejects.toThrow('one-shot ownership scope is missing');
     expect(builderExec.mock.calls.some((call) => call[1][0] === 'run')).toBe(false);
+  });
+
+  it('launches no one-shot for an attempt once its signal cleanup has started', async () => {
+    let releaseList!: (value: { stdout: string }) => void;
+    builderExec.mockImplementation((_cmd: string, argv: string[]) =>
+      argv[0] === 'ps'
+        ? new Promise((resolve) => {
+            releaseList = resolve;
+          })
+        : Promise.resolve({ stdout: '' }),
+    );
+    await withOneShotOwner('team_install', async () => {
+      const cleanup = oneShotSignalCleanup()();
+      // The upgrade keeps running while the cleanup lists: the next phase must not start a child.
+      await expect(runOneShot('target', ['migrate'], {})).rejects.toThrow(
+        'one-shot attempt is stopping',
+      );
+      releaseList({ stdout: '' });
+      await cleanup;
+    });
+    expect(builderExec.mock.calls.some((call) => call[1][0] === 'run')).toBe(false);
+    // A new attempt (the next start) launches normally.
+    await withOneShotOwner('team_install', () => runOneShot('target', ['commit'], {}));
+    expect(builderExec.mock.calls.filter((call) => call[1][0] === 'run')).toHaveLength(1);
   });
 
   it('labels snapshots, restores, migrations and builders with one attempt, renewed on recovery', async () => {

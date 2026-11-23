@@ -20,6 +20,9 @@ const ONE_SHOT_ROLE = 'org.haive.updater.role';
 export const ONE_SHOT_CHECK_TIMEOUT_MS = 30_000;
 export const ONE_SHOT_CHECK_MAX_BUFFER = 1024 * 1024;
 const oneShotOwner = new AsyncLocalStorage<{ install: string; attempt: string }>();
+/** Attempts whose signal cleanup has started. The upgrade keeps running while the cleanup lists and
+ *  removes, so a later phase must not start a child the cleanup's list has already missed. */
+const stoppingAttempts = new Set<string>();
 
 /** Scope every one-shot, including preflight builders and recovery, to this install invocation. */
 export function withOneShotOwner<T>(install: string, work: () => T): T {
@@ -29,6 +32,7 @@ export function withOneShotOwner<T>(install: string, work: () => T): T {
 function oneShotLabels(role: string): string[] {
   const owner = oneShotOwner.getStore();
   if (!owner) throw new Error('one-shot ownership scope is missing');
+  if (stoppingAttempts.has(owner.attempt)) throw new Error('one-shot attempt is stopping');
   return [
     '--label',
     `${ONE_SHOT_INSTALL}=${owner.install}`,
@@ -129,7 +133,10 @@ function errorCodeOrClass(error: unknown): string | number {
 export function oneShotSignalCleanup(): () => Promise<void> {
   const owner = oneShotOwner.getStore();
   if (!owner) throw new Error('one-shot ownership scope is missing');
-  return () => stopOneShots(owner.install, owner.attempt);
+  return () => {
+    stoppingAttempts.add(owner.attempt);
+    return stopOneShots(owner.install, owner.attempt);
+  };
 }
 
 /** A terminated Docker client does not stop its container. Remove only this attempt's role
