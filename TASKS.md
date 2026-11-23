@@ -1102,7 +1102,7 @@ A SIGKILLed bridge cannot cancel `docker compose` (`docker/desktop-extension/bri
 
 ### T759 · Updater: losing the stack lease does not fence the holder's later phases
 
-status: in review (#1330: ownership proved from the stored record before each phase, write and container start; proven loss `stack-lock-lost` sticks, unproven `stack-lock-unproven` refuses forward work but lets recovery run; residual T765; the postgres-down takeover stays T760 item 1) · kind: design · found: T744 review 2026-11-23 · priority: P3
+status: done (#1330 9974653a3, 2026-11-23; updater code, ships with the next release image. Bot round fixed: a failed read no longer enables torn-record tolerance, reverse resume runs in the recovery scope, a loss while pruning keeps done. Ownership proved from the stored record before each phase, write and container start; proven loss `stack-lock-lost` sticks, unproven `stack-lock-unproven` refuses forward work but lets recovery run; residual T765; the postgres-down takeover stays T760 item 1) · kind: design · found: T744 review 2026-11-23 · priority: P3
 
 `packages/updater/src/stack-lock.ts` ~:146-149: lease loss only stops heartbeats. A holder frozen over 60 s that resumes after a takeover keeps running its phases and can start one-shots the new holder's child check (T744) never saw. PRE-EXISTING, consequential. Fix direction: check lease ownership (a fencing token) before each phase and each container start, and abort on loss.
 
