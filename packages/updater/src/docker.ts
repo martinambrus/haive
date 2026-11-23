@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
-import { CONTAINER_FAMILY, containerName } from '@haive/shared/naming';
+import { AsyncLocalStorage } from 'node:async_hooks';
+import { CONTAINER_FAMILY, containerName, INSTALL_LABEL } from '@haive/shared/naming';
 import { execFile, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
 import { dirname, isAbsolute, resolve } from 'node:path';
@@ -13,10 +14,92 @@ import { UpgradeRefusal } from './refusal.js';
 
 const exec = promisify(execFile);
 
+const ONE_SHOT_INSTALL = INSTALL_LABEL;
+const ONE_SHOT_ATTEMPT = 'org.haive.updater.attempt';
+const ONE_SHOT_ROLE = 'org.haive.updater.role';
+export const ONE_SHOT_CHECK_TIMEOUT_MS = 30_000;
+export const ONE_SHOT_CHECK_MAX_BUFFER = 1024 * 1024;
+const oneShotOwner = new AsyncLocalStorage<{ install: string; attempt: string }>();
+/** Attempts whose signal cleanup has started. The upgrade keeps running while the cleanup lists and
+ *  removes, so a later phase must not start a child the cleanup's list has already missed. */
+const stoppingAttempts = new Set<string>();
+
+/** Scope every one-shot, including preflight builders and recovery, to this install invocation. */
+export function withOneShotOwner<T>(install: string, work: () => T): T {
+  return oneShotOwner.run({ install, attempt: randomUUID() }, work);
+}
+
+function oneShotLabels(role: string): string[] {
+  const owner = oneShotOwner.getStore();
+  if (!owner) throw new Error('one-shot ownership scope is missing');
+  if (stoppingAttempts.has(owner.attempt)) throw new Error('one-shot attempt is stopping');
+  return [
+    '--label',
+    `${ONE_SHOT_INSTALL}=${owner.install}`,
+    '--label',
+    `${ONE_SHOT_ATTEMPT}=${owner.attempt}`,
+    '--label',
+    `${ONE_SHOT_ROLE}=${role}`,
+  ];
+}
+
+/** Called under the install lock, before recovery or upgrade phases. Docker owns the child
+ * containers after a client dies; a stale lease is therefore insufficient proof of quiescence. */
+export async function requireNoRunningOneShots(
+  options: { timeoutMs?: number; maxBuffer?: number } = {},
+): Promise<void> {
+  const owner = oneShotOwner.getStore();
+  if (!owner) throw new Error('one-shot ownership scope is missing');
+  let stdout: string;
+  try {
+    ({ stdout } = await exec(
+      'docker',
+      [
+        'ps',
+        '--filter',
+        `label=${ONE_SHOT_INSTALL}=${owner.install}`,
+        '--filter',
+        `label=${ONE_SHOT_ATTEMPT}`,
+        '--filter',
+        `label=${ONE_SHOT_ROLE}`,
+        '--format',
+        `{{.ID}}\t{{.Label "${ONE_SHOT_ATTEMPT}"}}\t{{.Label "${ONE_SHOT_ROLE}"}}`,
+      ],
+      {
+        timeout: options.timeoutMs ?? ONE_SHOT_CHECK_TIMEOUT_MS,
+        maxBuffer: options.maxBuffer ?? ONE_SHOT_CHECK_MAX_BUFFER,
+      },
+    ));
+  } catch (error) {
+    const diagnostic = errorCodeOrClass(error);
+    throw new UpgradeRefusal(
+      'updater-child-check-failed',
+      `could not check updater one-shot containers (${diagnostic}); check Docker availability and retry`,
+    );
+  }
+  const blockers = stdout
+    .split('\n')
+    .filter((line) => line.length > 0)
+    .map((line) => {
+      const [id, attempt, role] = line.split('\t');
+      return { id, attempt, role };
+    })
+    .filter((child) => child.attempt !== owner.attempt);
+  if (blockers.length) {
+    throw new UpgradeRefusal(
+      'updater-child-running',
+      `another updater attempt still has running one-shot containers for this install: ${blockers
+        .map((child) => `${child.id} (${child.role || 'unknown role'})`)
+        .join(
+          ', ',
+        )}; wait for them to finish, or if a survivor is known dead or hung, remove it with docker rm -f <id>, then retry`,
+    );
+  }
+}
+
 /**
- * Thin shell wrappers. Deliberately thin: everything that DECIDES lives in `phases.ts` and
- * `preflight.ts`, which are pure and tested, so this module has no branching worth testing and
- * nothing to get subtly wrong.
+ * Docker transport wrappers. Upgrade decisions live in `phases.ts` and `preflight.ts`;
+ * one-shot ownership and the post-lock orphan check live here beside their Docker labels.
  *
  * `docker compose` rather than the API: the compose file IS the deployment description, and
  * re-implementing its dependency ordering and health gating against the daemon API would be
@@ -41,20 +124,102 @@ export function redactSecrets(text: string): string {
   return text.replace(SECRET_ARG, '$1<redacted>');
 }
 
+function errorCodeOrClass(error: unknown): string | number {
+  const code = (error as NodeJS.ErrnoException | null)?.code;
+  return code ?? (error instanceof Error ? error.constructor.name : typeof error);
+}
+
+/** Capture ownership while registering the handler: process signal callbacks have no owner scope. */
+export function oneShotSignalCleanup(): () => Promise<void> {
+  const owner = oneShotOwner.getStore();
+  if (!owner) throw new Error('one-shot ownership scope is missing');
+  return () => {
+    stoppingAttempts.add(owner.attempt);
+    return stopOneShots(owner.install, owner.attempt);
+  };
+}
+
+/** A terminated Docker client does not stop its container. Remove only this attempt's role
+ * (all its roles on SIGTERM) before its caller can roll back or release the lock. */
+async function stopOneShots(
+  install: string,
+  attempt: string,
+  roleLabel = ONE_SHOT_ROLE,
+): Promise<void> {
+  const options = {
+    timeout: ONE_SHOT_CHECK_TIMEOUT_MS,
+    maxBuffer: ONE_SHOT_CHECK_MAX_BUFFER,
+    killSignal: 'SIGKILL' as const,
+  };
+  const filters = [
+    'ps',
+    '-aq',
+    '--filter',
+    `label=${ONE_SHOT_INSTALL}=${install}`,
+    '--filter',
+    `label=${ONE_SHOT_ATTEMPT}=${attempt}`,
+    '--filter',
+    `label=${roleLabel}`,
+  ];
+  const list = async () => {
+    const { stdout } = await exec('docker', filters, options);
+    return stdout.split(/\s+/).filter(Boolean);
+  };
+  try {
+    const ids = await list();
+    if (ids.length) {
+      try {
+        await exec('docker', ['rm', '-f', ...ids], options);
+      } catch (error) {
+        // --rm can win this race. Only a fresh listing with identical filters proves success.
+        if ((await list()).length) throw error;
+      }
+    }
+  } catch (error) {
+    throw new UpgradeRefusal(
+      'updater-child-cleanup-failed',
+      `could not stop updater one-shot containers (${errorCodeOrClass(error)}); ` +
+        'leave the upgrade for recovery, check Docker availability and retry',
+    );
+  }
+}
+
 async function run(
   cmd: string,
   args: string[],
   cwd?: string,
   timeoutMs = 600_000,
 ): Promise<string> {
+  const roleLabel =
+    cmd === 'docker' && args[0] === 'run'
+      ? args.find((arg) => arg.startsWith(`${ONE_SHOT_ROLE}=`))
+      : undefined;
+  const owner = roleLabel ? oneShotOwner.getStore() : undefined;
   try {
     const { stdout } = await exec(cmd, args, {
       cwd,
-      timeout: timeoutMs,
+      // Main's SIGTERM timeout was proxied to PID 1 and did not bound these one-shots.
+      // Keep long snapshots, migrations and builds unbounded; SIGKILL still bounds maxBuffer kills.
+      timeout: owner ? 0 : timeoutMs,
+      ...(owner ? { killSignal: 'SIGKILL' as const } : {}),
       maxBuffer: 32 * 1024 * 1024,
     });
     return stdout.trim();
   } catch (err) {
+    const failure = err as (NodeJS.ErrnoException & { signal?: string | null }) | null;
+    if (
+      owner &&
+      roleLabel &&
+      (failure?.signal != null || failure?.code === 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER')
+    ) {
+      try {
+        await stopOneShots(owner.install, owner.attempt, roleLabel);
+      } catch (cleanupError) {
+        if (cleanupError instanceof UpgradeRefusal)
+          cleanupError.message += `; original client failure: ${errorCodeOrClass(err)}`;
+        throw cleanupError;
+      }
+    }
     throw new Error(redactSecrets(err instanceof Error ? err.message : String(err)));
   }
 }
@@ -169,6 +334,7 @@ export async function snapshotVolume(
   await run('docker', [
     'run',
     '--rm',
+    ...oneShotLabels('snapshot'),
     '-v',
     `${volume}:/from:ro`,
     '-v',
@@ -192,6 +358,7 @@ export async function restoreVolume(volume: string, inDir: string, inFile: strin
   await run('docker', [
     'run',
     '--rm',
+    ...oneShotLabels('restore'),
     '-v',
     `${volume}:/to`,
     '-v',
@@ -215,6 +382,7 @@ export async function runOneShot(
   return run('docker', [
     'run',
     '--rm',
+    ...oneShotLabels('migration'),
     ...(network ? ['--network', network] : []),
     ...envArgs,
     image,
@@ -235,6 +403,7 @@ export async function buildOwnModules(
     [
       'run',
       '--rm',
+      ...oneShotLabels('builder'),
       '--mount',
       'type=bind,src=/var/run/docker.sock,dst=/var/run/docker.sock',
       '--mount',

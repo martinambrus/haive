@@ -1,4 +1,4 @@
-/** A preflight refusal is journalled as refused and exits 3, before any hold. */
+/** Named refusal: preflight attempts are journalled as refused; child cleanup leaves recovery pending. */
 export class UpgradeRefusal extends Error {
   constructor(
     public readonly refusal: string,

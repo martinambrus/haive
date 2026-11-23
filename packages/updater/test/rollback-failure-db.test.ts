@@ -78,6 +78,9 @@ describe.skipIf(!url)(
         ...extra,
       ];
       vi.resetModules();
+      vi.spyOn(await import('../src/docker.js'), 'requireNoRunningOneShots').mockResolvedValue(
+        undefined,
+      );
       await import('../src/cli.js');
       await vi.waitFor(() => expect(exitCode, JSON.stringify(logs)).toBeDefined(), {
         timeout: 4000,

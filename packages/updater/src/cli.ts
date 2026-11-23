@@ -6,6 +6,7 @@ import postgres from 'postgres';
 import { safeErrorMessage, scrubErrorPaths } from '@haive/shared/logger';
 import { configService, encryptionKeyBootDatabase, networkName } from '@haive/shared';
 import { CHANNEL_PATTERN, parseReleaseManifest, type ReleaseManifest } from '@haive/shared/release';
+import { installId } from '@haive/shared/naming';
 import * as dk from './docker.js';
 import { readComposeContext } from './compose-context.js';
 import { classifyBundle, requireUnmodifiedBundle, stageBundle } from './bundle.js';
@@ -203,6 +204,10 @@ async function rollbackFailed(ctx: UpgradeContext, err: unknown): Promise<number
   return EXIT.rollbackFailed;
 }
 
+function isChildCleanupRefusal(err: unknown): err is UpgradeRefusal {
+  return err instanceof UpgradeRefusal && err.refusal === 'updater-child-cleanup-failed';
+}
+
 export async function main(options: { stackLock?: StackLockOptions } = {}): Promise<number> {
   if (flag('manifest') && flag('manifest-image')) {
     emit('error', { message: '--manifest and --manifest-image are mutually exclusive' });
@@ -219,6 +224,12 @@ export async function main(options: { stackLock?: StackLockOptions } = {}): Prom
     return EXIT.usage;
   }
 
+  return dk.withOneShotOwner(installId(), () => upgradeOwned(options));
+}
+
+async function upgradeOwned(options: { stackLock?: StackLockOptions }): Promise<number> {
+  const databaseUrl = process.env.DATABASE_URL;
+  const redisUrl = process.env.REDIS_URL;
   const installDir = arg('install-dir', process.env.HAIVE_INSTALL_DIR ?? '/install')!;
   const registry = arg('registry', process.env.HAIVE_REGISTRY ?? 'ghcr.io/martinambrus')!;
   const apiUrl = arg('api-url', process.env.HAIVE_API_URL ?? 'http://api:3001')!;
@@ -290,8 +301,9 @@ export async function main(options: { stackLock?: StackLockOptions } = {}): Prom
 
   let locked = false;
   let stackLock: StackLock | undefined;
-  let stopSignals: (() => void) | undefined;
+  let stopSignals: (() => Promise<void> | undefined) | undefined;
   let hasRun = false;
+  let errorRunId: string | undefined;
   let fromVersion = 'unknown';
   let installFieldsStarted = false;
   let toVersion = attemptVersion(arg('version'));
@@ -349,7 +361,11 @@ export async function main(options: { stackLock?: StackLockOptions } = {}): Prom
         throw new UpgradeRefusal('install-locked', describeBusy(outcome));
       if (outcome.status === 'held') {
         stackLock = outcome.lock;
-        stopSignals = releaseOnSignal(stackLock);
+        stopSignals = releaseOnSignal(stackLock, process.exit, ['SIGTERM'], {
+          beforeRelease: dk.oneShotSignalCleanup(),
+          onError: (err) =>
+            emit('updater-child-cleanup-failed', { message: safeErrorMessage(err) }),
+        });
       }
       // Waiting for the lock can outlast what the first read saw: the snapshot's database restart
       // ends the first updater's session lock, so a second updater can pass it and wait while the
@@ -358,11 +374,15 @@ export async function main(options: { stackLock?: StackLockOptions } = {}): Prom
       live = await findLiveRun(sql);
       hasRun = live !== null;
     }
+    errorRunId = live?.id;
     await requireRegularInstallFiles(installDir);
     if (live || !flag('check')) await cleanupInstallTemps(installDir);
     fromVersion = (await readEnvVar(envFile, 'HAIVE_VERSION')) ?? 'unknown';
     const { imageSettings, manifestOptions, missingTarget } = await readInstall();
     installFieldsStarted = true;
+    // Use the same Docker config as the children we are about to launch, while still under the
+    // install lock and before recovery, image preparation or any volume/database upgrade work.
+    if (live || !flag('check')) await dk.requireNoRunningOneShots();
 
     // An interrupted run is finished or undone before anything new is considered. Starting a
     // second upgrade over a half-finished one is the one thing that must never happen.
@@ -402,7 +422,7 @@ export async function main(options: { stackLock?: StackLockOptions } = {}): Prom
       try {
         await resume(ctx, live.phase);
       } catch (err) {
-        if (decideResume(live.phase).action !== 'reverse') throw err;
+        if (isChildCleanupRefusal(err) || decideResume(live.phase).action !== 'reverse') throw err;
         return rollbackFailed(ctx, err);
       }
       return EXIT.ok;
@@ -538,6 +558,7 @@ export async function main(options: { stackLock?: StackLockOptions } = {}): Prom
     });
 
     hasRun = true;
+    errorRunId = runId;
     const ctx: UpgradeContext = {
       sql,
       runId,
@@ -572,6 +593,9 @@ export async function main(options: { stackLock?: StackLockOptions } = {}): Prom
 
       verifyFailed = !(await phaseVerify(ctx));
     } catch (err) {
+      // A failed child cleanup leaves a possible writer alive: keep the run for recovery instead
+      // of rolling back concurrently with it. The next holder checks its labels before recovery.
+      if (isChildCleanupRefusal(err)) throw err;
       const message = err instanceof Error ? err.message : String(err);
       report('error', { message });
       // Anything that throws before commit is reversible by construction; say so and undo it
@@ -587,12 +611,18 @@ export async function main(options: { stackLock?: StackLockOptions } = {}): Prom
       await phaseCommit(ctx);
       return EXIT.ok;
     } catch (err) {
+      if (isChildCleanupRefusal(err)) throw err;
       const message = err instanceof Error ? err.message : String(err);
       report('error', { message, phase: 'commit', next: 'run the updater again to finish it' });
       return EXIT.failed;
     }
   } catch (err) {
     if (err instanceof UpgradeRefusal) {
+      if (errorRunId && isChildCleanupRefusal(err)) {
+        await recordRunError(sql, errorRunId, scrubErrorPaths(safeErrorMessage(err))).catch(
+          () => {},
+        );
+      }
       report('refused', { refusal: err.refusal, message: err.message });
       return EXIT.refused;
     }
@@ -621,7 +651,8 @@ export async function main(options: { stackLock?: StackLockOptions } = {}): Prom
         emit('attempt-record-failed', { message: safeErrorMessage(err) });
       }
     }
-    stopSignals?.();
+    // A child can settle while SIGTERM cleanup is still running. Join it before releasing.
+    await stopSignals?.();
     await stackLock?.release();
     await sql.end({ timeout: 5 }).catch(() => {});
   }
