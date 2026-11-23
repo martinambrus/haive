@@ -485,7 +485,7 @@ cliProviderRoutes.post('/', requireNewWorkAllowed, async (c) => {
   let secretEvent: AuditEvent | undefined;
   let setEvents: AuditEvent[] = [];
   const sharesLogin = body.name === 'claude-code' && !(body.isolateAuth ?? false);
-  const spreadsToken = sharesLogin && !!split?.secrets.CLAUDE_CODE_OAUTH_TOKEN;
+  const spreadsToken = sharesLogin && !!split?.secrets.CLAUDE_CODE_OAUTH_TOKEN?.trim();
   // Without a typed token a shared subscription row takes the login the set already has.
   const seedsFromSet = sharesLogin && !spreadsToken && body.authMode === 'subscription';
   const joinsSet = spreadsToken || seedsFromSet;
@@ -779,7 +779,8 @@ cliProviderRoutes.patch('/:id', async (c) => {
     authMode: body.authMode ?? existing.authMode,
     isolateAuth: body.isolateAuth ?? existing.isolateAuth,
   };
-  const spreadsToken = existing.name === 'claude-code' && !!split?.secrets.CLAUDE_CODE_OAUTH_TOKEN;
+  const spreadsToken =
+    existing.name === 'claude-code' && !!split?.secrets.CLAUDE_CODE_OAUTH_TOKEN?.trim();
   // A row that moves into a shared subscription set without a typed token takes the set's login.
   const joinsSet =
     existing.name === 'claude-code' &&

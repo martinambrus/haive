@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest';
 import type { ZodType } from 'zod';
 import {
   createCliProviderRequestSchema,
+  setCliProviderSecretRequestSchema,
   updateCliProviderRequestSchema,
 } from '../src/schemas/cli-providers.js';
 
@@ -133,5 +134,34 @@ describe('providers envVars with an empty secret-named value', () => {
     expect(createCliProviderRequestSchema.parse(form).envVars).toEqual(form.envVars);
     const { name: _name, ...update } = form;
     expect(updateCliProviderRequestSchema.parse(update).envVars).toEqual(form.envVars);
+  });
+});
+
+describe('T748.5 blank secret validation preserves real values', () => {
+  it.each([' ', '\t\n', '\u00a0\u2003'])(
+    'rejects blank values (%j) in every request schema',
+    (value) => {
+      for (const request of [
+        createCliProviderRequestSchema.safeParse({ ...BASE_VALID, envVars: { MY_API_KEY: value } }),
+        updateCliProviderRequestSchema.safeParse({ envVars: { MY_API_KEY: value } }),
+        setCliProviderSecretRequestSchema.safeParse({ secretName: 'MY_API_KEY', value }),
+      ])
+        expect(request.success).toBe(false);
+    },
+  );
+  it('preserves whitespace around a real secret and in a non-secret env value', () => {
+    const value = ` ${randomBytes(16).toString('hex')}\n`;
+    const envVars = { MY_API_KEY: value, PLAIN: ' \t\n' };
+    expect(
+      createCliProviderRequestSchema.parse({ ...BASE_VALID, envVars }).envVars?.MY_API_KEY ===
+        value,
+    ).toBe(true);
+    expect(updateCliProviderRequestSchema.parse({ envVars }).envVars?.MY_API_KEY === value).toBe(
+      true,
+    );
+    expect(
+      setCliProviderSecretRequestSchema.parse({ secretName: 'MY_API_KEY', value }).value === value,
+    ).toBe(true);
+    expect(updateCliProviderRequestSchema.parse({ envVars }).envVars?.PLAIN).toBe(' \t\n');
   });
 });

@@ -15,6 +15,7 @@ export async function saveCliLoginSecret(
   assertActive: () => void | Promise<void> = () => {},
   authLockHeld = false,
 ): Promise<void> {
+  if (!token.trim()) throw new Error('CLAUDE_CODE_OAUTH_TOKEN needs a non-blank value');
   if (!authLockHeld) {
     const provider = await db.query.cliProviders.findFirst({
       where: and(eq(schema.cliProviders.id, providerId), eq(schema.cliProviders.userId, userId)),
@@ -131,6 +132,7 @@ export async function writeLoginTokenToSet(
   },
 ): Promise<AuditEvent[]> {
   const { userId, viaId, members, source, value, masterKek, assertHeld } = opts;
+  if (!value.trim()) throw new Error('CLAUDE_CODE_OAUTH_TOKEN needs a non-blank value');
   if (!members.some((m) => m.id === viaId)) throw new Error('Provider not found');
   const events: AuditEvent[] = [];
   for (const member of members) {

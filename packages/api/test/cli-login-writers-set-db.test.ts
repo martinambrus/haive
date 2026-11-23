@@ -207,6 +207,23 @@ describe.skipIf(!url)(
           where: and(eq(schema.cliProviders.userId, U), eq(schema.cliProviders.label, label)),
         })
         .then((r) => r!);
+
+    it.each(['create', 'patch', 'manual'])(
+      'T748.5 %s refuses a blank token without changing the set',
+      async (kind) => {
+        const before = await world();
+        const value = ' \t\n\u00a0';
+        const res =
+          kind === 'create'
+            ? await call('POST', '', createBody(value))
+            : kind === 'patch'
+              ? await patch('C', { isolateAuth: false, envVars: { [TOKEN]: value } })
+              : await post('A', TOKEN, value);
+        expect(res.status).toBe(400);
+        expect(await world()).toEqual(before);
+      },
+    );
+
     /** Every member holds the token and one shared generation that differs from each old one. */
     const expectWritten = async (
       token: string,

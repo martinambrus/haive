@@ -1040,3 +1040,40 @@ describe('T748.4 configured secrets list', () => {
     expect(secretsService.getMasterKek).not.toHaveBeenCalled();
   });
 });
+
+describe('T748.5 blank API secrets', () => {
+  it.each(['POST', 'PATCH'])(
+    '%s rejects whitespace env secrets before any write',
+    async (method) => {
+      const fake = setup(method === 'PATCH');
+      const before = fake.rows(schema.cliProviders);
+      const response = await send(method, method === 'POST' ? '/' : `/${PROVIDER}`, {
+        ...(method === 'POST'
+          ? { name: 'claude-code', label: 'blank', authMode: 'subscription' }
+          : {}),
+        envVars: { CLAUDE_CODE_OAUTH_TOKEN: ' \t\n\u00a0' },
+      });
+      expect(response.status).toBe(400);
+      expect(await response.text()).toContain('CLAUDE_CODE_OAUTH_TOKEN');
+      expect(fake.rows(schema.cliProviders)).toEqual(before);
+      expect(fake.rows(schema.cliProviderSecrets)).toHaveLength(0);
+      expect(fake.rows(schema.auditEvents)).toHaveLength(0);
+      expect(h.add).not.toHaveBeenCalled();
+    },
+  );
+  it('rejects a blank manual token without replacing an existing value', async () => {
+    const fake = setup(true);
+    const value = randomBytes(16).toString('hex');
+    expect(
+      (await send('POST', `/${PROVIDER}/secrets`, { secretName: 'CLAUDE_CODE_OAUTH_TOKEN', value }))
+        .status,
+    ).toBe(201);
+    const before = fake.rows(schema.cliProviderSecrets);
+    const response = await send('POST', `/${PROVIDER}/secrets`, {
+      secretName: 'CLAUDE_CODE_OAUTH_TOKEN',
+      value: ' \t\n',
+    });
+    expect(response.status).toBe(400);
+    expect(fake.rows(schema.cliProviderSecrets)).toEqual(before);
+  });
+});
