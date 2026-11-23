@@ -107,16 +107,19 @@ function isCapableModuleStep(target: PinnedFixTarget, def: StepDefinition | unde
   );
 }
 
-export async function isPinnedFixRepair(ctx: StepContext, def: StepDefinition): Promise<boolean> {
+/** A capable module executable selected by this task's immutable fix-target pin. */
+export async function isPinnedFixConsumer(ctx: StepContext, def: StepDefinition): Promise<boolean> {
   if (def.fixConsumer === undefined) return false;
   const row = await ctx.db.query.tasks.findFirst({
     where: eq(schema.tasks.id, ctx.taskId),
     columns: { executionContract: true },
   });
   const target = pinnedFixTarget(row?.executionContract);
-  if (!target || target.stepId !== def.metadata.id || !isCapableModuleStep(target, def))
-    return false;
-  return isFixRound(ctx);
+  return !!target && target.stepId === def.metadata.id && isCapableModuleStep(target, def);
+}
+
+export async function isPinnedFixRepair(ctx: StepContext, def: StepDefinition): Promise<boolean> {
+  return (await isPinnedFixConsumer(ctx, def)) && (await isFixRound(ctx));
 }
 
 /** Whether a step runs: its own `shouldRun`, or the repair round of the fix target a task pinned.
