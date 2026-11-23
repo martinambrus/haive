@@ -378,8 +378,7 @@ failure after it was sent, such as a Stop, keeps it out. `advanceStep`'s own `do
 is left as it is: the START path that reaches it has no moved-chain check, so a verdict re-driven
 there could bump a round.
 
-The re-drive records the step's end-of-step event (`step.done`, `step.skipped`, `step.loop_back` or
-`step.revise`) only when the pass it repeats did not. Each of those events carries the row's
+The re-drive records the step's end-of-step event (`step.done`, `step.skipped`, `step.loop_back` or `step.revise`) only when the pass it repeats did not. A loop_back handoff records its `step.loop_back` inside the winning transaction, so a pass that lost the race to another pass, a Retry or a superseding reset records nothing. A revise that forks into the next round resets from the first existing row of its range with the same epoch swap, and records `step.revise` and moves the pointer in that reset's transaction, so a superseded, refused or duplicate revise leaves neither the event nor a reset. Each of those events carries the row's
 `ended_at` as `endedAt`, which names the pass, since a Retry clears it and the rerun sets a new one;
 on the re-drive path the event is appended only when no event of that type for that row carries the
 same stamp (`appendEventOnce`). A first pass always appends, and a missing stamp never matches.
@@ -590,13 +589,10 @@ for the job's own catch too, which fails the task only at the epoch the job hold
 read, or the one a reset the job made itself moved it to, and only from an open status, so a Stop that
 failed the task (which moves no epoch) keeps its error and `completed_at`. Such a reset (a fix-loop re-entry, a
 revise, boot recovery's) compare-and-swaps that epoch in the write that bumps it, kept last as the
-api Retry keeps its own, and a lost swap rolls the whole reset back and hands nothing off. The
-hand-off after it points the task at the target only while the task is still at that epoch, and a
+api Retry keeps its own, and a lost swap rolls the whole reset back and hands nothing off. The hand-off after it points the task at the target only while the task is still at that epoch, and the job for the target is enqueued after the commit; a process that dies between the two leaves the pointer moved with no job, which the stalled re-drive finds and runs with the recorded diagnosis (`custom-fix-recovery-db.test.ts` pins it for loop_back; an enqueue that throws inside a live job fails the task through the job's catch instead), and a
 fix round's request and `started` event are written in the same transaction, since a round a Retry overtook
 would otherwise count toward the cap. A new round usually has no row to reset, so no swap is taken; when a stale
-row exists at the next round, loop_back and gate Continue both reset it (from the first row of the target-to-end range
-that exists there, since a validation-only round has no target row; see [Fix loop](fix-loop.md)) inside that
-transaction and take the swap
+row exists at the next round, loop_back and gate Continue both reset it (from the first row of the target-to-end range that exists there, since a validation-only round has no target row; see [Fix loop](fix-loop.md)) inside that transaction and take the swap
 there. That transaction follows the lock order below (runs, then one id-ordered batch of
 step rows, then the task row): it resets the next round's rows first, with the source row held in that ordered
 batch, then confirms the source is still the pass's own (`lockOwnedStep`, since a Retry writes the steps before it
