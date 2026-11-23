@@ -2800,6 +2800,10 @@ export async function handleResult(
         logLost('fix_target'),
       );
       if (!target) return;
+      const steps = await buildRunList(ctx, db);
+      const resetRange = steps
+        .slice(steps.findIndex((step) => step.metadata.id === target.metadata.id))
+        .map((step) => step.metadata.id);
       // Reset runs first, then all overlapping step rows (including the source) in
       // one id-ordered batch, and the task row last. Every refusal rolls back the
       // reset, so a loser cannot disturb the winner's target or advance epoch.
@@ -2811,13 +2815,22 @@ export async function handleResult(
             refusalReason = reason;
             throw new StepSupersededError(result.row.id);
           };
-          // A prior attempt at this round may have left a terminal row. As in Continue,
-          // reset on this transaction and include the owned source in the held row batch.
-          // A genuinely new round has no target row, so the reset is a no-op.
+          // As in Continue, a validation-only round may have checks but no target.
+          // Reset its first existing row in run-list order, holding the source too.
+          // A genuinely new round has no row anywhere in this range: reset is a no-op.
+          const prior = await tx.query.taskSteps.findMany({
+            where: and(
+              eq(schema.taskSteps.taskId, ctx.taskId),
+              eq(schema.taskSteps.round, nextRound),
+              inArray(schema.taskSteps.stepId, resetRange),
+            ),
+            columns: { stepId: true },
+          });
+          const firstExisting = resetRange.find((id) => prior.some((row) => row.stepId === id));
           const reset = await resetStepAndDownstream(
             tx,
             ctx.taskId,
-            target.metadata.id,
+            firstExisting ?? target.metadata.id,
             nextRound,
             ctx.orchestrationEpoch,
             false,

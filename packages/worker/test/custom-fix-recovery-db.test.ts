@@ -950,6 +950,34 @@ describe.skipIf(!url)('recovery of a fix round on Postgres', () => {
           },
         );
 
+        it.each([true, false])(
+          'loop_back reruns checks without a target row (07c=%s)',
+          async (reconcile) => {
+            // A positive allowance takes direct loop_back instead of the Continue gate.
+            const { id, checks, source, roundRows, run } = await rewoundValidation(reconcile, 1);
+            expect(source.status).toBe('done');
+            expect(await eventsOf(id, 'fix_loop.started')).toHaveLength(1);
+            expect(await eventsOf(id, 'fix_loop.escalated')).toHaveLength(0);
+            expect
+              .soft(
+                (await roundRows()).map((r) => ({
+                  step: r.stepId,
+                  status: r.status,
+                  output: r.output,
+                  generation: r.rerunGeneration,
+                })),
+              )
+              .toEqual(
+                checks.map((step) => ({ step, status: 'pending', output: null, generation: 1 })),
+              );
+            expect.soft((await taskOf(id)).orchestrationEpoch).toBe(BASE_EPOCH + 2);
+            await run(leg.ids.TARGET, 1);
+            expect(applied[leg.ids.TARGET]).toBe(1);
+            for (const check of checks) await run(check, 1);
+            for (const check of checks) expect.soft(applied[check]).toBe(2);
+          },
+        );
+
         it.each(['stale_epoch', 'lost_source', 'unavailable_cli'])(
           'Continue preserves a validation-only round on %s',
           async (refusal) => {
