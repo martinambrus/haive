@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { schema, type Database } from '@haive/database';
 import { createFakeDb } from '@haive/database/testing';
+import { resolvePreferredProvider } from '@haive/shared/cli-preferred-provider';
 import { providerHoldFor } from '../src/queues/task-queue.js';
 import { resolveDispatch } from '../src/orchestrator/dispatcher.js';
 import { FixRoundCliUnavailable } from '../src/step-engine/steps/workflow/_fix-round-cli.js';
@@ -221,6 +222,7 @@ it.each([
   { own: CLAUDE, off: [CLAUDE], roleSaved: CODEX },
 ])('hold and dispatch agree: %j', async (setup) => {
   let disabled = false;
+  let refusedProviderId: string | null = null;
   const held = await hold({
     ...setup,
     composed: true,
@@ -245,11 +247,27 @@ it.each([
         input: { kind: 'prompt', prompt: 'work', capabilities: [] },
         invokeOpts: {},
       });
-      disabled = plan.mode === 'skip' && plan.reason?.includes('is disabled') === true;
-      if (!disabled) expect(plan.providerId).toBe(CLAUDE);
+      const preferred = resolvePreferredProvider({
+        providers,
+        preferredProviderId: resolved.cliProviderId,
+        savedPreference: resolved.savedPreference,
+        composedLspProviderIds: lock.composedProviderIds,
+      });
+      disabled = preferred.kind === 'disabled';
+      if (preferred.kind === 'disabled') {
+        expect(preferred.provider.enabled).toBe(false);
+        refusedProviderId = preferred.provider.id;
+        expect(plan.mode).toBe('skip');
+        expect(plan.providerId).toBeNull();
+      } else {
+        expect(preferred.kind).toBe('use');
+        expect(plan.mode).not.toBe('skip');
+        expect(plan.providerId).toBe(CLAUDE);
+      }
     },
   });
   expect(held !== null).toBe(disabled);
+  expect(held?.providerId ?? null).toBe(refusedProviderId);
 });
 
 it('a fix-round task choice remains explicit for both hold and dispatch', async () => {
