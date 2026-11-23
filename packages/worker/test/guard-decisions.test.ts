@@ -181,7 +181,9 @@ describe('guard decisions from loaded rows', () => {
         } as StepRow,
       ]),
     );
-    tx = {} as StepContext['db'];
+    tx = {
+      select: () => ({ from: () => ({ where: async () => [{ payload: { round: 1 } }] }) }),
+    } as unknown as StepContext['db'];
     ctx = {
       taskId: task.id,
       taskStepId: rows.work!.id,
@@ -316,6 +318,17 @@ describe('guard decisions from loaded rows', () => {
     current.guardState = decision;
     expect(await decide()).toEqual(decision);
     expect(evaluate).toHaveBeenCalledOnce();
+  });
+  it.each(['revise', 'restart'])('re-evaluates a fix-target pin on a %s round', async () => {
+    pinFixTarget();
+    await save();
+    nextRound();
+    tx = {
+      select: () => ({ from: () => ({ where: async () => [] }) }),
+    } as unknown as StepContext['db'];
+    evaluate.mockResolvedValue(false);
+    expect(await decide()).toMatchObject({ round: 1, generation: 7, run: false });
+    expect(evaluate).toHaveBeenCalledTimes(2);
   });
   it('keeps same-round evaluation for a no-target pin at round one', async () => {
     await save();

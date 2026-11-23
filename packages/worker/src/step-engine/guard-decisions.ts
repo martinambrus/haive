@@ -8,6 +8,7 @@ import {
 } from '@haive/shared/modularity';
 import { TaskCancelledError, type StepContext, type StepDefinition } from '@haive/shared/step';
 import { z } from 'zod';
+import { isFixRound } from './steps/workflow/_fix-loop.js';
 
 const generation = z.number().int().nonnegative();
 const reference = z.strictObject({
@@ -120,7 +121,7 @@ export function prepareGuardDecision(
   if (!ids || new Set(ids).size !== ids.length)
     throw new GuardDecisionError('missing-run-list-pin');
   // Validate guard declarations without inventing a capability catalog. Admission
-  // and the fix router own target capability checks; both admission fences stay closed.
+  // and the fix router own target capability checks.
   executionContractPaths(ids, new Map(), { ...contract, fixTarget: undefined }, predicates);
   const spans = [...contract.guardedSpans].sort(
     (a, b) => ids.indexOf(a.firstStepId) - ids.indexOf(b.firstStepId),
@@ -135,7 +136,6 @@ export function prepareGuardDecision(
     span,
     hash,
     fixTarget: contract.fixTarget,
-    reuseRoundZero: !!contract.fixTarget && ctx.round > 0,
   };
 }
 
@@ -181,7 +181,8 @@ export async function decideLoadedGuardDecision(
   tx: StepContext['db'],
   bounds: Bounds,
 ): Promise<{ decision: GuardDecision; entry: StepRow; replay: boolean }> {
-  const { task, ids, spans, span, hash, fixTarget, reuseRoundZero } = prepared;
+  const { task, ids, spans, span, hash, fixTarget } = prepared;
+  const reuseRoundZero = !!fixTarget && (await isFixRound({ ...ctx, db: tx }));
   const spanId = span.id;
   const decisionRound = reuseRoundZero ? 0 : ctx.round;
   const entry = (s: Span) =>

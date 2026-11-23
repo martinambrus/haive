@@ -172,6 +172,11 @@ describe.skipIf(!url)('durable guard decisions on Postgres', () => {
         })
         .returning();
       await db.update(schema.tasks).set({ currentRound: 1 }).where(eq(schema.tasks.id, taskId));
+      await db.insert(schema.taskEvents).values({
+        taskId,
+        eventType: 'fix_loop.requested',
+        payload: { round: 1 },
+      });
       const next = { ...ctx, round: 1, taskStepId: current!.id, rerunGeneration: 4 };
       evaluate.mockRejectedValue(new Error('must not evaluate against the changed tree'));
       const [decision, duplicate] = await Promise.all([
