@@ -561,6 +561,107 @@ describe.skipIf(!url)('recovery of a fix round on Postgres', () => {
         }
       });
 
+      it.each([false, true])(
+        'guarded fork preserves its held source in another round (crash=%s)',
+        async (crash) => {
+          const providerId = `module.cfr-g-${leg.name}-${crash}`;
+          const evaluate = vi.fn(async () => true);
+          stub(`${providerId}.plan`, 0, providerId, {
+            guardPredicates: { run: { argsSchema: z.strictObject({}), evaluate } },
+          });
+          const pin = {
+            version: 1,
+            guardedSpans: [
+              {
+                id: 'checks',
+                firstStepId: leg.ids.REVIEW,
+                lastStepId: leg.ids.AFTER,
+                predicateId: `${providerId}.run`,
+                args: {},
+              },
+            ],
+            ...(leg.pin ? { fixTarget: { stepId: leg.ids.TARGET, capabilityVersion: 1 } } : {}),
+          };
+          const actual = await vi.importActual<
+            typeof import('../src/step-engine/execution-contract-support.js')
+          >('../src/step-engine/execution-contract-support.js');
+          h.fence.mockImplementation(actual.assertWorkerExecutionContractSupported);
+          const id = await seedTask(leg, { executionContract: pin });
+          await seedRow(leg, id, 'TARGET', 0, 'done', { output: {} });
+          const sourceRow = await seedRow(leg, id, 'REVIEW', 0, 'pending');
+          let ctx = await ctxFor(leg, id);
+          const list = await buildRunList(ctx, db);
+          expect((await decideGuardEntry(db, ctx, sourceRow.stepId, 0, sourceRow, list)).kind).toBe(
+            'run',
+          );
+          await db
+            .update(schema.taskSteps)
+            .set({ status: 'done', endedAt: new Date() })
+            .where(eq(schema.taskSteps.id, sourceRow.id));
+          const source = await rowOf(sourceRow.id);
+          expect(source.guardState).not.toBeNull();
+          const target = await seedRow(leg, id, 'TARGET', 1, 'done', { output: {} });
+          const entry = await seedRow(leg, id, 'REVIEW', 1, 'pending');
+          await db.update(schema.tasks).set({ currentRound: 1 }).where(eq(schema.tasks.id, id));
+          evaluate.mockResolvedValue(false);
+          ctx = await ctxFor(leg, id);
+          expect((await decideGuardEntry(db, ctx, entry.stepId, 1, entry, list)).kind).toBe(
+            'skipped',
+          );
+          const rows = await db.query.taskSteps.findMany({
+            where: and(eq(schema.taskSteps.taskId, id), eq(schema.taskSteps.round, 1)),
+            orderBy: asc(schema.taskSteps.runSeq),
+          });
+          expect(rows.map((r) => r.status)).toEqual(['done', 'skipped', 'skipped']);
+          await db.update(schema.tasks).set({ currentRound: 0 }).where(eq(schema.tasks.id, id));
+          ctx = await ctxFor(leg, id);
+          const before = await taskOf(id);
+          if (crash) {
+            const name = `guard_revise_${randomBytes(8).toString('hex')}`;
+            await db.execute(
+              sql.raw(
+                `CREATE FUNCTION ${name}() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.task_id = '${id}' AND NEW.event_type = 'step.revise' THEN RAISE EXCEPTION USING ERRCODE = 'P7663'; END IF; RETURN NEW; END $$`,
+              ),
+            );
+            await db.execute(
+              sql.raw(
+                `CREATE TRIGGER ${name} BEFORE INSERT ON task_events FOR EACH ROW EXECUTE FUNCTION ${name}()`,
+              ),
+            );
+            try {
+              await expect(revise(id, source, ctx)).rejects.toMatchObject({
+                cause: { code: 'P7663' },
+              });
+              for (const row of rows) expect(await rowOf(row.id)).toEqual(row);
+              expect(await rowOf(source.id)).toEqual(source);
+              expect(await taskOf(id)).toEqual(before);
+              expect(await eventsOf(id, 'step.revise')).toEqual([]);
+              expect(ctx.orchestrationEpoch).toBe(BASE_EPOCH);
+              expect(h.adds).toEqual([]);
+            } finally {
+              await db.execute(sql.raw(`DROP TRIGGER ${name} ON task_events`));
+              await db.execute(sql.raw(`DROP FUNCTION ${name}()`));
+            }
+          }
+          await revise(id, source, ctx);
+          for (const row of rows)
+            expect(await rowOf(row.id)).toMatchObject({
+              status: 'pending',
+              guardState: null,
+              rerunGeneration: 1,
+            });
+          expect(await rowOf(source.id)).toEqual(source);
+          expect(await taskOf(id)).toMatchObject({
+            currentStepId: target.stepId,
+            currentRound: 1,
+            orchestrationEpoch: BASE_EPOCH + 1,
+          });
+          expect(await eventsOf(id, 'step.revise')).toHaveLength(1);
+          expect(h.adds).toHaveLength(1);
+          expect(evaluate).toHaveBeenCalledTimes(2);
+        },
+      );
+
       it('a superseded reset leaves no revise event or reset', async () => {
         const id = await seedTask(leg);
         const source = await seedRow(leg, id, 'REVIEW', 0, 'done');
