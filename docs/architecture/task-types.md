@@ -133,7 +133,7 @@ into a built-in fails the boot loudly instead of being converted.
 prompt step or another module's step, never repeated (a repeated step made the queue hand the step to
 itself forever). A seed with `selectsOwnProviders: true` lists only its own module's steps: its steps choose
 their providers themselves (for example from a consent step), so the type gets no model-health canary,
-and a core CLI step in it would lose its probe. Those rules are manifest checks: a seed that breaks them fails its manifest, and the
+and a core CLI step in it would lose its probe. `GET /task-types` reports such a type with `dispatchesCli: false` (from the stored flag, so before a catalog sync too), so New Task shows no CLI picker and sends no task-level provider for it; the admin task-types list marks it with a read-only "Selects own providers" badge. Those rules are manifest checks: a seed that breaks them fails its manifest, and the
 worker does not boot. A seed is also checked like an admin type — defaults always, composition only
 when every step has a composable entry (an internal step's needs are unknown). A seed that fails those
 checks is logged, reported and not written; a slug held by another source is left alone and reported.
