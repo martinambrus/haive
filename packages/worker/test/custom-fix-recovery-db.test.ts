@@ -498,6 +498,69 @@ describe.skipIf(!url)('recovery of a fix round on Postgres', () => {
           targetStepId: self ? source.stepId : leg.ids.TARGET,
         });
 
+      it.each([
+        'reset_superseded',
+        'source_not_owned',
+        'task_missing_under_lock',
+        'task_pointer_moved_under_lock',
+        'task_write_refused',
+      ])('logs the %s revise refusal and rolls back the handoff', async (reason) => {
+        const id = await seedTask(leg);
+        const source = await seedRow(leg, id, 'REVIEW', 0, 'done');
+        const target = await seedRow(leg, id, 'TARGET', 1, 'done');
+        const ctx = await ctxFor(leg, id);
+        const logged = vi.spyOn(logger, 'info');
+        const transaction = db.transaction.bind(db);
+        let before = await taskOf(id);
+        const spy = vi.spyOn(db, 'transaction').mockImplementationOnce(async (callback, config) => {
+          // Interleave after handleResult's unlocked epoch read, before the reset.
+          if (reason === 'reset_superseded')
+            await db
+              .update(schema.tasks)
+              .set({ orchestrationEpoch: BASE_EPOCH + 1 })
+              .where(eq(schema.tasks.id, id));
+          if (reason === 'source_not_owned')
+            await db
+              .update(schema.taskSteps)
+              .set({ status: 'pending' })
+              .where(eq(schema.taskSteps.id, source.id));
+          if (reason === 'task_pointer_moved_under_lock')
+            await db
+              .update(schema.tasks)
+              .set({ currentStepId: leg.ids.AFTER })
+              .where(eq(schema.tasks.id, id));
+          if (reason === 'task_write_refused')
+            await db.update(schema.tasks).set({ status: 'failed' }).where(eq(schema.tasks.id, id));
+          before = await taskOf(id);
+          return transaction(async (tx) => {
+            const read =
+              reason === 'task_missing_under_lock'
+                ? vi.spyOn(tx.query.tasks, 'findFirst').mockResolvedValueOnce(undefined)
+                : undefined;
+            try {
+              return await callback(tx);
+            } finally {
+              read?.mockRestore();
+            }
+          }, config);
+        });
+        try {
+          await revise(id, source, ctx);
+          expect(logged).toHaveBeenCalledExactlyOnceWith(
+            { taskId: id, stepId: source.stepId, targetStepId: target.stepId, round: 0, reason },
+            expect.any(String),
+          );
+          expect(await eventsOf(id, 'step.revise')).toEqual([]);
+          expect(await rowOf(target.id)).toEqual(target);
+          expect(await taskOf(id)).toEqual(before);
+          expect(ctx.orchestrationEpoch).toBe(BASE_EPOCH);
+          expect(h.adds).toEqual([]);
+        } finally {
+          spy.mockRestore();
+          logged.mockRestore();
+        }
+      });
+
       it('a superseded reset leaves no revise event or reset', async () => {
         const id = await seedTask(leg);
         const source = await seedRow(leg, id, 'REVIEW', 0, 'done');

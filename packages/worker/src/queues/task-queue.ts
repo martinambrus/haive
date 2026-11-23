@@ -2995,8 +2995,13 @@ export async function handleResult(
       // Reset runs, then the ordered step batch (including the source), then
       // the task. A refused handoff rolls back both the reset and its event.
       let entered;
+      let refusalReason = 'task_write_refused';
       try {
         entered = await db.transaction(async (tx) => {
+          const refuse = (reason: string): never => {
+            refusalReason = reason;
+            throw new StepSupersededError(result.row.id);
+          };
           const reset = await resetStepAndDownstream(
             tx,
             ctx.taskId,
@@ -3007,22 +3012,21 @@ export async function handleResult(
             [result.row.id],
             ctx.executionContract,
           );
-          if (reset === 'superseded') throw new StepSupersededError(result.row.id);
+          if (reset === 'superseded') return refuse('reset_superseded');
           // A self-revise resets its own row to pending under the reset's batch.
           // A fork keeps the source as it was and must still own it after that batch.
-          if (!selfLoop && !(await lockOwnedStep(tx, result.row.id)))
-            throw new StepSupersededError(result.row.id);
+          if (!selfLoop && !(await lockOwnedStep(tx, result.row.id))) refuse('source_not_owned');
           if (selfLoop && !reset) return { missing: true as const };
           const current = await tx.query.tasks.findFirst({
             where: eq(schema.tasks.id, ctx.taskId),
             columns: { currentStepId: true, currentRound: true },
           });
+          if (!current) return refuse('task_missing_under_lock');
           if (
-            !current ||
-            (current.currentStepId != null &&
-              (current.currentStepId !== stepId || current.currentRound !== result.row.round))
+            current.currentStepId != null &&
+            (current.currentStepId !== stepId || current.currentRound !== result.row.round)
           )
-            throw new StepSupersededError(result.row.id);
+            refuse('task_pointer_moved_under_lock');
           const epoch = reset?.newEpoch ?? ctx.orchestrationEpoch;
           const pointed = await markTaskRunningWithStep(
             tx,
@@ -3032,7 +3036,7 @@ export async function handleResult(
             targetRound,
             { epoch },
           );
-          if (!pointed) throw new StepSupersededError(result.row.id);
+          if (!pointed) refuse('task_write_refused');
           await record(tx, ctx.taskId, result.row.id, 'step.revise', {
             stepId,
             sourceStepId: result.sourceStepId,
@@ -3045,7 +3049,13 @@ export async function handleResult(
       } catch (err) {
         if (!(err instanceof StepSupersededError)) throw err;
         logger.info(
-          { taskId: ctx.taskId, stepId, targetStepId: result.targetStepId },
+          {
+            taskId: ctx.taskId,
+            stepId,
+            targetStepId: result.targetStepId,
+            round: result.row.round,
+            reason: refusalReason,
+          },
           'revise not entered: its source or task moved before the hand-off',
         );
         return;
