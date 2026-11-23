@@ -332,7 +332,13 @@ describe.skipIf(!url)('recovery of a fix round on Postgres', () => {
             ? and(eq(schema.taskEvents.taskId, id), eq(schema.taskEvents.eventType, type))
             : eq(schema.taskEvents.taskId, id),
         )
-        .orderBy(asc(schema.taskEvents.createdAt), asc(schema.taskEvents.eventType))
+        .orderBy(
+          asc(schema.taskEvents.createdAt),
+          // now() gives every write in one transaction the same timestamp.
+          // Keep the handoff's causal order for ties instead of alphabetizing it.
+          sql`case ${schema.taskEvents.eventType} when 'step.loop_back' then 0 when 'fix_loop.requested' then 1 else 2 end`,
+          asc(schema.taskEvents.eventType),
+        )
     ).map((e) => e);
   const ctxFor = async (leg: Leg, taskId: string): Promise<ResolvedTaskContext> => {
     const t = await taskOf(taskId);
@@ -484,6 +490,225 @@ describe.skipIf(!url)('recovery of a fix round on Postgres', () => {
     });
 
     if (!leg.pin)
+      describe('atomic revise', () => {
+        const revise = async (
+          id: string,
+          source: StepRow,
+          ctx?: ResolvedTaskContext,
+          self = false,
+        ) =>
+          handleResult(db, ctx ?? (await ctxFor(leg, id)), source.stepId, {
+            status: 'revise',
+            row: source,
+            sourceStepId: source.stepId,
+            targetStepId: self ? source.stepId : leg.ids.TARGET,
+          });
+
+        it('a superseded reset leaves no revise event or reset', async () => {
+          const id = await seedTask(leg);
+          const source = await seedRow(leg, id, 'REVIEW', 0, 'done');
+          const target = await seedRow(leg, id, 'TARGET', 1, 'done');
+          const ctx = await ctxFor(leg, id);
+          const read = db.query.tasks.findFirst.bind(db.query.tasks);
+          const spy = vi.spyOn(db.query.tasks, 'findFirst').mockImplementationOnce((...args) => {
+            const query = read(...args);
+            const execute = query.execute.bind(query);
+            query.execute = async () => {
+              const task = await execute();
+              await db
+                .update(schema.tasks)
+                .set({ orchestrationEpoch: BASE_EPOCH + 1 })
+                .where(eq(schema.tasks.id, id));
+              return task;
+            };
+            return query;
+          });
+          try {
+            await revise(id, source, ctx);
+            expect(await eventsOf(id, 'step.revise')).toEqual([]);
+            expect(await rowOf(target.id)).toEqual(target);
+            expect((await taskOf(id)).currentStepId).toBe(source.stepId);
+            expect(ctx.orchestrationEpoch).toBe(BASE_EPOCH);
+            expect(h.adds).toEqual([]);
+          } finally {
+            spy.mockRestore();
+          }
+        });
+
+        it('a refused pointer rolls back the revise event and stale-row reset', async () => {
+          const id = await seedTask(leg);
+          const source = await seedRow(leg, id, 'REVIEW', 0, 'done');
+          const target = await seedRow(leg, id, 'TARGET', 1, 'done', { output: { stale: true } });
+          const ctx = await ctxFor(leg, id);
+          await db.update(schema.tasks).set({ status: 'failed' }).where(eq(schema.tasks.id, id));
+          const before = await taskOf(id);
+          await revise(id, source, ctx);
+          expect.soft(await eventsOf(id, 'step.revise')).toEqual([]);
+          expect.soft(await rowOf(target.id)).toEqual(target);
+          expect.soft(await taskOf(id)).toEqual(before);
+          expect.soft(ctx.orchestrationEpoch).toBe(BASE_EPOCH);
+          expect(h.adds).toEqual([]);
+        });
+
+        it.each([false, true])(
+          'a failed revise event rolls back the reset and pointer, then replays once (self=%s)',
+          async (self) => {
+            const id = await seedTask(leg);
+            const source = await seedRow(leg, id, 'REVIEW', 0, 'done', { endedAt: new Date() });
+            const target = self
+              ? source
+              : await seedRow(leg, id, 'TARGET', 1, 'done', { output: { stale: true } });
+            const before = await taskOf(id);
+            const ctx = await ctxFor(leg, id);
+            const name = `revise_${randomBytes(8).toString('hex')}`;
+            await db.execute(
+              sql.raw(
+                `CREATE FUNCTION ${name}() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.task_id = '${id}' AND NEW.event_type = 'step.revise' THEN RAISE EXCEPTION USING ERRCODE = 'P7572'; END IF; RETURN NEW; END $$`,
+              ),
+            );
+            await db.execute(
+              sql.raw(
+                `CREATE TRIGGER ${name} BEFORE INSERT ON task_events FOR EACH ROW EXECUTE FUNCTION ${name}()`,
+              ),
+            );
+            try {
+              await expect(revise(id, source, ctx, self)).rejects.toMatchObject({
+                cause: { code: 'P7572' },
+              });
+              expect(await rowOf(target.id)).toEqual(target);
+              expect(await taskOf(id)).toEqual(before);
+              expect(await eventsOf(id, 'step.revise')).toEqual([]);
+              expect(ctx.orchestrationEpoch).toBe(BASE_EPOCH);
+              expect(h.adds).toEqual([]);
+            } finally {
+              await db.execute(sql.raw(`DROP TRIGGER ${name} ON task_events`));
+              await db.execute(sql.raw(`DROP FUNCTION ${name}()`));
+            }
+            await revise(id, source, ctx, self);
+            expect(await rowOf(target.id)).toMatchObject({
+              status: 'pending',
+              output: null,
+              rerunGeneration: 1,
+            });
+            expect(await taskOf(id)).toMatchObject({
+              currentStepId: target.stepId,
+              currentRound: self ? 0 : 1,
+              orchestrationEpoch: BASE_EPOCH + 1,
+            });
+            expect(await eventsOf(id, 'step.revise')).toHaveLength(1);
+            expect(h.adds).toHaveLength(1);
+          },
+        );
+
+        it('a duplicate forked revise preserves the winner and records nothing', async () => {
+          const id = await seedTask(leg);
+          const source = await seedRow(leg, id, 'REVIEW', 0, 'done', { endedAt: new Date() });
+          const ctx = await ctxFor(leg, id);
+          await revise(id, source, ctx);
+          const target = await seedRow(leg, id, 'TARGET', 1, 'done', { output: { winner: true } });
+          const before = await taskOf(id);
+          await revise(id, source, ctx);
+          expect.soft(await rowOf(target.id)).toEqual(target);
+          expect.soft(await taskOf(id)).toEqual(before);
+          expect.soft(await eventsOf(id, 'step.revise')).toHaveLength(1);
+          expect.soft(h.adds).toHaveLength(1);
+        });
+      });
+
+    if (!leg.pin)
+      describe('atomic escalation', () => {
+        it.each(
+          ['cap', 'oscillation'].flatMap((kind) =>
+            ['request', 'task', 'event'].map((cut) => ({ kind, cut })),
+          ),
+        )('rolls back $kind at the $cut write and replays completely', async ({ kind, cut }) => {
+          const round = kind === 'cap' ? 0 : 2;
+          const id = await seedTask(leg, {
+            currentRound: round,
+            maxFixRounds: kind === 'cap' ? 0 : 5,
+          });
+          const source = await seedRow(leg, id, 'REVIEW', round, 'done', { endedAt: new Date() });
+          if (kind === 'oscillation') {
+            await recordFixLoopRequest(db, id, source.id, {
+              round: 1,
+              sourceStepId: source.stepId,
+              diagnosis: 'same defect',
+            });
+            await recordFixLoopRequest(db, id, source.id, {
+              round: 2,
+              sourceStepId: 'another-check',
+              diagnosis: 'other defect',
+            });
+          }
+          const beforeTask = await taskOf(id);
+          const beforeRequests = await eventsOf(id, 'fix_loop.requested');
+          const event = kind === 'cap' ? 'fix_loop.escalated' : 'fix_loop.oscillation_detected';
+          // Fail the real SQL statement immediately after each preceding durable write.
+          // The trigger is task-scoped and removed before replay, even on assertion failure.
+          const name = `crash_${randomBytes(8).toString('hex')}`;
+          const table = cut === 'task' ? 'tasks' : 'task_events';
+          const condition =
+            cut === 'task'
+              ? `NEW.id = '${id}' AND NEW.status = 'waiting_user'`
+              : `NEW.task_id = '${id}' AND NEW.event_type = '${cut === 'request' ? 'fix_loop.requested' : event}'`;
+          await db.execute(
+            sql.raw(
+              `CREATE FUNCTION ${name}() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF ${condition} THEN RAISE EXCEPTION USING ERRCODE = 'P7571'; END IF; RETURN NEW; END $$`,
+            ),
+          );
+          await db.execute(
+            sql.raw(
+              `CREATE TRIGGER ${name} BEFORE ${cut === 'task' ? 'UPDATE' : 'INSERT'} ON ${table} FOR EACH ROW EXECUTE FUNCTION ${name}()`,
+            ),
+          );
+          const result = {
+            status: 'loop_back' as const,
+            row: source,
+            sourceStepId: source.stepId,
+            diagnosis: 'same defect',
+          };
+          try {
+            await expect(
+              handleResult(db, await ctxFor(leg, id), source.stepId, result),
+            ).rejects.toMatchObject({ cause: { code: 'P7571' } });
+            expect.soft(await rowOf(source.id)).toEqual(source);
+            expect.soft(await taskOf(id)).toEqual(beforeTask);
+            expect.soft(await eventsOf(id, 'fix_loop.requested')).toEqual(beforeRequests);
+            expect.soft(await eventsOf(id, event)).toEqual([]);
+            expect.soft(h.adds).toEqual([]);
+          } finally {
+            await db.execute(sql.raw(`DROP TRIGGER ${name} ON ${table}`));
+            await db.execute(sql.raw(`DROP FUNCTION ${name}()`));
+          }
+          await handleResult(db, await ctxFor(leg, id), source.stepId, result);
+          expect(await rowOf(source.id)).toMatchObject({
+            status: 'waiting_form',
+            endedAt: null,
+            waitingStartedAt: expect.any(Date),
+          });
+          expect(await taskOf(id)).toMatchObject({
+            status: 'waiting_user',
+            currentStepId: source.stepId,
+            currentRound: round,
+          });
+          expect(await eventsOf(id, 'fix_loop.requested')).toHaveLength(beforeRequests.length + 1);
+          expect(await eventsOf(id, event)).toHaveLength(1);
+          await resolveFixLoopGate(
+            db,
+            await ctxFor(leg, id),
+            await rowOf(source.id),
+            'continue',
+            round,
+            '',
+          );
+          expect(await taskOf(id)).toMatchObject({
+            currentStepId: leg.ids.TARGET,
+            currentRound: round + 1,
+          });
+        });
+      });
+
+    if (!leg.pin)
       it('two interleaved loop_back passes enter the fix round only once', async () => {
         const id = await seedTask(leg);
         const source = await seedRow(leg, id, 'REVIEW', 0, 'done');
@@ -523,6 +748,7 @@ describe.skipIf(!url)('recovery of a fix round on Postgres', () => {
           expect(arrivals).toBe(2);
           expect(await eventsOf(id, 'fix_loop.requested')).toHaveLength(1);
           expect(await eventsOf(id, 'fix_loop.started')).toHaveLength(1);
+          expect(await eventsOf(id, 'step.loop_back')).toHaveLength(1);
           expect(h.adds).toHaveLength(1);
           expect(await taskOf(id)).toMatchObject({
             currentStepId: leg.ids.TARGET,
@@ -851,7 +1077,7 @@ describe.skipIf(!url)('recovery of a fix round on Postgres', () => {
 
     if (!leg.pin)
       describe('Retry into a validation-only next round', () => {
-        const rewoundValidation = async (reconcile: boolean, cap = 0) => {
+        const rewoundValidation = async (reconcile: boolean, cap = 0, revise = false) => {
           const editor = `${leg.type}-late-editor`;
           const checks = [...(reconcile ? [RECONCILE] : []), VALIDATE];
           const runListSnapshot = [
@@ -938,9 +1164,31 @@ describe.skipIf(!url)('recovery of a fix round on Postgres', () => {
           expect((await roundRows()).map((r) => [r.stepId, r.status])).toEqual(
             checks.map((check) => [check, 'done']),
           );
-          await run(leg.ids.REVIEW, 0);
+          const review = stepRegistry.require(leg.ids.REVIEW);
+          if (revise)
+            stepRegistry.override({
+              ...review,
+              fixLoop: undefined,
+              reviseLoop: { evaluate: () => ({ targetStepId: leg.ids.TARGET }) },
+            });
+          try {
+            await run(leg.ids.REVIEW, 0);
+          } finally {
+            if (revise) stepRegistry.override(review);
+          }
           return { id, checks, source: await rowOf(source.id), roundRows, run };
         };
+
+        it('revise reruns the validation-only downstream rows after Retry', async () => {
+          const { id, checks, roundRows, run } = await rewoundValidation(true, 0, true);
+          expect
+            .soft((await roundRows()).map((r) => [r.stepId, r.status, r.output, r.rerunGeneration]))
+            .toEqual(checks.map((id) => [id, 'pending', null, 1]));
+          expect.soft((await taskOf(id)).orchestrationEpoch).toBe(BASE_EPOCH + 2);
+          await run(leg.ids.TARGET, 1);
+          for (const check of checks) await run(check, 1);
+          for (const check of checks) expect.soft(applied[check]).toBe(2);
+        });
 
         it.each([true, false])(
           'Continue reruns checks without a target row (07c=%s)',
@@ -997,6 +1245,69 @@ describe.skipIf(!url)('recovery of a fix round on Postgres', () => {
             for (const check of checks) expect.soft(applied[check]).toBe(2);
           },
         );
+
+        it('two Continue passes reset a validation-only round once', async () => {
+          const { id, checks, source, roundRows, run } = await rewoundValidation(true);
+          const ctx = await ctxFor(leg, id);
+          h.adds.length = 0;
+          const bothReady = Promise.withResolvers<void>();
+          const transaction = db.transaction.bind(db);
+          let arrivals = 0;
+          const spy = vi.spyOn(db, 'transaction').mockImplementation(async (...args) => {
+            if (++arrivals === 2) bothReady.resolve();
+            await bothReady.promise;
+            return transaction(...args);
+          });
+          try {
+            await Promise.all([
+              resolveFixLoopGate(db, { ...ctx }, source, 'continue', 0, ''),
+              resolveFixLoopGate(db, { ...ctx }, source, 'continue', 0, ''),
+            ]);
+          } finally {
+            spy.mockRestore();
+          }
+          expect(arrivals).toBe(2);
+          expect((await roundRows()).map((r) => [r.stepId, r.status, r.rerunGeneration])).toEqual(
+            checks.map((check) => [check, 'pending', 1]),
+          );
+          expect(await taskOf(id)).toMatchObject({
+            currentStepId: leg.ids.TARGET,
+            currentRound: 1,
+            orchestrationEpoch: ctx.orchestrationEpoch + 1,
+          });
+          expect(await eventsOf(id, 'fix_loop.continued')).toHaveLength(1);
+          expect(h.adds).toHaveLength(1);
+          await run(leg.ids.TARGET, 1);
+          for (const check of checks) await run(check, 1);
+          for (const check of checks) expect(applied[check]).toBe(2);
+        });
+
+        it('Stop after the validation-only reset refuses its queued advance', async () => {
+          const { id, checks, source, roundRows } = await rewoundValidation(true);
+          await resolveFixLoopGate(db, await ctxFor(leg, id), source, 'continue', 0, '');
+          const fresh = await roundRows();
+          expect(fresh.map((r) => [r.stepId, r.status, r.rerunGeneration])).toEqual(
+            checks.map((check) => [check, 'pending', 1]),
+          );
+          const queued = h.adds.at(-1)!;
+          // A crash-left invocation makes Stop applicable even before the new
+          // target row exists. Stop commits after the reset and keeps the epoch.
+          await db
+            .insert(schema.cliInvocations)
+            .values({ taskId: id, taskStepId: source.id, mode: 'cli', prompt: 'crash-left run' });
+          const { stopActiveCliInvocations } = await import(apiSource('lib/task-control.ts'));
+          expect(await stopActiveCliInvocations(db, id, { failTask: true })).toMatchObject({
+            cancelled: 1,
+            failedAt: expect.any(String),
+          });
+          const stopped = await taskOf(id);
+          expect(stopped.status).toBe('failed');
+          await processTaskJob(job(queued.name, queued.data));
+          expect(await taskOf(id)).toEqual(stopped);
+          expect(await roundRows()).toEqual(fresh);
+          expect(applied[leg.ids.TARGET]).toBeUndefined();
+          for (const check of checks) expect(applied[check]).toBe(1);
+        });
 
         it.each(['stale_epoch', 'lost_source', 'unavailable_cli'])(
           'Continue preserves a validation-only round on %s',
@@ -1386,6 +1697,38 @@ describe.skipIf(!url)('recovery of a fix round on Postgres', () => {
         });
         await seedEvent(taskId, 'fix_loop.started', { sourceStepId: leg.ids.REVIEW, round: 1 });
       };
+
+      if (!leg.pin)
+        it('recovers a real committed loop_back whose enqueue was lost', async () => {
+          const id = await seedTask(leg);
+          const source = await seedRow(leg, id, 'REVIEW', 0, 'done');
+          const { Queue } = await import('bullmq');
+          const lost = new Error('injected lost enqueue');
+          const add = vi.spyOn(Queue.prototype, 'add').mockRejectedValueOnce(lost);
+          try {
+            await expect(loopBack(id, source, 'durable diagnosis')).rejects.toBe(lost);
+          } finally {
+            add.mockRestore();
+          }
+          expect(h.adds).toEqual([]);
+          expect(await taskOf(id)).toMatchObject({
+            currentStepId: leg.ids.TARGET,
+            currentRound: 1,
+          });
+          const requests = await eventsOf(id, 'fix_loop.requested');
+          expect(requests).toHaveLength(1);
+          await twice();
+          expect(h.adds).toHaveLength(1);
+          expect(h.adds[0]!.data).toMatchObject({
+            stepId: leg.ids.TARGET,
+            round: 1,
+            epoch: BASE_EPOCH + 1,
+          });
+          await processTaskJob(job(h.adds[0]!.name, h.adds[0]!.data));
+          expect(applied[leg.ids.TARGET]).toBe(1);
+          expect(await eventsOf(id, 'fix_loop.requested')).toEqual(requests);
+          expect(await eventsOf(id, 'fix_loop.started')).toHaveLength(1);
+        });
 
       it('pointer at the target with a started round and no row', async () => {
         const id = await seedTask(leg, { currentStepId: leg.ids.TARGET, currentRound: 1 });

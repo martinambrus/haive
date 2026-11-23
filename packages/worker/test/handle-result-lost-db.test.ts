@@ -272,30 +272,30 @@ describe.skipIf(!url)('a hand-off write that loses its row or task says so, on P
   const OSCILLATION_ROW: Site = {
     name: 'oscillation_row',
     readsRow: true,
-    parks: true,
+    parks: false,
     ...OSCILLATION,
-    recorded: ['step.loop_back'],
+    recorded: [],
   };
   const OSCILLATION_TASK: Site = {
     name: 'oscillation_task',
     readsRow: false,
-    parks: true,
+    parks: false,
     ...OSCILLATION,
-    recorded: ['step.loop_back', 'fix_loop.requested'],
+    recorded: [],
   };
   const ROUND_CAP_ROW: Site = {
     name: 'round_cap_row',
     readsRow: true,
-    parks: true,
+    parks: false,
     ...ROUND_CAP,
-    recorded: ['step.loop_back'],
+    recorded: [],
   };
   const ROUND_CAP_TASK: Site = {
     name: 'round_cap_task',
     readsRow: false,
-    parks: true,
+    parks: false,
     ...ROUND_CAP,
-    recorded: ['step.loop_back', 'fix_loop.requested'],
+    recorded: [],
   };
   // The fix target is not in the run list, so the function would fail the task: unless it lost.
   const FIX_TARGET_SITE: Site = {
@@ -305,7 +305,7 @@ describe.skipIf(!url)('a hand-off write that loses its row or task says so, on P
     row: { status: 'done' },
     ctx: { runListSnapshot: [S] },
     result: loopBack({ uncapped: true }),
-    recorded: ['step.loop_back'],
+    recorded: [],
   };
 
   const ROW_SITES = [WAITING_FORM_ROW, OSCILLATION_ROW, ROUND_CAP_ROW, FIX_TARGET_SITE];
@@ -1623,7 +1623,7 @@ describe.skipIf(!url)('a hand-off write that loses its row or task says so, on P
       const c = await open(FIX_TARGET_SITE);
       await hand(FIX_TARGET_SITE, c);
       expect(handoffLines()).toEqual([]);
-      await expectReturned(FIX_TARGET_SITE, c, 'fix_loop.unroutable');
+      await expectReturned(FIX_TARGET_SITE, c, 'step.loop_back', 'fix_loop.unroutable');
       const [task] = await db.select().from(schema.tasks).where(eq(schema.tasks.id, c.taskId));
       expect(task?.status).toBe('failed');
     });
