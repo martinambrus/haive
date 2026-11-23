@@ -1,6 +1,6 @@
 import { randomBytes, randomUUID } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { cp, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { and, asc, eq } from 'drizzle-orm';
@@ -158,19 +158,22 @@ describe.skipIf(!url)('recovery of a fix round on Postgres', () => {
   let db: Database;
   let userId: string;
   let repositoryId: string;
+  let template: string;
+  // The current test's own copy of the template; the late editor writes to it.
   let worktree: string;
+  const copies: string[] = [];
   const email = randomBytes(8).toString('hex');
 
   beforeAll(async () => {
     db = createDatabase(url!);
     h.db = db;
-    // One real Git fixture for all validation-only round controls.
-    worktree = await mkdtemp(join(tmpdir(), 'haive-validation-only-'));
-    const git = (...args: string[]) => execFileSync('git', args, { cwd: worktree, stdio: 'pipe' });
+    // One real Git template for all validation-only round controls; each writing test copies it.
+    template = await mkdtemp(join(tmpdir(), 'haive-validation-only-'));
+    const git = (...args: string[]) => execFileSync('git', args, { cwd: template, stdio: 'pipe' });
     git('init', '-q', '-b', 'main');
     git('config', 'user.email', 'test@test.local');
     git('config', 'user.name', 'Test');
-    await writeFile(join(worktree, 'a.ts'), 'export const a = 1;');
+    await writeFile(join(template, 'a.ts'), 'export const a = 1;');
     git('add', '-A');
     git('commit', '-qm', 'base');
     stub(RECONCILE, 1, LEGS[0]!.type);
@@ -249,7 +252,7 @@ describe.skipIf(!url)('recovery of a fix round on Postgres', () => {
         .delete(schema.taskTypeDefinitions)
         .where(eq(schema.taskTypeDefinitions.slug, leg.type));
     await db.$client.end({ timeout: 5 });
-    await rm(worktree, { recursive: true, force: true });
+    for (const dir of [template, ...copies]) await rm(dir, { recursive: true, force: true });
   });
 
   const seedTask = async (leg: Leg, over: Partial<typeof schema.tasks.$inferInsert> = {}) => {
@@ -849,7 +852,9 @@ describe.skipIf(!url)('recovery of a fix round on Postgres', () => {
             maxFixRounds: cap,
           });
           // Round 0 already validated the base tree. The late editor changes it during apply.
-          await writeFile(join(worktree, 'a.ts'), 'export const a = 1;');
+          worktree = await mkdtemp(join(tmpdir(), 'haive-validation-only-'));
+          copies.push(worktree);
+          await cp(template, worktree, { recursive: true });
           await db.insert(schema.taskSteps).values({
             taskId: id,
             stepId: '01-worktree-setup',
