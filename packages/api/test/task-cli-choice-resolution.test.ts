@@ -735,3 +735,91 @@ describe('composed provider lock readers', () => {
     },
   );
 });
+
+it.each([
+  { name: 'ignored saved pick', own: TASK_CLI, ignore: true, expected: [TASK_CLI] },
+  { name: 'disabled task substitute', own: TASK_CLI, off: true, expected: [TASK_CLI] },
+  {
+    name: 'implicit default confined to effective references',
+    own: null,
+    refs: [TASK_CLI],
+    expected: [TASK_CLI],
+  },
+  {
+    name: 'saved skip floats when the own CLI is outside retained references',
+    own: TASK_CLI,
+    refs: [PICKED_CLI],
+    expected: [PICKED_CLI],
+  },
+  { name: 'task choice remains explicit', own: TASK_CLI, chosen: SAVED_CLI, expected: [] },
+  {
+    name: 'task clear suppresses the saved default',
+    own: TASK_CLI,
+    chosen: null,
+    expected: [TASK_CLI],
+  },
+  { name: 'round choice remains explicit', own: TASK_CLI, roundChoice: SAVED_CLI, expected: [] },
+  { name: 'unavailable round never falls through', own: TASK_CLI, roundChoice: null, expected: [] },
+])('composed reader parity: $name', async (scenario) => {
+  const { fake, db, save, choose } = setup();
+  const template = '00000000-0000-4000-8000-0000000000e1';
+  const stepId = '07-phase-2-implement';
+  const ref = {
+    tag: 'img:1',
+    imageId: 'sha256:1',
+    identityHash: 'h',
+    inputs: { rtkVersion: '1', baseImageId: null, rtkPin: null, requestedHash: 'r' },
+  };
+  const metadata =
+    'refs' in scenario
+      ? {
+          composedLspImageRefs: {
+            schemaVersion: 1,
+            entries: scenario.refs!.map((providerId) => ({ providerId, effective: ref })),
+          },
+        }
+      : null;
+  fake.insert(schema.envTemplates, {
+    id: template,
+    declaredDeps: { lspInstallContractVersion: 2 },
+  });
+  fake.insert(schema.tasks, {
+    id: TASK,
+    userId: USER,
+    cliProviderId: scenario.own,
+    envTemplateId: template,
+    metadata,
+  });
+  fake.patch(schema.cliProviders, TASK_CLI, {
+    name: 'claude-code',
+    enabled: !('off' in scenario && scenario.off),
+    createdAt: new Date(2),
+  });
+  fake.patch(schema.cliProviders, PICKED_CLI, { name: 'claude-code', createdAt: new Date(3) });
+  fake.patch(schema.cliProviders, SAVED_CLI, { createdAt: new Date(1) });
+  save(stepId, SAVED_CLI);
+  if ('chosen' in scenario) choose(stepId, scenario.chosen!);
+  if ('roundChoice' in scenario) choose(stepId, scenario.roundChoice!, 'fix:2:default');
+  const ignore = 'ignore' in scenario && scenario.ignore === true;
+  const [detail] = await enrichStepsWithCliPreferences(
+    db,
+    flags,
+    USER,
+    [{ stepId, round: 2 }],
+    TASK,
+    ignore,
+  );
+  const listing = await resolveCurrentStepCliProviderIds(db, flags, USER, [
+    {
+      id: TASK,
+      currentStepId: stepId,
+      currentRound: 2,
+      cliProviderId: scenario.own,
+      ignoreSavedStepClis: ignore,
+    },
+  ]);
+  expect(detail?.effectiveCliProviderIds).toEqual(scenario.expected);
+  expect(listing.get(TASK)).toEqual(scenario.expected);
+  if (scenario.own === null || 'refs' in scenario)
+    expect(detail?.effectivePreferredCliProviderId).toBeNull();
+});
