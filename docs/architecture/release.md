@@ -499,7 +499,7 @@ cannot be removed it refuses with `updater-child-cleanup-failed` (exit 3, the ru
 failure's code) and does not roll back, which would race the survivor: the run stays for recovery, and the next
 start's child check refuses until the container is gone. A SIGTERM to the updater removes this attempt's running
 one-shots before it releases the lock and exits 143, waiting at most `STACK_LOCK_SIGNAL_CLEANUP_TIMEOUT_MS` (5 s,
-under `docker stop`'s 10 s grace) so a hung daemon cannot keep the lock held; a removal that fails or overruns is
+under `docker stop`'s 10 s grace) so a hung daemon cannot keep the lock held; from the moment it starts, that attempt launches no further one-shot (`one-shot attempt is stopping`), so a later phase cannot start a child its list has already missed (one already being created when the mark lands can still survive, and the next start's check catches it); a removal that fails or overruns is
 logged and the lock still released, so the next start's check catches the survivor. A SIGTERM that lands while the
 updater is rolling back can end it mid-rollback: the run stays for recovery, and the next start reverses it, as after
 any crash. It releases the lock in `finally` on every exit path and on SIGTERM (exit 143). That handler is new: as PID 1
