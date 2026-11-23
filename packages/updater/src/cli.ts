@@ -13,7 +13,14 @@ import { classifyBundle, requireUnmodifiedBundle, stageBundle } from './bundle.j
 import { ensureEnvKeys } from './envkeys.js';
 import { BundleBackupError, readBundleState } from './bundle-swap.js';
 import { UpgradeRefusal } from './refusal.js';
-import { assertStackLease, bindStackLease, isLeaseLoss, withStackLease } from './lease-fence.js';
+import {
+  assertStackLease,
+  bindStackLease,
+  isLeaseLoss,
+  isLeaseUnproven,
+  withStackLeaseRecovery,
+  withStackLease,
+} from './lease-fence.js';
 import { cleanupInstallTemps, requireRegularInstallFiles } from './install-files.js';
 import {
   acquireStackLock,
@@ -184,30 +191,34 @@ export async function loadManifest(options: {
 /** A rollback that throws has not undone the upgrade, so the run stays `running` for the next
  *  updater to find and finish. */
 async function undo(ctx: UpgradeContext, reason: string): Promise<number> {
-  try {
-    await assertStackLease();
-    await rollback(ctx, reason);
-    return EXIT.rolledBack;
-  } catch (err) {
-    if (isLeaseLoss(err)) throw err;
-    return await rollbackFailed(ctx, err);
-  }
+  return withStackLeaseRecovery(async () => {
+    try {
+      await assertStackLease();
+      await rollback(ctx, reason);
+      return EXIT.rolledBack;
+    } catch (err) {
+      if (isLeaseLoss(err)) throw err;
+      return await rollbackFailed(ctx, err);
+    }
+  });
 }
 
 async function rollbackFailed(ctx: UpgradeContext, err: unknown): Promise<number> {
-  await assertStackLease();
-  const message = scrubErrorPaths(safeErrorMessage(err));
-  await recordRunError(ctx.sql, ctx.runId, `rollback failed: ${message}`).catch((error) => {
-    if (isLeaseLoss(error)) throw error;
+  return withStackLeaseRecovery(async () => {
+    await assertStackLease();
+    const message = scrubErrorPaths(safeErrorMessage(err));
+    await recordRunError(ctx.sql, ctx.runId, `rollback failed: ${message}`).catch((error) => {
+      if (isLeaseLoss(error)) throw error;
+    });
+    emit('rollback-failed', {
+      message,
+      next:
+        err instanceof BundleBackupError
+          ? `restore the missing or invalid bundle backup at ${err.backupDir}, then run \`haive upgrade\` again to finish the rollback`
+          : 'run `haive upgrade` again to finish the rollback',
+    });
+    return EXIT.rollbackFailed;
   });
-  emit('rollback-failed', {
-    message,
-    next:
-      err instanceof BundleBackupError
-        ? `restore the missing or invalid bundle backup at ${err.backupDir}, then run \`haive upgrade\` again to finish the rollback`
-        : 'run `haive upgrade` again to finish the rollback',
-  });
-  return EXIT.rollbackFailed;
 }
 
 function isChildCleanupRefusal(err: unknown): err is UpgradeRefusal {
@@ -442,7 +453,7 @@ async function upgradeOwned(options: { stackLock?: StackLockOptions }): Promise<
         await assertStackLease();
         await resume(ctx, live.phase);
       } catch (err) {
-        await assertStackLease();
+        await withStackLeaseRecovery(assertStackLease);
         if (
           isLeaseLoss(err) ||
           isChildCleanupRefusal(err) ||
@@ -632,13 +643,18 @@ async function upgradeOwned(options: { stackLock?: StackLockOptions }): Promise<
     } catch (err) {
       // A failed child cleanup leaves a possible writer alive: keep the run for recovery instead
       // of rolling back concurrently with it. The next holder checks its labels before recovery.
-      await assertStackLease();
+      await withStackLeaseRecovery(assertStackLease);
       if (isLeaseLoss(err) || isChildCleanupRefusal(err)) throw err;
       const message = err instanceof Error ? err.message : String(err);
       report('error', { message });
       // Anything that throws before commit is reversible by construction; say so and undo it
       // rather than leaving the install held.
-      return await undo(ctx, message);
+      const result = await undo(ctx, message);
+      if (isLeaseUnproven(err) && result === EXIT.rolledBack) {
+        report('refused', { refusal: err.refusal, message: err.message });
+        return EXIT.refused;
+      }
+      return result;
     }
     if (verifyFailed) {
       return await undo(ctx, 'the new containers never reported the target version');
@@ -650,15 +666,15 @@ async function upgradeOwned(options: { stackLock?: StackLockOptions }): Promise<
       await phaseCommit(ctx);
       return EXIT.ok;
     } catch (err) {
-      await assertStackLease();
-      if (isLeaseLoss(err) || isChildCleanupRefusal(err)) throw err;
+      await withStackLeaseRecovery(assertStackLease);
+      if (isLeaseLoss(err) || isLeaseUnproven(err) || isChildCleanupRefusal(err)) throw err;
       const message = err instanceof Error ? err.message : String(err);
       report('error', { message, phase: 'commit', next: 'run the updater again to finish it' });
       return EXIT.failed;
     }
   } catch (err) {
     try {
-      await assertStackLease();
+      await withStackLeaseRecovery(assertStackLease);
     } catch (loss) {
       err = loss;
     }
@@ -683,19 +699,22 @@ async function upgradeOwned(options: { stackLock?: StackLockOptions }): Promise<
     try {
       if (stackLock?.lost) await assertStackLease();
       if (locked && !hasRun && !flag('check') && terminal && !stackLock?.lost) {
+        const attempt = terminal;
         try {
           const fields = installFieldsStarted
             ? { fromVersion, channel }
             : await readAttemptInstallFields(installDir);
-          await assertStackLease();
-          await recordAttempt(sql, {
-            fromVersion: fields.fromVersion,
-            toVersion,
-            channel: fields.channel,
-            ...terminal,
-            error: fields.note
-              ? `${terminal.error}${/[.!?]\s*$/.test(terminal.error) ? '' : '.'} ${fields.note}`
-              : terminal.error,
+          await withStackLeaseRecovery(async () => {
+            await assertStackLease();
+            await recordAttempt(sql, {
+              fromVersion: fields.fromVersion,
+              toVersion,
+              channel: fields.channel,
+              ...attempt,
+              error: fields.note
+                ? `${attempt.error}${/[.!?]\s*$/.test(attempt.error) ? '' : '.'} ${fields.note}`
+                : attempt.error,
+            });
           });
         } catch (err) {
           if (isLeaseLoss(err)) throw err;

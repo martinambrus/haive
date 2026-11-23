@@ -13,6 +13,8 @@ export const STACK_LOCK_ROUNDS = 3;
 export const STACK_LOCK_MAX_BYTES = 4096;
 export const STACK_LOCK_RELEASE_TRIES = 3;
 export const STACK_LOCK_RELEASE_PAUSE_MS = 100;
+export const STACK_LOCK_PROOF_TRIES = 3;
+export const STACK_LOCK_PROOF_PAUSE_MS = 100;
 // Leave time to release the lock before docker stop's default 10 s SIGKILL grace expires.
 export const STACK_LOCK_SIGNAL_CLEANUP_TIMEOUT_MS = 5000;
 
@@ -23,6 +25,8 @@ export interface StackLockOptions {
   pollMs?: number;
   rounds?: number;
   maxBytes?: number;
+  proofTries?: number;
+  proofPauseMs?: number;
   releaseTries?: number;
   releasePauseMs?: number;
   heartbeat?: boolean;
@@ -49,6 +53,8 @@ function resolve(options: StackLockOptions): Resolved {
     pollMs: options.pollMs ?? STACK_LOCK_POLL_MS,
     rounds: options.rounds ?? STACK_LOCK_ROUNDS,
     maxBytes: options.maxBytes ?? STACK_LOCK_MAX_BYTES,
+    proofTries: Math.max(1, options.proofTries ?? STACK_LOCK_PROOF_TRIES),
+    proofPauseMs: options.proofPauseMs ?? STACK_LOCK_PROOF_PAUSE_MS,
     releaseTries: options.releaseTries ?? STACK_LOCK_RELEASE_TRIES,
     releasePauseMs: options.releasePauseMs ?? STACK_LOCK_RELEASE_PAUSE_MS,
     heartbeat: options.heartbeat ?? true,
@@ -114,7 +120,8 @@ export class StackLock {
   /** A phase needs a fresh proof from the store, not merely the absence of a failed heartbeat.
    * Never recreate or refresh here: an absent or unreadable record proves no ownership. */
   assertOwned(): Promise<void> {
-    if (this.lostFlag || this.releasing) return Promise.reject(this.lossRefusal());
+    if (this.lostFlag) return Promise.reject(this.lossRefusal());
+    if (this.releasing) return Promise.reject(this.lossRefusal());
     return (this.checking ??= this.checkOwner().finally(() => {
       this.checking = undefined;
     }));
@@ -123,32 +130,53 @@ export class StackLock {
   private async checkOwner(): Promise<void> {
     // A heartbeat rewrites in place. Do not mistake its unfinished write for a foreign record.
     await this.inFlight;
-    if (this.lostFlag || this.releasing) throw this.lossRefusal();
-    try {
-      const current = await inInstall(this.installDir, (dir) =>
-        dir.read(STACK_LOCK_NAME, this.options.maxBytes),
-      );
-      const owner = current && decode(current.bytes);
+    if (this.lostFlag) throw this.lossRefusal();
+    if (this.releasing) throw this.lossRefusal();
+    for (let attempt = 1; attempt <= this.options.proofTries; attempt++) {
+      let current;
+      try {
+        current = await inInstall(this.installDir, (dir) =>
+          dir.read(STACK_LOCK_NAME, this.options.maxBytes),
+        );
+      } catch {
+        if (attempt === this.options.proofTries) throw this.unprovenRefusal();
+        await this.options.sleep(this.options.proofPauseMs);
+        continue;
+      }
+      if (this.lostFlag) throw this.lossRefusal();
+      if (this.releasing) throw this.lossRefusal();
+      // breakStale can leave the name absent while restoring a displaced holder. Never infer
+      // takeover from absence, or recreate the record as a side effect of a phase proof.
+      if (!current) throw this.unprovenRefusal();
+      if (!parses(current.bytes)) {
+        if (this.failing) return;
+        throw this.unprovenRefusal();
+      }
+      const owner = decode(current.bytes);
+      if (!owner.token || !owner.holder || !owner.startedAt) throw this.unprovenRefusal();
       if (
-        this.lostFlag ||
-        this.releasing ||
-        !owner ||
         owner.token !== this.token ||
         owner.holder !== this.options.holder ||
         owner.startedAt !== this.startedAt
       ) {
+        this.markLost();
         throw this.lossRefusal();
       }
-    } catch {
-      this.markLost();
-      throw this.lossRefusal();
+      return;
     }
+  }
+
+  private unprovenRefusal(): UpgradeRefusal {
+    return new UpgradeRefusal(
+      'stack-lock-unproven',
+      'install stack lease ownership could not be proved; refusing the phase and attempting normal failure recovery',
+    );
   }
 
   private lossRefusal(): UpgradeRefusal {
     return new UpgradeRefusal(
       'stack-lock-lost',
-      'install stack lease ownership could not be proved; leaving the upgrade for its current holder to recover',
+      'install stack lease was lost; leaving the upgrade for recovery',
     );
   }
 
@@ -165,7 +193,7 @@ export class StackLock {
     if (this.checking)
       return this.checking.then(
         () => this.beat(),
-        () => 'lost' as const,
+        () => (this.lostFlag ? ('lost' as const) : ('error' as const)),
       );
     // A tick that arrives while a write is still in flight joins it rather than overlapping.
     this.inFlight ??= this.beatOnce().finally(() => {
@@ -187,8 +215,18 @@ export class StackLock {
           return 'created' as const;
         }
         // A write that failed after truncating leaves our own record empty or partial: not a loss.
-        const torn = this.failing && current !== undefined && !parses(current.bytes);
-        if (decode(current.bytes).token !== this.token && !torn) return 'lost' as const;
+        const parsed = parses(current.bytes);
+        if (!parsed && !this.failing) throw this.unprovenRefusal();
+        const owner = decode(current.bytes);
+        if (parsed && (!owner.token || !owner.holder || !owner.startedAt))
+          throw this.unprovenRefusal();
+        if (
+          parsed &&
+          (owner.token !== this.token ||
+            owner.holder !== this.options.holder ||
+            owner.startedAt !== this.startedAt)
+        )
+          return 'lost' as const;
         await dir.overwrite(
           STACK_LOCK_NAME,
           encode(this.token, this.options.holder, this.startedAt, this.seq + 1),

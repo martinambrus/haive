@@ -13,7 +13,7 @@ import {
 import type { ReleaseManifest } from '@haive/shared/release';
 import { safeErrorMessage } from '@haive/shared/logger';
 import * as dk from './docker.js';
-import { assertStackLease, isLeaseLoss } from './lease-fence.js';
+import { assertStackLease, isLeaseLoss, withStackLeaseRecovery } from './lease-fence.js';
 import { inInstall } from './install-files.js';
 import { IMAGE_KEYS, imageFor, type ImageOverrides } from './images.js';
 import {
@@ -387,13 +387,17 @@ export async function phaseSnapshot(ctx: UpgradeContext): Promise<string> {
   } finally {
     // While still owning the lease, bring it back even on a failed snapshot: everything after
     // this needs a database. A lost holder leaves the restart to the new holder.
-    await assertStackLease();
-    await dk.composeUp(ctx.compose, composeEnv(ctx.fromVersion, ctx.previousImages, ctx.registry), [
-      'postgres',
-    ]);
-    // And WAIT for it. The journal is in this database; without this the next write races the
-    // restart and loses.
-    await awaitDatabase(ctx.sql);
+    await withStackLeaseRecovery(async () => {
+      await assertStackLease();
+      await dk.composeUp(
+        ctx.compose,
+        composeEnv(ctx.fromVersion, ctx.previousImages, ctx.registry),
+        ['postgres'],
+      );
+      // And WAIT for it. The journal is in this database; without this the next write races the
+      // restart and loses.
+      await awaitDatabase(ctx.sql);
+    });
   }
   ctx.log('snapshot-done', { file });
   return file;

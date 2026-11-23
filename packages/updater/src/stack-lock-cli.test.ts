@@ -50,6 +50,7 @@ import { main } from './cli.js';
 import { UpgradeRefusal } from './refusal.js';
 import { STACK_LOCK_BEAT_MS, StackLock } from './stack-lock.js';
 import * as images from './images.js';
+import * as install from './install-files.js';
 import * as dk from './docker.js';
 import * as journal from './journal.js';
 import * as run from './run.js';
@@ -761,6 +762,81 @@ describe('SIGTERM while a one-shot is running', () => {
       }
     },
   );
+});
+
+describe('unproven lease recovery', () => {
+  const opts = { stackLock: { ...quick, sleep: idleSleep } };
+  const unreadable = () =>
+    vi.spyOn(install.InstallDirectory.prototype, 'read').mockImplementation(async function (
+      this: install.InstallDirectory,
+      name,
+      cap,
+    ) {
+      if (name === LOCK) throw Object.assign(new Error('io'), { code: 'EIO' });
+      return originalRead.call(this, name, cap);
+    });
+  const originalRead = install.InstallDirectory.prototype.read;
+  const lossEvents = () => events().filter((event) => event === 'stack-lock-lost');
+  it('restarts postgres in snapshot finally and rolls back after persistent proof read errors', async () => {
+    const actual = await vi.importActual<typeof import('./run.js')>('./run.js');
+    vi.mocked(run.phaseSnapshot).mockImplementation(actual.phaseSnapshot);
+    h.sql.mockResolvedValue([]);
+    const lost = vi.spyOn(StackLock.prototype, 'lost', 'get');
+    h.dockerExec.mockImplementation(async (_cmd, args) => {
+      if (args[0] === 'run') unreadable();
+      return { stdout: '' };
+    });
+    expect(await main(opts)).toBe(3);
+    expect(
+      h.dockerExec.mock.calls.filter(([, args]) => args[0] === 'compose').map(([, args]) => args),
+    ).toEqual([
+      expect.arrayContaining(['stop', 'postgres']),
+      expect.arrayContaining(['up', '-d', 'postgres']),
+    ]);
+    expect(run.rollback).toHaveBeenCalledOnce();
+    expect(run.phaseMigrate).not.toHaveBeenCalled();
+    expect(lossEvents()).toEqual([]);
+    expect(lost.mock.results.every((result) => result.value === false)).toBe(true);
+    expect(
+      vi.mocked(console.log).mock.calls.map(([line]) => JSON.parse(String(line))),
+    ).toContainEqual(expect.objectContaining({ event: 'refused', refusal: 'stack-lock-unproven' }));
+  });
+  it('records an unproven preflight refusal and releases normally', async () => {
+    vi.mocked(images.prepareImages).mockImplementation(async () => {
+      unreadable();
+      return images.emptyOverrides();
+    });
+    vi.mocked(journal.recordAttempt).mockResolvedValue(undefined);
+    const release = vi.spyOn(StackLock.prototype, 'release');
+    expect(await main(opts)).toBe(3);
+    expect(journal.startRun).not.toHaveBeenCalled();
+    expect(journal.recordAttempt).toHaveBeenCalledWith(
+      h.sql,
+      expect.objectContaining({
+        status: 'refused',
+        metadata: { refusal: 'stack-lock-unproven' },
+      }),
+    );
+    expect(release).toHaveBeenCalledOnce();
+    expect(lossEvents()).toEqual([]);
+    // Read failures prevent token verification at release; retry remains safe and reports failure.
+    expect(events()).toContain('stack-lock-release-failed');
+  });
+  it('still stops recovery if a foreign record is proved after an unproven phase', async () => {
+    vi.mocked(run.phaseMigrate).mockImplementation(async () => {
+      const read = unreadable();
+      try {
+        await dk.runOneShot('target', ['migrate'], {});
+      } finally {
+        read.mockRestore();
+        await writeFile(lock, record(ext.token, 'updater', 7));
+      }
+    });
+    expect(await main(opts)).toBe(3);
+    expect(run.rollback).not.toHaveBeenCalled();
+    expect(await readFile(lock, 'utf8')).toBe(record(ext.token, 'updater', 7));
+    expect(lossEvents()).toHaveLength(1);
+  });
 });
 
 describe('lease loss fences the attempt', () => {

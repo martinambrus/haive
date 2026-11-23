@@ -15,10 +15,18 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import * as install from './install-files.js';
 import {
+  assertStackLease,
+  bindStackLease,
+  withStackLease,
+  withStackLeaseRecovery,
+} from './lease-fence.js';
+import {
   STACK_LOCK_BEAT_MS,
   STACK_LOCK_MAX_BYTES,
   STACK_LOCK_NAME,
   STACK_LOCK_POLL_MS,
+  STACK_LOCK_PROOF_TRIES,
+  STACK_LOCK_PROOF_PAUSE_MS,
   STACK_LOCK_RELEASE_PAUSE_MS,
   STACK_LOCK_RELEASE_TRIES,
   STACK_LOCK_ROUNDS,
@@ -63,6 +71,8 @@ describe('constants and defaults', () => {
     expect(STACK_LOCK_STALE_MS).toBe(60000);
     expect(STACK_LOCK_POLL_MS).toBe(1000);
     expect(STACK_LOCK_ROUNDS).toBe(3);
+    expect(STACK_LOCK_PROOF_TRIES).toBe(3);
+    expect(STACK_LOCK_PROOF_PAUSE_MS).toBe(100);
     expect(STACK_LOCK_MAX_BYTES).toBe(4096);
     expect(STACK_LOCK_RELEASE_TRIES).toBe(3);
     expect(STACK_LOCK_RELEASE_PAUSE_MS).toBe(100);
@@ -325,19 +335,13 @@ describe('phase ownership proofs', () => {
     expect(await readFile(path, 'utf8')).toBe(before);
     await lock.release();
   });
-  it.each(['token', 'holder', 'startedAt', 'missing', 'invalid', 'unreadable'])(
+  it.each(['token', 'holder', 'startedAt'])(
     'fails closed for %s without changing the replacement record',
     async (field) => {
       const lock = await held();
       const own = await parse();
-      if (field === 'missing') await rm(path);
-      else if (field === 'invalid') await writeFile(path, '{');
-      else await writeFile(path, JSON.stringify({ ...own, [field]: token() }));
-      const before = await readFile(path, 'utf8').catch(() => null);
-      if (field === 'unreadable')
-        vi.spyOn(install.InstallDirectory.prototype, 'read').mockRejectedValueOnce(
-          Object.assign(new Error('read failed'), { code: 'EACCES' }),
-        );
+      await writeFile(path, JSON.stringify({ ...own, [field]: token() }));
+      const before = await readFile(path, 'utf8');
       await expect(lock.assertOwned()).rejects.toMatchObject({ refusal: 'stack-lock-lost' });
       expect(lock.lost).toBe(true);
       expect(await lock.beat()).toBe('lost');
@@ -345,6 +349,69 @@ describe('phase ownership proofs', () => {
       expect(await readFile(path, 'utf8').catch(() => null)).toBe(before);
     },
   );
+  it.each(['missing', 'invalid', 'invalid-record', 'unreadable'])(
+    'refuses unproven %s ownership without marking the holder lost',
+    async (kind) => {
+      const sleep = vi.fn(idle);
+      const lock = await held({ sleep });
+      const own = await readFile(path, 'utf8');
+      if (kind === 'missing') await rm(path);
+      if (kind === 'invalid') await writeFile(path, '{');
+      if (kind === 'invalid-record') await writeFile(path, 'null');
+      const read = vi.spyOn(install.InstallDirectory.prototype, 'read');
+      if (kind === 'unreadable')
+        read.mockRejectedValue(Object.assign(new Error('io'), { code: 'EIO' }));
+      await expect(lock.assertOwned()).rejects.toMatchObject({ refusal: 'stack-lock-unproven' });
+      expect(lock.lost).toBe(false);
+      if (kind === 'unreadable') {
+        expect(read).toHaveBeenCalledTimes(3);
+        expect(sleep.mock.calls).toEqual([[100], [100]]);
+      }
+      read.mockRestore();
+      await writeFile(path, own);
+      await expect(lock.assertOwned()).resolves.toBeUndefined();
+      await lock.release();
+      expect(await readdir(dir)).toEqual([]);
+    },
+  );
+  it('retries one read error then proves ownership', async () => {
+    const sleep = vi.fn(idle);
+    const lock = await held({ sleep });
+    vi.spyOn(install.InstallDirectory.prototype, 'read').mockRejectedValueOnce(
+      Object.assign(new Error('io'), { code: 'EIO' }),
+    );
+    await expect(lock.assertOwned()).resolves.toBeUndefined();
+    expect(sleep.mock.calls).toEqual([[100]]);
+    expect(lock.lost).toBe(false);
+    await lock.release();
+  });
+  it('accepts a torn own record while a beat failure streak is open', async () => {
+    const lock = await held();
+    const overwrite = install.InstallDirectory.prototype.overwrite;
+    vi.spyOn(install.InstallDirectory.prototype, 'overwrite').mockImplementationOnce(
+      async function (this: install.InstallDirectory, name) {
+        await overwrite.call(this, name, Buffer.from('{'));
+        throw Object.assign(new Error('full'), { code: 'ENOSPC' });
+      },
+    );
+    expect(await lock.beat()).toBe('error');
+    await expect(lock.assertOwned()).resolves.toBeUndefined();
+    expect(lock.lost).toBe(false);
+    expect(await lock.beat()).toBe('ok');
+    await lock.release();
+  });
+  it('does not tolerate a released lease during failure recovery', async () => {
+    const lock = await held();
+    await withStackLease(async () => {
+      bindStackLease(() => lock.assertOwned());
+      await lock.release();
+      await expect(withStackLeaseRecovery(assertStackLease)).rejects.toMatchObject({
+        refusal: 'stack-lock-lost',
+      });
+      expect(lock.lost).toBe(false);
+      expect(await readdir(dir)).toEqual([]);
+    });
+  });
   it('fences the old holder after a real stale takeover while the new holder keeps ownership', async () => {
     const old = await held();
     const next = await held();
@@ -566,11 +633,12 @@ describe('heartbeat', () => {
   });
   it('a failed re-create whose name now holds its own restored record stays held', async () => {
     const lock = await held();
+    const own = await readFile(path, 'utf8');
     await rm(path);
     const real = install.InstallDirectory.prototype.createExclusive;
     vi.spyOn(install.InstallDirectory.prototype, 'createExclusive').mockImplementationOnce(
       async function (this: install.InstallDirectory, name: string, bytes: Buffer) {
-        await writeFile(path, record(lock.token, 'updater', 1));
+        await writeFile(path, own);
         return real.call(this, name, bytes);
       },
     );
@@ -620,11 +688,11 @@ describe('heartbeat', () => {
     await lock.release();
     expect(await readdir(dir)).toEqual([]);
   });
-  it('still reports a loss for an unparseable record when no write had failed', async () => {
+  it('reports an error for an unparseable record when no write had failed', async () => {
     const lock = await held();
     await writeFile(path, '');
-    expect(await lock.beat()).toBe('lost');
-    expect(lock.lost).toBe(true);
+    expect(await lock.beat()).toBe('error');
+    expect(lock.lost).toBe(false);
     await lock.release();
     expect(await readFile(path, 'utf8')).toBe('');
   });
