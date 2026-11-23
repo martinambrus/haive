@@ -1061,7 +1061,7 @@ A task's Attachments tab exists only once the task does, and the task parks on "
 
 ### T755 · The model-health canary probes a provider a module type never uses
 
-status: open · kind: fix · found: T735 free-step walk 2026-11-22 (owner: file it as its own fix) · priority: P3
+status: done (host #1323 77afe801a, migration 0249, deployed 2026-11-22; translator opt-in haive-module-translator#16 899f115, deployed 2026-11-23: the translate type's row has `selects_own_providers = t`; load fails clearly on a host that strips the flag; follow-ups T761) · kind: fix · found: T735 free-step walk 2026-11-22 (owner: file it as its own fix) · priority: P3
 
 In `martinambrus/haive` (host), with a one-line follow-up in `martinambrus/haive-module-translator`.
 
@@ -1107,6 +1107,17 @@ status: open · kind: fix · found: T744 review 2026-11-23 · priority: P4
 
 1. `packages/updater/src/cli.ts` ~:336: `ensureJournal` and the database bootstrap run before the lock and the child check, so after an updater killed mid-snapshot (Postgres stopped by `composeStop`) a takeover probably fails at the journal connection with no named refusal. PRE-EXISTING, unverified: probe first.
 2. `packages/updater/src/docker.ts` ~:262 `restoreVolume` has no caller. PRE-EXISTING, minor.
+
+### T761 · FNF[T755]: own-provider type follow-ups (+3)
+
+status: open · kind: fix · found: T755 reviews 2026-11-22 · priority: P3
+
+All PRE-EXISTING, minor, unless noted.
+
+1. `GET /task-types` still reports `dispatchesCli: true` for a type with `selects_own_providers` (`api/src/routes/task-types.ts` ~:160-165 `dispatchesCliOf` ignores the flag). Unverified effect: whether the New Task form then shows a CLI picker the module never uses. Check the form first; change only if it does.
+2. Admin JSON carries `selects_own_providers` (whole-row spread, `task-types.ts` ~:188,465,559,630,845,855), but `AdminTaskType` (`web/src/lib/api-client.ts` ~:2640-2662) declares neither it nor `executionContract`, so an admin cannot see which module types skip the canary. A read-only badge on the admin task-types list.
+3. `api/test/task-type-own-providers.test.ts` ~:30-62 stubs the exact Drizzle select chain; a refactor of `readStepCatalog`/`readModuleStates` breaks it for unrelated reasons. Move the control into the real-Postgres matrix `task-type-definition.test.ts` (`TRAIT_ROWS`) as an own-providers row.
+4. Translator module (`martinambrus/haive-module-translator`), consequential: `README.md` ~:638 (M6) storage headroom. A tight consent quota can pass setup and then fail translation or render after paid work; the setup form's minimum does not reserve the headroom later passes need.
 
 ### T721 · The Claude usage grant reaches sandbox environments
 
