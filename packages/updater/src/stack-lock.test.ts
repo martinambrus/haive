@@ -400,6 +400,38 @@ describe('phase ownership proofs', () => {
     expect(await lock.beat()).toBe('ok');
     await lock.release();
   });
+  it.each(['malformed', 'incomplete', 'read-error', 'create-race'])(
+    'never treats a %s beat failure as proof of its own torn write',
+    async (kind) => {
+      const lock = await held();
+      const partial = '{';
+      if (kind === 'malformed') await writeFile(path, partial);
+      if (kind === 'incomplete') await writeFile(path, '{}');
+      if (kind === 'read-error')
+        vi.spyOn(install.InstallDirectory.prototype, 'read').mockRejectedValueOnce(
+          Object.assign(new Error('io'), { code: 'EIO' }),
+        );
+      if (kind === 'create-race') {
+        await rm(path);
+        const create = install.InstallDirectory.prototype.createExclusive;
+        vi.spyOn(install.InstallDirectory.prototype, 'createExclusive').mockImplementationOnce(
+          async function (this: install.InstallDirectory, name, bytes) {
+            await writeFile(path, partial);
+            return create.call(this, name, bytes);
+          },
+        );
+      }
+      expect(await lock.beat()).toBe('error');
+      // The partial bytes may be a new holder's in-flight write. This holder wrote nothing.
+      await writeFile(path, partial);
+      await expect(lock.assertOwned()).rejects.toMatchObject({ refusal: 'stack-lock-unproven' });
+      expect(await lock.beat()).toBe('error');
+      expect(await readFile(path, 'utf8')).toBe(partial);
+      expect(lock.lost).toBe(false);
+      await lock.release();
+      expect(await readFile(path, 'utf8')).toBe(partial);
+    },
+  );
   it('does not tolerate a released lease during failure recovery', async () => {
     const lock = await held();
     await withStackLease(async () => {
