@@ -367,7 +367,7 @@ function endedAtOf(row: { endedAt: Date | null }): string | null {
 
 /** Appends the event once per pass (row, type, `endedAt`); a missing `endedAt` never matches. */
 async function appendEventOnce(
-  db: Database,
+  db: Database | DbHandle,
   taskId: string,
   taskStepId: string,
   eventType: string,
@@ -1059,6 +1059,7 @@ async function routableFixLoopTarget(
   ctx: ResolvedTaskContext,
   sourceRowId: string,
   onLost?: () => Promise<void>,
+  onUnroutable?: (tx: DbHandle) => Promise<void>,
 ): Promise<StepDefinition | null> {
   const resolved = resolveFixLoopTarget({
     taskType: ctx.workflowType,
@@ -1081,6 +1082,7 @@ async function routableFixLoopTarget(
     if (!(await writeTaskFailed(tx, ctx.taskId, reason, ctx.orchestrationEpoch))) {
       return false;
     }
+    await onUnroutable?.(tx);
     await appendEvent(tx, ctx.taskId, sourceRowId, 'fix_loop.unroutable', {
       reason,
     });
@@ -2640,12 +2642,13 @@ export async function handleResult(
       // forward walk then re-runs the whole post-implementation chain as round-N rows.
       const nextRound = result.row.round + 1;
       const cap = taskRow.maxFixRounds ?? DEFAULT_MAX_FIX_ROUNDS;
-      await record(db, ctx.taskId, result.row.id, 'step.loop_back', {
-        stepId,
-        sourceStepId: result.sourceStepId,
-        round: nextRound,
-        endedAt: endedAtOf(result.row),
-      });
+      const recordLoopBack = (tx: DbHandle) =>
+        record(tx, ctx.taskId, result.row.id, 'step.loop_back', {
+          stepId,
+          sourceStepId: result.sourceStepId,
+          round: nextRound,
+          endedAt: endedAtOf(result.row),
+        });
       const parkEscalation = async (
         formSchema: FormSchema,
         eventType: string,
@@ -2705,6 +2708,7 @@ export async function handleResult(
               ))
             )
               throw new StepSupersededError(result.row.id);
+            await recordLoopBack(tx);
             await appendEvent(tx, ctx.taskId, result.row.id, eventType, payload);
           });
         } catch (err) {
@@ -2806,8 +2810,12 @@ export async function handleResult(
         );
         return;
       }
-      const target = await routableFixLoopTarget(db, ctx, result.row.id, () =>
-        logLost('fix_target'),
+      const target = await routableFixLoopTarget(
+        db,
+        ctx,
+        result.row.id,
+        () => logLost('fix_target'),
+        recordLoopBack,
       );
       if (!target) return;
       const steps = await buildRunList(ctx, db);
@@ -2870,6 +2878,7 @@ export async function handleResult(
           );
           // Roll back the reset too when a Stop or Retry refuses the pointer write.
           if (!pointed) refuse('task_write_refused');
+          await recordLoopBack(tx);
           await recordFixLoopRequest(tx, ctx.taskId, result.row.id, {
             diagnosis: result.diagnosis,
             sourceStepId: result.sourceStepId,

@@ -756,7 +756,7 @@ describe('a job that resets steps itself', () => {
     await handleResult(db as never, ctx as never, 'epoch-job-step', loopBack as never);
     expect(h.state.taskWrites).toEqual([{ epochs: [5], landed: false }]);
     // No round recorded as requested or started, and nothing queued for it.
-    expect(h.state.events).toEqual(['step.loop_back']);
+    expect(h.state.events).toEqual([]);
     expect(h.state.add).not.toHaveBeenCalled();
   });
 
@@ -808,7 +808,7 @@ describe('a job that resets steps itself', () => {
       undefined,
     );
     expect(h.state.taskWrites).toEqual([]);
-    expect(h.state.events).toEqual(['step.loop_back']);
+    expect(h.state.events).toEqual([]);
     expect(h.state.add).not.toHaveBeenCalled();
   });
 
@@ -864,7 +864,7 @@ describe('a job that resets steps itself', () => {
     // The reset refused, so neither the pointer nor the task moved, and no round was recorded as
     // requested or started.
     expect(h.state.taskWrites).toEqual([]);
-    expect(h.state.events).toEqual(['step.loop_back']);
+    expect(h.state.events).toEqual([]);
   });
 });
 

@@ -607,6 +607,7 @@ describe.skipIf(!url)('recovery of a fix round on Postgres', () => {
           expect(arrivals).toBe(2);
           expect(await eventsOf(id, 'fix_loop.requested')).toHaveLength(1);
           expect(await eventsOf(id, 'fix_loop.started')).toHaveLength(1);
+          expect(await eventsOf(id, 'step.loop_back')).toHaveLength(1);
           expect(h.adds).toHaveLength(1);
           expect(await taskOf(id)).toMatchObject({
             currentStepId: leg.ids.TARGET,
