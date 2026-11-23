@@ -96,12 +96,12 @@ export const createCliProviderRequestSchema = z.object({
   executablePath: z.string().optional(),
   wrapperPath: z.string().optional(),
   wrapperContent: z.string().optional(),
-  // An empty secret-named value would overwrite a stored secret with nothing.
+  // An empty or blank secret-named value would overwrite a stored secret with nothing.
   envVars: z
     .record(z.string(), z.string())
     .superRefine((env, ctx) => {
       for (const [name, value] of Object.entries(splitSecretLikeEnv(env).secrets)) {
-        if (value === '') {
+        if (value.trim() === '') {
           ctx.addIssue({
             code: 'custom',
             path: [name],
@@ -162,7 +162,9 @@ export type CliPackageVersionsEntry = z.infer<typeof cliPackageVersionsEntrySche
 
 export const setCliProviderSecretRequestSchema = z.object({
   secretName: z.string().min(1).max(255),
-  value: z.string().min(1),
+  value: z.string().refine((value) => value.trim().length > 0, {
+    message: 'Secret needs a non-blank value',
+  }),
 });
 
 export type SetCliProviderSecretRequest = z.infer<typeof setCliProviderSecretRequestSchema>;

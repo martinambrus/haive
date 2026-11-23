@@ -25,6 +25,7 @@ import {
   OLLAMA_MODEL_NOT_ALLOWED_MESSAGE,
   isRunnableCliVersion,
   lockLoginSet,
+  isEmptyEnvelope,
   logger,
   normalizeCliArgsArray,
   resolveDefaultCliProvider,
@@ -484,7 +485,7 @@ cliProviderRoutes.post('/', requireNewWorkAllowed, async (c) => {
   let secretEvent: AuditEvent | undefined;
   let setEvents: AuditEvent[] = [];
   const sharesLogin = body.name === 'claude-code' && !(body.isolateAuth ?? false);
-  const spreadsToken = sharesLogin && !!split?.secrets.CLAUDE_CODE_OAUTH_TOKEN;
+  const spreadsToken = sharesLogin && !!split?.secrets.CLAUDE_CODE_OAUTH_TOKEN?.trim();
   // Without a typed token a shared subscription row takes the login the set already has.
   const seedsFromSet = sharesLogin && !spreadsToken && body.authMode === 'subscription';
   const joinsSet = spreadsToken || seedsFromSet;
@@ -778,7 +779,8 @@ cliProviderRoutes.patch('/:id', async (c) => {
     authMode: body.authMode ?? existing.authMode,
     isolateAuth: body.isolateAuth ?? existing.isolateAuth,
   };
-  const spreadsToken = existing.name === 'claude-code' && !!split?.secrets.CLAUDE_CODE_OAUTH_TOKEN;
+  const spreadsToken =
+    existing.name === 'claude-code' && !!split?.secrets.CLAUDE_CODE_OAUTH_TOKEN?.trim();
   // A row that moves into a shared subscription set without a typed token takes the set's login.
   const joinsSet =
     existing.name === 'claude-code' &&
@@ -900,7 +902,6 @@ cliProviderRoutes.patch('/:id', async (c) => {
           joinerId: id,
           members,
           assertHeld,
-          keepGeneration: authSecretNames.length > 0,
         });
         setEvents = [...leaveEvents, ...seeded.events];
         loginSeeded = seeded.row;
@@ -1231,7 +1232,10 @@ cliProviderRoutes.post('/:id/clone', requireNewWorkAllowed, async (c) => {
           await tx.query.cliProviderSecrets.findMany({
             where: eq(schema.cliProviderSecrets.providerId, source.id),
           })
-        ).filter((s) => !fromSet(s.secretName));
+        ).filter((s) => !fromSet(s.secretName) && !isEmptyEnvelope(s.encryptedValue));
+        const legacySecrets = Object.entries(split.secrets).filter(
+          ([name, value]) => !fromSet(name) && value.trim().length > 0,
+        );
         if (sourceSecrets.length > 0) {
           await tx.insert(schema.cliProviderSecrets).values(
             sourceSecrets.map((s) => ({
@@ -1244,8 +1248,8 @@ cliProviderRoutes.post('/:id/clone', requireNewWorkAllowed, async (c) => {
           );
         }
         const copied = new Set(sourceSecrets.map((s) => s.secretName));
-        for (const [name, value] of Object.entries(split.secrets)) {
-          if (!copied.has(name) && !fromSet(name)) {
+        for (const [name, value] of legacySecrets) {
+          if (!copied.has(name)) {
             await upsertProviderSecret(tx, {
               providerId: row.id,
               name,
@@ -1264,7 +1268,7 @@ cliProviderRoutes.post('/:id/clone', requireNewWorkAllowed, async (c) => {
             sourceProviderId: source.id,
             ...secretAuditMetadata([
               ...sourceSecrets.map((s) => s.secretName),
-              ...Object.keys(split.secrets).filter((name) => !fromSet(name)),
+              ...legacySecrets.map(([name]) => name),
             ]),
           },
         };
@@ -1323,11 +1327,15 @@ cliProviderRoutes.get('/:providerId/secrets', async (c) => {
       id: true,
       secretName: true,
       fingerprint: true,
+      encryptedValue: true,
       createdAt: true,
       updatedAt: true,
     },
   });
-  return c.json({ secrets: rows });
+  const secrets = rows
+    .filter((row) => !isEmptyEnvelope(row.encryptedValue))
+    .map(({ encryptedValue: _value, ...metadata }) => metadata);
+  return c.json({ secrets });
 });
 
 cliProviderRoutes.post('/:providerId/secrets', async (c) => {
