@@ -116,6 +116,32 @@ describe.skipIf(!url)('module task type seeds on Postgres', () => {
     await db.$client.end({ timeout: 5 });
   });
 
+  it('round-trips provider selection, resyncs changes and leaves unchanged seeds untouched', async () => {
+    await sync(moduleOf([seedOf()]));
+    expect(await one('fx__weekly')).toMatchObject({ selectsOwnProviders: false });
+    await db
+      .update(schema.taskTypeDefinitions)
+      .set({ enabled: false, displayName: 'Admin title', sortOrder: 42, updatedAt: new Date(0) })
+      .where(eq(schema.taskTypeDefinitions.slug, 'fx__weekly'));
+    const before = await one('fx__weekly');
+    await sync(moduleOf([seedOf({ selectsOwnProviders: false })]));
+    expect(await one('fx__weekly')).toEqual(before);
+    const ownProviders = moduleOf([seedOf({ selectsOwnProviders: true })]);
+    await sync(ownProviders);
+    const changed = await one('fx__weekly');
+    expect(changed).toMatchObject({
+      selectsOwnProviders: true,
+      enabled: false,
+      displayName: 'Admin title',
+      sortOrder: 42,
+    });
+    expect(changed?.updatedAt).not.toEqual(before?.updatedAt);
+    await sync(ownProviders);
+    expect(await one('fx__weekly')).toEqual(changed);
+    await sync(moduleOf([seedOf()]));
+    expect(await one('fx__weekly')).toMatchObject({ selectsOwnProviders: false });
+  });
+
   it('owns execution-contract storage, hashes, no-op detection and updates without changing admin columns', async () => {
     const contract = { version: 1 as const, guardedSpans: [] };
     const fx = moduleOf([seedOf({ executionContract: contract })]);
@@ -524,8 +550,12 @@ describe.skipIf(!url)('module task type seeds on Postgres', () => {
         const before = await one('fx__weekly');
         const warn = vi.spyOn(logger, 'warn');
 
-        const outcome = await sync(moduleOf([seedOf(), seedOf({ slug: 'daily' })]));
+        expect(before?.selectsOwnProviders).toBe(false);
+        const outcome = await sync(
+          moduleOf([seedOf({ selectsOwnProviders: true }), seedOf({ slug: 'daily' })]),
+        );
 
+        expect((await one('fx__weekly'))?.selectsOwnProviders).toBe(false);
         expect(await one('fx__weekly')).toEqual(before);
         expect(outcome).toEqual({
           fx: { seeded: ['fx__daily'], conflicts: [{ slug: 'fx__weekly', heldBy: holder }] },
