@@ -612,6 +612,77 @@ describe('read-only and absent installs', () => {
 });
 
 describe('SIGTERM while a one-shot is running', () => {
+  it('exits 143 after loss, removes only this attempt children and preserves the new lock', async () => {
+    const saved = process.listeners('SIGTERM') as NodeJS.SignalsListener[];
+    process.removeAllListeners('SIGTERM');
+    let started!: () => void;
+    let finish!: () => void;
+    const running = new Promise<void>((resolve) => {
+      started = resolve;
+    });
+    const child = new Promise<{ stdout: string }>((resolve) => {
+      finish = () => resolve({ stdout: '' });
+    });
+    const proof = vi.spyOn(StackLock.prototype, 'assertOwned');
+    const children = new Map([['new-child', 'org.haive.updater.attempt=new-holder']]);
+    let attempt: string | undefined;
+    h.dockerExec.mockImplementation(async (_cmd, args: string[]) => {
+      if (args[0] === 'run') {
+        attempt = args.find((arg) => arg.startsWith('org.haive.updater.attempt='));
+        children.set('old-child', attempt!);
+        started();
+        return child;
+      }
+      if (args[1] === '-aq') {
+        expect(args).toContain('label=haive.install=haive');
+        expect(args).toContain('label=' + attempt);
+        expect(args).toContain('label=org.haive.updater.role');
+        return {
+          stdout: [...children]
+            .filter(([, owner]) => args.includes('label=' + owner))
+            .map(([id]) => id)
+            .join('\n'),
+        };
+      }
+      if (args[0] === 'rm') for (const id of args.slice(2)) children.delete(id);
+      return { stdout: '' };
+    });
+    vi.mocked(run.phaseMigrate).mockImplementation(async () => {
+      await dk.runOneShot('target', ['migrate'], {});
+    });
+    let exitDone!: (code: number) => void;
+    const exited = new Promise<number>((resolve) => {
+      exitDone = resolve;
+    });
+    vi.spyOn(process, 'exit').mockImplementation((code) => {
+      exitDone(Number(code));
+      return undefined as never;
+    });
+    const result = main({ stackLock: { ...quick, sleep: idleSleep } });
+    const replacement = record(ext.token, 'updater', 7);
+    try {
+      await running;
+      await writeFile(lock, replacement);
+      expect(await (proof.mock.contexts.at(-1) as StackLock).beat()).toBe('lost');
+      process.emit('SIGTERM');
+      expect(await exited).toBe(143);
+      expect(
+        h.dockerExec.mock.calls.filter(([, args]) => args[0] === 'rm').map(([, args]) => args),
+      ).toEqual([['rm', '-f', 'old-child']]);
+      expect([...children.keys()]).toEqual(['new-child']);
+      expect(await readFile(lock, 'utf8')).toBe(replacement);
+      finish();
+      expect(await result).toBe(3);
+      expect(run.rollback).not.toHaveBeenCalled();
+      expect(journal.recordAttempt).not.toHaveBeenCalled();
+      expect(await readFile(lock, 'utf8')).toBe(replacement);
+    } finally {
+      finish();
+      await result;
+      process.removeAllListeners('SIGTERM');
+      for (const listener of saved) process.on('SIGTERM', listener);
+    }
+  });
   it('keeps the lock when the Docker client settles before SIGTERM cleanup finishes', async () => {
     const saved = process.listeners('SIGTERM') as NodeJS.SignalsListener[];
     process.removeAllListeners('SIGTERM');
