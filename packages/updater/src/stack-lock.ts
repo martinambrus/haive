@@ -12,6 +12,8 @@ export const STACK_LOCK_ROUNDS = 3;
 export const STACK_LOCK_MAX_BYTES = 4096;
 export const STACK_LOCK_RELEASE_TRIES = 3;
 export const STACK_LOCK_RELEASE_PAUSE_MS = 100;
+// Leave time to release the lock before docker stop's default 10 s SIGKILL grace expires.
+export const STACK_LOCK_SIGNAL_CLEANUP_TIMEOUT_MS = 5000;
 
 export interface StackLockOptions {
   holder?: string;
@@ -321,17 +323,40 @@ export function releaseOnSignal(
   lock: StackLock,
   exit: (code: number) => never = process.exit,
   signals: NodeJS.Signals[] = ['SIGTERM'],
-  cleanup: { beforeRelease?: () => Promise<void>; onError?: (error: unknown) => void } = {},
+  cleanup: {
+    beforeRelease?: () => Promise<void>;
+    onError?: (error: unknown) => void;
+    timeoutMs?: number;
+  } = {},
 ): () => Promise<void> | undefined {
   let stopping: Promise<void> | undefined;
   const handlers = signals.map((signal) => {
     const handler = () => {
       stopping ??= (async () => {
+        let timer: NodeJS.Timeout | undefined;
         try {
-          await cleanup.beforeRelease?.();
+          if (cleanup.beforeRelease) {
+            const timeoutMs = cleanup.timeoutMs ?? STACK_LOCK_SIGNAL_CLEANUP_TIMEOUT_MS;
+            await Promise.race([
+              cleanup.beforeRelease(),
+              new Promise<never>((_resolve, reject) => {
+                timer = setTimeout(() => {
+                  reject(
+                    Object.assign(
+                      new Error(`${signal} cleanup exceeded ${timeoutMs} ms deadline`),
+                      {
+                        code: 'ETIMEDOUT',
+                      },
+                    ),
+                  );
+                }, timeoutMs);
+              }),
+            ]);
+          }
         } catch (error) {
           cleanup.onError?.(error);
         } finally {
+          clearTimeout(timer);
           await lock.release();
           exit(128 + (constants.signals[signal] ?? 0));
         }

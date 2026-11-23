@@ -179,7 +179,11 @@ describe('one-shot ownership after an updater dies', () => {
         ]);
         expect(builderExec.mock.calls[2]![1]).toEqual(['rm', '-f', 'abc123', 'def456']);
         for (const call of builderExec.mock.calls.slice(1))
-          expect(call[2]).toMatchObject({ killSignal: 'SIGKILL' });
+          expect(call[2]).toEqual({
+            timeout: 30_000,
+            maxBuffer: 1024 * 1024,
+            killSignal: 'SIGKILL',
+          });
         release();
         const error = await result;
         expect(error).toBeInstanceOf(Error);
@@ -259,8 +263,10 @@ describe('one-shot ownership after an updater dies', () => {
       await localImages();
     });
     for (const [, args, options] of builderExec.mock.calls) {
-      if (args[0] === 'run') expect(options.timeout).toBe(0);
-      else {
+      if (args[0] === 'run') {
+        expect(options.timeout).toBe(0);
+        expect(options.killSignal).toBe('SIGKILL');
+      } else {
         expect(options).toEqual({
           cwd: undefined,
           timeout: args[0] === 'pull' ? 1_800_000 : 600_000,
@@ -285,6 +291,12 @@ describe('one-shot ownership after an updater dies', () => {
       ).rejects.toThrow('client stopped');
       expect(builderExec).toHaveBeenCalledTimes(4);
       expect(builderExec.mock.calls[3]).toEqual(builderExec.mock.calls[1]);
+      for (const call of builderExec.mock.calls.slice(1))
+        expect(call[2]).toEqual({
+          timeout: 30_000,
+          maxBuffer: 1024 * 1024,
+          killSignal: 'SIGKILL',
+        });
     },
   );
 

@@ -22,6 +22,7 @@ import {
   STACK_LOCK_RELEASE_PAUSE_MS,
   STACK_LOCK_RELEASE_TRIES,
   STACK_LOCK_ROUNDS,
+  STACK_LOCK_SIGNAL_CLEANUP_TIMEOUT_MS,
   STACK_LOCK_STALE_MS,
   acquireStackLock,
   describeBusy,
@@ -65,6 +66,7 @@ describe('constants and defaults', () => {
     expect(STACK_LOCK_MAX_BYTES).toBe(4096);
     expect(STACK_LOCK_RELEASE_TRIES).toBe(3);
     expect(STACK_LOCK_RELEASE_PAUSE_MS).toBe(100);
+    expect(STACK_LOCK_SIGNAL_CLEANUP_TIMEOUT_MS).toBe(5000);
   });
   it('uses them as option defaults', async () => {
     // Default staleness is observed through the requested sleeps: 60 polls of 1000 ms.
@@ -609,6 +611,91 @@ describe('releaseOnSignal', () => {
     expect(exit).toHaveBeenCalledTimes(1);
     expect(await readdir(dir)).toEqual([]);
   });
+  it.each([undefined, 7])(
+    'releases and exits at the cleanup deadline (timeoutMs=%s)',
+    async (timeoutMs) => {
+      const lock = await held();
+      vi.useFakeTimers();
+      let fail: (error: Error) => void = () => {};
+      const beforeRelease = vi.fn(
+        () =>
+          new Promise<void>((_resolve, reject) => {
+            fail = reject;
+          }),
+      );
+      const release = vi.spyOn(lock, 'release');
+      const onError = vi.fn(() => expect(release).not.toHaveBeenCalled());
+      let done: (code: number) => void = () => {};
+      const exited = new Promise<number>((resolve) => {
+        done = resolve;
+      });
+      const exit = vi.fn((code: number) => done(code) as never);
+      const dispose = releaseOnSignal(lock, exit, ['SIGTERM'], {
+        beforeRelease,
+        onError,
+        ...(timeoutMs === undefined ? {} : { timeoutMs }),
+      });
+      const deadline = timeoutMs ?? 5000;
+      try {
+        process.emit('SIGTERM');
+        process.emit('SIGTERM');
+        await vi.advanceTimersByTimeAsync(deadline - 1);
+        expect(beforeRelease).toHaveBeenCalledTimes(1);
+        expect(release).not.toHaveBeenCalled();
+        expect(exit).not.toHaveBeenCalled();
+        expect(onError).not.toHaveBeenCalled();
+        expect(await parse()).toMatchObject({ token: lock.token });
+
+        await vi.advanceTimersByTimeAsync(1);
+        expect(release).toHaveBeenCalledTimes(1);
+        expect(await exited).toBe(143);
+        expect(await readdir(dir)).toEqual([]);
+        expect(onError).toHaveBeenCalledExactlyOnceWith(
+          expect.objectContaining({
+            code: 'ETIMEDOUT',
+            message: expect.stringContaining(`${deadline} ms`),
+          }),
+        );
+        // A late Docker failure stays handled and cannot release or log a second time.
+        fail(new Error('late Docker failure'));
+        await Promise.resolve();
+        expect(onError).toHaveBeenCalledTimes(1);
+        expect(release).toHaveBeenCalledTimes(1);
+        expect(exit).toHaveBeenCalledExactlyOnceWith(143);
+        expect(vi.getTimerCount()).toBe(0);
+      } finally {
+        fail(new Error('test cleanup'));
+        await dispose();
+      }
+    },
+  );
+  it.each([false, true])(
+    'clears the cleanup deadline after settlement (fails=%s)',
+    async (fails) => {
+      const lock = await held();
+      vi.useFakeTimers();
+      const error = new Error('cleanup failed');
+      const beforeRelease = vi.fn(async () => {
+        if (fails) throw error;
+      });
+      const onError = vi.fn();
+      let done: (code: number) => void = () => {};
+      const exited = new Promise<number>((resolve) => {
+        done = resolve;
+      });
+      const dispose = releaseOnSignal(lock, (code) => done(code) as never, ['SIGTERM'], {
+        beforeRelease,
+        onError,
+      });
+      process.emit('SIGTERM');
+      expect(await exited).toBe(143);
+      expect(await readdir(dir)).toEqual([]);
+      if (fails) expect(onError).toHaveBeenCalledExactlyOnceWith(error);
+      else expect(onError).not.toHaveBeenCalled();
+      expect(vi.getTimerCount()).toBe(0);
+      dispose();
+    },
+  );
   it('handles SIGTERM only by default, leaving SIGINT alone', async () => {
     const lock = await held();
     const dispose = releaseOnSignal(lock, vi.fn() as never);
