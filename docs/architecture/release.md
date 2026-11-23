@@ -217,7 +217,8 @@ Each retained backup emits `bundle-backup-retained` with its relative path. Once
 and its saved edits are no longer needed, manually delete that run's
 `<install>/.haive-upgrade/<runId>/` directory; never delete the backup of a running upgrade.
 Failed commits and rollbacks retain their backup and staging. A pruning failure emits
-`bundle-prune-failed` with `safeErrorMessage(err)` and keeps the successful commit; remaining
+`bundle-prune-failed` with `safeErrorMessage(err)` and keeps the successful commit (a lost stack lease stops
+the pruning the same way); remaining
 prunable files may be cleaned by a later successful bundle upgrade.
 Rollback alone adds `--remove-orphans` when bringing up the restored bundle, removing services
 introduced by the failed target. Forward deployment and the snapshot restart retain their existing
@@ -478,15 +479,15 @@ a proven loss and sticks: the phase is refused with `stack-lock-lost`, exit 3, a
 no journal or attempt write and no release, and removes only its own attempt's labelled children; the run stays
 for the new holder to recover. Anything that proves nothing (a read that fails `STACK_LOCK_PROOF_TRIES` times,
 100 ms apart; an absent name, which breaking a stale lock briefly leaves; a record that lacks a token, holder or
-`startedAt`; an empty or partial record, unless the holder's own beat is failing, when it counts as its own torn
-write, as in the beat) refuses the forward phase with `stack-lock-unproven` (exit 3 when no rollback is needed
-or it succeeds, 6 when it fails; in the commit phase the run stays at `commit`) but marks nothing lost: failure
-recovery (the snapshot's database restart, rollback, the attempt row, release) still runs, re-proving before
+`startedAt`; an empty or partial record, unless this holder's own overwrite of its record failed, when it counts as its own torn
+write; a failed read or proof never enables that) refuses the forward phase with `stack-lock-unproven` (exit 3 when no rollback is needed
+or it succeeds, 6 when it fails; in the commit phase the run stays at `commit`) but marks nothing lost: failure recovery (the snapshot's database restart, rollback, a reverse resume of an interrupted run from its
+entry proof on, the attempt row, release) still runs, while the forward commit stays strict, re-proving before
 each action and stopping only at a proven loss, since leaving the database stopped turns a recoverable failure
 into an outage. The residual: recovery is not fenced against a takeover whose record this holder cannot read (a
 lock unreadable or absent to it for 60 s or more while another holder took over), which a time bound on the last
-good proof or beat would close (T765). A result already decided (done or rolled back) is not replaced when the
-beat notices a loss afterwards. Release removes the file only when it carries the holder's token, is shared by
+good proof or beat would close (T765). A result already decided (done or rolled back) is not replaced when the beat notices a loss afterwards; a
+loss during the pruning after a commit stops the pruning and keeps `done` and exit 0. Release removes the file only when it carries the holder's token, is shared by
 every
 caller, never throws, and a failed removal leaves a lock that the stale rule clears. A non-regular entry at the
 name (a directory or a link) is refused and never followed or deleted. A holder name read from a record reaches
