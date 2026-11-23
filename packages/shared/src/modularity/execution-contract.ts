@@ -64,6 +64,10 @@ export function assertExecutionContractSupported(
 ): void {
   if (raw == null) return;
   const contract = parseExecutionContract(raw);
+  if (contract.fixTarget && !scope.staticPinnedList)
+    throw new ExecutionContractError(
+      `fix-target ${contract.fixTarget.stepId} needs a static pinned run list`,
+    );
   if (contract.fixTarget)
     throw new ExecutionContractError('custom fix target not yet supported by this worker');
   if (contract.guardedSpans.length > 0 && !scope.staticPinnedList)

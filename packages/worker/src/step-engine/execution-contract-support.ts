@@ -23,14 +23,22 @@ export function assertWorkerExecutionContractSupported(
 ): void {
   if (raw == null) return;
   const contract = parseExecutionContract(raw);
-  if (contract.fixTarget)
-    throw new ExecutionContractError('a custom fix target is not yet supported by this worker');
-  if (!contract.guardedSpans.length) return;
+  if (!contract.guardedSpans.length && !contract.fixTarget) return;
   const ids = scope.runListSnapshot;
   if (scope.runListStrategy !== 'static' || scope.derivedRunPlan != null)
-    throw new ExecutionContractError('guarded spans need a static run list');
+    throw new ExecutionContractError(
+      contract.fixTarget
+        ? `fix-target ${contract.fixTarget.stepId} needs a static run list`
+        : 'guarded spans need a static run list',
+    );
   if (!ids || new Set(ids).size !== ids.length)
-    throw new ExecutionContractError('guarded spans need a unique pinned run list');
+    throw new ExecutionContractError(
+      contract.fixTarget
+        ? `fix-target ${contract.fixTarget.stepId} needs a unique pinned run list`
+        : 'guarded spans need a unique pinned run list',
+    );
+  if (contract.fixTarget)
+    throw new ExecutionContractError('a custom fix target is not yet supported by this worker');
   executionContractPaths(ids, new Map(), contract, registeredGuardPredicates(registry));
   for (const span of contract.guardedSpans)
     if (ids.indexOf(span.firstStepId) < 1)
