@@ -10,6 +10,7 @@ import {
   type ReleaseManifest,
 } from '@haive/shared/release';
 import { bundleHash } from './bundle.js';
+import { assertStackLease } from './lease-fence.js';
 import { UpgradeRefusal } from './refusal.js';
 
 const exec = promisify(execFile);
@@ -190,6 +191,8 @@ async function run(
   cwd?: string,
   timeoutMs = 600_000,
 ): Promise<string> {
+  if (cmd === 'docker' && ['run', 'create', 'pull'].includes(args[0] ?? ''))
+    await assertStackLease();
   const roleLabel =
     cmd === 'docker' && args[0] === 'run'
       ? args.find((arg) => arg.startsWith(`${ONE_SHOT_ROLE}=`))
@@ -277,6 +280,7 @@ async function runCompose(
   args: string[],
   timeout = 1_800_000,
 ): Promise<void> {
+  await assertStackLease();
   await exec('docker', ['compose', ...composeArgs(ctx, args)], {
     cwd: ctx.dir,
     env,

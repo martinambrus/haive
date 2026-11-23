@@ -13,6 +13,7 @@ import {
 import type { ReleaseManifest } from '@haive/shared/release';
 import { safeErrorMessage } from '@haive/shared/logger';
 import * as dk from './docker.js';
+import { assertStackLease, withStackLeaseRecovery } from './lease-fence.js';
 import { inInstall } from './install-files.js';
 import { IMAGE_KEYS, imageFor, type ImageOverrides } from './images.js';
 import {
@@ -227,7 +228,10 @@ const MAINTENANCE_WRITE_PAUSE_MS = 3000;
 async function setMaintenanceState(ctx: UpgradeContext, state: MaintenanceState): Promise<void> {
   for (let attempt = 1; ; attempt++) {
     try {
-      await underFence(ctx.sql, () => configService.set(CONFIG_KEYS.MAINTENANCE_STATE, state));
+      await underFence(ctx.sql, async () => {
+        await assertStackLease();
+        await configService.set(CONFIG_KEYS.MAINTENANCE_STATE, state);
+      });
       return;
     } catch (err) {
       if (!(err instanceof ConfigUnavailableError) || attempt >= MAINTENANCE_WRITE_ATTEMPTS) {
@@ -249,7 +253,10 @@ async function holdDraining(ctx: UpgradeContext): Promise<MaintenanceState> {
     );
     await recordFoundState(fence, ctx.runId, found);
     ctx.stateUntouched = false;
-    if (found === 'normal') await configService.set(CONFIG_KEYS.MAINTENANCE_STATE, 'draining');
+    if (found === 'normal') {
+      await assertStackLease();
+      await configService.set(CONFIG_KEYS.MAINTENANCE_STATE, 'draining');
+    }
     return found;
   });
 }
@@ -283,8 +290,10 @@ async function enterMaintenance(ctx: UpgradeContext): Promise<boolean> {
     // The updater's pool is one connection and the fence holds it, so the count runs on the fence.
     const live = await liveWorkCount(fence, state);
     const entered = state !== 'normal' && live === 0;
+    await assertStackLease();
     if (state === 'normal') await configService.set(CONFIG_KEYS.MAINTENANCE_STATE, 'draining');
     if (entered && state === 'draining') {
+      await assertStackLease();
       await configService.set(CONFIG_KEYS.MAINTENANCE_STATE, 'maintenance');
     }
     return { entered, state, live };
@@ -376,14 +385,19 @@ export async function phaseSnapshot(ctx: UpgradeContext): Promise<string> {
   try {
     await dk.snapshotVolume(ctx.postgresVolume, ctx.snapshotHostDir, file);
   } finally {
-    // Always bring it back, even on a failed snapshot: everything after this needs a database, and
-    // leaving it stopped turns a recoverable failure into an outage.
-    await dk.composeUp(ctx.compose, composeEnv(ctx.fromVersion, ctx.previousImages, ctx.registry), [
-      'postgres',
-    ]);
-    // And WAIT for it. The journal is in this database; without this the next write races the
-    // restart and loses.
-    await awaitDatabase(ctx.sql);
+    // While still owning the lease, bring it back even on a failed snapshot: everything after
+    // this needs a database. A lost holder leaves the restart to the new holder.
+    await withStackLeaseRecovery(async () => {
+      await assertStackLease();
+      await dk.composeUp(
+        ctx.compose,
+        composeEnv(ctx.fromVersion, ctx.previousImages, ctx.registry),
+        ['postgres'],
+      );
+      // And WAIT for it. The journal is in this database; without this the next write races the
+      // restart and loses.
+      await awaitDatabase(ctx.sql);
+    });
   }
   ctx.log('snapshot-done', { file });
   return file;
@@ -476,6 +490,8 @@ export async function phaseCommit(ctx: UpgradeContext): Promise<void> {
     try {
       await pruneBundles(ctx.compose, ctx.bundle, ctx.log);
     } catch (err) {
+      // The journal is already done. A lease refusal stops pruning at its first fenced
+      // write, but cannot replace the completed upgrade's result.
       ctx.log('bundle-prune-failed', {
         reason: 'commit succeeded; keeping remaining backup and staging files',
         message: safeErrorMessage(err),
