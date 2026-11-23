@@ -837,20 +837,13 @@ output-contract replacement or host role policy. A capable step must also declar
 not set `metadata.allowSkip`: boot rejects the combination (`fix-consumer-skippable`), since a
 fix target the user could skip leaves a fix round with nothing to repair.
 A fan-out step (`agentMining`) is not capable: repair evidence is captured only on the LLM
-phase, so the worker refuses a pin naming one rather than let it repair without snapshots.
-Every gate still refuses a pin that selects a fix target until the existing reset/epoch
-protocol exists for it. The rest of what a capable target needs is in place and dormant: the
-fix router resolves a pinned target (see Fix loop), `loadFixLoopDiagnosis()` supplies its
+phase, so the host does not publish its capability, and availability, create and the worker (START, advance, boot, revive) refuse a pin naming one by name rather than let it repair without snapshots. The catalog is synced at worker boot, so until a capable worker has booted, availability and create still read the older catalog and the task dies at START with a named reason.
+Every gate admits a pin that selects a capable target on a static pinned run list (see Task types). The fix router resolves a pinned target (see Fix loop), `loadFixLoopDiagnosis()` supplies its
 diagnosis, repair evidence follows the capability, and the next-round CLI choice, the gates'
-provider options and the api display follow the target's own step id. Readers of 07's output
-or prompt still key on 07: the changed-file supplement (`reportedFiles`), `loadTaskSimilarSites`
-and the learned-guidance target (`GUIDANCE_TARGET`, `guidanceTargetStep`). Capability version 1
-declares no output shape for them to read, so each must be answered before a gate admits such
-a pin.
+provider options and the api display follow the target's own step id. Readers of the implementation's output follow the pinned target too: the changed-file supplement (`reportedFiles`) reads the target's `filesTouched` only as an array of strings and the git collector keeps the review scope, `loadTaskSimilarSites` reads the target's rounds, and learned guidance (`guidanceTargetStep`) is appended to the target.
 
 The module-owned declaration participates in source-guarded upsert, no-op
-comparison and content hashing. A declaration with a selected fix
-target can be stored as a validated seed but cannot create or start a task. A
+comparison and content hashing. A declaration with a selected fix target creates and starts tasks only when the target is capable on a static pinned run list; any other is stored as a validated seed and refused at every gate. A
 guarded declaration creates tasks only for a static type whose predicates are
 registered. No admin authoring UI is added. Absence keeps the old NULL behavior; an
 explicit empty declaration can be pinned. Preserve every task pin on rollback.
@@ -900,8 +893,7 @@ Missing exports leave referenced predicates unknown and conditional validation
 fails closed; catalog JSON never reconstructs a schema. Ordinary NULL/inert pins
 keep their existing reads, locks and returned bytes.
 
-No scan seed is installed. A valid guarded composition passes admission for a static
-type; custom fix targets remain refused. Registration itself evaluates nothing. There is no DDL.
+No scan seed is installed. A valid guarded composition passes admission for a static type, and so does a pin selecting a capable module fix target. Registration itself evaluates nothing. There is no DDL.
 Deploy module declarations and matching host support together. A module that declares `guardPredicates` without the `./execution-predicates` export fails worker boot ("has no declaration"). Rollback removes new
 exports/importing consumers together (a module importing a new SDK symbol needs a
 compatible host), retaining migration 0245 and every immutable pin/decision. Retain

@@ -178,7 +178,7 @@ describe('the rollback pins the run list', () => {
       assertExecutionContractUsable({
         version: 1,
         guardedSpans: [],
-        fixTarget: { stepId: 'module.scan.fix', capabilityVersion: 1 },
+        fixTarget: { stepId: '07-phase-2-implement', capabilityVersion: 1 },
       }),
     );
     const res = await post(`/repositories/${REPO}/rollback-upgrade`);
@@ -214,7 +214,7 @@ describe('spawnPlanTask pins the run list', () => {
         assertExecutionContractUsable({
           version: 1,
           guardedSpans: [],
-          fixTarget: { stepId: 'module.scan.fix', capabilityVersion: 1 },
+          fixTarget: { stepId: '07-phase-2-implement', capabilityVersion: 1 },
         }),
       );
       await expect(
@@ -302,7 +302,7 @@ describe('POST /admin/task-type-drafts pins the run list', () => {
       assertExecutionContractUsable({
         version: 1,
         guardedSpans: [],
-        fixTarget: { stepId: 'module.scan.fix', capabilityVersion: 1 },
+        fixTarget: { stepId: '07-phase-2-implement', capabilityVersion: 1 },
       }),
     );
     const res = await post('/admin/task-type-drafts', { message: 'draft' });

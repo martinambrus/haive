@@ -8,7 +8,22 @@ import { DelayedError } from 'bullmq';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createDatabase, schema, type Database } from '@haive/database';
 import { configService, logger, TASK_JOB_NAMES, type WorkflowType } from '@haive/shared';
-import { ExecutionContractError } from '@haive/shared/modularity';
+import { moduleManifestSchema } from '@haive/shared/modularity';
+import { z } from 'zod';
+import {
+  advanceStep,
+  resolvePreferredCli,
+  type WorkerDeps,
+} from '../src/step-engine/step-runner.js';
+import { buildRunList } from '../src/queues/run-list.js';
+import { decideGuardEntry } from '../src/step-engine/guard-entry.js';
+import { collectImplementationFiles } from '../src/step-engine/steps/workflow/_impl-changes.js';
+import { loadTaskSimilarSites } from '../src/step-engine/steps/workflow/_similar-sites.js';
+import { guidanceTargetStep } from '../src/step-engine/steps/workflow/_prompt-defect.js';
+import { loadRoleTaskPin } from '../src/step-engine/role-task-pin.js';
+import * as fixCapture from '../src/step-engine/steps/workflow/_fix-test-store.js';
+import * as workerTree from '../src/repo/worktree-git-boundary.js';
+import type { StepContext } from '@haive/shared/step';
 import {
   enqueueRedrive,
   handleResult,
@@ -2114,8 +2129,72 @@ describe.skipIf(!url)('recovery of a fix round on Postgres', () => {
       });
     });
 
-    describe('the closed fence', () => {
-      it('the real fence refuses the custom task in the judge and leaves the ordinary one alone', async () => {
+    describe('the supported execution fence', () => {
+      if (leg.pin)
+        it.each(['unregistered', 'incapable', 'off-list'] as const)(
+          'the real fence marks a task dead at boot for an %s fix target',
+          async (failure) => {
+            const actual = await vi.importActual<
+              typeof import('../src/step-engine/execution-contract-support.js')
+            >('../src/step-engine/execution-contract-support.js');
+            h.fence.mockImplementation(actual.assertWorkerExecutionContractSupported);
+            const target = failure === 'unregistered' ? 'module.cfr-fix.missing' : leg.ids.TARGET;
+            const pin = {
+              version: 1,
+              guardedSpans: [],
+              fixTarget: { stepId: target, capabilityVersion: 1 },
+            };
+            const original = stepRegistry.require(leg.ids.TARGET);
+            if (failure === 'incapable')
+              stepRegistry.override({ ...original, fixConsumer: undefined });
+            try {
+              const id = await seedTask(leg, {
+                currentStepId: leg.ids.REVIEW,
+                executionContract: pin,
+                runListSnapshot:
+                  failure === 'off-list'
+                    ? [leg.ids.REVIEW, leg.ids.AFTER]
+                    : [target, leg.ids.REVIEW, leg.ids.AFTER],
+              });
+              await seedRow(leg, id, 'REVIEW', 0, 'pending');
+              const before = await db
+                .select()
+                .from(schema.taskSteps)
+                .where(eq(schema.taskSteps.taskId, id));
+              const deps = {
+                enqueueStart: async () => undefined,
+                enqueueAdvance: enqueueRedrive,
+                redriveRetryDelaysMs: [],
+              };
+              expect(await reconcileDeadTasks(db, deps)).toMatchObject({
+                marked: 1,
+                revived: 0,
+                failed: 0,
+              });
+              const task = await taskOf(id);
+              expect(task.deadAt).not.toBeNull();
+              expect(task.deadReason).toContain('invalid-execution-contract');
+              expect(task.deadReason).toContain(target);
+              expect(task).toMatchObject({
+                status: 'running',
+                orchestrationEpoch: BASE_EPOCH,
+                executionContract: pin,
+              });
+              expect(
+                await db.select().from(schema.taskSteps).where(eq(schema.taskSteps.taskId, id)),
+              ).toEqual(before);
+              const events = await eventsOf(id, 'task.dead');
+              expect(events).toHaveLength(1);
+              expect(events[0]!.payload).toMatchObject({ reason: expect.stringContaining(target) });
+              expect(await reconcileDeadTasks(db, deps)).toMatchObject({ marked: 0, revived: 0 });
+              expect(await eventsOf(id, 'task.dead')).toHaveLength(1);
+              expect(h.adds).toEqual([]);
+            } finally {
+              stepRegistry.override(original);
+            }
+          },
+        );
+      it('the real fence admits both capable custom and ordinary tasks without changing their rows', async () => {
         const actual = await vi.importActual<
           typeof import('../src/step-engine/execution-contract-support.js')
         >('../src/step-engine/execution-contract-support.js');
@@ -2132,14 +2211,8 @@ describe.skipIf(!url)('recovery of a fix round on Postgres', () => {
           redriveRetryDelaysMs: [],
         });
         const task = await taskOf(id);
-        if (leg.pin) {
-          expect(result).toMatchObject({ marked: 1, revived: 0 });
-          expect(task.deadAt).not.toBeNull();
-          expect(task.deadReason).toContain(new ExecutionContractError('refused').code);
-        } else {
-          expect(result).toMatchObject({ marked: 0, revived: 0 });
-          expect(task.deadAt).toBeNull();
-        }
+        expect(result).toMatchObject({ marked: 0, revived: 0 });
+        expect(task.deadAt).toBeNull();
         expect(
           await db.select().from(schema.taskSteps).where(eq(schema.taskSteps.taskId, id)),
         ).toEqual(before);
@@ -2323,5 +2396,318 @@ describe.skipIf(!url)('recovery of a fix round on Postgres', () => {
       expect(await reconcileDeadTasks(db, deps)).toMatchObject({ marked: 0, revived: 0 });
       expect((await taskOf(id)).deadAt).toBeNull();
     });
+  });
+  it('admits and executes a module repair round through the real fences, CLI dispatch, readers and guard re-entry', async () => {
+    // Only the outbound CLI worker and filesystem repair capture are substituted.
+    // Admission, SQL, routing, runner, dispatch resolution and guard persistence are real.
+    const apiPath = (file: string) => new URL(`../../api/src/${file}`, import.meta.url).pathname;
+    const { definitionForCreate } = await import(apiPath('lib/task-type-definition.ts'));
+    const { registerModuleExecutionPredicates } = await import(
+      apiPath('modules/execution-predicates.ts')
+    );
+    const actual = await vi.importActual<
+      typeof import('../src/step-engine/execution-contract-support.js')
+    >('../src/step-engine/execution-contract-support.js');
+    h.fence.mockImplementation(actual.assertWorkerExecutionContractSupported);
+    const mod = 'cfr-e2e';
+    const type = 'cfr_e2e_type';
+    const [plan, target, guard, review, tail] = ['plan', 'repair', 'guard', 'review', 'tail'].map(
+      (id) => `module.${mod}.${id}`,
+    ) as [string, string, string, string, string];
+    const ids = [plan, target, guard, review, tail];
+    const argsSchema = z.strictObject({});
+    const evaluate = vi.fn(async () => true);
+    const pin = {
+      version: 1,
+      guardedSpans: [
+        {
+          id: 'checks',
+          firstStepId: guard,
+          lastStepId: guard,
+          predicateId: `module.${mod}.planned`,
+          args: {},
+        },
+      ],
+      fixTarget: { stepId: target, capabilityVersion: 1 },
+    };
+    const entry = (id: string, extra = {}) => ({
+      stepId: id,
+      label: id,
+      group: 'build',
+      dispatchesCli: false,
+      requires: [],
+      provides: [],
+      ...extra,
+    });
+    for (const [index, id] of ids.entries()) {
+      stub(id, index, `module.${mod}`, {
+        ...(id === plan ? { guardPredicates: { planned: { argsSchema, evaluate } } } : {}),
+        ...(id === target
+          ? {
+              fixConsumer: { version: 1 },
+              editsCodeOrTests: true,
+              shouldRun: async () => false,
+              detect: async (ctx: StepContext) => ({
+                repair: await ctx.host!.loadFixLoopDiagnosis(),
+              }),
+              llm: {
+                requiredCapabilities: ['tool_use', 'file_write'],
+                buildPrompt: ({ detected }: { detected: unknown }) =>
+                  `Repair diagnosis: ${JSON.stringify(detected)}`,
+              },
+              apply: async () => ({
+                summary: 'Repaired',
+                filesTouched: ['module-fix.ts'],
+                similarSites: [{ path: 'similar.ts', reason: 'same defect' }],
+              }),
+            }
+          : {}),
+        ...(id === review
+          ? { fixLoop: { evaluate: () => ({ blocking: true, diagnosis: 'module review defect' }) } }
+          : {}),
+      });
+    }
+    registerModuleExecutionPredicates(
+      [{ executionPredicates: [{ id: 'planned', argsSchema }] }],
+      [
+        {
+          manifest: moduleManifestSchema.parse({
+            id: mod,
+            name: mod,
+            version: '1',
+            schemaVersion: 1,
+          }),
+        },
+      ],
+    );
+    vi.spyOn(configService, 'getBoolean').mockImplementation(
+      async (key) => key === 'config:taskTypes:moduleEnabled',
+    );
+    vi.spyOn(configService, 'get').mockResolvedValue(null);
+    vi.spyOn(fixCapture, 'beginFixTestCapture').mockResolvedValue(undefined);
+    vi.spyOn(fixCapture, 'finishFixTestCapture').mockResolvedValue(undefined);
+    vi.spyOn(workerTree, 'resolveInvocationWorkerTree').mockResolvedValue('/tmp');
+    await db.insert(schema.modules).values({
+      moduleId: mod,
+      packageName: `@haive/module-${mod}`,
+      name: mod,
+      installedVersion: '1',
+    });
+    await db.insert(schema.stepCatalog).values(
+      ids.map((id, stepIndex) => ({
+        stepId: id,
+        source: `module:${mod}`,
+        title: id,
+        workflowType: `module.${mod}`,
+        stepIndex,
+        dispatchesCli: id === target,
+        allowSkip: false,
+        providerSensitive: false,
+        composable: true,
+        entry: entry(
+          id,
+          id === target
+            ? { dispatchesCli: true, fixConsumer: { version: 1 } }
+            : id === review
+              ? { loopTargetStepId: '07-phase-2-implement' }
+              : {},
+        ),
+      })),
+    );
+    await db.insert(schema.taskTypeDefinitions).values({
+      slug: type,
+      displayName: type,
+      source: `module:${mod}`,
+      runListStrategy: 'static',
+      stepIds: ids,
+      executionContract: pin,
+      selectsOwnProviders: true,
+      requiresRepository: false,
+    });
+    const [provider] = await db
+      .insert(schema.cliProviders)
+      .values({ userId, name: 'claude-code', label: 'Module repair CLI' })
+      .returning();
+    const leg: Leg = {
+      name: 'module e2e',
+      type,
+      ids: { TARGET: target, REVIEW: review, AFTER: tail },
+      pin,
+    };
+    try {
+      const admitted = (await db.transaction((tx) =>
+        definitionForCreate(tx as never, type, { generic: true, locked: true }),
+      )) as { executionContract: unknown; runListSnapshot: string[]; dataEdgePlan: unknown };
+      expect(admitted.executionContract).toEqual(pin);
+      expect(admitted.runListSnapshot).toEqual(ids);
+      const id = await seedTask(leg, {
+        runListSnapshot: admitted.runListSnapshot,
+        executionContract: admitted.executionContract,
+        dataEdgePlan: admitted.dataEdgePlan,
+        currentStepId: guard,
+      });
+      const [planRow, targetZero] = await db
+        .insert(schema.taskSteps)
+        .values([
+          { taskId: id, stepId: plan, stepIndex: 0, runSeq: 0, title: plan, status: 'done' },
+          {
+            taskId: id,
+            stepId: target,
+            stepIndex: 1,
+            runSeq: 1,
+            title: target,
+            status: 'done',
+            output: { filesTouched: ['round-zero.ts'] },
+          },
+        ])
+        .returning();
+      expect(planRow).toBeDefined();
+      const scope = () => ctxFor(leg, id);
+      const list = await buildRunList(await scope(), db);
+      expect((await decideGuardEntry(db, await scope(), guard, 0, null, list)).kind).toBe('run');
+      const original = await db.query.taskSteps.findFirst({
+        where: and(
+          eq(schema.taskSteps.taskId, id),
+          eq(schema.taskSteps.stepId, guard),
+          eq(schema.taskSteps.round, 0),
+        ),
+      });
+      expect(evaluate).toHaveBeenCalledOnce();
+      await db
+        .update(schema.taskSteps)
+        .set({ status: 'done' })
+        .where(eq(schema.taskSteps.id, original!.id));
+      await db.update(schema.tasks).set({ currentStepId: review }).where(eq(schema.tasks.id, id));
+      const reviewResult = await advanceStep({
+        db,
+        taskId: id,
+        userId,
+        repoPath: '/tmp',
+        workspacePath: '/tmp',
+        cliProviderId: null,
+        stepDef: stepRegistry.require(review),
+        epoch: BASE_EPOCH,
+      });
+      expect(reviewResult.status).toBe('loop_back');
+      await handleResult(db, await scope(), review, reviewResult);
+      expect(await taskOf(id)).toMatchObject({ currentStepId: target, currentRound: 1 });
+      expect(await eventsOf(id, 'fix_loop.started')).toHaveLength(1);
+      expect(h.adds.at(-1)!.data).toMatchObject({ stepId: target, round: 1 });
+      expect(h.adds.some((job) => job.data.stepId === '07-phase-2-implement')).toBe(false);
+      const epoch = (await taskOf(id)).orchestrationEpoch;
+      await db
+        .insert(schema.taskStepCliChoices)
+        .values({ taskId: id, stepId: target, role: 'fix:1:default', cliProviderId: provider!.id });
+      expect(
+        (await resolvePreferredCli(db, userId, target, null, [provider!], 'default', id, false, 1))
+          .roundProvider?.id,
+      ).toBe(provider!.id);
+      const enqueue = vi.fn<WorkerDeps['enqueueCliInvocation']>(async () => undefined);
+      const params = {
+        db,
+        taskId: id,
+        userId,
+        repoPath: '/tmp',
+        workspacePath: '/tmp',
+        cliProviderId: null,
+        stepDef: stepRegistry.require(target),
+        round: 1,
+        runSeq: 1,
+        epoch,
+        providers: [provider!],
+        deps: { enqueueCliInvocation: enqueue },
+      };
+      const dispatched = await advanceStep(params);
+      expect(dispatched.status).toBe('waiting_cli');
+      expect(enqueue).toHaveBeenCalledOnce();
+      expect(enqueue.mock.calls[0]![0]).toMatchObject({
+        cliProviderId: provider!.id,
+        taskStepId: dispatched.row.id,
+      });
+      const invocation = await db.query.cliInvocations.findFirst({
+        where: eq(schema.cliInvocations.taskStepId, dispatched.row.id),
+      });
+      expect(invocation!.prompt).toContain('module review defect');
+      expect(enqueue.mock.calls[0]![0].spec).toMatchObject({ houseRules: { mode: 'write' } });
+      await db
+        .update(schema.cliInvocations)
+        .set({ exitCode: 0, endedAt: new Date(), rawOutput: '{}' })
+        .where(eq(schema.cliInvocations.id, invocation!.id));
+      const repaired = await advanceStep(params);
+      expect(repaired.status).toBe('done');
+      await handleResult(db, await scope(), target, repaired);
+      expect(await taskOf(id)).toMatchObject({ currentStepId: guard, currentRound: 1 });
+      evaluate.mockResolvedValue(false);
+      expect((await decideGuardEntry(db, await scope(), guard, 1, null, list)).kind).toBe('run');
+      const copy = await db.query.taskSteps.findFirst({
+        where: and(
+          eq(schema.taskSteps.taskId, id),
+          eq(schema.taskSteps.stepId, guard),
+          eq(schema.taskSteps.round, 1),
+        ),
+      });
+      expect(copy!.guardState).toMatchObject({
+        run: true,
+        round: 1,
+        boundary: { stepRowId: targetZero!.id },
+      });
+      expect(evaluate).toHaveBeenCalledOnce();
+      const readCtx = { db, taskId: id, taskStepId: repaired.row.id, round: 1 } as StepContext;
+      expect((await collectImplementationFiles(readCtx, '/nonexistent-cfr-e2e')).files).toContain(
+        'module-fix.ts',
+      );
+      expect((await loadTaskSimilarSites(db, id)).sites).toMatchObject([
+        { path: 'similar.ts', source: 'implementation round 1' },
+      ]);
+      expect(guidanceTargetStep('08c-code-review', await loadRoleTaskPin(db, id))).toBe(target);
+      await db.update(schema.tasks).set({ currentRound: 2 }).where(eq(schema.tasks.id, id));
+      await db.insert(schema.taskSteps).values({
+        taskId: id,
+        stepId: target,
+        stepIndex: 1,
+        runSeq: 1,
+        title: target,
+        round: 2,
+        status: 'done',
+      });
+      // No fix request for round 2: a revise round re-evaluates the changed tree.
+      expect((await decideGuardEntry(db, await scope(), guard, 2, null, list)).kind).toBe(
+        'skipped',
+      );
+      expect(evaluate).toHaveBeenCalledTimes(2);
+      const refusedId = await seedTask(leg, { runListSnapshot: ids });
+      const refusedSource = await seedRow(leg, refusedId, 'REVIEW', 0, 'done');
+      await db
+        .update(schema.modules)
+        .set({ deactivatedAt: new Date() })
+        .where(eq(schema.modules.moduleId, mod));
+      await handleResult(db, await ctxFor(leg, refusedId), review, {
+        status: 'loop_back',
+        row: refusedSource,
+        sourceStepId: review,
+        diagnosis: 'module review defect',
+      });
+      expect(await taskOf(refusedId)).toMatchObject({
+        currentRound: 0,
+        status: 'failed',
+        errorMessage: expect.stringContaining(target),
+      });
+      expect(await eventsOf(refusedId, 'fix_loop.started')).toEqual([]);
+      expect(
+        await db
+          .select()
+          .from(schema.taskSteps)
+          .where(and(eq(schema.taskSteps.taskId, refusedId), eq(schema.taskSteps.round, 1))),
+      ).toEqual([]);
+    } finally {
+      await db.delete(schema.tasks).where(eq(schema.tasks.type, type));
+      await db.delete(schema.taskTypeDefinitions).where(eq(schema.taskTypeDefinitions.slug, type));
+      await db
+        .delete(schema.stepCatalog)
+        .where(sql`${schema.stepCatalog.source} = ${`module:${mod}`}`);
+      await db.delete(schema.modules).where(eq(schema.modules.moduleId, mod));
+      await db.delete(schema.cliProviders).where(eq(schema.cliProviders.id, provider!.id));
+      registerModuleExecutionPredicates([], []);
+    }
   });
 });

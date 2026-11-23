@@ -8,19 +8,29 @@ import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { createDatabase, schema, type Database } from '@haive/database';
 import { CONFIG_KEYS, configService, TASK_JOB_NAMES, type WorkflowType } from '@haive/shared';
 import {
+  assertExecutionContractSupported,
+  ExecutionContractError,
+  executionContractPaths,
   mergePromptStepCatalog,
   moduleManifestSchema,
+  parseExecutionContract,
   resolveTaskTypeAvailability,
   type ExecutionPredicateDeclaration,
 } from '@haive/shared/modularity';
 import { readStepCatalog } from '@haive/shared/modularity-server';
 import { z } from 'zod';
-import { reconcileDeadTasks, reviveDeadTask } from '../src/queues/dead-task-boot.js';
+import {
+  deadTaskResolution,
+  reconcileDeadTasks,
+  reviveDeadTask,
+} from '../src/queues/dead-task-boot.js';
 import type { DeadTaskBootDeps, DeadTaskView } from '../src/queues/dead-task-boot.js';
 import { redriveStalledTasks, type StalledRedriveDeps } from '../src/queues/stalled-redrive.js';
 import { processTaskJob, setContainerCleanupRunner } from '../src/queues/task-queue.js';
 import { advanceGuardSpan } from '../src/step-engine/guard-span-skip.js';
-import { stepRegistry } from '../src/step-engine/registry.js';
+import { StepRegistry, stepRegistry } from '../src/step-engine/registry.js';
+import { registerModuleSteps } from '../src/modules/loader.js';
+import { syncStepCatalog } from '../src/step-engine/step-catalog.js';
 import type { StepDefinition } from '../src/step-engine/step-definition.js';
 import { rolePlan } from './replacement-fixtures.js';
 
@@ -90,6 +100,8 @@ const apiPath = (rel: string) => new URL(`../../api/src/${rel}`, import.meta.url
 const EMAIL_INDEX = 'guard-gates-test-user';
 const IDS = ['gg-plan', 'gg-a', 'gg-b', 'gg-report'];
 const ENTRY = 'gg-a';
+const MODULE_TARGET = 'module.gg.repair';
+const MINING_TARGET = 'module.gg.mining';
 const DEAD_AT = new Date('2026-10-14T08:00:00.000Z');
 const ADVANCE = TASK_JOB_NAMES.ADVANCE_STEP;
 const START = TASK_JOB_NAMES.START;
@@ -126,6 +138,7 @@ interface Shape {
   strategy: Strategy;
   snapshot: string[] | null;
   derivedTask?: boolean;
+  namedFixRefusal?: string;
   expected: Verdict;
 }
 
@@ -136,7 +149,7 @@ interface Shape {
 // the run list strategy, the derived plan, the snapshot and which predicates its steps provide,
 // so it marks the task dead (pin kept) for anything it cannot run, and boot and revival repeat
 // that judgement. A shape the API admits and the worker kills is the intended asymmetry, not a
-// disagreement; a custom fix target and a malformed pin are refused by every gate.
+// disagreement; non-module fix targets and malformed pins are refused by every gate.
 const API_ADMITS = {
   apiStart: 'admitted',
   apiRetry: 'admitted',
@@ -182,6 +195,28 @@ const SHAPES: Shape[] = [
     },
   },
   {
+    name: 'supported module fix target',
+    contract: { ...EMPTY, fixTarget: { stepId: MODULE_TARGET, capabilityVersion: 1 } },
+    strategy: 'static',
+    snapshot: [...IDS, MODULE_TARGET],
+    expected: {
+      availability: 'available',
+      create: 'admitted',
+      ...API_ADMITS,
+      workerStart: 'runs-no-guard-call',
+      ...WORKER_RUNS,
+    },
+  },
+  {
+    name: 'mining step declaring fixConsumer is not a capable fix target',
+    contract: { ...EMPTY, fixTarget: { stepId: MINING_TARGET, capabilityVersion: 1 } },
+    strategy: 'static',
+    snapshot: [...IDS, MINING_TARGET],
+    namedFixRefusal: MINING_TARGET,
+    // Stored-pin re-entry knows no executable metadata; locked create uses the catalog.
+    expected: { availability: 'refused', create: 'refused', ...API_ADMITS, ...WORKER_KILLS },
+  },
+  {
     name: 'entry at first index',
     contract: {
       version: 1,
@@ -192,14 +227,14 @@ const SHAPES: Shape[] = [
     expected: { availability: 'refused', create: 'refused', ...API_ADMITS, ...WORKER_KILLS },
   },
   {
-    name: 'valid custom fix target',
+    name: 'non-module fix target on the run list',
     contract: { ...EMPTY, fixTarget: { stepId: ENTRY, capabilityVersion: 1 } },
     strategy: 'static',
     snapshot: IDS,
     expected: FIX_TARGET_REFUSED,
   },
   {
-    name: 'invalid custom fix target',
+    name: 'non-module fix target off the run list',
     contract: { ...EMPTY, fixTarget: { stepId: 'gg-missing', capabilityVersion: 1 } },
     strategy: 'static',
     snapshot: IDS,
@@ -294,6 +329,10 @@ function stub(id: string, index: number): StepDefinition {
       return {};
     },
     ...(id === IDS[0] ? { guardPredicates: { guard: predicate } } : {}),
+    ...([MODULE_TARGET, MINING_TARGET].includes(id)
+      ? { fixConsumer: { version: 1 }, editsCodeOrTests: true }
+      : {}),
+    ...(id === MINING_TARGET ? { agentMining: {} } : {}),
   } as StepDefinition;
 }
 
@@ -456,12 +495,48 @@ describe.skipIf(!url)('every gate agrees on the same pin, on Postgres', () => {
       .returning();
     repositoryId = repo!.id;
 
+    await db.insert(schema.modules).values({
+      moduleId: 'gg',
+      packageName: '@haive/module-gg',
+      name: 'Gg',
+      installedVersion: '1',
+    });
+    const moduleRegistry = new StepRegistry();
+    const [loaded] = registerModuleSteps(moduleRegistry, [
+      {
+        packageName: '@haive/module-gg',
+        manifest: {
+          id: 'gg',
+          name: 'Gg',
+          version: '1',
+          schemaVersion: 1,
+          composableSteps: ['repair', 'mining'].map((stepId) => ({
+            stepId,
+            label: stepId,
+            group: 'gg',
+            requires: [],
+            provides: [],
+            dispatchesCli: false,
+            fixConsumer: { version: 1 },
+          })),
+        },
+        steps: [MODULE_TARGET, MINING_TARGET].map((id, index) => {
+          const def = stub(id, IDS.length + index);
+          return { ...def, metadata: { ...def.metadata, id: id.split('.').at(-1)! } };
+        }),
+      },
+    ]);
+    await syncStepCatalog(
+      db,
+      moduleRegistry,
+      new Map(loaded!.composable.map((entry) => [entry.stepId, entry])),
+    );
     for (const [index, stepId] of IDS.entries())
       await db
         .insert(schema.stepCatalog)
         .values({
           stepId,
-          source: 'core',
+          source: stepId === MODULE_TARGET ? 'module:gg' : 'core',
           title: stepId,
           workflowType: 'gg',
           stepIndex: index + 1,
@@ -476,6 +551,7 @@ describe.skipIf(!url)('every gate agrees on the same pin, on Postgres', () => {
             requires: [],
             provides: [],
             dispatchesCli: false,
+            ...(stepId === MODULE_TARGET ? { fixConsumer: { version: 1 } } : {}),
           },
         })
         .onConflictDoNothing();
@@ -506,12 +582,14 @@ describe.skipIf(!url)('every gate agrees on the same pin, on Postgres', () => {
           slug: slugOf(index),
           displayName: slugOf(index),
           runListStrategy: shape.strategy,
-          stepIds: shape.strategy === 'static' ? IDS : null,
+          stepIds: shape.strategy === 'static' ? shape.snapshot : null,
           ...(shape.strategy === 'derived' ? { baseSlug: BASE_SLUG, changes: [] } : {}),
           executionContract: shape.contract,
         })
         .onConflictDoNothing();
-    IDS.forEach((id, index) => stepRegistry.override(stub(id, index)));
+    [...IDS, MODULE_TARGET, MINING_TARGET].forEach((id, index) =>
+      stepRegistry.override(stub(id, index)),
+    );
     setContainerCleanupRunner(async () => 0);
   });
 
@@ -525,6 +603,7 @@ describe.skipIf(!url)('every gate agrees on the same pin, on Postgres', () => {
         .delete(schema.taskTypeDefinitions)
         .where(eq(schema.taskTypeDefinitions.source, 'admin'));
       await db.delete(schema.stepCatalog).where(eq(schema.stepCatalog.workflowType, 'gg'));
+      await db.delete(schema.modules).where(eq(schema.modules.moduleId, 'gg'));
       await db.$client.end({ timeout: 5 });
     }
     vi.restoreAllMocks();
@@ -573,8 +652,8 @@ describe.skipIf(!url)('every gate agrees on the same pin, on Postgres', () => {
         taskId,
         stepId,
         title: stepId,
-        stepIndex: IDS.indexOf(stepId),
-        runSeq: IDS.indexOf(stepId),
+        stepIndex: [...IDS, MODULE_TARGET].indexOf(stepId),
+        runSeq: [...IDS, MODULE_TARGET].indexOf(stepId),
         round: 0,
         status: 'pending',
         ...over,
@@ -605,10 +684,34 @@ describe.skipIf(!url)('every gate agrees on the same pin, on Postgres', () => {
     const dead = await task(id);
     const count = (await events(id, 'task.dead')).length;
     if (dead.deadAt === null) return count === 0 ? 'alive' : 'alive-with-dead-event';
+    const namedTarget = SHAPES.find((_, index) => slugOf(index) === dead.type)?.namedFixRefusal;
+    if (namedTarget) expect(dead.deadReason).toContain(namedTarget);
     return count === 1 ? 'dead-once' : `dead-${count}-events`;
   };
 
-  const gates: Record<keyof Verdict, (index: number) => Promise<string>> = {
+  const gates: Record<keyof Verdict | 'shared', (index: number) => Promise<string>> = {
+    async shared(index) {
+      const shape = SHAPES[index]!;
+      if (shape.contract == null) return 'supported';
+      const stored = await readStepCatalog(db, { ordered: true });
+      try {
+        assertExecutionContractSupported(shape.contract, {
+          staticPinnedList: shape.strategy === 'static',
+          stepIds: shape.snapshot ?? undefined,
+        });
+        executionContractPaths(
+          shape.snapshot ?? [],
+          stored.composable,
+          parseExecutionContract(shape.contract),
+          executionPredicates(),
+        );
+        return 'supported';
+      } catch (error) {
+        if (!(error instanceof ExecutionContractError)) throw error;
+        if (shape.namedFixRefusal) expect(error.message).toContain(shape.namedFixRefusal);
+        return 'refused';
+      }
+    },
     async availability(index) {
       const shape = SHAPES[index]!;
       const [def] = await db
@@ -619,7 +722,7 @@ describe.skipIf(!url)('every gate agrees on the same pin, on Postgres', () => {
       const result = resolveTaskTypeAvailability({
         definition: def!,
         switches: { customEnabled: true, moduleEnabled: true },
-        modules: new Map(),
+        modules: new Map([['gg', { name: 'Gg', missing: false, deactivated: false }]]),
         catalog: stored.synced ? mergePromptStepCatalog(stored, def!) : null,
         generic: false,
         predicates: executionPredicates(),
@@ -628,6 +731,15 @@ describe.skipIf(!url)('every gate agrees on the same pin, on Postgres', () => {
       if (result.available) return 'available';
       const named = result.issues?.some((issue) => issue.kind === REFUSAL_CODE) === true;
       if (!named) throw new Error(`refused for ${result.reason}, not the execution contract`);
+      if (shape.namedFixRefusal)
+        expect(result.issues).toEqual(
+          expect.arrayContaining([
+            expect.objectContaining({
+              kind: REFUSAL_CODE,
+              reason: expect.stringContaining(shape.namedFixRefusal),
+            }),
+          ]),
+        );
       return 'refused';
     },
     async create(index) {
@@ -638,7 +750,14 @@ describe.skipIf(!url)('every gate agrees on the same pin, on Postgres', () => {
         );
         return 'admitted';
       } catch (error) {
-        if (isHttp(error) && error.status === 409 && error.code === REFUSAL_CODE) return 'refused';
+        if (isHttp(error) && error.status === 409 && error.code === REFUSAL_CODE) {
+          if (SHAPES[index]!.namedFixRefusal)
+            expect(error).toHaveProperty(
+              'message',
+              expect.stringContaining(SHAPES[index]!.namedFixRefusal!),
+            );
+          return 'refused';
+        }
         throw error;
       }
     },
@@ -714,6 +833,10 @@ describe.skipIf(!url)('every gate agrees on the same pin, on Postgres', () => {
         deadReason: 'seeded',
       });
       const before = await task(id);
+      if (SHAPES[index]!.namedFixRefusal)
+        expect(deadTaskResolution(before, SHAPES[index]!.strategy).supportReason).toContain(
+          SHAPES[index]!.namedFixRefusal,
+        );
       const view: DeadTaskView = {
         id,
         userId,
@@ -745,7 +868,7 @@ describe.skipIf(!url)('every gate agrees on the same pin, on Postgres', () => {
         .select()
         .from(schema.taskSteps)
         .where(eq(schema.taskSteps.taskId, id));
-      for (const stepId of IDS)
+      for (const stepId of SHAPES[index]!.snapshot ?? IDS)
         if (!existing.some((r) => r.stepId === stepId && r.round === 0))
           await stepRow(id, stepId, { round: 0 });
       h.adds.length = 0;
@@ -793,7 +916,7 @@ describe.skipIf(!url)('every gate agrees on the same pin, on Postgres', () => {
     async (_name, index) => {
       const verdict: Record<string, string> = {};
       for (const [gate, run] of Object.entries(gates) as [
-        keyof Verdict,
+        keyof typeof gates,
         (i: number) => Promise<string>,
       ][]) {
         try {
@@ -802,7 +925,10 @@ describe.skipIf(!url)('every gate agrees on the same pin, on Postgres', () => {
           verdict[gate] = `error:${error instanceof Error ? error.name : typeof error}`;
         }
       }
-      expect(verdict).toEqual(SHAPES[index]!.expected);
+      expect(verdict).toEqual({
+        shared: SHAPES[index]!.expected.availability === 'available' ? 'supported' : 'refused',
+        ...SHAPES[index]!.expected,
+      });
     },
     60_000,
   );
@@ -826,9 +952,9 @@ describe.skipIf(!url)('every gate agrees on the same pin, on Postgres', () => {
     expect(h.adds).toEqual([]);
   });
 
-  it('the global-pause lift holds a fix-target task and lists it, and leaves a supported pin alone', async () => {
+  it('the global-pause lift holds a non-module fix-target task and lists it, and leaves a supported pin alone', async () => {
     const supported = SHAPES.findIndex((s) => s.name === 'supported guarded pin');
-    const fixTarget = SHAPES.findIndex((s) => s.name === 'valid custom fix target');
+    const fixTarget = SHAPES.findIndex((s) => s.name === 'non-module fix target on the run list');
     const keep = await make(supported, { status: 'queued' });
     const [held] = await db
       .insert(schema.tasks)

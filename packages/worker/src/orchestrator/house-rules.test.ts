@@ -144,6 +144,18 @@ describe('houseRulesFor', () => {
     expect(houseRulesFor('06c-dag-execute', 'coder')).toEqual({ mode: 'write' });
   });
 
+  it('gives the pinned module fix consumer write rules while ordinary module dispatch stays unchanged', () => {
+    expect(
+      houseRulesFor('module.fx.repair', 'default', undefined, ['file_write'], undefined, true),
+    ).toEqual({ mode: 'write' });
+    expect(
+      houseRulesFor('module.fx.repair', 'default', undefined, ['file_write'], undefined, false),
+    ).toBeUndefined();
+    expect(
+      houseRulesFor('09_5-skill-generation', 'default', undefined, ['file_write'], undefined, true),
+    ).toBeUndefined();
+  });
+
   it('gives an exempt or unknown (step, role) nothing', () => {
     expect(houseRulesFor('05-phase-0b5-spec-quality', 'reviewer')).toBeUndefined();
     expect(houseRulesFor('06c-dag-execute', 'reviewer')).toBeUndefined();

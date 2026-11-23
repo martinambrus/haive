@@ -37,7 +37,7 @@ import {
 export { FIX_LOOP_TARGET_STEP_ID };
 /** Fallback cap when a task predates tasks.max_fix_rounds (set on the Gate-1 form). */
 export const DEFAULT_MAX_FIX_ROUNDS = 5;
-const FIX_LOOP_REQUESTED = 'fix_loop.requested';
+export const FIX_LOOP_REQUESTED = 'fix_loop.requested';
 const FIX_LOOP_ACCEPTED = 'fix_loop.accepted';
 export { FIX_LOOP_ACTION_FIELD };
 
