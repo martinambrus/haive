@@ -430,3 +430,26 @@ it.each(['workflow', 'derived-demo'])(
     expect((await phase8LearningStep.detect!(ctx)).verifyPassed).toBe(false);
   },
 );
+
+it('a module target with no summary keys keeps git scope and DAG similar-site reports', async () => {
+  const { ctx, fake, put } = setup();
+  fake.patch(schema.tasks, ctx.taskId, {
+    executionContract: {
+      version: 1,
+      guardedSpans: [],
+      fixTarget: { stepId: alternate, capabilityVersion: 1 },
+    },
+  });
+  put(alternate, {});
+  fake.insert(schema.taskDagIssues, {
+    taskId: ctx.taskId,
+    issueKey: 'ISSUE-1',
+    level: 0,
+    similarSites: [{ path: 'other.ts', reason: 'same defect' }],
+  });
+  const files = await collectImplementationFiles(ctx, '/nonexistent-module-summary');
+  expect(files.files).toContain('src/measured.ts');
+  expect((await loadTaskSimilarSites(ctx.db, ctx.taskId)).sites).toEqual([
+    { path: 'other.ts', reason: 'same defect', source: 'DAG issue ISSUE-1' },
+  ]);
+});
