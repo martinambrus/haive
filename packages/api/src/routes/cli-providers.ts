@@ -901,7 +901,6 @@ cliProviderRoutes.patch('/:id', async (c) => {
           joinerId: id,
           members,
           assertHeld,
-          keepGeneration: authSecretNames.length > 0,
         });
         setEvents = [...leaveEvents, ...seeded.events];
         loginSeeded = seeded.row;
