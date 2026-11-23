@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { constants, type Stats } from 'node:fs';
 import { join } from 'node:path';
 import { RELEASE_BUNDLE_FILES } from '@haive/shared/release';
+import { assertStackLease } from './lease-fence.js';
 import { UpgradeRefusal } from './refusal.js';
 import {
   lstat,
@@ -118,6 +119,7 @@ export class InstallDirectory {
   async child(name: string, create = false): Promise<InstallDirectory> {
     let created = false;
     if (create) {
+      await assertStackLease();
       try {
         await mkdir(this.path(name), { mode: this.owner.mode & 0o777 });
         created = true;
@@ -182,6 +184,7 @@ export class InstallDirectory {
   }
 
   async atomic(name: string, bytes: Buffer, owner?: Owner): Promise<void> {
+    await assertStackLease();
     const replaced = await this.entry(name);
     const mode = owner ?? replaced ?? { ...this.owner, mode: 0o644 };
     const temp = `.${name}.${randomUUID()}`;
@@ -194,6 +197,7 @@ export class InstallDirectory {
       await file.close();
       // A raced-in link is refused too; rename itself never follows a final component.
       await this.entry(name);
+      await assertStackLease();
       await rename(this.path(temp), this.path(name));
       await this.sync();
     } finally {
@@ -236,6 +240,9 @@ export class InstallDirectory {
 
   async remove(name: string): Promise<void> {
     if (await this.entry(name)) {
+      // Lock release and stale-tomb removal obey the lock protocol itself.
+      if (name !== '.haive-stack-lock' && !name.startsWith('.haive-stack-lock.stale.'))
+        await assertStackLease();
       await unlink(this.path(name));
       await this.sync();
     }
@@ -259,6 +266,7 @@ export class InstallDirectory {
         throw error;
       });
       if (!info || info.isDirectory()) continue;
+      await assertStackLease();
       await unlink(this.path(name)).catch((error: unknown) => {
         if (!absent(error)) throw error;
       });
@@ -289,6 +297,7 @@ export class InstallDirectory {
     } finally {
       await child.close();
     }
+    await assertStackLease();
     await rmdir(this.path(name));
     await this.sync();
   }
