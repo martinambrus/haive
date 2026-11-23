@@ -11,6 +11,16 @@ export class UnresolvedStepError extends Error {
   }
 }
 
+/** Registered, but absent from this task's run list. Keep named ids for dead-task readers. */
+export class StepNotInRunListError extends UnresolvedStepError {
+  readonly code = 'step-not-in-run-list';
+  constructor(id: string) {
+    super([id]);
+    this.name = 'StepNotInRunListError';
+    this.message = `the run list does not include the requested step: ${id}`;
+  }
+}
+
 /** The physical producer is installed, but cannot execute its immutable pinned promise. */
 export class PinnedStepSupportError extends UnresolvedStepError {
   readonly code = 'pinned-step-support-unavailable';

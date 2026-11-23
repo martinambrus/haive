@@ -174,7 +174,11 @@ import {
   taskTypeRuntimeFor,
   type ResolvedTaskContext,
 } from './run-list.js';
-import { PinnedStepSupportError, UnresolvedStepError } from '../step-engine/registry.js';
+import {
+  PinnedStepSupportError,
+  StepNotInRunListError,
+  UnresolvedStepError,
+} from '../step-engine/registry.js';
 import { fixRoundTargetDef } from '../step-engine/fix-consumer.js';
 import { enqueueUsagePollTick } from './usage-poll-queue.js';
 import { USAGE_PROVIDERS } from '../usage-window/fetchers/index.js';
@@ -2820,7 +2824,7 @@ export async function handleResult(
       if (!target) return;
       const steps = await buildRunList(ctx, db);
       const targetIndex = steps.findIndex((step) => step.metadata.id === target.metadata.id);
-      if (targetIndex < 0) throw new UnresolvedStepError([target.metadata.id]);
+      if (targetIndex < 0) throw new StepNotInRunListError(target.metadata.id);
       const resetRange = steps.slice(targetIndex).map((step) => step.metadata.id);
       // Reset runs first, then all overlapping step rows (including the source) in
       // one id-ordered batch, and the task row last. Every refusal rolls back the
@@ -2980,7 +2984,7 @@ export async function handleResult(
       if (!selfLoop) {
         const steps = await buildRunList(ctx, db);
         const targetIndex = steps.findIndex((step) => step.metadata.id === result.targetStepId);
-        if (targetIndex < 0) throw new UnresolvedStepError([result.targetStepId]);
+        if (targetIndex < 0) throw new StepNotInRunListError(result.targetStepId);
         const resetRange = steps.slice(targetIndex).map((step) => step.metadata.id);
         const prior = await db.query.taskSteps.findMany({
           where: and(
@@ -3300,7 +3304,7 @@ export async function resolveFixLoopGate(
   }
   const steps = await buildRunList(ctx, db);
   const targetIndex = steps.findIndex((step) => step.metadata.id === target.metadata.id);
-  if (targetIndex < 0) throw new UnresolvedStepError([target.metadata.id]);
+  if (targetIndex < 0) throw new StepNotInRunListError(target.metadata.id);
   const resetRange = steps.slice(targetIndex).map((step) => step.metadata.id);
   const nextRound = round + 1;
   // A directive typed at the gate supersedes that recorded request. Written as a NEW event for
@@ -3391,7 +3395,9 @@ async function handleStartTask(
     const marked = await markTaskDead(
       db,
       ctx.taskId,
-      err instanceof PinnedStepSupportError || err instanceof ExecutionContractError
+      err instanceof PinnedStepSupportError ||
+        err instanceof StepNotInRunListError ||
+        err instanceof ExecutionContractError
         ? err.message
         : deadReasonFor(err.ids),
       {
@@ -5423,7 +5429,9 @@ async function runTaskJob(job: Job<TaskWorkerPayload>): Promise<void> {
           const dead = await markTaskDeadFromJob(
             db,
             taskId,
-            err instanceof PinnedStepSupportError || err instanceof ExecutionContractError
+            err instanceof PinnedStepSupportError ||
+              err instanceof StepNotInRunListError ||
+              err instanceof ExecutionContractError
               ? err.message
               : deadReasonFor(err.ids),
             {
