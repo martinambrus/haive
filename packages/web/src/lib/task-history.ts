@@ -167,8 +167,8 @@ function outcome(
     return { message: 'Validation found issues.', tone: 'warning' };
   if (step.degradedNote || text(output.degradedNote))
     return { message: 'This step finished with incomplete checks or results.', tone: 'warning' };
-  if (step.warningMessage)
-    return { message: 'This step finished with a warning.', tone: 'warning' };
+  // Attempt notes describe retries, fallbacks and repository state; they do not
+  // establish an outcome. The step panel keeps their full text.
   if (output.source === 'stub')
     return { message: 'No usable agent result was recorded.', tone: 'warning' };
   // Browser pass-through flags are not verdicts: manual mode prepares a

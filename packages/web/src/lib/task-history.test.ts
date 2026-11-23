@@ -85,6 +85,36 @@ describe('hydrated visit boundary', () => {
 });
 
 describe('implementation overview', () => {
+  it.each([
+    ['retry', 'Attempt 2 of 3: the run produced nothing this step could use'],
+    ['codex fallback', 'Codex app-server unavailable; using exec fallback.'],
+    ['merge recovery', 'An earlier cancelled task left an open merge; it was aborted.'],
+    ['merge cleanup', 'The base worktree was kept because git would not remove it.'],
+    ['merge upstream', 'The branch was pushed but its upstream could not be set.'],
+    ['merge fallback', "Haive's own files in the merge fell back on a side."],
+    ['fixer leftovers', 'Unrelated fixer edits were kept for inspection.'],
+    ['revert', 'Some project state changes could not be reverted.'],
+    ['saved CLI skip', 'The saved CLI could not launch; another CLI ran instead.'],
+    ['RAG CPU', 'Embedding model is running on CPU.'],
+    ['RAG lexical-only', 'This repository is set to lexical-only RAG.'],
+    ['RAG degraded', 'RAG embeddings are failing for this repository.'],
+  ])('keeps the recorded outcome independent of a %s note', (_kind, warningMessage) => {
+    expect(entry({ warningMessage, output: { testsPassed: true } })).toMatchObject({
+      message: 'Tests passed.',
+      tone: 'success',
+    });
+    expect(entry({ warningMessage })).toMatchObject({
+      message: 'The agent completed a fix pass.',
+      tone: 'neutral',
+    });
+    expect(entry({ warningMessage, output: { test: { ran: true, passed: false } } })).toMatchObject(
+      {
+        message: 'Verification found failing checks.',
+        tone: 'warning',
+      },
+    );
+  });
+
   it('includes a pinned module fix target without output roles or filesTouched', () => {
     const custom = step({ stepId: 'module.fix-demo.repair', isPinnedFixTarget: true, output: {} });
     expect(buildTaskHistory([custom])).toMatchObject([

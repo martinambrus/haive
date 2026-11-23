@@ -191,15 +191,23 @@ beforeEach(async () => {
       },
       update: (table: unknown) => ({
         set: (values: Record<string, unknown>) => ({
-          where: async () => {
-            if (table === schema.taskSteps && 'warningMessage' in values)
-              warnings.push(values.warningMessage as string | null);
-            if (failDegradedWrite && table === schema.repositories && values.ragEmbedDegradedAt)
-              throw new Error('database is down');
-            if (table === schema.repositories && 'ragEmbedDegradedAt' in values)
-              order.push('degraded');
-            if (table === schema.repositories) Object.assign(repo, values);
-            return [];
+          where: () => {
+            const updated = (async () => {
+              if (table === schema.taskSteps && 'warningMessage' in values)
+                warnings.push(values.warningMessage as string | null);
+              if (failDegradedWrite && table === schema.repositories && values.ragEmbedDegradedAt)
+                throw new Error('database is down');
+              if (table === schema.repositories && 'ragEmbedDegradedAt' in values)
+                order.push('degraded');
+              if (table === schema.repositories) Object.assign(repo, values);
+              return [];
+            })();
+            return Object.assign(updated, {
+              returning: async () => {
+                await updated;
+                return [{ id: 'step-1' }];
+              },
+            });
           },
         }),
       }),
