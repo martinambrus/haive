@@ -3270,12 +3270,12 @@ export async function resolveFixLoopGate(
     if (next) {
       const landed = await reopen(next, round, async (tx) => {
         await recordFixLoopAccepted(tx, ctx.taskId, gateRow.id);
+        // A decision on this round's findings commits with the gate and pointer.
+        // The helper's savepoint keeps telemetry failure from aborting that decision.
+        await acceptRemainingReviewFindings(tx, ctx.taskId, round, 'fix-loop-gate');
         await appendEvent(tx, ctx.taskId, gateRow.id, 'fix_loop.accepted', { round });
       });
       if (!landed) return;
-      // "Unresolved" is now a decision, not a pending state: this round's findings ship as they
-      // are. Recorded on the rows so a later read cannot mistake them for work still in flight.
-      await acceptRemainingReviewFindings(db, ctx.taskId, round, 'fix-loop-gate');
       await enqueueAdvance(ctx.taskId, ctx.userId, next.metadata.id, round, ctx.orchestrationEpoch);
       return;
     }

@@ -2,7 +2,7 @@ import { findingFingerprint } from '@haive/shared/step/review';
 export { findingFingerprint } from '@haive/shared/step/review';
 import { and, eq, inArray, lt } from 'drizzle-orm';
 import { schema } from '@haive/database';
-import type { Database } from '@haive/database';
+import type { Database, DbTx } from '@haive/database';
 import { logger } from '@haive/shared';
 import { isCredentialCwe } from '@haive/shared/review';
 import type { ReviewSeverity } from '@haive/shared/review';
@@ -251,26 +251,29 @@ export async function dispositionReviewFindings(
  *  Takes a db rather than a StepContext because its caller is the queue's gate resolver,
  *  which runs outside any step. Best-effort in the same way: never throws. */
 export async function acceptRemainingReviewFindings(
-  db: Database,
+  db: Database | DbTx,
   taskId: string,
   round: number,
   source: string,
 ): Promise<void> {
   try {
-    await db
-      .update(schema.reviewFindings)
-      .set({
-        disposition: 'accepted_risk',
-        dispositionAt: new Date(),
-        dispositionSource: source,
-      })
-      .where(
-        and(
-          eq(schema.reviewFindings.taskId, taskId),
-          eq(schema.reviewFindings.round, round),
-          eq(schema.reviewFindings.disposition, 'open'),
-        ),
-      );
+    // Isolate a failed telemetry statement so a caller's gate transaction stays usable.
+    await db.transaction(async (tx) => {
+      await tx
+        .update(schema.reviewFindings)
+        .set({
+          disposition: 'accepted_risk',
+          dispositionAt: new Date(),
+          dispositionSource: source,
+        })
+        .where(
+          and(
+            eq(schema.reviewFindings.taskId, taskId),
+            eq(schema.reviewFindings.round, round),
+            eq(schema.reviewFindings.disposition, 'open'),
+          ),
+        );
+    });
   } catch (err) {
     log.warn(
       { err, taskId, round, source },

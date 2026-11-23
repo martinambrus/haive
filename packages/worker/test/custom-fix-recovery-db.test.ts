@@ -489,6 +489,100 @@ describe.skipIf(!url)('recovery of a fix round on Postgres', () => {
       expect(await eventsOf(id, 'fix_loop.escalated')).toHaveLength(1);
     });
 
+    describe('atomic Accept findings', () => {
+      it.each(['commit', 'pointer_failure', 'telemetry_failure'] as const)(
+        '%s preserves the gate decision and finding scope',
+        async (cut) => {
+          const id = await seedTask(leg, { currentRound: 1 });
+          const source = await seedRow(leg, id, 'REVIEW', 1, 'waiting_form');
+          const findings = await db
+            .insert(schema.reviewFindings)
+            .values(
+              [
+                { round: 1, fingerprint: 'current-open', disposition: 'open' as const },
+                {
+                  round: 1,
+                  fingerprint: 'current-waived',
+                  disposition: 'dismissed_human' as const,
+                },
+                { round: 0, fingerprint: 'earlier-open', disposition: 'open' as const },
+                { round: 2, fingerprint: 'later-open', disposition: 'open' as const },
+              ].map((f) => ({
+                ...f,
+                taskId: id,
+                taskStepId: source.id,
+                stepId: source.stepId,
+                reviewerId: 'reviewer',
+                severity: 'high' as const,
+                issue: f.fingerprint,
+              })),
+            )
+            .returning();
+          const current = findings.find((f) => f.fingerprint === 'current-open')!;
+          const ctx = await ctxFor(leg, id);
+          const before = await taskOf(id);
+          const name = `accept_${randomBytes(8).toString('hex')}`;
+          const table = cut === 'telemetry_failure' ? 'review_findings' : 'tasks';
+          const body =
+            cut === 'telemetry_failure'
+              ? `IF NEW.task_id = '${id}' THEN RAISE EXCEPTION USING ERRCODE = 'P7667'; END IF;`
+              : `IF NEW.id = '${id}' AND NEW.current_step_id = '${leg.ids.AFTER}' THEN
+               IF NOT EXISTS (SELECT 1 FROM review_findings WHERE id = '${current.id}' AND disposition = 'accepted_risk') THEN RAISE EXCEPTION USING ERRCODE = 'P7660'; END IF;
+               ${cut === 'pointer_failure' ? "RAISE EXCEPTION USING ERRCODE = 'P7666';" : ''}
+             END IF;`;
+          await db.execute(
+            sql.raw(
+              `CREATE FUNCTION ${name}() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN ${body} RETURN NEW; END $$`,
+            ),
+          );
+          // The deferred trigger observes the transaction at commit, before any caller
+          // could write the findings afterward. Pointer failure tests the rollback cut.
+          await db.execute(
+            sql.raw(
+              cut === 'commit'
+                ? `CREATE CONSTRAINT TRIGGER ${name} AFTER UPDATE ON tasks DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION ${name}()`
+                : `CREATE TRIGGER ${name} BEFORE UPDATE ON ${table} FOR EACH ROW EXECUTE FUNCTION ${name}()`,
+            ),
+          );
+          try {
+            const accept = () => resolveFixLoopGate(db, ctx, source, 'accept', 1, '');
+            if (cut === 'pointer_failure') {
+              await expect(accept()).rejects.toMatchObject({ cause: { code: 'P7666' } });
+              expect(await rowOf(source.id)).toEqual(source);
+              expect(await taskOf(id)).toEqual(before);
+              expect(await eventsOf(id, 'fix_loop.accepted')).toEqual([]);
+              expect(h.adds).toEqual([]);
+            } else {
+              await accept();
+              expect(await rowOf(source.id)).toMatchObject({ status: 'done' });
+              expect(await taskOf(id)).toMatchObject({
+                currentStepId: leg.ids.AFTER,
+                currentRound: 1,
+              });
+              expect(await eventsOf(id, 'fix_loop.accepted')).toHaveLength(2);
+              expect(h.adds).toHaveLength(1);
+            }
+            const after = await db.query.reviewFindings.findMany({
+              where: eq(schema.reviewFindings.taskId, id),
+            });
+            for (const finding of findings) {
+              const actual = after.find((f) => f.id === finding.id);
+              if (finding.id === current.id && cut === 'commit')
+                expect(actual).toMatchObject({
+                  disposition: 'accepted_risk',
+                  dispositionSource: 'fix-loop-gate',
+                  dispositionAt: expect.any(Date),
+                });
+              else expect(actual).toEqual(finding);
+            }
+          } finally {
+            await db.execute(sql.raw(`DROP TRIGGER ${name} ON ${table}`));
+            await db.execute(sql.raw(`DROP FUNCTION ${name}()`));
+          }
+        },
+      );
+    });
+
     describe('atomic revise', () => {
       const revise = async (id: string, source: StepRow, ctx?: ResolvedTaskContext, self = false) =>
         handleResult(db, ctx ?? (await ctxFor(leg, id)), source.stepId, {
