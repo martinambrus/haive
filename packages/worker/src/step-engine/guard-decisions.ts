@@ -182,11 +182,28 @@ export async function decideLoadedGuardDecision(
   bounds: Bounds,
 ): Promise<{ decision: GuardDecision; entry: StepRow; replay: boolean }> {
   const { task, ids, spans, span, hash, fixTarget } = prepared;
-  const reuseRoundZero = !!fixTarget && (await isFixRound({ ...ctx, db: tx }));
+  const reuseEarlierDecision = !!fixTarget && (await isFixRound({ ...ctx, db: tx }));
+  const decisionRounds = new Map<string, number>();
+  if (reuseEarlierDecision) {
+    // A revise round may have changed the branch, or reached it for the first time.
+    // Fix receipts are never baselines. Resolve each shared span by the same rule.
+    for (let round = ctx.round - 1; round >= 0; round--) {
+      if (await isFixRound({ ...ctx, db: tx, round })) continue;
+      for (const s of spans) {
+        if (
+          !decisionRounds.has(s.id) &&
+          rows.some((r) => r.stepId === s.firstStepId && r.round === round && r.guardState != null)
+        )
+          decisionRounds.set(s.id, round);
+      }
+      if (decisionRounds.size === spans.length) break;
+    }
+  }
   const spanId = span.id;
-  const decisionRound = reuseRoundZero ? 0 : ctx.round;
+  const decisionRound = (s: Span) =>
+    reuseEarlierDecision ? (decisionRounds.get(s.id) ?? -1) : ctx.round;
   const entry = (s: Span) =>
-    rows.find((r) => r.stepId === s.firstStepId && r.round === decisionRound);
+    rows.find((r) => r.stepId === s.firstStepId && r.round === decisionRound(s));
   const current = rows.find((r) => r.stepId === span.firstStepId && r.round === ctx.round);
   if (
     !current ||
@@ -200,7 +217,7 @@ export async function decideLoadedGuardDecision(
   const predecessor = (s: Span) => {
     const id = ids[ids.indexOf(s.firstStepId) - 1];
     const row = rows
-      .filter((r) => r.stepId === id && r.round <= decisionRound)
+      .filter((r) => r.stepId === id && r.round <= decisionRound(s))
       .sort((a, b) => b.round - a.round)[0];
     if (!row || row.status !== 'done') throw new GuardDecisionError('producer-not-settled');
     return row;
@@ -214,7 +231,7 @@ export async function decideLoadedGuardDecision(
     const saved = parseGuardDecision(row.guardState);
     if (
       saved.taskId !== task.id ||
-      saved.round !== decisionRound ||
+      saved.round !== decisionRound(s) ||
       saved.spanId !== s.id ||
       saved.generation !== row.rerunGeneration ||
       saved.contractHash !== hash
@@ -255,11 +272,11 @@ export async function decideLoadedGuardDecision(
     loaded.set(s.id, saved);
     return saved;
   };
-  if (reuseRoundZero) {
+  if (reuseEarlierDecision) {
     let original: GuardDecision;
     try {
-      // Round zero's own generation and references remain authoritative. A later
-      // round/generation cannot reinterpret its branch against the changed tree.
+      // The latest earlier non-fix decision's generation and references remain
+      // authoritative; a fix cannot reinterpret its branch against the changed tree.
       original = read(span);
     } catch (err) {
       if (!(err instanceof GuardDecisionError)) throw err;
@@ -274,7 +291,7 @@ export async function decideLoadedGuardDecision(
     )
       throw new GuardDecisionError('fix-target-suppressed');
     // Keep a current-round receipt for the existing skip/reopen protocols, while
-    // retaining round-zero source, dependency and predecessor references.
+    // retaining the baseline source, dependency and predecessor references.
     const decision = { ...original, round: ctx.round, generation: current.rerunGeneration };
     if (current.guardState != null && !same(parseGuardDecision(current.guardState), decision))
       throw new GuardDecisionError('stale-decision');

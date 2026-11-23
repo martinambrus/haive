@@ -203,6 +203,132 @@ describe.skipIf(!url)('durable guard decisions on Postgres', () => {
       }
     },
   );
+  async function pinFixTarget(requiresSpan = false) {
+    await db
+      .update(schema.tasks)
+      .set({
+        runListSnapshot: ['module.fx.repair', ...ids],
+        executionContract: {
+          ...contract,
+          guardedSpans: requiresSpan
+            ? [contract.guardedSpans[0]!, { ...contract.guardedSpans[1]!, requiresSpan: 'work' }]
+            : contract.guardedSpans,
+          fixTarget: { stepId: 'module.fx.repair', capabilityVersion: 1 },
+        },
+      })
+      .where(eq(schema.tasks.id, taskId));
+  }
+  async function enterRound(round: number, fix: boolean, stepId = 'work') {
+    const [current] = await db
+      .insert(schema.taskSteps)
+      .values({
+        taskId,
+        stepId,
+        title: stepId,
+        stepIndex: ids.indexOf(stepId),
+        round,
+        rerunGeneration: round + 2,
+        status: 'pending',
+      })
+      .returning();
+    await db
+      .update(schema.tasks)
+      .set({ currentRound: round, currentStepId: stepId })
+      .where(eq(schema.tasks.id, taskId));
+    if (fix)
+      await db.insert(schema.taskEvents).values({
+        taskId,
+        eventType: 'fix_loop.requested',
+        payload: { round },
+      });
+    return { ...ctx, round, taskStepId: current!.id, rerunGeneration: current!.rerunGeneration };
+  }
+  it('reuses the revise decision when spec-gate revise preceded the first span entry', async () => {
+    await pinFixTarget();
+    const revise = await enterRound(1, false);
+    const original = await evaluateGuardDecision(revise, 'work', predicates);
+    const fix = await enterRound(2, true);
+    evaluate.mockRejectedValue(new Error('fix must reuse the revise decision'));
+    const decision = await evaluateGuardDecision(fix, 'work', predicates);
+    expect(decision).toEqual({ ...original, round: 2, generation: 4 });
+    expect(await evaluateGuardDecision(fix, 'work', predicates)).toEqual(decision);
+    expect(evaluate).toHaveBeenCalledOnce();
+    expect((await row('work'))!.guardState).toBeNull();
+  });
+  it.each([true, false])(
+    'reuses the latest revise decision instead of round zero (%s)',
+    async (initial) => {
+      await pinFixTarget();
+      evaluate.mockResolvedValue(initial);
+      await evaluateGuardDecision(ctx, 'work', predicates);
+      const revise = await enterRound(1, false);
+      evaluate.mockResolvedValue(!initial);
+      const original = await evaluateGuardDecision(revise, 'work', predicates);
+      const fix = await enterRound(2, true);
+      evaluate.mockRejectedValue(new Error('fix must reuse the revise decision'));
+      const decision = await evaluateGuardDecision(fix, 'work', predicates);
+      expect(decision).toEqual({ ...original, round: 2, generation: 4 });
+      expect(decision!.run).toBe(!initial);
+      expect(await evaluateGuardDecision(fix, 'work', predicates)).toEqual(decision);
+      expect(evaluate).toHaveBeenCalledTimes(2);
+    },
+  );
+  it('consecutive fix rounds skip fix receipts and both reuse round zero', async () => {
+    await pinFixTarget();
+    const original = await evaluateGuardDecision(ctx, 'work', predicates);
+    for (const round of [1, 2]) {
+      const fix = await enterRound(round, true);
+      expect(await evaluateGuardDecision(fix, 'work', predicates)).toEqual({
+        ...original,
+        round,
+        generation: round + 2,
+      });
+    }
+    expect(evaluate).toHaveBeenCalledOnce();
+  });
+  it('skips earlier non-fix rounds that hold no decision for the span', async () => {
+    await pinFixTarget();
+    const revise = await enterRound(1, false);
+    const original = await evaluateGuardDecision(revise, 'work', predicates);
+    await enterRound(2, false);
+    const fix = await enterRound(3, true);
+    expect(await evaluateGuardDecision(fix, 'work', predicates)).toEqual({
+      ...original,
+      round: 3,
+      generation: 5,
+    });
+    expect(evaluate).toHaveBeenCalledOnce();
+  });
+  it('fails closed by name when no earlier non-fix round holds a decision', async () => {
+    await pinFixTarget();
+    await enterRound(1, false);
+    const fix = await enterRound(2, true);
+    await expect(evaluateGuardDecision(fix, 'work', predicates)).rejects.toMatchObject({
+      name: 'GuardDecisionError',
+      code: 'guard-decision-invalid',
+      reason: 'fix-round-decision-unavailable',
+    });
+    expect(evaluate).not.toHaveBeenCalled();
+  });
+  it.each([true, false])(
+    'requiresSpan and shared reads use the latest non-fix decisions (%s)',
+    async (run) => {
+      await pinFixTarget(true);
+      evaluate.mockResolvedValue(run);
+      const work = await enterRound(1, false);
+      const parent = await evaluateGuardDecision(work, 'work', predicates);
+      const cleanup = await enterRound(1, false, 'cleanup');
+      const original = await evaluateGuardDecision(cleanup, 'cleanup', predicates);
+      const fix = await enterRound(2, true, 'cleanup');
+      evaluate.mockRejectedValue(new Error('shared reads must reuse the revise decisions'));
+      const decision = await evaluateGuardDecision(fix, 'cleanup', predicates);
+      expect(decision).toEqual({ ...original, round: 2, generation: 4 });
+      expect(decision!.required).toMatchObject({ stepRowId: work.taskStepId, generation: 3 });
+      expect(decision!.predicate).toEqual(run ? parent!.predicate : null);
+      expect(await evaluateGuardDecision(fix, 'cleanup', predicates)).toEqual(decision);
+      expect(evaluate).toHaveBeenCalledOnce();
+    },
+  );
   it('serializes duplicate advances and replays after an acknowledgement loss or epoch recovery', async () => {
     const decisions = await Promise.all(
       Array.from({ length: 4 }, () => evaluateGuardDecision(ctx, 'work', predicates)),
