@@ -127,6 +127,36 @@ function setup(target: Record<string, unknown>) {
 const queued = () => h.add.mock.calls.map(([name, data]) => ({ name, data }));
 
 describe('a task Retry re-runs the step the task stopped on', () => {
+  it.each(['failed', 'waiting_form', 'pending'] as const)(
+    'a CLI switch clears prior attempt warnings on a %s step',
+    async (status) => {
+      const t = setup({
+        status,
+        iterationCount: 0,
+        warningMessage: 'This task continues on codex exec. Attempt 1 was rejected.',
+        rerunGeneration: 2,
+      });
+      t.fake.insert(schema.cliInvocations, {
+        id: RUN,
+        taskId: TASK,
+        taskStepId: TARGET_ROW,
+        supersededAt: null,
+      });
+      const res = await app.request(`/${TASK}/steps/step-b/cli-provider`, {
+        method: 'PATCH',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ cliProviderId: null }),
+      });
+      expect(res.status).toBe(200);
+      expect(t.step(TARGET_ROW)).toMatchObject({
+        status: 'pending',
+        warningMessage: null,
+        rerunGeneration: 3,
+      });
+      expect(t.fake.rows(schema.cliInvocations)[0]!.supersededAt).toBeInstanceOf(Date);
+    },
+  );
+
   it('task retry clears a current pending receipt when recovery left no park marker', async () => {
     const t = setup({
       status: 'pending',

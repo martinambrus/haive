@@ -429,7 +429,10 @@ epoch check is made once, and a Retry writes its row before the epoch), goes thr
 while the row is still the pass's own, not `pending` (a Retry), `skipped` (a Skip) or `failed` (a
 Stop, which fails the row without moving the task's epoch). A note added to a step's warning goes through
 `appendStepWarning` (same file): one such write that adds the text once, so a warning another writer added since the
-caller read its row is kept. A retry note, a RAG index banner and a reset set or clear the whole column on purpose.
+caller read its row is kept. The notes belong to the attempt: a retry note inside it appends the same way (so the
+codex fallback and merge notes stay beside "Attempt 2 ..."), and only a new attempt (a Retry, a reset, a per-step CLI
+switch) clears the column. A RAG index banner still sets or clears the whole column on purpose: it is a snapshot of
+the repository's embedding state, and a healthy run must clear a stale one.
 A run a pass records for its row goes
 the same way (`insertOwnedRun`, at every insert site in step-runner, the merge resolver and the DAG
 executor), and so does a fan-out's reservation: the row is locked while it is still the pass's own,

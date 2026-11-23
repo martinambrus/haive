@@ -87,7 +87,10 @@ no `app-server` subcommand, 0.78.0 has an app-server with `turn/start` and `turn
   existing re-dispatch re-runs. Either way `handleCliExecJob` first records `unsupported`/`runtime`
   for that provider, so every later dispatch in the task — that re-run included — builds
   `codex exec`, and one sentence naming the stage and codex version is added to the step's `warningMessage`
-  (`appendStepWarning`: kept beside what other writers left, written only while the row is not `pending`, `skipped` or `failed`). That
+  (`appendInvocationStepWarning`: under a lock on the invocation row, taken before the step row as Retry takes them,
+  it appends through `appendStepWarning` only while that invocation is not superseded and still belongs to the step,
+  so a late invocation cannot annotate the attempt a Retry started; kept beside what other writers left, written only
+  while the row is not `pending`, `skipped` or `failed`). That
   banner cannot be the only trace: a self-revising step resets its own row at the end of the turn
   that set it — MEASURED on plan_chat, the warning was cleared 0.3 s after it was written — so
   every `unsupported` verdict, probe or run, is also a `codex_app_server.unavailable` task event on
