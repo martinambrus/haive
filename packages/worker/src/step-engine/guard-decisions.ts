@@ -8,7 +8,7 @@ import {
 } from '@haive/shared/modularity';
 import { TaskCancelledError, type StepContext, type StepDefinition } from '@haive/shared/step';
 import { z } from 'zod';
-import { isFixRound } from './steps/workflow/_fix-loop.js';
+import { FIX_LOOP_REQUESTED } from './steps/workflow/_fix-loop.js';
 
 const generation = z.number().int().nonnegative();
 const reference = z.strictObject({
@@ -182,7 +182,23 @@ export async function decideLoadedGuardDecision(
   bounds: Bounds,
 ): Promise<{ decision: GuardDecision; entry: StepRow; replay: boolean }> {
   const { task, ids, spans, span, hash, fixTarget } = prepared;
-  const reuseEarlierDecision = !!fixTarget && (await isFixRound({ ...ctx, db: tx }));
+  // The same structural event as isFixRound, loaded once under the held transaction.
+  const fixRounds = new Set(
+    fixTarget && ctx.round > 0
+      ? (
+          await tx
+            .select({ payload: schema.taskEvents.payload })
+            .from(schema.taskEvents)
+            .where(
+              and(
+                eq(schema.taskEvents.taskId, ctx.taskId),
+                eq(schema.taskEvents.eventType, FIX_LOOP_REQUESTED),
+              ),
+            )
+        ).map((r) => (r.payload as { round?: number } | null)?.round)
+      : [],
+  );
+  const reuseEarlierDecision = fixRounds.has(ctx.round);
   let decisionRound = ctx.round;
   if (reuseEarlierDecision) {
     // A revise round may have changed the branch, or reached it for the first time.
@@ -190,7 +206,7 @@ export async function decideLoadedGuardDecision(
     // Fix receipts are never baselines.
     decisionRound = -1;
     for (let round = ctx.round - 1; round >= 0; round--) {
-      if (await isFixRound({ ...ctx, db: tx, round })) continue;
+      if (round > 0 && fixRounds.has(round)) continue;
       if (
         rows.some((r) => r.stepId === span.firstStepId && r.round === round && r.guardState != null)
       ) {

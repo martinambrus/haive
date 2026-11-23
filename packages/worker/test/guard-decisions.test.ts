@@ -325,6 +325,26 @@ describe('guard decisions from loaded rows', () => {
     expect(await decide()).toEqual(decision);
     expect(evaluate).toHaveBeenCalledOnce();
   });
+  it('reads fix rounds once through the held transaction and ignores unneeded spans', async () => {
+    pinFixTarget();
+    const original = await save();
+    const current = nextRound();
+    current.round = ctx.round = task.currentRound = 3;
+    const from = vi.fn(() => ({
+      where: async () => [{ payload: { round: 2 } }, { payload: { round: 3 } }],
+    }));
+    const select = vi.fn(() => ({ from }));
+    tx = { select } as unknown as StepContext['db'];
+    Object.defineProperty(rows.cleanup!, 'guardState', {
+      get() {
+        throw new Error('the current evaluation does not need this span');
+      },
+    });
+    expect(await decide()).toEqual({ ...original, round: 3, generation: 7 });
+    expect(select).toHaveBeenCalledOnce();
+    expect(from).toHaveBeenCalledExactlyOnceWith(schema.taskEvents);
+    expect(evaluate).toHaveBeenCalledOnce();
+  });
   it.each(['revise', 'restart'])(
     're-evaluates revise and reuses restart decisions: %s',
     async (kind) => {
