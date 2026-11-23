@@ -102,6 +102,7 @@ function buildFake(s: Scenario, storedDeps: Record<string, unknown> | null) {
   const task = {
     id: TASK,
     userId: USER,
+    cliProviderId: s.defaultProvider ?? CLAUDE,
     repositoryId: REPO,
     type: 'custom-lsp',
     status: 'running',
@@ -439,6 +440,7 @@ describe('contract-2 writer: provider read under the lock', () => {
       },
       null,
     );
+    r.fake.patch(schema.tasks, TASK, { cliProviderId: null });
     r.fake.hooks.beforeInsert = (table) => {
       if (table === schema.envTemplates)
         r.fake.patch(schema.cliProviders, CODEX, { enabled: true });
@@ -449,6 +451,7 @@ describe('contract-2 writer: provider read under the lock', () => {
 
   it('decides on the provider read under the lock when the task has no default: accepts after a disable makes another claude-code provider the oldest', async () => {
     const r = makeRun({ defaultProvider: CLAUDE }, null);
+    r.fake.patch(schema.tasks, TASK, { cliProviderId: null });
     r.fake.hooks.beforeInsert = (table) => {
       if (table === schema.envTemplates)
         r.fake.patch(schema.cliProviders, CLAUDE, { enabled: false });

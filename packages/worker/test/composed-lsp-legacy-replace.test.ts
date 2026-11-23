@@ -106,6 +106,7 @@ function buildFake(s: Scenario, storedDeps: Record<string, unknown> | null) {
   fake.insert(schema.tasks, {
     id: TASK,
     userId: USER,
+    cliProviderId: s.defaultProvider ?? CLAUDE,
     repositoryId: REPO,
     type: 'custom-lsp',
     status: 'running',
@@ -317,15 +318,17 @@ describe('replacement provider read under the lock', () => {
       stored: 'absent',
       replace: true,
     });
+    r.fake.patch(schema.tasks, TASK, { cliProviderId: null });
     r.fake.hooks.beforeInsert = (table) => {
       if (table === schema.envTemplates)
         r.fake.patch(schema.cliProviders, CODEX, { enabled: true });
     };
-    await expect(r.apply()).rejects.toMatchObject({ code: REFUSED, reason: 'providers' });
+    await expect(r.apply()).rejects.toMatchObject({ code: REFUSED, reason: 'cli_unsupported' });
   });
 
   it('decides on the provider read under the lock when the task has no default: accepts after a disable makes another claude-code provider the oldest', async () => {
     const r = await makeLegacy({ defaultProvider: CLAUDE, stored: 'absent', replace: true });
+    r.fake.patch(schema.tasks, TASK, { cliProviderId: null });
     r.fake.hooks.beforeInsert = (table) => {
       if (table === schema.envTemplates)
         r.fake.patch(schema.cliProviders, CLAUDE, { enabled: false });
@@ -649,4 +652,25 @@ describe('step 03 default image tag', () => {
   it('B9 same-named contract-2 and legacy rows get different defaults', async () => {
     expect(await defaultTag(ID_2, { [KEY]: 2 })).not.toBe(await defaultTag(ID_1, { [KEY]: 1 }));
   });
+});
+
+it('replacement derives LSP support from the current task provider, not stale step context', async () => {
+  const r = await makeLegacy({ replace: true });
+  r.fake.patch(schema.tasks, TASK, { cliProviderId: CLAUDE });
+  r.ctx.cliProviderId = CODEX;
+  await r.apply();
+  expect(candidates(r)[0]?.declaredDeps).toMatchObject({
+    lspInstallContractVersion: 2,
+    lspServers: ['intelephense-extended'],
+  });
+});
+
+it('locked replacement re-reads provider capability after a provider rename', async () => {
+  const r = await makeLegacy({ replace: true });
+  r.fake.patch(schema.tasks, TASK, { cliProviderId: CLAUDE });
+  r.fake.hooks.beforeInsert = (table) => {
+    if (table === schema.envTemplates) r.fake.patch(schema.cliProviders, CLAUDE, { name: 'codex' });
+  };
+  await expect(r.apply()).rejects.toMatchObject({ reason: 'cli_unsupported' });
+  expect(candidates(r)).toHaveLength(0);
 });
