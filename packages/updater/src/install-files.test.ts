@@ -4,6 +4,9 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { inInstall } from './install-files.js';
 import { setEnvVar } from './run.js';
+import { STACK_LOCK_NAME } from './stack-lock.js';
+import { bindStackLease, withStackLease } from './lease-fence.js';
+import { UpgradeRefusal } from './refusal.js';
 
 vi.mock('node:fs/promises', async (original) => {
   const real = await original<typeof import('node:fs/promises')>();
@@ -57,3 +60,30 @@ it.each(['different-owner', 'other-error'])(
     expect(await fs.readdir(dir)).toEqual(['.env']);
   },
 );
+
+it('pins remove exemptions to STACK_LOCK_NAME and its stale tombs only', async () => {
+  const exempt = [STACK_LOCK_NAME, `${STACK_LOCK_NAME}.stale.1234abcd`];
+  const fenced = [
+    `${STACK_LOCK_NAME}.stale`,
+    `${STACK_LOCK_NAME}.stale-other`,
+    `${STACK_LOCK_NAME}-other`,
+  ];
+  for (const name of [...exempt, ...fenced]) await fs.writeFile(join(dir, name), 'keep');
+  const check = vi.fn(async () => {
+    throw new UpgradeRefusal('stack-lock-lost', 'test loss');
+  });
+  await withStackLease(async () => {
+    bindStackLease(check);
+    await inInstall(dir, async (root) => {
+      for (const name of exempt) await root.remove(name);
+      expect(check).not.toHaveBeenCalled();
+      for (const name of fenced) {
+        await expect(root.remove(name)).rejects.toMatchObject({ refusal: 'stack-lock-lost' });
+        expect(await fs.readFile(join(dir, name), 'utf8')).toBe('keep');
+      }
+    });
+  });
+  expect(check).toHaveBeenCalledTimes(fenced.length);
+  for (const name of exempt)
+    await expect(fs.stat(join(dir, name))).rejects.toMatchObject({ code: 'ENOENT' });
+});

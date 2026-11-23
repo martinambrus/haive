@@ -2,6 +2,7 @@ import { randomBytes } from 'node:crypto';
 import { open, rename, unlink } from 'node:fs/promises';
 import type { ReleaseManifest } from '@haive/shared/release';
 import { UpgradeRefusal } from './refusal.js';
+import { assertStackLease, isLeaseLoss } from './lease-fence.js';
 
 type EnvKeys = NonNullable<ReleaseManifest['bundle']>['env'];
 
@@ -96,6 +97,7 @@ export async function ensureEnvKeys(
   const missing = keys.filter(({ key }) => !current.get(key));
   for (const entry of missing) if (entry.generate === 'never') throw new EnvKeyMissing(entry.key);
   if (options.check || missing.length === 0) return [];
+  await assertStackLease();
   const added = missing.map(({ key }) => key);
   const lines = missing.map((entry) => {
     if (entry.generate !== 'hex') throw new EnvKeyMissing(entry.key);
@@ -113,12 +115,15 @@ export async function ensureEnvKeys(
     await output.writeFile(text + (text && !text.endsWith('\n') ? '\n' : '') + lines.join(''));
     await output.sync();
     await output.close();
+    await assertStackLease();
     await rename(temp, file);
-  } catch {
+  } catch (error) {
+    if (isLeaseLoss(error)) throw error;
     // Never propagate a write/encoding error that might quote a generated value.
     throw new Error('could not atomically add required .env keys');
   } finally {
     await output.close().catch(() => {});
+    await assertStackLease();
     await unlink(temp).catch((error: NodeJS.ErrnoException) => {
       if (error.code !== 'ENOENT')
         throw new Error('could not remove required env keys temporary file');

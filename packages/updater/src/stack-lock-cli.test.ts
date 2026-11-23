@@ -7,6 +7,8 @@ const h = vi.hoisted(() => ({
   sql: Object.assign(vi.fn(), { end: vi.fn(), options: { parsers: {}, serializers: {} } }),
   initialize: vi.fn(),
   dockerExec: vi.fn(),
+  setConfig: vi.fn(),
+  getFreshConfig: vi.fn(),
 }));
 vi.mock('node:child_process', () => ({
   execFile: Object.assign(vi.fn(), {
@@ -17,10 +19,14 @@ vi.mock('postgres', () => ({ default: vi.fn(() => h.sql) }));
 import postgres from 'postgres';
 vi.mock('@haive/shared', async (original) => ({
   ...(await original<typeof import('@haive/shared')>()),
-  configService: { initialize: h.initialize },
+  configService: { initialize: h.initialize, set: h.setConfig, getFresh: h.getFreshConfig },
 }));
 vi.mock('./journal.js', () => ({
   ensureJournal: vi.fn(),
+  enterPhase: vi.fn(),
+  recordFoundState: vi.fn(),
+  readFoundState: vi.fn(),
+  finishRun: vi.fn(),
   findLiveRun: vi.fn(),
   lastDoneChannel: vi.fn(),
   recordRunError: vi.fn(),
@@ -46,9 +52,14 @@ import { main } from './cli.js';
 import { UpgradeRefusal } from './refusal.js';
 import { STACK_LOCK_BEAT_MS, StackLock } from './stack-lock.js';
 import * as images from './images.js';
+import * as install from './install-files.js';
 import * as dk from './docker.js';
 import * as journal from './journal.js';
 import * as run from './run.js';
+import { backupBundle, swapBundle } from './bundle-swap.js';
+import { bundleHash, stageBundle } from './bundle.js';
+import { assertStackLease } from './lease-fence.js';
+import { parseReleaseManifest } from '@haive/shared/release';
 
 // The other party is simulated at protocol level on purpose. The lock module is imported only to
 // watch the updater's own beats.
@@ -165,6 +176,9 @@ beforeEach(async () => {
   vi.mocked(journal.findLiveRun).mockResolvedValue(null);
   vi.mocked(journal.lastDoneChannel).mockResolvedValue(null);
   vi.mocked(journal.startRun).mockResolvedValue('new-run');
+  vi.mocked(journal.readFoundState).mockResolvedValue(null);
+  vi.mocked(journal.finishRun).mockImplementation(assertStackLease);
+  vi.mocked(journal.recordRunError).mockResolvedValue(undefined);
   vi.mocked(run.phaseVerify).mockResolvedValue(true);
   vi.mocked(run.phaseSnapshot).mockResolvedValue('dump.sql');
   vi.mocked(run.readEnvVar).mockResolvedValue('1.0.0');
@@ -240,6 +254,163 @@ describe('race, other direction: the updater lock is exclusive for the whole run
     vi.mocked(run.rollback).mockImplementation(probe('rollback'));
     expect(await main(opts)).toBe(5);
     expect(seen).toEqual([['rollback', 'updater', true]]);
+  });
+});
+
+describe('real recovery under stack lease proofs', () => {
+  const opts = { stackLock: { ...quick, sleep: idleSleep } };
+  const interrupted = async () => {
+    const compose = { dir, files: ['docker-compose.yml', 'docker-compose.run.yml'] };
+    const payload = new Map(
+      compose.files.map((name) => [name, Buffer.from('services: {new: {}}\n')]),
+    );
+    const target = parseReleaseManifest({
+      ...manifest,
+      bundle: {
+        files: Object.fromEntries([...payload].map(([name, bytes]) => [name, bundleHash(bytes)])),
+        known: [],
+        env: [],
+      },
+    });
+    const bundle = await backupBundle(compose, 'live', target);
+    await stageBundle(compose, target.bundle!, payload);
+    await swapBundle(compose, bundle, target.version);
+    vi.mocked(journal.findLiveRun).mockResolvedValue({
+      ...liveRun,
+      metadata: { ...liveRun.metadata, bundle },
+    } as never);
+    const actual = await vi.importActual<typeof run>('./run.js');
+    vi.mocked(run.resume).mockImplementation(actual.resume);
+    return bundle;
+  };
+
+  it.each(['before-resume', 'after-restore'] as const)(
+    'finishes reverse recovery with an unproven record %s',
+    async (point) => {
+      await interrupted();
+      const unprove = async () => writeFile(lock, '{');
+      if (point === 'before-resume')
+        vi.mocked(images.readImageSettings).mockImplementationOnce(async () => {
+          await unprove();
+          return { ...settings };
+        });
+      else {
+        const atomic = install.InstallDirectory.prototype.atomic;
+        vi.spyOn(install.InstallDirectory.prototype, 'atomic').mockImplementation(async function (
+          this: install.InstallDirectory,
+          ...args
+        ) {
+          await atomic.call(this, ...args);
+          if (args[0] === '.env') await unprove();
+        });
+      }
+      expect(await main(opts)).toBe(0);
+      expect(await readFile(join(dir, 'docker-compose.yml'), 'utf8')).toBe('services: {}\n');
+      expect(h.dockerExec.mock.calls.some(([, args]) => args.includes('--remove-orphans'))).toBe(
+        true,
+      );
+      expect(journal.finishRun).toHaveBeenCalledWith(
+        h.sql,
+        'live',
+        'rolled_back',
+        expect.any(String),
+      );
+      expect(journal.recordRunError).not.toHaveBeenCalled();
+      expect(events()).toContain('rolled-back');
+      expect(await readFile(lock, 'utf8')).toBe('{');
+    },
+  );
+
+  it('stops reverse recovery on a proven foreign record after restoring the bundle', async () => {
+    await interrupted();
+    const foreign = record(ext.token, 'extension', 1);
+    const atomic = install.InstallDirectory.prototype.atomic;
+    vi.spyOn(install.InstallDirectory.prototype, 'atomic').mockImplementation(async function (
+      this: install.InstallDirectory,
+      ...args
+    ) {
+      await atomic.call(this, ...args);
+      if (args[0] === '.env') await writeFile(lock, foreign);
+    });
+    expect(await main(opts)).toBe(3);
+    expect(await readFile(join(dir, 'docker-compose.yml'), 'utf8')).toBe('services: {}\n');
+    expect(h.dockerExec.mock.calls.some(([, args]) => args.includes('--remove-orphans'))).toBe(
+      false,
+    );
+    expect(journal.finishRun).not.toHaveBeenCalled();
+    expect(journal.recordRunError).not.toHaveBeenCalled();
+    expect(await readFile(lock, 'utf8')).toBe(foreign);
+    expect(events()).toContain('stack-lock-lost');
+  });
+
+  it.each(['before-prune', 'during-prune', 'heartbeat-during-prune'] as const)(
+    'keeps exit 0 and stops real pruning on lease loss %s after done',
+    async (point) => {
+      const bundle = await interrupted();
+      vi.mocked(journal.findLiveRun).mockResolvedValue({
+        ...liveRun,
+        phase: 'commit',
+        metadata: { ...liveRun.metadata, bundle },
+      } as never);
+      const proof = vi.spyOn(StackLock.prototype, 'assertOwned');
+      const foreign = record(ext.token, 'extension', 1);
+      let done = false;
+      let displaced = false;
+      let removed = 0;
+      const lose = async () => {
+        displaced = true;
+        await writeFile(lock, foreign);
+        if (point === 'heartbeat-during-prune')
+          expect(await (proof.mock.contexts[0] as StackLock).beat()).toBe('lost');
+      };
+      vi.mocked(journal.finishRun).mockImplementation(async () => {
+        await assertStackLease();
+        done = true;
+        if (point === 'before-prune') await lose();
+      });
+      const remove = install.InstallDirectory.prototype.remove;
+      vi.spyOn(install.InstallDirectory.prototype, 'remove').mockImplementation(async function (
+        this: install.InstallDirectory,
+        name,
+      ) {
+        await remove.call(this, name);
+        if (done) {
+          removed++;
+          if (!displaced) await lose();
+        }
+      });
+      expect(await main(opts)).toBe(0);
+      expect(journal.finishRun).toHaveBeenCalledExactlyOnceWith(h.sql, 'live', 'done');
+      expect(removed).toBe(point === 'before-prune' ? 0 : 1);
+      expect(await readdir(join(dir, '.haive-upgrade/pending/new'))).toHaveLength(
+        point === 'before-prune' ? 2 : 1,
+      );
+      expect(await readFile(join(dir, bundle.backupDir, 'docker-compose.yml'), 'utf8')).toBe(
+        'services: {}\n',
+      );
+      expect(await readFile(lock, 'utf8')).toBe(foreign);
+      expect(events()).toEqual(
+        expect.arrayContaining(['stack-lock-lost', 'bundle-prune-failed', 'done']),
+      );
+      expect(events()).not.toContain('refused');
+      expect(events()).not.toContain('rolled-back');
+      expect(journal.recordRunError).not.toHaveBeenCalled();
+      expect(run.rollback).not.toHaveBeenCalled();
+    },
+  );
+
+  it('keeps forward commit recovery strict for an unproven record', async () => {
+    await interrupted();
+    vi.mocked(journal.findLiveRun).mockResolvedValue({ ...liveRun, phase: 'commit' } as never);
+    vi.mocked(images.readImageSettings).mockImplementationOnce(async () => {
+      await writeFile(lock, '{');
+      return { ...settings };
+    });
+    expect(await main(opts)).toBe(3);
+    expect(run.resume).not.toHaveBeenCalled();
+    expect(journal.finishRun).not.toHaveBeenCalled();
+    expect(h.dockerExec.mock.calls.some(([, args]) => args[0] === 'run')).toBe(false);
+    expect(events()).toContain('refused');
   });
 });
 
@@ -607,6 +778,77 @@ describe('read-only and absent installs', () => {
 });
 
 describe('SIGTERM while a one-shot is running', () => {
+  it('exits 143 after loss, removes only this attempt children and preserves the new lock', async () => {
+    const saved = process.listeners('SIGTERM') as NodeJS.SignalsListener[];
+    process.removeAllListeners('SIGTERM');
+    let started!: () => void;
+    let finish!: () => void;
+    const running = new Promise<void>((resolve) => {
+      started = resolve;
+    });
+    const child = new Promise<{ stdout: string }>((resolve) => {
+      finish = () => resolve({ stdout: '' });
+    });
+    const proof = vi.spyOn(StackLock.prototype, 'assertOwned');
+    const children = new Map([['new-child', 'org.haive.updater.attempt=new-holder']]);
+    let attempt: string | undefined;
+    h.dockerExec.mockImplementation(async (_cmd, args: string[]) => {
+      if (args[0] === 'run') {
+        attempt = args.find((arg) => arg.startsWith('org.haive.updater.attempt='));
+        children.set('old-child', attempt!);
+        started();
+        return child;
+      }
+      if (args[1] === '-aq') {
+        expect(args).toContain('label=haive.install=haive');
+        expect(args).toContain('label=' + attempt);
+        expect(args).toContain('label=org.haive.updater.role');
+        return {
+          stdout: [...children]
+            .filter(([, owner]) => args.includes('label=' + owner))
+            .map(([id]) => id)
+            .join('\n'),
+        };
+      }
+      if (args[0] === 'rm') for (const id of args.slice(2)) children.delete(id);
+      return { stdout: '' };
+    });
+    vi.mocked(run.phaseMigrate).mockImplementation(async () => {
+      await dk.runOneShot('target', ['migrate'], {});
+    });
+    let exitDone!: (code: number) => void;
+    const exited = new Promise<number>((resolve) => {
+      exitDone = resolve;
+    });
+    vi.spyOn(process, 'exit').mockImplementation((code) => {
+      exitDone(Number(code));
+      return undefined as never;
+    });
+    const result = main({ stackLock: { ...quick, sleep: idleSleep } });
+    const replacement = record(ext.token, 'updater', 7);
+    try {
+      await running;
+      await writeFile(lock, replacement);
+      expect(await (proof.mock.contexts.at(-1) as StackLock).beat()).toBe('lost');
+      process.emit('SIGTERM');
+      expect(await exited).toBe(143);
+      expect(
+        h.dockerExec.mock.calls.filter(([, args]) => args[0] === 'rm').map(([, args]) => args),
+      ).toEqual([['rm', '-f', 'old-child']]);
+      expect([...children.keys()]).toEqual(['new-child']);
+      expect(await readFile(lock, 'utf8')).toBe(replacement);
+      finish();
+      expect(await result).toBe(3);
+      expect(run.rollback).not.toHaveBeenCalled();
+      expect(journal.recordAttempt).not.toHaveBeenCalled();
+      expect(await readFile(lock, 'utf8')).toBe(replacement);
+    } finally {
+      finish();
+      await result;
+      process.removeAllListeners('SIGTERM');
+      for (const listener of saved) process.on('SIGTERM', listener);
+    }
+  });
   it('keeps the lock when the Docker client settles before SIGTERM cleanup finishes', async () => {
     const saved = process.listeners('SIGTERM') as NodeJS.SignalsListener[];
     process.removeAllListeners('SIGTERM');
@@ -757,4 +999,396 @@ describe('SIGTERM while a one-shot is running', () => {
       }
     },
   );
+});
+
+describe('unproven lease recovery', () => {
+  const opts = { stackLock: { ...quick, sleep: idleSleep } };
+  const unreadable = () =>
+    vi.spyOn(install.InstallDirectory.prototype, 'read').mockImplementation(async function (
+      this: install.InstallDirectory,
+      name,
+      cap,
+    ) {
+      if (name === LOCK) throw Object.assign(new Error('io'), { code: 'EIO' });
+      return originalRead.call(this, name, cap);
+    });
+  const originalRead = install.InstallDirectory.prototype.read;
+  const lossEvents = () => events().filter((event) => event === 'stack-lock-lost');
+  it('restarts postgres in snapshot finally and rolls back after persistent proof read errors', async () => {
+    const actual = await vi.importActual<typeof import('./run.js')>('./run.js');
+    vi.mocked(run.phaseSnapshot).mockImplementation(actual.phaseSnapshot);
+    h.sql.mockResolvedValue([]);
+    const lost = vi.spyOn(StackLock.prototype, 'lost', 'get');
+    h.dockerExec.mockImplementation(async (_cmd, args) => {
+      if (args[0] === 'run') unreadable();
+      return { stdout: '' };
+    });
+    expect(await main(opts)).toBe(3);
+    expect(
+      h.dockerExec.mock.calls.filter(([, args]) => args[0] === 'compose').map(([, args]) => args),
+    ).toEqual([
+      expect.arrayContaining(['stop', 'postgres']),
+      expect.arrayContaining(['up', '-d', 'postgres']),
+    ]);
+    expect(run.rollback).toHaveBeenCalledOnce();
+    expect(run.phaseMigrate).not.toHaveBeenCalled();
+    expect(lossEvents()).toEqual([]);
+    expect(lost.mock.results.every((result) => result.value === false)).toBe(true);
+    expect(
+      vi.mocked(console.log).mock.calls.map(([line]) => JSON.parse(String(line))),
+    ).toContainEqual(expect.objectContaining({ event: 'refused', refusal: 'stack-lock-unproven' }));
+  });
+  it('records an unproven preflight refusal and releases normally', async () => {
+    vi.mocked(images.prepareImages).mockImplementation(async () => {
+      unreadable();
+      return images.emptyOverrides();
+    });
+    vi.mocked(journal.recordAttempt).mockResolvedValue(undefined);
+    const release = vi.spyOn(StackLock.prototype, 'release');
+    expect(await main(opts)).toBe(3);
+    expect(journal.startRun).not.toHaveBeenCalled();
+    expect(journal.recordAttempt).toHaveBeenCalledWith(
+      h.sql,
+      expect.objectContaining({
+        status: 'refused',
+        metadata: { refusal: 'stack-lock-unproven' },
+      }),
+    );
+    expect(release).toHaveBeenCalledOnce();
+    expect(lossEvents()).toEqual([]);
+    // Read failures prevent token verification at release; retry remains safe and reports failure.
+    expect(events()).toContain('stack-lock-release-failed');
+  });
+  it('still stops recovery if a foreign record is proved after an unproven phase', async () => {
+    vi.mocked(run.phaseMigrate).mockImplementation(async () => {
+      const read = unreadable();
+      try {
+        await dk.runOneShot('target', ['migrate'], {});
+      } finally {
+        read.mockRestore();
+        await writeFile(lock, record(ext.token, 'updater', 7));
+      }
+    });
+    expect(await main(opts)).toBe(3);
+    expect(run.rollback).not.toHaveBeenCalled();
+    expect(await readFile(lock, 'utf8')).toBe(record(ext.token, 'updater', 7));
+    expect(lossEvents()).toHaveLength(1);
+  });
+});
+
+describe('lease loss fences the attempt', () => {
+  beforeEach(() => {
+    vi.mocked(journal.recordRunError).mockResolvedValue(undefined);
+    vi.mocked(journal.recordAttempt).mockResolvedValue(undefined);
+  });
+  const opts = { stackLock: { ...quick, sleep: idleSleep } };
+  const takeover = async () => writeFile(lock, record(ext.token, 'updater', 7));
+  const refused = async () => {
+    expect(await main(opts)).toBe(3);
+    expect(
+      vi.mocked(console.log).mock.calls.map(([line]) => JSON.parse(String(line))),
+    ).toContainEqual(expect.objectContaining({ event: 'refused', refusal: 'stack-lock-lost' }));
+    expect(run.rollback).not.toHaveBeenCalled();
+    expect(journal.recordRunError).not.toHaveBeenCalled();
+    expect(journal.recordAttempt).not.toHaveBeenCalled();
+    expect(await readFile(lock, 'utf8')).toBe(record(ext.token, 'updater', 7));
+    expect(h.dockerExec.mock.calls.filter(([, args]) => args[0] === 'rm')).toEqual([]);
+  };
+  it('emits exactly one refusal for a proven loss', async () => {
+    vi.mocked(run.phaseMigrate).mockImplementation(takeover);
+    expect(await main(opts)).toBe(3);
+    expect(
+      vi
+        .mocked(console.log)
+        .mock.calls.map(([line]) => JSON.parse(String(line)))
+        .filter((event) => event.event === 'refused' && event.refusal === 'stack-lock-lost'),
+    ).toHaveLength(1);
+  });
+  it.each(['ok', 'rolledBack'] as const)(
+    'keeps the decided %s result when the last mutation is followed by heartbeat loss',
+    async (outcome) => {
+      const proof = vi.spyOn(StackLock.prototype, 'assertOwned');
+      const lateLoss = async () => {
+        await takeover();
+        const holder = proof.mock.contexts.at(-1) as StackLock;
+        expect(await holder.beat()).toBe('lost');
+      };
+      if (outcome === 'ok') vi.mocked(run.phaseCommit).mockImplementation(lateLoss);
+      else {
+        vi.mocked(run.phaseVerify).mockResolvedValue(false);
+        vi.mocked(run.rollback).mockImplementation(lateLoss);
+      }
+      expect(await main(opts)).toBe(outcome === 'ok' ? 0 : 5);
+      expect(events().filter((event) => event === 'refused')).toEqual([]);
+      expect(journal.recordAttempt).not.toHaveBeenCalled();
+      expect(await readFile(lock, 'utf8')).toBe(record(ext.token, 'updater', 7));
+    },
+  );
+  it.each([
+    ['draining', 'phaseDraining', 'phaseMaintenance'],
+    ['maintenance', 'phaseMaintenance', 'phaseSnapshot'],
+    ['migrate', 'phaseMigrate', 'phaseVerify'],
+    ['verify', 'phaseVerify', 'phaseCommit'],
+  ] as const)(
+    'does not dispatch the next phase after %s loses ownership',
+    async (_name, phase, next) => {
+      vi.mocked(run[phase]).mockImplementation(async () => {
+        await takeover();
+        return true as never;
+      });
+      await refused();
+      expect(run[next]).not.toHaveBeenCalled();
+    },
+  );
+  it.each(['error', 'verify-false', 'rollback-error', 'commit-error', 'recovery-error'])(
+    'does not write or roll back after %s and takeover',
+    async (where) => {
+      const fail = async () => {
+        await takeover();
+        throw Object.assign(new Error('phase failed'), { code: 'EIO' });
+      };
+      if (where === 'error') vi.mocked(run.phaseMigrate).mockImplementation(fail);
+      if (where === 'verify-false')
+        vi.mocked(run.phaseVerify).mockImplementation(async () => {
+          await takeover();
+          return false;
+        });
+      if (where === 'rollback-error') {
+        vi.mocked(run.phaseVerify).mockResolvedValue(false);
+        vi.mocked(run.rollback).mockImplementation(fail);
+      }
+      if (where === 'commit-error') vi.mocked(run.phaseCommit).mockImplementation(fail);
+      if (where === 'recovery-error') {
+        vi.mocked(journal.findLiveRun).mockResolvedValue(liveRun as never);
+        vi.mocked(run.resume).mockImplementation(fail);
+      }
+      // A rollback entered while owning is permitted; its failure must not write over recovery.
+      if (where === 'rollback-error') {
+        expect(await main(opts)).toBe(3);
+        expect(run.rollback).toHaveBeenCalledTimes(1);
+        expect(journal.recordRunError).not.toHaveBeenCalled();
+        expect(await readFile(lock, 'utf8')).toBe(record(ext.token, 'updater', 7));
+      } else await refused();
+    },
+  );
+  it('does not start a run or record an attempt after preparation loses ownership', async () => {
+    vi.mocked(images.prepareImages).mockImplementation(async () => {
+      await takeover();
+      return images.emptyOverrides();
+    });
+    await refused();
+    expect(journal.startRun).not.toHaveBeenCalled();
+  });
+  it.each(['snapshot', 'restore', 'migration', 'builder', 'compose-up', 'compose-stop'])(
+    'does not start %s after takeover inside a phase',
+    async (role) => {
+      vi.mocked(run.phaseMigrate).mockImplementation(async () => {
+        await takeover();
+        const ctx = { dir, files: ['docker-compose.yml', 'docker-compose.run.yml'] };
+        if (role === 'snapshot') await dk.snapshotVolume('isolated', dir, 'backup.tgz');
+        if (role === 'restore') await dk.restoreVolume('isolated', dir, 'backup.tgz');
+        if (role === 'migration') await dk.runOneShot('target', ['migrate'], {});
+        if (role === 'builder') await dk.buildOwnModules('builder', dir, {});
+        if (role === 'compose-up') await dk.composeUp(ctx, {});
+        if (role === 'compose-stop') await dk.composeStop(ctx, {}, ['postgres']);
+      });
+      await refused();
+      expect(
+        h.dockerExec.mock.calls.filter(([, args]) => args[0] === 'run' || args[0] === 'compose'),
+      ).toEqual([]);
+    },
+  );
+  it('checks again after a builder pull, before docker run', async () => {
+    h.dockerExec.mockImplementation(async (_cmd, args) => {
+      if (args[0] === 'pull') await takeover();
+      return { stdout: '' };
+    });
+    vi.mocked(run.phaseMigrate).mockImplementation(async () =>
+      dk.buildOwnModules('builder', dir, {}),
+    );
+    await refused();
+    expect(h.dockerExec.mock.calls.filter(([, args]) => args[0] === 'run')).toEqual([]);
+  });
+  it('does not restart postgres in snapshot finally after takeover', async () => {
+    const actual = await vi.importActual<typeof import('./run.js')>('./run.js');
+    vi.mocked(run.phaseSnapshot).mockImplementation(actual.phaseSnapshot);
+    h.dockerExec.mockImplementation(async (_cmd, args) => {
+      if (args[0] === 'run') await takeover();
+      return { stdout: '' };
+    });
+    await refused();
+    expect(
+      h.dockerExec.mock.calls.filter(([, args]) => args[0] === 'compose').map(([, args]) => args),
+    ).toEqual([expect.arrayContaining(['stop', 'postgres'])]);
+    expect(run.recordSnapshot).not.toHaveBeenCalled();
+  });
+  it.each(['phase', 'metadata', 'finish', 'error', 'start', 'attempt', 'found'])(
+    'fences the actual %s journal writer after takeover',
+    async (writer) => {
+      const actual = await vi.importActual<typeof import('./journal.js')>('./journal.js');
+      const sql = Object.assign(
+        vi.fn(async () => [{ id: 'new' }]),
+        {
+          json: (value: unknown) => value,
+          begin: vi.fn(async (work: (tx: unknown) => Promise<void>) => work(sql)),
+        },
+      );
+      vi.mocked(run.phaseMigrate).mockImplementation(async () => {
+        await takeover();
+        const db = sql as never;
+        if (writer === 'phase') await actual.enterPhase(db, 'new-run', 'commit');
+        if (writer === 'metadata') await actual.mergeMetadata(db, 'new-run', {});
+        if (writer === 'finish') await actual.finishRun(db, 'new-run', 'done');
+        if (writer === 'error') await actual.recordRunError(db, 'new-run', 'failure');
+        if (writer === 'start')
+          await actual.startRun(db, {
+            fromVersion: '1.0.0',
+            toVersion: '9.9.9',
+            channel: 'public',
+          });
+        if (writer === 'attempt')
+          await actual.recordAttempt(db, {
+            fromVersion: '1.0.0',
+            toVersion: '9.9.9',
+            channel: 'public',
+            status: 'refused',
+            error: 'failure',
+            metadata: {},
+          });
+        if (writer === 'found') await actual.recordFoundState(db, 'new-run', 'normal');
+      });
+      await refused();
+      expect(sql).not.toHaveBeenCalled();
+      expect(sql.begin).not.toHaveBeenCalled();
+    },
+  );
+  it.each(['pin', 'atomic', 'mkdir', 'remove', 'prune', 'temps', 'env-keys'])(
+    'fences the actual %s install writer after takeover',
+    async (writer) => {
+      const actual = await vi.importActual<typeof import('./run.js')>('./run.js');
+      const { inInstall } = await import('./install-files.js');
+      const { ensureEnvKeys } = await import('./envkeys.js');
+      const victim = writer === 'temps' ? '..env.' + randomUUID() : 'victim';
+      if (writer !== 'temps') await writeFile(join(dir, victim), 'keep');
+      const envBefore = await readFile(join(dir, '.env'), 'utf8');
+      vi.mocked(run.phaseMigrate).mockImplementation(async () => {
+        if (writer === 'temps') await writeFile(join(dir, victim), 'keep');
+        await takeover();
+        if (writer === 'pin') await actual.setEnvVar(join(dir, '.env'), 'HAIVE_VERSION', '9.9.9');
+        else if (writer === 'env-keys')
+          await ensureEnvKeys(join(dir, '.env'), [
+            { key: 'MAILPIT_UI_PASSWORD', generate: 'hex', bytes: 24 },
+          ]);
+        else
+          await inInstall(dir, async (root) => {
+            if (writer === 'atomic') await root.atomic(victim, Buffer.from('changed'));
+            if (writer === 'mkdir') await (await root.child('new-directory', true)).close();
+            if (writer === 'remove') await root.remove(victim);
+            if (writer === 'prune') await root.removeTree(victim);
+            if (writer === 'temps') await root.removeTemps();
+          });
+      });
+      await refused();
+      expect(await readFile(join(dir, victim), 'utf8')).toBe('keep');
+      expect(await readFile(join(dir, '.env'), 'utf8')).toBe(envBefore);
+      await expect(stat(join(dir, 'new-directory'))).rejects.toMatchObject({ code: 'ENOENT' });
+    },
+  );
+  it('checks after waiting for the maintenance fence before changing configuration', async () => {
+    const actual = await vi.importActual<typeof import('./run.js')>('./run.js');
+    const fence = Object.assign(
+      vi.fn(async () => []),
+      { release: vi.fn() },
+    );
+    const sql = {
+      reserve: vi.fn(async () => {
+        await takeover();
+        return fence;
+      }),
+    };
+    vi.mocked(run.phaseMaintenance).mockImplementation(async (ctx) => {
+      await actual.phaseMaintenance({ ...ctx, sql: sql as never, drainForced: true });
+    });
+    await refused();
+    expect(h.setConfig).not.toHaveBeenCalled();
+    expect(fence.release).toHaveBeenCalledOnce();
+  });
+  it('checks again after a maintenance recount before changing configuration', async () => {
+    const actual = await vi.importActual<typeof import('./run.js')>('./run.js');
+    const fence = Object.assign(
+      vi.fn(async (parts: TemplateStringsArray) => {
+        if (parts.join('').includes('::text AS n')) {
+          await takeover();
+          return [{ n: '0' }];
+        }
+        return [{ has_dead_at: false }];
+      }),
+      { release: vi.fn() },
+    );
+    h.getFreshConfig.mockResolvedValue('draining');
+    vi.mocked(run.phaseMaintenance).mockImplementation(async (ctx) => {
+      await actual.phaseMaintenance({ ...ctx, sql: { reserve: async () => fence } as never });
+    });
+    await refused();
+    expect(h.setConfig).not.toHaveBeenCalled();
+    expect(fence.release).toHaveBeenCalledOnce();
+  });
+  it('propagates a lost lease during best-effort attempt recording as refusal exit 3', async () => {
+    vi.mocked(journal.lastDoneChannel).mockResolvedValue('other');
+    vi.mocked(journal.recordAttempt).mockImplementation(async () => {
+      await takeover();
+      const actual = await vi.importActual<typeof import('./journal.js')>('./journal.js');
+      await actual.recordAttempt(h.sql as never, {
+        fromVersion: '1.0.0',
+        toVersion: '9.9.9',
+        channel: 'public',
+        status: 'refused',
+        error: 'failure',
+        metadata: {},
+      });
+    });
+    expect(await main(opts)).toBe(3);
+    expect(
+      vi.mocked(console.log).mock.calls.map(([line]) => JSON.parse(String(line))),
+    ).toContainEqual(expect.objectContaining({ event: 'refused', refusal: 'stack-lock-lost' }));
+    expect(await readFile(lock, 'utf8')).toBe(record(ext.token, 'updater', 7));
+    expect(h.sql.end).toHaveBeenCalled();
+  });
+  it('client-failure cleanup only removes the old attempt children after takeover', async () => {
+    let attempt: string | undefined;
+    const children = new Map([
+      ['old-child', ''],
+      ['new-child', 'new-holder-attempt'],
+    ]);
+    h.dockerExec.mockImplementation(async (_cmd, args) => {
+      if (args[0] === 'run') {
+        attempt = args.find((a: string) => a.startsWith('org.haive.updater.attempt='));
+        children.set('old-child', attempt!);
+        await takeover();
+        throw Object.assign(new Error('client killed'), { signal: 'SIGKILL' });
+      }
+      if (args[1] === '-aq') {
+        expect(args).toContain('label=' + attempt);
+        return {
+          stdout: [...children]
+            .filter(([, owner]) => owner === attempt)
+            .map(([id]) => id)
+            .join('\n'),
+        };
+      }
+      if (args[0] === 'rm') for (const id of args.slice(2)) children.delete(id);
+      return { stdout: '' };
+    });
+    vi.mocked(run.phaseMigrate).mockImplementation(async () => {
+      await dk.runOneShot('target', ['migrate'], {});
+    });
+    expect(await main(opts)).toBe(3);
+    expect(
+      h.dockerExec.mock.calls.filter(([, args]) => args[0] === 'rm').map(([, args]) => args),
+    ).toEqual([['rm', '-f', 'old-child']]);
+    expect([...children.keys()]).toEqual(['new-child']);
+    expect(run.rollback).not.toHaveBeenCalled();
+    expect(journal.recordRunError).not.toHaveBeenCalled();
+    expect(await readFile(lock, 'utf8')).toBe(record(ext.token, 'updater', 7));
+  });
 });

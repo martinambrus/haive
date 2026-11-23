@@ -2,6 +2,7 @@ import { randomBytes } from 'node:crypto';
 import { constants } from 'node:os';
 import { rename } from 'node:fs/promises';
 import { inInstall, type InstallDirectory } from './install-files.js';
+import { UpgradeRefusal } from './refusal.js';
 
 /** Wire contract shared with the Desktop extension bridge: file name and timings must match it. */
 export const STACK_LOCK_NAME = '.haive-stack-lock';
@@ -12,6 +13,8 @@ export const STACK_LOCK_ROUNDS = 3;
 export const STACK_LOCK_MAX_BYTES = 4096;
 export const STACK_LOCK_RELEASE_TRIES = 3;
 export const STACK_LOCK_RELEASE_PAUSE_MS = 100;
+export const STACK_LOCK_PROOF_TRIES = 3;
+export const STACK_LOCK_PROOF_PAUSE_MS = 100;
 // Leave time to release the lock before docker stop's default 10 s SIGKILL grace expires.
 export const STACK_LOCK_SIGNAL_CLEANUP_TIMEOUT_MS = 5000;
 
@@ -22,6 +25,8 @@ export interface StackLockOptions {
   pollMs?: number;
   rounds?: number;
   maxBytes?: number;
+  proofTries?: number;
+  proofPauseMs?: number;
   releaseTries?: number;
   releasePauseMs?: number;
   heartbeat?: boolean;
@@ -48,6 +53,8 @@ function resolve(options: StackLockOptions): Resolved {
     pollMs: options.pollMs ?? STACK_LOCK_POLL_MS,
     rounds: options.rounds ?? STACK_LOCK_ROUNDS,
     maxBytes: options.maxBytes ?? STACK_LOCK_MAX_BYTES,
+    proofTries: Math.max(1, options.proofTries ?? STACK_LOCK_PROOF_TRIES),
+    proofPauseMs: options.proofPauseMs ?? STACK_LOCK_PROOF_PAUSE_MS,
     releaseTries: options.releaseTries ?? STACK_LOCK_RELEASE_TRIES,
     releasePauseMs: options.releasePauseMs ?? STACK_LOCK_RELEASE_PAUSE_MS,
     heartbeat: options.heartbeat ?? true,
@@ -89,9 +96,11 @@ export class StackLock {
   private seq = 1;
   private lostFlag = false;
   private failing = false;
+  private ownWriteFailed = false;
   private releasing: Promise<void> | undefined;
   private inFlight: Promise<'ok' | 'lost' | 'error'> | undefined;
   private timer: NodeJS.Timeout | undefined;
+  private checking: Promise<void> | undefined;
 
   constructor(
     private readonly installDir: string,
@@ -109,9 +118,84 @@ export class StackLock {
     return this.lostFlag;
   }
 
+  /** A phase needs a fresh proof from the store, not merely the absence of a failed heartbeat.
+   * Never recreate or refresh here: an absent or unreadable record proves no ownership. */
+  assertOwned(): Promise<void> {
+    if (this.lostFlag) return Promise.reject(this.lossRefusal());
+    if (this.releasing) return Promise.reject(this.lossRefusal());
+    return (this.checking ??= this.checkOwner().finally(() => {
+      this.checking = undefined;
+    }));
+  }
+
+  private async checkOwner(): Promise<void> {
+    // A heartbeat rewrites in place. Do not mistake its unfinished write for a foreign record.
+    await this.inFlight;
+    if (this.lostFlag) throw this.lossRefusal();
+    if (this.releasing) throw this.lossRefusal();
+    for (let attempt = 1; attempt <= this.options.proofTries; attempt++) {
+      let current;
+      try {
+        current = await inInstall(this.installDir, (dir) =>
+          dir.read(STACK_LOCK_NAME, this.options.maxBytes),
+        );
+      } catch {
+        if (attempt === this.options.proofTries) throw this.unprovenRefusal();
+        await this.options.sleep(this.options.proofPauseMs);
+        continue;
+      }
+      if (this.lostFlag) throw this.lossRefusal();
+      if (this.releasing) throw this.lossRefusal();
+      // breakStale can leave the name absent while restoring a displaced holder. Never infer
+      // takeover from absence, or recreate the record as a side effect of a phase proof.
+      if (!current) throw this.unprovenRefusal();
+      if (!parses(current.bytes)) {
+        if (this.ownWriteFailed) return;
+        throw this.unprovenRefusal();
+      }
+      const owner = decode(current.bytes);
+      if (!owner.token || !owner.holder || !owner.startedAt) throw this.unprovenRefusal();
+      if (
+        owner.token !== this.token ||
+        owner.holder !== this.options.holder ||
+        owner.startedAt !== this.startedAt
+      ) {
+        this.markLost();
+        throw this.lossRefusal();
+      }
+      return;
+    }
+  }
+
+  private unprovenRefusal(): UpgradeRefusal {
+    return new UpgradeRefusal(
+      'stack-lock-unproven',
+      'install stack lease ownership could not be proved; refusing the phase',
+    );
+  }
+
+  private lossRefusal(): UpgradeRefusal {
+    return new UpgradeRefusal(
+      'stack-lock-lost',
+      'install stack lease was lost; leaving the upgrade for recovery',
+    );
+  }
+
+  private markLost(): void {
+    if (this.lostFlag) return;
+    this.lostFlag = true;
+    this.stopTimer();
+    this.options.onEvent?.('stack-lock-lost', { token: this.token });
+  }
+
   beat(): Promise<'ok' | 'lost' | 'error'> {
     // After release has started a beat must never re-create the file.
     if (this.lostFlag || this.releasing) return Promise.resolve('lost');
+    if (this.checking)
+      return this.checking.then(
+        () => this.beat(),
+        () => (this.lostFlag ? ('lost' as const) : ('error' as const)),
+      );
     // A tick that arrives while a write is still in flight joins it rather than overlapping.
     this.inFlight ??= this.beatOnce().finally(() => {
       this.inFlight = undefined;
@@ -132,22 +216,38 @@ export class StackLock {
           return 'created' as const;
         }
         // A write that failed after truncating leaves our own record empty or partial: not a loss.
-        const torn = this.failing && current !== undefined && !parses(current.bytes);
-        if (decode(current.bytes).token !== this.token && !torn) return 'lost' as const;
-        await dir.overwrite(
-          STACK_LOCK_NAME,
-          encode(this.token, this.options.holder, this.startedAt, this.seq + 1),
-        );
+        const parsed = parses(current.bytes);
+        if (!parsed && !this.ownWriteFailed) throw this.unprovenRefusal();
+        const owner = decode(current.bytes);
+        if (parsed && (!owner.token || !owner.holder || !owner.startedAt))
+          throw this.unprovenRefusal();
+        if (
+          parsed &&
+          (owner.token !== this.token ||
+            owner.holder !== this.options.holder ||
+            owner.startedAt !== this.startedAt)
+        )
+          return 'lost' as const;
+        try {
+          await dir.overwrite(
+            STACK_LOCK_NAME,
+            encode(this.token, this.options.holder, this.startedAt, this.seq + 1),
+          );
+        } catch (error) {
+          // Only our own failed rewrite can explain torn bytes. A read or proof failure
+          // may have observed another holder's unfinished write and grants no tolerance.
+          this.ownWriteFailed = true;
+          throw error;
+        }
         return 'ok' as const;
       });
       if (outcome === 'ok' || outcome === 'created') {
         this.seq += 1;
         this.failing = false;
+        this.ownWriteFailed = false;
         return 'ok';
       }
-      this.lostFlag = true;
-      this.stopTimer();
-      this.options.onEvent?.('stack-lock-lost', { token: this.token });
+      this.markLost();
       return 'lost';
     } catch (error) {
       if (!this.failing) {
