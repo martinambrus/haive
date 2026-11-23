@@ -730,6 +730,34 @@ describe('off-list fix target reset protection', () => {
       }
     },
   );
+
+  it('refuses revise by the registered target name before reset or enqueue when the run list omits it', async () => {
+    h.state.readsAnswer = true;
+    const ctx = workflowTaskContext();
+    const target = 'epoch-job-target';
+    expect(stepRegistry.require(target).metadata.id).toBe(target);
+    const steps = await runList.buildRunList(ctx as never, db as never);
+    const list = vi
+      .spyOn(runList, 'buildRunList')
+      .mockResolvedValueOnce(steps.filter((step) => step.metadata.id !== target));
+    vi.mocked(resetStepAndDownstream).mockClear();
+    try {
+      await expect(
+        handleResult(db as never, ctx as never, 'epoch-job-step', {
+          status: 'revise',
+          row: { id: 'ts-1', round: 0 },
+          sourceStepId: 'epoch-job-step',
+          targetStepId: target,
+        } as never),
+      ).rejects.toMatchObject({ ids: [target] });
+      expect(vi.mocked(resetStepAndDownstream)).not.toHaveBeenCalled();
+      expect(h.state.add).not.toHaveBeenCalled();
+      expect(h.state.events).toEqual([]);
+      expect(h.state.taskWrites).toEqual([]);
+    } finally {
+      list.mockRestore();
+    }
+  });
 });
 
 describe('a job that resets steps itself', () => {
