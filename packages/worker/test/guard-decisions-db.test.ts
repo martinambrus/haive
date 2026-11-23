@@ -7,6 +7,7 @@ import { TaskCancelledError, type StepContext, type StepDefinition } from '@haiv
 import { z } from 'zod';
 import { evaluateGuardDecision } from '../src/step-engine/guard-decisions.js';
 import { skipGuardSpan } from '../src/step-engine/guard-span-skip.js';
+import { FIX_LOOP_REQUESTED } from '../src/step-engine/steps/workflow/_fix-loop.js';
 
 const url = process.env.GUARD_DECISIONS_TEST_URL;
 if (url && !new URL(url).pathname.startsWith('/guard_decisions_test'))
@@ -174,7 +175,7 @@ describe.skipIf(!url)('durable guard decisions on Postgres', () => {
       await db.update(schema.tasks).set({ currentRound: 1 }).where(eq(schema.tasks.id, taskId));
       await db.insert(schema.taskEvents).values({
         taskId,
-        eventType: 'fix_loop.requested',
+        eventType: FIX_LOOP_REQUESTED,
         payload: { round: 1 },
       });
       const next = { ...ctx, round: 1, taskStepId: current!.id, rerunGeneration: 4 };
@@ -238,7 +239,7 @@ describe.skipIf(!url)('durable guard decisions on Postgres', () => {
     if (fix)
       await db.insert(schema.taskEvents).values({
         taskId,
-        eventType: 'fix_loop.requested',
+        eventType: FIX_LOOP_REQUESTED,
         payload: { round },
       });
     return { ...ctx, round, taskStepId: current!.id, rerunGeneration: current!.rerunGeneration };

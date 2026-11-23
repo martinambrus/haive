@@ -16,7 +16,13 @@ import {
   type ExecutionContract,
 } from '@haive/shared/modularity';
 import { randomBytes, randomUUID } from 'node:crypto';
-import type { schema } from '@haive/database';
+import { schema } from '@haive/database';
+import { createFakeDb } from '@haive/database/testing';
+import {
+  FIX_LOOP_REQUESTED,
+  isFixRound,
+  recordFixLoopRequest,
+} from '../src/step-engine/steps/workflow/_fix-loop.js';
 import { TaskCancelledError, type StepContext, type StepDefinition } from '@haive/shared/step';
 import { z } from 'zod';
 import { sql } from 'drizzle-orm';
@@ -319,17 +325,41 @@ describe('guard decisions from loaded rows', () => {
     expect(await decide()).toEqual(decision);
     expect(evaluate).toHaveBeenCalledOnce();
   });
-  it.each(['revise', 'restart'])('re-evaluates a fix-target pin on a %s round', async () => {
-    pinFixTarget();
-    await save();
-    nextRound();
-    tx = {
-      select: () => ({ from: () => ({ where: async () => [] }) }),
-    } as unknown as StepContext['db'];
-    evaluate.mockResolvedValue(false);
-    expect(await decide()).toMatchObject({ round: 1, generation: 7, run: false });
-    expect(evaluate).toHaveBeenCalledTimes(2);
-  });
+  it.each(['revise', 'restart'])(
+    're-evaluates revise and reuses restart decisions: %s',
+    async (kind) => {
+      pinFixTarget();
+      const original = await save();
+      nextRound();
+      const events = createFakeDb({ taskEvents: schema.taskEvents });
+      tx = events.db as unknown as StepContext['db'];
+      if (kind === 'restart') {
+        // restartLoop returns loop_back, whose handler records this durable request.
+        await recordFixLoopRequest(tx, task.id, rows.plan!.id, {
+          round: 1,
+          sourceStepId: '09-gate-2-verify-approval',
+          diagnosis: 'Restart requested',
+        });
+        expect(events.rows(schema.taskEvents)).toEqual([
+          expect.objectContaining({
+            eventType: FIX_LOOP_REQUESTED,
+            payload: expect.objectContaining({ round: 1 }),
+          }),
+        ]);
+      } else {
+        expect(events.rows(schema.taskEvents)).toEqual([]);
+      }
+      expect(await isFixRound({ ...ctx, db: tx })).toBe(kind === 'restart');
+      evaluate.mockResolvedValue(false);
+      if (kind === 'restart') {
+        expect(await decide()).toEqual({ ...original, round: 1, generation: 7 });
+        expect(evaluate).toHaveBeenCalledOnce();
+      } else {
+        expect(await decide()).toMatchObject({ round: 1, generation: 7, run: false });
+        expect(evaluate).toHaveBeenCalledTimes(2);
+      }
+    },
+  );
   it('keeps same-round evaluation for a no-target pin at round one', async () => {
     await save();
     nextRound();
