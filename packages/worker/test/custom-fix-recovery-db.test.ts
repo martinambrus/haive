@@ -490,6 +490,78 @@ describe.skipIf(!url)('recovery of a fix round on Postgres', () => {
     });
 
     describe('atomic Accept findings', () => {
+      it.each(['task_moved', 'row_not_owned', 'revive_refused', 'fence.reviveFailed'] as const)(
+        '%s refuses Accept without accepting findings or recording a decision',
+        async (cut) => {
+          const failed = cut === 'revive_refused' || cut === 'fence.reviveFailed';
+          const id = await seedTask(leg, {
+            currentRound: 1,
+            ...(failed ? { status: 'failed', completedAt: new Date() } : {}),
+            ...(cut === 'revive_refused'
+              ? { repositoryId: null, metadata: { anchorRepositoryId: repositoryId } }
+              : {}),
+          });
+          const source = await seedRow(leg, id, 'REVIEW', 1, 'waiting_form');
+          const [finding] = await db
+            .insert(schema.reviewFindings)
+            .values({
+              taskId: id,
+              taskStepId: source.id,
+              stepId: source.stepId,
+              round: 1,
+              fingerprint: 'refused-open',
+              reviewerId: 'reviewer',
+              severity: 'high',
+              issue: 'Accept must land before this finding is accepted',
+            })
+            .returning();
+          const ctx = await ctxFor(leg, id);
+          // Interleave after pickup. The failed-task variant admits revival, writes the
+          // decision, then loses the pointer fence; the whole transaction must roll back.
+          if (cut === 'task_moved' || cut === 'fence.reviveFailed')
+            await db
+              .update(schema.tasks)
+              .set({ orchestrationEpoch: BASE_EPOCH + 1 })
+              .where(eq(schema.tasks.id, id));
+          if (cut === 'row_not_owned')
+            await db
+              .update(schema.taskSteps)
+              .set({ status: 'pending' })
+              .where(eq(schema.taskSteps.id, source.id));
+          const beforeTask = await taskOf(id);
+          const beforeRow = await rowOf(source.id);
+          const logged = vi.spyOn(logger, 'warn');
+          try {
+            await expect(
+              resolveFixLoopGate(db, ctx, source, 'accept', 1, ''),
+            ).resolves.toBeUndefined();
+            expect(logged).toHaveBeenCalledExactlyOnceWith(
+              {
+                taskId: id,
+                stepId: source.stepId,
+                round: 1,
+                action: 'accept',
+                reason: cut === 'fence.reviveFailed' ? 'task_moved' : cut,
+                ...(cut === 'revive_refused' ? { refusal: 'no-repository' } : {}),
+              },
+              expect.any(String),
+            );
+            expect(await taskOf(id)).toEqual(beforeTask);
+            expect(await rowOf(source.id)).toEqual(beforeRow);
+            expect(await eventsOf(id)).toEqual([]);
+            expect(h.adds).toEqual([]);
+            expect(ctx.orchestrationEpoch).toBe(BASE_EPOCH);
+            expect(
+              await db.query.reviewFindings.findMany({
+                where: eq(schema.reviewFindings.taskId, id),
+              }),
+            ).toEqual([finding]);
+          } finally {
+            logged.mockRestore();
+          }
+        },
+      );
+
       it.each(['commit', 'pointer_failure', 'telemetry_failure'] as const)(
         '%s preserves the gate decision and finding scope',
         async (cut) => {
