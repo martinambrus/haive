@@ -424,7 +424,7 @@ Retry.
 A Retry's advance waits behind a pass still running, so that pass must not keep what the Retry
 reset. A task Retry's START, which only a task that never reached a step still takes, runs its first
 step itself rather than through an advance, so it takes that step's hold as well. Every write step-runner makes to a pass's row, and every status the DAG executor and the
-merge resolver set on it, and every merge-state write of the merge resolver (`saveMergeState`, in a dir section or out of one: a section's
+merge resolver set on it, and every RAG index banner the onboarding and workflow RAG steps write on their own row, and every merge-state write of the merge resolver (`saveMergeState`, in a dir section or out of one: a section's
 epoch check is made once, and a Retry writes its row before the epoch), goes through `updateOwnedStep` (`step-ownership.ts`), which lands only
 while the row is still the pass's own, not `pending` (a Retry), `skipped` (a Skip) or `failed` (a
 Stop, which fails the row without moving the task's epoch). A note added to a step's warning goes through
@@ -432,7 +432,8 @@ Stop, which fails the row without moving the task's epoch). A note added to a st
 caller read its row is kept. The notes belong to the attempt: a retry note inside it appends the same way (so the
 codex fallback and merge notes stay beside "Attempt 2 ..."), and only a new attempt (a Retry, a reset, a per-step CLI
 switch) clears the column. A RAG index banner still sets or clears the whole column on purpose: it is a snapshot of
-the repository's embedding state, and a healthy run must clear a stale one.
+the repository's embedding state, and a healthy run must clear a stale one; it is still an owned write, so a
+superseded pass's banner (after a Retry, Stop or Skip) is refused rather than landing on the row that replaced it.
 A run a pass records for its row goes
 the same way (`insertOwnedRun`, at every insert site in step-runner, the merge resolver and the DAG
 executor), and so does a fan-out's reservation: the row is locked while it is still the pass's own,
