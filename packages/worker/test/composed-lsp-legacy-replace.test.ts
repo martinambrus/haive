@@ -308,6 +308,39 @@ describe('refused replacement', () => {
 });
 
 describe('replacement provider read under the lock', () => {
+  it('refuses providers under the lock when a newer codex is enabled and chosen while claude remains the default', async () => {
+    const r = await makeLegacy({
+      providers: [
+        { id: CLAUDE, name: 'claude-code', enabled: true },
+        { id: CODEX, name: 'codex', enabled: false },
+      ],
+      stored: 'absent',
+      replace: true,
+    });
+    r.fake.patch(schema.tasks, TASK, { cliProviderId: null });
+    r.fake.patch(schema.cliProviders, CLAUDE, { createdAt: new Date(1) });
+    r.fake.patch(schema.cliProviders, CODEX, { createdAt: new Date(2) });
+    const before = structuredClone([templates(r), r.fake.rows(schema.tasks)]);
+    let enabledUnderLock = false;
+    r.fake.hooks.beforeInsert = (table) => {
+      if (table === schema.envTemplates) {
+        enabledUnderLock = true;
+        r.fake.patch(schema.cliProviders, CODEX, { enabled: true });
+        r.fake.insert(schema.taskStepCliChoices, {
+          taskId: TASK,
+          stepId: '05-implement',
+          role: 'default',
+          cliProviderId: CODEX,
+        });
+      }
+    };
+    await expect(r.apply()).rejects.toMatchObject({ code: REFUSED, reason: 'providers' });
+    expect(enabledUnderLock).toBe(true);
+    expect(events(r)).toHaveLength(0);
+    expect(candidates(r)).toHaveLength(0);
+    expect([templates(r), r.fake.rows(schema.tasks)]).toEqual(before);
+  });
+
   it('decides on the provider read under the lock when the task has no default: refuses after an enable makes another provider the oldest', async () => {
     const r = await makeLegacy({
       defaultProvider: CLAUDE,
