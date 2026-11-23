@@ -1,4 +1,5 @@
 import { assertMatchingOutputDeclaration } from '../step-engine/step-output-contract.js';
+import { fixConsumerCapability } from '../step-engine/fix-consumer-capability.js';
 import type { Redis } from 'ioredis';
 import type { Database } from '@haive/database';
 import { logger } from '@haive/shared';
@@ -233,7 +234,11 @@ export function registerModuleSteps(
       ) {
         throw new Error(`${named} declares a loop target but does not loop`);
       }
-      return { ...composableEntry, stepId: namespaced(moduleId, composableEntry.stepId) };
+      return {
+        ...composableEntry,
+        fixConsumer: fixConsumerCapability(def),
+        stepId: namespaced(moduleId, composableEntry.stepId),
+      };
     });
 
     for (const seed of manifest.taskTypes ?? []) {

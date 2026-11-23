@@ -8,19 +8,29 @@ import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { createDatabase, schema, type Database } from '@haive/database';
 import { CONFIG_KEYS, configService, TASK_JOB_NAMES, type WorkflowType } from '@haive/shared';
 import {
+  assertExecutionContractSupported,
+  ExecutionContractError,
+  executionContractPaths,
   mergePromptStepCatalog,
   moduleManifestSchema,
+  parseExecutionContract,
   resolveTaskTypeAvailability,
   type ExecutionPredicateDeclaration,
 } from '@haive/shared/modularity';
 import { readStepCatalog } from '@haive/shared/modularity-server';
 import { z } from 'zod';
-import { reconcileDeadTasks, reviveDeadTask } from '../src/queues/dead-task-boot.js';
+import {
+  deadTaskResolution,
+  reconcileDeadTasks,
+  reviveDeadTask,
+} from '../src/queues/dead-task-boot.js';
 import type { DeadTaskBootDeps, DeadTaskView } from '../src/queues/dead-task-boot.js';
 import { redriveStalledTasks, type StalledRedriveDeps } from '../src/queues/stalled-redrive.js';
 import { processTaskJob, setContainerCleanupRunner } from '../src/queues/task-queue.js';
 import { advanceGuardSpan } from '../src/step-engine/guard-span-skip.js';
-import { stepRegistry } from '../src/step-engine/registry.js';
+import { StepRegistry, stepRegistry } from '../src/step-engine/registry.js';
+import { registerModuleSteps } from '../src/modules/loader.js';
+import { syncStepCatalog } from '../src/step-engine/step-catalog.js';
 import type { StepDefinition } from '../src/step-engine/step-definition.js';
 import { rolePlan } from './replacement-fixtures.js';
 
@@ -91,6 +101,7 @@ const EMAIL_INDEX = 'guard-gates-test-user';
 const IDS = ['gg-plan', 'gg-a', 'gg-b', 'gg-report'];
 const ENTRY = 'gg-a';
 const MODULE_TARGET = 'module.gg.repair';
+const MINING_TARGET = 'module.gg.mining';
 const DEAD_AT = new Date('2026-10-14T08:00:00.000Z');
 const ADVANCE = TASK_JOB_NAMES.ADVANCE_STEP;
 const START = TASK_JOB_NAMES.START;
@@ -127,6 +138,7 @@ interface Shape {
   strategy: Strategy;
   snapshot: string[] | null;
   derivedTask?: boolean;
+  namedFixRefusal?: string;
   expected: Verdict;
 }
 
@@ -194,6 +206,15 @@ const SHAPES: Shape[] = [
       workerStart: 'runs-no-guard-call',
       ...WORKER_RUNS,
     },
+  },
+  {
+    name: 'mining step declaring fixConsumer is not a capable fix target',
+    contract: { ...EMPTY, fixTarget: { stepId: MINING_TARGET, capabilityVersion: 1 } },
+    strategy: 'static',
+    snapshot: [...IDS, MINING_TARGET],
+    namedFixRefusal: MINING_TARGET,
+    // Stored-pin re-entry knows no executable metadata; locked create uses the catalog.
+    expected: { availability: 'refused', create: 'refused', ...API_ADMITS, ...WORKER_KILLS },
   },
   {
     name: 'entry at first index',
@@ -308,7 +329,10 @@ function stub(id: string, index: number): StepDefinition {
       return {};
     },
     ...(id === IDS[0] ? { guardPredicates: { guard: predicate } } : {}),
-    ...(id === MODULE_TARGET ? { fixConsumer: { version: 1 }, editsCodeOrTests: true } : {}),
+    ...([MODULE_TARGET, MINING_TARGET].includes(id)
+      ? { fixConsumer: { version: 1 }, editsCodeOrTests: true }
+      : {}),
+    ...(id === MINING_TARGET ? { agentMining: {} } : {}),
   } as StepDefinition;
 }
 
@@ -477,7 +501,37 @@ describe.skipIf(!url)('every gate agrees on the same pin, on Postgres', () => {
       name: 'Gg',
       installedVersion: '1',
     });
-    for (const [index, stepId] of [...IDS, MODULE_TARGET].entries())
+    const moduleRegistry = new StepRegistry();
+    const [loaded] = registerModuleSteps(moduleRegistry, [
+      {
+        packageName: '@haive/module-gg',
+        manifest: {
+          id: 'gg',
+          name: 'Gg',
+          version: '1',
+          schemaVersion: 1,
+          composableSteps: ['repair', 'mining'].map((stepId) => ({
+            stepId,
+            label: stepId,
+            group: 'gg',
+            requires: [],
+            provides: [],
+            dispatchesCli: false,
+            fixConsumer: { version: 1 },
+          })),
+        },
+        steps: [MODULE_TARGET, MINING_TARGET].map((id, index) => {
+          const def = stub(id, IDS.length + index);
+          return { ...def, metadata: { ...def.metadata, id: id.split('.').at(-1)! } };
+        }),
+      },
+    ]);
+    await syncStepCatalog(
+      db,
+      moduleRegistry,
+      new Map(loaded!.composable.map((entry) => [entry.stepId, entry])),
+    );
+    for (const [index, stepId] of IDS.entries())
       await db
         .insert(schema.stepCatalog)
         .values({
@@ -533,7 +587,9 @@ describe.skipIf(!url)('every gate agrees on the same pin, on Postgres', () => {
           executionContract: shape.contract,
         })
         .onConflictDoNothing();
-    [...IDS, MODULE_TARGET].forEach((id, index) => stepRegistry.override(stub(id, index)));
+    [...IDS, MODULE_TARGET, MINING_TARGET].forEach((id, index) =>
+      stepRegistry.override(stub(id, index)),
+    );
     setContainerCleanupRunner(async () => 0);
   });
 
@@ -628,10 +684,34 @@ describe.skipIf(!url)('every gate agrees on the same pin, on Postgres', () => {
     const dead = await task(id);
     const count = (await events(id, 'task.dead')).length;
     if (dead.deadAt === null) return count === 0 ? 'alive' : 'alive-with-dead-event';
+    const namedTarget = SHAPES.find((_, index) => slugOf(index) === dead.type)?.namedFixRefusal;
+    if (namedTarget) expect(dead.deadReason).toContain(namedTarget);
     return count === 1 ? 'dead-once' : `dead-${count}-events`;
   };
 
-  const gates: Record<keyof Verdict, (index: number) => Promise<string>> = {
+  const gates: Record<keyof Verdict | 'shared', (index: number) => Promise<string>> = {
+    async shared(index) {
+      const shape = SHAPES[index]!;
+      if (shape.contract == null) return 'supported';
+      const stored = await readStepCatalog(db, { ordered: true });
+      try {
+        assertExecutionContractSupported(shape.contract, {
+          staticPinnedList: shape.strategy === 'static',
+          stepIds: shape.snapshot ?? undefined,
+        });
+        executionContractPaths(
+          shape.snapshot ?? [],
+          stored.composable,
+          parseExecutionContract(shape.contract),
+          executionPredicates(),
+        );
+        return 'supported';
+      } catch (error) {
+        if (!(error instanceof ExecutionContractError)) throw error;
+        if (shape.namedFixRefusal) expect(error.message).toContain(shape.namedFixRefusal);
+        return 'refused';
+      }
+    },
     async availability(index) {
       const shape = SHAPES[index]!;
       const [def] = await db
@@ -651,6 +731,15 @@ describe.skipIf(!url)('every gate agrees on the same pin, on Postgres', () => {
       if (result.available) return 'available';
       const named = result.issues?.some((issue) => issue.kind === REFUSAL_CODE) === true;
       if (!named) throw new Error(`refused for ${result.reason}, not the execution contract`);
+      if (shape.namedFixRefusal)
+        expect(result.issues).toEqual(
+          expect.arrayContaining([
+            expect.objectContaining({
+              kind: REFUSAL_CODE,
+              reason: expect.stringContaining(shape.namedFixRefusal),
+            }),
+          ]),
+        );
       return 'refused';
     },
     async create(index) {
@@ -661,7 +750,14 @@ describe.skipIf(!url)('every gate agrees on the same pin, on Postgres', () => {
         );
         return 'admitted';
       } catch (error) {
-        if (isHttp(error) && error.status === 409 && error.code === REFUSAL_CODE) return 'refused';
+        if (isHttp(error) && error.status === 409 && error.code === REFUSAL_CODE) {
+          if (SHAPES[index]!.namedFixRefusal)
+            expect(error).toHaveProperty(
+              'message',
+              expect.stringContaining(SHAPES[index]!.namedFixRefusal!),
+            );
+          return 'refused';
+        }
         throw error;
       }
     },
@@ -737,6 +833,10 @@ describe.skipIf(!url)('every gate agrees on the same pin, on Postgres', () => {
         deadReason: 'seeded',
       });
       const before = await task(id);
+      if (SHAPES[index]!.namedFixRefusal)
+        expect(deadTaskResolution(before, SHAPES[index]!.strategy).supportReason).toContain(
+          SHAPES[index]!.namedFixRefusal,
+        );
       const view: DeadTaskView = {
         id,
         userId,
@@ -816,7 +916,7 @@ describe.skipIf(!url)('every gate agrees on the same pin, on Postgres', () => {
     async (_name, index) => {
       const verdict: Record<string, string> = {};
       for (const [gate, run] of Object.entries(gates) as [
-        keyof Verdict,
+        keyof typeof gates,
         (i: number) => Promise<string>,
       ][]) {
         try {
@@ -825,7 +925,10 @@ describe.skipIf(!url)('every gate agrees on the same pin, on Postgres', () => {
           verdict[gate] = `error:${error instanceof Error ? error.name : typeof error}`;
         }
       }
-      expect(verdict).toEqual(SHAPES[index]!.expected);
+      expect(verdict).toEqual({
+        shared: SHAPES[index]!.expected.availability === 'available' ? 'supported' : 'refused',
+        ...SHAPES[index]!.expected,
+      });
     },
     60_000,
   );

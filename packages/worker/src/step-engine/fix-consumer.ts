@@ -11,6 +11,7 @@ import type { StepContext } from '@haive/shared/step';
 import { isFixRound } from './steps/workflow/_fix-loop.js';
 import type { StepDefinition } from './step-definition.js';
 import type { StepRegistry } from './registry.js';
+import { fixConsumerCapability } from './fix-consumer-capability.js';
 
 export interface PinnedFixTarget {
   stepId: string;
@@ -102,8 +103,7 @@ export function fixRoundTargetDef(
 function isCapableModuleStep(target: PinnedFixTarget, def: StepDefinition | undefined): boolean {
   return (
     parseStepId(target.stepId)?.kind === 'module' &&
-    def?.fixConsumer?.version === target.capabilityVersion &&
-    def.agentMining === undefined
+    fixConsumerCapability(def)?.version === target.capabilityVersion
   );
 }
 
