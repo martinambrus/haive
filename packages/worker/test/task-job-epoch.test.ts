@@ -748,13 +748,13 @@ describe('a job that resets steps itself', () => {
     uncapped: true,
   };
 
-  it('holds the task at the epoch its own reset moved it to', async () => {
+  it('keeps the original epoch when the revise transaction throws', async () => {
     const ctx = workflowTaskContext();
-    // The reset is the job's own, so a failure after it must land at the new epoch.
+    // The reset rolls back with the failed handoff, so the job retains its original epoch.
     await expect(
       handleResult(db as never, ctx as never, 'epoch-job-step', revise as never),
     ).rejects.toThrow('the job went no further');
-    expect(ctx.orchestrationEpoch).toBe(7);
+    expect(ctx.orchestrationEpoch).toBe(5);
   });
 
   it('hands nothing off when its reset finds the task moved on', async () => {
@@ -769,7 +769,7 @@ describe('a job that resets steps itself', () => {
       1,
       5,
       false,
-      [],
+      ['ts-1'],
       ctx.executionContract,
     );
     expect(ctx.orchestrationEpoch).toBe(5);

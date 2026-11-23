@@ -2974,13 +2974,6 @@ export async function handleResult(
       // preserved, per-card timer, terminal re-opens on the fresh row) — mirrors loop_back.
       const selfLoop = result.targetStepId === result.sourceStepId;
       const targetRound = selfLoop ? result.row.round : result.row.round + 1;
-      await record(db, ctx.taskId, result.row.id, 'step.revise', {
-        stepId,
-        sourceStepId: result.sourceStepId,
-        targetStepId: result.targetStepId,
-        round: targetRound,
-        endedAt: endedAtOf(result.row),
-      });
       // A late editor can leave a validation-only round with no revise target
       // row. Reset from the first existing downstream row, as Continue does.
       let resetFrom = result.targetStepId;
@@ -2999,29 +2992,66 @@ export async function handleResult(
         });
         resetFrom = resetRange.find((id) => prior.some((row) => row.stepId === id)) ?? resetFrom;
       }
-      const reset = await resetStepAndDownstream(
-        db,
-        ctx.taskId,
-        resetFrom,
-        targetRound,
-        ctx.orchestrationEpoch,
-        false,
-        [],
-        ctx.executionContract,
-      );
-      if (reset === 'superseded') {
+      // Reset runs, then the ordered step batch (including the source), then
+      // the task. A refused handoff rolls back both the reset and its event.
+      let entered;
+      try {
+        entered = await db.transaction(async (tx) => {
+          const reset = await resetStepAndDownstream(
+            tx,
+            ctx.taskId,
+            resetFrom,
+            targetRound,
+            ctx.orchestrationEpoch,
+            false,
+            [result.row.id],
+            ctx.executionContract,
+          );
+          if (reset === 'superseded') throw new StepSupersededError(result.row.id);
+          // A self-revise resets its own row to pending under the reset's batch.
+          // A fork keeps the source as it was and must still own it after that batch.
+          if (!selfLoop && !(await lockOwnedStep(tx, result.row.id)))
+            throw new StepSupersededError(result.row.id);
+          if (selfLoop && !reset) return { missing: true as const };
+          const current = await tx.query.tasks.findFirst({
+            where: eq(schema.tasks.id, ctx.taskId),
+            columns: { currentStepId: true, currentRound: true },
+          });
+          if (
+            !current ||
+            (current.currentStepId != null &&
+              (current.currentStepId !== stepId || current.currentRound !== result.row.round))
+          )
+            throw new StepSupersededError(result.row.id);
+          const epoch = reset?.newEpoch ?? ctx.orchestrationEpoch;
+          const pointed = await markTaskRunningWithStep(
+            tx,
+            ctx.taskId,
+            target.metadata.id,
+            computeGlobalStepIndex(target.metadata.workflowType, target.metadata.index),
+            targetRound,
+            { epoch },
+          );
+          if (!pointed) throw new StepSupersededError(result.row.id);
+          await record(tx, ctx.taskId, result.row.id, 'step.revise', {
+            stepId,
+            sourceStepId: result.sourceStepId,
+            targetStepId: result.targetStepId,
+            round: targetRound,
+            endedAt: endedAtOf(result.row),
+          });
+          return { epoch };
+        });
+      } catch (err) {
+        if (!(err instanceof StepSupersededError)) throw err;
         logger.info(
           { taskId: ctx.taskId, stepId, targetStepId: result.targetStepId },
-          'revise not entered: the task moved to a newer epoch before its reset',
+          'revise not entered: its source or task moved before the hand-off',
         );
         return;
       }
-      // The reset moved the task to a new epoch, and this job holds it there from now on.
-      if (reset) ctx.orchestrationEpoch = reset.newEpoch;
-      // An in-place self-revise REQUIRES the existing row. A forked round legitimately has
-      // no row yet — reset is then a crash-safety no-op (only resets a stale terminal row),
-      // exactly as in loop_back; upsertRow materializes the fresh round-N rows.
-      if (selfLoop && !reset) {
+      // An in-place self-revise requires its existing row. A fork may have none.
+      if ('missing' in entered) {
         await markTaskFailed(
           db,
           ctx.taskId,
@@ -3030,21 +3060,8 @@ export async function handleResult(
         );
         return;
       }
-      const pointed = await markTaskRunningWithStep(
-        db,
-        ctx.taskId,
-        target.metadata.id,
-        computeGlobalStepIndex(target.metadata.workflowType, target.metadata.index),
-        targetRound,
-        { epoch: ctx.orchestrationEpoch },
-      );
-      if (!pointed) {
-        logger.info(
-          { taskId: ctx.taskId, stepId, targetStepId: result.targetStepId },
-          'revise not entered: the task moved to a newer epoch before its hand-off',
-        );
-        return;
-      }
+      // Only a committed handoff transfers this job to the reset's new epoch.
+      ctx.orchestrationEpoch = entered.epoch;
       await enqueueAdvance(
         ctx.taskId,
         ctx.userId,

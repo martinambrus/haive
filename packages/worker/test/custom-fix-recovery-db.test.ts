@@ -475,6 +475,132 @@ describe.skipIf(!url)('recovery of a fix round on Postgres', () => {
     });
 
     if (!leg.pin)
+      describe('atomic revise', () => {
+        const revise = async (
+          id: string,
+          source: StepRow,
+          ctx?: ResolvedTaskContext,
+          self = false,
+        ) =>
+          handleResult(db, ctx ?? (await ctxFor(leg, id)), source.stepId, {
+            status: 'revise',
+            row: source,
+            sourceStepId: source.stepId,
+            targetStepId: self ? source.stepId : leg.ids.TARGET,
+          });
+
+        it('a superseded reset leaves no revise event or reset', async () => {
+          const id = await seedTask(leg);
+          const source = await seedRow(leg, id, 'REVIEW', 0, 'done');
+          const target = await seedRow(leg, id, 'TARGET', 1, 'done');
+          const ctx = await ctxFor(leg, id);
+          const read = db.query.tasks.findFirst.bind(db.query.tasks);
+          const spy = vi.spyOn(db.query.tasks, 'findFirst').mockImplementationOnce((...args) => {
+            const query = read(...args);
+            const execute = query.execute.bind(query);
+            query.execute = async () => {
+              const task = await execute();
+              await db
+                .update(schema.tasks)
+                .set({ orchestrationEpoch: BASE_EPOCH + 1 })
+                .where(eq(schema.tasks.id, id));
+              return task;
+            };
+            return query;
+          });
+          try {
+            await revise(id, source, ctx);
+            expect(await eventsOf(id, 'step.revise')).toEqual([]);
+            expect(await rowOf(target.id)).toEqual(target);
+            expect((await taskOf(id)).currentStepId).toBe(source.stepId);
+            expect(ctx.orchestrationEpoch).toBe(BASE_EPOCH);
+            expect(h.adds).toEqual([]);
+          } finally {
+            spy.mockRestore();
+          }
+        });
+
+        it('a refused pointer rolls back the revise event and stale-row reset', async () => {
+          const id = await seedTask(leg);
+          const source = await seedRow(leg, id, 'REVIEW', 0, 'done');
+          const target = await seedRow(leg, id, 'TARGET', 1, 'done', { output: { stale: true } });
+          const ctx = await ctxFor(leg, id);
+          await db.update(schema.tasks).set({ status: 'failed' }).where(eq(schema.tasks.id, id));
+          const before = await taskOf(id);
+          await revise(id, source, ctx);
+          expect.soft(await eventsOf(id, 'step.revise')).toEqual([]);
+          expect.soft(await rowOf(target.id)).toEqual(target);
+          expect.soft(await taskOf(id)).toEqual(before);
+          expect.soft(ctx.orchestrationEpoch).toBe(BASE_EPOCH);
+          expect(h.adds).toEqual([]);
+        });
+
+        it.each([false, true])(
+          'a failed revise event rolls back the reset and pointer, then replays once (self=%s)',
+          async (self) => {
+            const id = await seedTask(leg);
+            const source = await seedRow(leg, id, 'REVIEW', 0, 'done', { endedAt: new Date() });
+            const target = self
+              ? source
+              : await seedRow(leg, id, 'TARGET', 1, 'done', { output: { stale: true } });
+            const before = await taskOf(id);
+            const ctx = await ctxFor(leg, id);
+            const name = `revise_${randomBytes(8).toString('hex')}`;
+            await db.execute(
+              sql.raw(
+                `CREATE FUNCTION ${name}() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.task_id = '${id}' AND NEW.event_type = 'step.revise' THEN RAISE EXCEPTION USING ERRCODE = 'P7572'; END IF; RETURN NEW; END $$`,
+              ),
+            );
+            await db.execute(
+              sql.raw(
+                `CREATE TRIGGER ${name} BEFORE INSERT ON task_events FOR EACH ROW EXECUTE FUNCTION ${name}()`,
+              ),
+            );
+            try {
+              await expect(revise(id, source, ctx, self)).rejects.toMatchObject({
+                cause: { code: 'P7572' },
+              });
+              expect(await rowOf(target.id)).toEqual(target);
+              expect(await taskOf(id)).toEqual(before);
+              expect(await eventsOf(id, 'step.revise')).toEqual([]);
+              expect(ctx.orchestrationEpoch).toBe(BASE_EPOCH);
+              expect(h.adds).toEqual([]);
+            } finally {
+              await db.execute(sql.raw(`DROP TRIGGER ${name} ON task_events`));
+              await db.execute(sql.raw(`DROP FUNCTION ${name}()`));
+            }
+            await revise(id, source, ctx, self);
+            expect(await rowOf(target.id)).toMatchObject({
+              status: 'pending',
+              output: null,
+              rerunGeneration: 1,
+            });
+            expect(await taskOf(id)).toMatchObject({
+              currentStepId: target.stepId,
+              currentRound: self ? 0 : 1,
+              orchestrationEpoch: BASE_EPOCH + 1,
+            });
+            expect(await eventsOf(id, 'step.revise')).toHaveLength(1);
+            expect(h.adds).toHaveLength(1);
+          },
+        );
+
+        it('a duplicate forked revise preserves the winner and records nothing', async () => {
+          const id = await seedTask(leg);
+          const source = await seedRow(leg, id, 'REVIEW', 0, 'done', { endedAt: new Date() });
+          const ctx = await ctxFor(leg, id);
+          await revise(id, source, ctx);
+          const target = await seedRow(leg, id, 'TARGET', 1, 'done', { output: { winner: true } });
+          const before = await taskOf(id);
+          await revise(id, source, ctx);
+          expect.soft(await rowOf(target.id)).toEqual(target);
+          expect.soft(await taskOf(id)).toEqual(before);
+          expect.soft(await eventsOf(id, 'step.revise')).toHaveLength(1);
+          expect.soft(h.adds).toHaveLength(1);
+        });
+      });
+
+    if (!leg.pin)
       describe('atomic escalation', () => {
         it.each(
           ['cap', 'oscillation'].flatMap((kind) =>
