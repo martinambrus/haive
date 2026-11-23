@@ -57,7 +57,7 @@ vi.mock('@haive/shared/claude-oauth', async (original) => ({
   ...(await original<any>()),
   exchangeClaudeAuthCode: h.exchange,
 }));
-import { configService, secretsService } from '@haive/shared';
+import { configService, envelopeEncrypt, secretsService } from '@haive/shared';
 import { saveCliLoginSecret } from '../src/lib/cli-login-secret.js';
 import { cliProviderRoutes } from '../src/routes/cli-providers.js';
 import { errorHandler } from '../src/middleware/error-handler.js';
@@ -343,8 +343,7 @@ describe.skipIf(!url)('CLI secrets commit with their audit, on Postgres', () => 
           names.slice(0, 55).map((secretName) => ({
             providerId: provider,
             secretName,
-            encryptedValue: 'synthetic',
-            encryptedDek: 'synthetic',
+            ...envelopeEncrypt(randomUUID(), KEK),
           })),
         );
         await db
@@ -388,8 +387,7 @@ describe.skipIf(!url)('CLI secrets commit with their audit, on Postgres', () => 
         await db.insert(schema.cliProviderSecrets).values({
           providerId: provider,
           secretName: 'API_KEY',
-          encryptedValue: 'before',
-          encryptedDek: 'before',
+          ...envelopeEncrypt(randomUUID(), KEK),
         });
         const before = await db.select().from(schema.cliProviders);
         const beforeSecrets = await secrets();

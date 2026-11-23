@@ -850,6 +850,26 @@ describe.skipIf(!url)(
         await expectWritten(token, ['A', 'B', created.id]);
       });
 
+      it.each(['', ' \t\n\u00a0'])(
+        'T748.1 clone skips a newest blank set token (%j)',
+        async (value) => {
+          await differ('B');
+          await upsertProviderSecret(db, {
+            providerId: rows.B.id,
+            name: TOKEN,
+            value,
+            masterKek: KEK,
+            onExisting: 'overwrite',
+          });
+          const before = await outside(['A', 'B', 'C', 'D', 'E', 'F']);
+          const res = await cloneOf('A');
+          expect(res.status).toBe(201);
+          const id = ((await res.json()) as { provider: { id: string } }).provider.id;
+          await expectJoined(id, 'A', 3);
+          expect(await outside(['A', 'B', 'C', 'D', 'E', 'F'])).toEqual(before);
+        },
+      );
+
       it('a clone of the older member joins the set and takes the login of the newest member', async () => {
         await differ('B');
         const before = await outside(['A', 'B', 'C', 'D', 'E', 'F']);

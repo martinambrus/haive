@@ -44,6 +44,7 @@ import {
   type SandboxImageBuildJobPayload,
   type SandboxImageRemoveJobPayload,
 } from '@haive/shared';
+import { configuredProviderSecrets } from '../lib/configured-provider-secrets.js';
 import { mayPullOllamaModel } from '../lib/ollama-pull-policy.js';
 import { HttpError, type AppEnv } from '../context.js';
 import { z } from 'zod';
@@ -1227,11 +1228,16 @@ cliProviderRoutes.post('/:id/clone', requireNewWorkAllowed, async (c) => {
         // Order: advisory auth lock, this set lock, then secret writes.
         const members = joinsSet ? await lockLoginSet(tx, row) : [];
 
-        const sourceSecrets = (
-          await tx.query.cliProviderSecrets.findMany({
-            where: eq(schema.cliProviderSecrets.providerId, source.id),
-          })
-        ).filter((s) => !fromSet(s.secretName));
+        const sourceSecrets = await configuredProviderSecrets(
+          (
+            await tx.query.cliProviderSecrets.findMany({
+              where: eq(schema.cliProviderSecrets.providerId, source.id),
+            })
+          ).filter((s) => !fromSet(s.secretName)),
+        );
+        const legacySecrets = Object.entries(split.secrets).filter(
+          ([name, value]) => !fromSet(name) && value.trim().length > 0,
+        );
         if (sourceSecrets.length > 0) {
           await tx.insert(schema.cliProviderSecrets).values(
             sourceSecrets.map((s) => ({
@@ -1244,8 +1250,8 @@ cliProviderRoutes.post('/:id/clone', requireNewWorkAllowed, async (c) => {
           );
         }
         const copied = new Set(sourceSecrets.map((s) => s.secretName));
-        for (const [name, value] of Object.entries(split.secrets)) {
-          if (!copied.has(name) && !fromSet(name)) {
+        for (const [name, value] of legacySecrets) {
+          if (!copied.has(name)) {
             await upsertProviderSecret(tx, {
               providerId: row.id,
               name,
@@ -1264,7 +1270,7 @@ cliProviderRoutes.post('/:id/clone', requireNewWorkAllowed, async (c) => {
             sourceProviderId: source.id,
             ...secretAuditMetadata([
               ...sourceSecrets.map((s) => s.secretName),
-              ...Object.keys(split.secrets).filter((name) => !fromSet(name)),
+              ...legacySecrets.map(([name]) => name),
             ]),
           },
         };

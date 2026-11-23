@@ -43,6 +43,7 @@ import {
   configService,
   DEFAULT_AGENT_RULES,
   envelopeDecrypt,
+  envelopeEncrypt,
   logger,
   secretsService,
 } from '@haive/shared';
@@ -959,3 +960,44 @@ it.each(['POST', 'PATCH'])(
     expect(authLock.release).toHaveBeenCalledOnce();
   },
 );
+
+describe('T748.1 clone ignores unconfigured secrets', () => {
+  it.each(['', ' \t\n\u00a0'])('skips blank legacy and stored values (%j)', async (blank) => {
+    const fake = setup(true);
+    const real = ` ${randomBytes(16).toString('hex')}\n`;
+    fake.patch(schema.cliProviders, PROVIDER, {
+      authMode: 'api_key',
+      envVars: { LEGACY_API_KEY: blank, FALLBACK_TOKEN: real, PLAIN: '' },
+    });
+    for (const [name, value] of Object.entries({
+      EMPTY_SECRET: blank,
+      REAL_TOKEN: real,
+      FALLBACK_TOKEN: blank,
+    })) {
+      fake.insert(schema.cliProviderSecrets, {
+        providerId: PROVIDER,
+        secretName: name,
+        ...envelopeEncrypt(value, KEK),
+      });
+    }
+    const before = fake.rows(schema.cliProviderSecrets);
+    const response = await send('POST', `/${PROVIDER}/clone`, {});
+    expect(response.status).toBe(201);
+    const clone = fake.rows(schema.cliProviders).find((row) => row.id !== PROVIDER)!;
+    expect(clone.envVars).toEqual({ PLAIN: '' });
+    const copied = fake
+      .rows(schema.cliProviderSecrets)
+      .filter((row) => row.providerId === clone.id);
+    expect(copied.map((row) => row.secretName).sort()).toEqual(['FALLBACK_TOKEN', 'REAL_TOKEN']);
+    expect(copied.every((row) => envelopeDecrypt(row as never, KEK) === real)).toBe(true);
+    expect(
+      fake.rows(schema.cliProviderSecrets).filter((row) => row.providerId === PROVIDER),
+    ).toEqual(before);
+    const event = fake.rows(schema.auditEvents).find((row) => row.action === 'cli_provider.clone')!;
+    expect(event.metadata).toMatchObject({
+      secretCount: 2,
+      secretNames: ['FALLBACK_TOKEN', 'REAL_TOKEN'],
+    });
+    expect((await response.text()).includes(real)).toBe(false);
+  });
+});

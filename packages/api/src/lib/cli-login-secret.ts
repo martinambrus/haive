@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { and, asc, desc, eq, inArray, sql } from 'drizzle-orm';
 import { schema, tryCliAuthLock, type Database } from '@haive/database';
 import { lockLoginSet, secretsService, upsertProviderSecret } from '@haive/shared';
+import { configuredProviderSecrets } from './configured-provider-secrets.js';
 import { insertAuditEvent, logAuditEvent, type AuditEvent } from './audit.js';
 
 /** Keep the captured credential, legacy-env cleanup and security trail together. */
@@ -208,7 +209,7 @@ export async function seedJoinerFromSet(
   const { userId, joinerId, members, assertHeld, keepGeneration } = opts;
   const others = members.filter((m) => m.id !== joinerId).map((m) => m.id);
   if (others.length === 0) return { events: [] };
-  const [source] = await tx
+  const candidates = await tx
     .select({
       providerId: schema.cliProviderSecrets.providerId,
       encryptedValue: schema.cliProviderSecrets.encryptedValue,
@@ -231,8 +232,8 @@ export async function seedJoinerFromSet(
         eq(schema.cliProviderSecrets.secretName, 'CLAUDE_CODE_OAUTH_TOKEN'),
       ),
     )
-    .orderBy(desc(schema.cliProviderSecrets.updatedAt), asc(schema.cliProviderSecrets.providerId))
-    .limit(1);
+    .orderBy(desc(schema.cliProviderSecrets.updatedAt), asc(schema.cliProviderSecrets.providerId));
+  const [source] = await configuredProviderSecrets(candidates);
   if (!source) return { events: [] };
   const event: AuditEvent = {
     actorUserId: userId,
