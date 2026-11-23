@@ -749,7 +749,7 @@ describe('a job that resets steps itself', () => {
   };
 
   it('holds the task at the epoch its own reset moved it to', async () => {
-    const ctx = { taskId: 'task-1', userId: 'user-1', orchestrationEpoch: 5 };
+    const ctx = workflowTaskContext();
     // The reset is the job's own, so a failure after it must land at the new epoch.
     await expect(
       handleResult(db as never, ctx as never, 'epoch-job-step', revise as never),
@@ -759,12 +759,7 @@ describe('a job that resets steps itself', () => {
 
   it('hands nothing off when its reset finds the task moved on', async () => {
     vi.mocked(resetStepAndDownstream).mockResolvedValueOnce('superseded');
-    const ctx = {
-      taskId: 'task-1',
-      userId: 'user-1',
-      orchestrationEpoch: 5,
-      executionContract: null,
-    };
+    const ctx = { ...workflowTaskContext(), executionContract: null };
     // Resolving at all shows it stopped before the task writes that follow a reset.
     await handleResult(db as never, ctx as never, 'epoch-job-step', revise as never);
     expect(vi.mocked(resetStepAndDownstream)).toHaveBeenLastCalledWith(

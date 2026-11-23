@@ -2981,10 +2981,28 @@ export async function handleResult(
         round: targetRound,
         endedAt: endedAtOf(result.row),
       });
+      // A late editor can leave a validation-only round with no revise target
+      // row. Reset from the first existing downstream row, as Continue does.
+      let resetFrom = result.targetStepId;
+      if (!selfLoop) {
+        const steps = await buildRunList(ctx, db);
+        const targetIndex = steps.findIndex((step) => step.metadata.id === result.targetStepId);
+        if (targetIndex < 0) throw new UnresolvedStepError([result.targetStepId]);
+        const resetRange = steps.slice(targetIndex).map((step) => step.metadata.id);
+        const prior = await db.query.taskSteps.findMany({
+          where: and(
+            eq(schema.taskSteps.taskId, ctx.taskId),
+            eq(schema.taskSteps.round, targetRound),
+            inArray(schema.taskSteps.stepId, resetRange),
+          ),
+          columns: { stepId: true },
+        });
+        resetFrom = resetRange.find((id) => prior.some((row) => row.stepId === id)) ?? resetFrom;
+      }
       const reset = await resetStepAndDownstream(
         db,
         ctx.taskId,
-        result.targetStepId,
+        resetFrom,
         targetRound,
         ctx.orchestrationEpoch,
         false,

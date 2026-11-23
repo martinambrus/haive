@@ -2037,16 +2037,23 @@ describe.skipIf(!url)('dead tasks at worker boot, on Postgres', () => {
       ]);
 
       await deliver(id);
-      // loop_back now resets the existing downstream row even without a target row.
+      // Both fork routes reset the existing downstream row without a target row.
       // That reset bumps the epoch; replay the lost handoff at its current epoch.
-      const redriveEpoch = kind.event === 'step.loop_back' ? 4 : 3;
+      const resetsFork = kind.event === 'step.loop_back' || kind.event === 'step.revise';
+      const redriveEpoch = resetsFork ? 4 : 3;
       expect((await task(id)).orchestrationEpoch).toBe(redriveEpoch);
+      if (resetsFork) {
+        const fresh = await db.query.taskSteps.findFirst({
+          where: eq(schema.taskSteps.id, otherRound.id),
+        });
+        expect(fresh).toMatchObject({ status: 'pending', output: null, rerunGeneration: 1 });
+      }
       await loseHandOff(id);
       await deliver(id, redriveEpoch);
 
       expect(await recorded(id, done)).toHaveLength(1);
       expect(await events(id, kind.event)).toHaveLength(3);
-      await expectHandedOn(id, kind.event === 'step.loop_back' ? 5 : 3);
+      await expectHandedOn(id, resetsFork ? 5 : 3);
     });
 
     it('records the event of a rerun after a Retry whose pass died before recording', async () => {

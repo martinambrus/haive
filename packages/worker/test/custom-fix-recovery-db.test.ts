@@ -936,7 +936,7 @@ describe.skipIf(!url)('recovery of a fix round on Postgres', () => {
 
     if (!leg.pin)
       describe('Retry into a validation-only next round', () => {
-        const rewoundValidation = async (reconcile: boolean, cap = 0) => {
+        const rewoundValidation = async (reconcile: boolean, cap = 0, revise = false) => {
           const editor = `${leg.type}-late-editor`;
           const checks = [...(reconcile ? [RECONCILE] : []), VALIDATE];
           const runListSnapshot = [
@@ -1023,9 +1023,31 @@ describe.skipIf(!url)('recovery of a fix round on Postgres', () => {
           expect((await roundRows()).map((r) => [r.stepId, r.status])).toEqual(
             checks.map((check) => [check, 'done']),
           );
-          await run(leg.ids.REVIEW, 0);
+          const review = stepRegistry.require(leg.ids.REVIEW);
+          if (revise)
+            stepRegistry.override({
+              ...review,
+              fixLoop: undefined,
+              reviseLoop: { evaluate: () => ({ targetStepId: leg.ids.TARGET }) },
+            });
+          try {
+            await run(leg.ids.REVIEW, 0);
+          } finally {
+            if (revise) stepRegistry.override(review);
+          }
           return { id, checks, source: await rowOf(source.id), roundRows, run };
         };
+
+        it('revise reruns the validation-only downstream rows after Retry', async () => {
+          const { id, checks, roundRows, run } = await rewoundValidation(true, 0, true);
+          expect
+            .soft((await roundRows()).map((r) => [r.stepId, r.status, r.output, r.rerunGeneration]))
+            .toEqual(checks.map((id) => [id, 'pending', null, 1]));
+          expect.soft((await taskOf(id)).orchestrationEpoch).toBe(BASE_EPOCH + 2);
+          await run(leg.ids.TARGET, 1);
+          for (const check of checks) await run(check, 1);
+          for (const check of checks) expect.soft(applied[check]).toBe(2);
+        });
 
         it.each([true, false])(
           'Continue reruns checks without a target row (07c=%s)',
