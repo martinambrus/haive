@@ -298,13 +298,15 @@ uses): a Retry through the api can leave such a row `done`, and Continue then sk
 implementation step and ran the next round on the old output. The reset starts at the first row of the
 target-to-end range that exists at that round, not at the target: a late editor can start a validation-only round
 (07c or 07b on) with no implementation row, and a reset keyed on the missing target reset nothing, so the round's
-completed checks were reused for the fresh change. loop_back's entry and a revise that forks into the next round reset the same way, as the insight continuation already did. Accept with a next step accepts the round's open findings in the same transaction as the gate and the pointer move (a savepoint isolates a telemetry failure); a refused or overtaken Accept leaves them open. Accept and Abort ignore the selector. Both user
+completed checks were reused for the fresh change. loop_back's entry and a revise that forks into the next round reset the same way, as the insight continuation already did. Accept and Abort ignore the selector. Both user
 preference tables stay unchanged. With The same CLI or a legacy answer lacking the field,
 dispatch follows the existing chain. Only that implementation round's default role reads
 the round slot. The newest of that slot and the task's ordinary default slot wins, ordered
 by PostgreSQL's full timestamp precision (the ordinary slot wins an exact tie). Thus a
 step-card pick made after the gate replaces its override, including a disabled or deleted
 provider; an earlier card choice stays below it. A later card clear replaces it too.
+
+Accept with a next step accepts the round's open review findings in the same transaction as the gate and the pointer move (a savepoint isolates a telemetry failure), so a refused or overtaken Accept leaves them open; Accept with no next step still accepts them in a separate statement after the gate closes (see [Review findings](review-findings.md)).
 
 Reaching the round cap or the oscillation guard publishes the escalation in one transaction under the same fences and lock order: the parked gate row, the next-round request (`recordFixLoopRequest`), the `step.loop_back` event, the waiting task status and the escalation event (`fix_loop.escalated` or `fix_loop.oscillation_detected`) commit together or not at all, so a crash between them can no longer leave a parked gate with no request for Continue to read. A pass that lost the race to a Retry, Stop or another pass writes none of them.
 

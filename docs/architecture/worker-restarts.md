@@ -792,9 +792,7 @@ restored by reverting code.
 A task is **dead** when its current step requires an uninstalled integration provider, or its data
 names a step this install no longer registers: a module was removed, or a step its run list names
 went away (`UnresolvedStepError`). A registered step that the task's run list does not hold (a loop_back, Continue or revise target the list lost) is the subclass `StepNotInRunListError`, with its own reason text and the same `unresolved` payload. A third cause is a registered producer that cannot execute its
-pinned output contract or host role policy (`pinned-step-support-unavailable`). An unsupported or
-malformed execution-contract pin is another cause (`invalid-execution-contract`): a custom fix
-target, a guarded span on a derived, non-static or non-unique run list, a span predicate no
+pinned output contract or host role policy (`pinned-step-support-unavailable`). An unsupported or malformed execution-contract pin is another cause (`invalid-execution-contract`): an off-list or non-capable custom fix target, a guarded span on a derived, non-static or non-unique run list, a span predicate no
 registered step provides, or a span whose first step leads the list. Behind that fence, which admits a custom fix target only when the step is capable (see [Modules](modules.md)), `deadTaskResolution` also asks `unsupportedPinnedFixTarget`
 (`step-engine/fix-consumer.ts`) about the pinned target: a target absent from the pinned run list,
 or registered but not a module step declaring the pinned `fixConsumer` version (or fanning out),
