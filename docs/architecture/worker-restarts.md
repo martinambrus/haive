@@ -336,7 +336,10 @@ caller. Once START has claimed, its redelivery is
 no longer a recovery path: a START that dies after the claim is recovered by the reconcile and the
 re-driver above, as any advance is.
 
-**A duplicate delivery re-drives the hand-off the step finished with.** An advance that finds its
+**A duplicate delivery re-drives the hand-off the step finished with.** A loop_back hand-off for a
+round the task has already left, or one whose fix-loop gate is already parked, is refused before it
+writes, and logged: a direct replay used to write the `fix_loop.requested` and escalation events a
+second time. An advance that finds its
 row already `done`, while the task still points at that step and round, re-drives the hand-off from
 the row (`finishedStepResult`, `step-runner.ts`) rather than as a plain `done`. The apply tail writes
 `done` for a fix-loop, restart or revise verdict too, and for a `fixLoopOnError` failure, whose
@@ -346,7 +349,8 @@ output by the one function the tail itself routes with (`finishedRoutingVerdict`
 cannot disagree on precedence. An answered fix-loop gate is finished from its answer instead
 (`resolveFixLoopGate`), so a verdict recomputed there cannot replace the person's decision with the
 step's own. An answer that reopens the task (continue, or accept with a next step) closes the gate,
-records the answer and points the task at its next step in one transaction, under the new-work fence
+records the answer, resets any stale row at the next round (Continue) and points the task at its
+next step in one transaction, the gate row taken in the ordered step-lock batch, under the new-work fence
 and then the repository lock when the task had failed, so a refused or overtaken reopen leaves the
 gate parked with nothing recorded. The refused answer stays saved on its row. A task Retry, a settle
 and a per-step CLI switch that reset a row to `pending` drop it
@@ -363,7 +367,8 @@ runs the file's SQL on Postgres, and `smoke:gate-reoffer` drives the real worker
 never-answered gate, a pre-answered one, a Stop and a healed legacy row. Abort, an accept with no
 next step, a dead run list and a continue with no routable target close the row before they act.
 A resolver that finds the gate no longer its own (`row_not_owned`: a Retry, Skip or Stop took the
-row), the task moved to a newer epoch (`task_moved`), the reopen of a failed task refused
+row), the task moved to a newer epoch (`task_moved`, which also covers a lost swap in Continue's
+reset), the reopen of a failed task refused
 (`revive_refused`, with the refusal's own reason) or no fix target to route to
 (`no_routable_target`) applies nothing and logs a `fix-loop gate answer not applied` warning naming
 the step, the action and that `reason`. On a task that failed before the
@@ -583,10 +588,17 @@ failed the task (which moves no epoch) keeps its error and `completed_at`. Such 
 revise, boot recovery's) compare-and-swaps that epoch in the write that bumps it, kept last as the
 api Retry keeps its own, and a lost swap rolls the whole reset back and hands nothing off. The
 hand-off after it points the task at the target only while the task is still at that epoch, and a
-fix round's request and `started` event are written in the same transaction: a new round has no row
-to reset, so no swap is taken there, and a round a Retry overtook would otherwise count toward the
-cap. That transaction first locks the source row while it is still the pass's own
-(`lockOwnedStep`), since a Retry writes the steps before it moves the epoch.
+fix round's request and `started` event are written in the same transaction, since a round a Retry overtook
+would otherwise count toward the cap. A new round usually has no row to reset, so no swap is taken; when a stale
+row exists at the next round, loop_back and gate Continue both reset it inside that transaction and take the swap
+there. That transaction follows the lock order below (runs, then one id-ordered batch of
+step rows, then the task row): it resets the next round's rows first, with the source row held in that ordered
+batch, then confirms the source is still the pass's own (`lockOwnedStep`, since a Retry writes the steps before it
+moves the epoch) and reads the task pointer again (a null pointer is not evidence of a move, as in the unlocked
+check). When the task no longer points at this step and round, it logs one line with the refusal's reason code
+and throws, so the reset rolls back with everything else. Two live passes of the same result therefore cannot
+both write the request and `started`, and a losing pass never commits a reset of the winner's fresh target row
+(which left the task pointing at a pending step with no job).
 
 **Writers of several step rows of one task take them first, as one batch in id order.** `task_steps.id` is a
 random uuid, so two transactions that write overlapping rows in the order their caller lists them, or their

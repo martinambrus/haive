@@ -293,7 +293,10 @@ and explains that the existing CLI choice will be used.
 
 Continue stores the choice in `task_step_cli_choices` under the task, implementation
 step and `fix:<round>:default` role, inside the existing fenced transaction that closes
-the gate and moves the task pointer. Accept and Abort ignore the selector. Both user
+the gate and moves the task pointer. The same transaction resets a terminal row already present
+at the next round for the target or a later step (`resetStepAndDownstream`, the reset loop_back
+uses): a Retry through the api can leave such a row `done`, and Continue then skipped the
+implementation step and ran the next round on the old output. Accept and Abort ignore the selector. Both user
 preference tables stay unchanged. With The same CLI or a legacy answer lacking the field,
 dispatch follows the existing chain. Only that implementation round's default role reads
 the round slot. The newest of that slot and the task's ordinary default slot wins, ordered
@@ -328,7 +331,8 @@ instead of failing the task. The same transaction restores the gate's `waiting_f
 clears its submitted values, stamps `waiting_started_at`, refreshes the eligible options and
 adds a fixed explanation to the form. It leaves the task waiting for the person, writes no
 round choice or continuation event and queues no next step. The original row-ownership and
-task-epoch fences still apply: an overtaken answer rolls every write back. Unrelated database
+task-epoch fences still apply: an overtaken answer rolls every write back, the reset of
+next-round rows included. Unrelated database
 or dispatch errors still propagate.
 
 ## Test edits during a repair
