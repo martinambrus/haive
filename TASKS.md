@@ -1013,7 +1013,7 @@ Follow-ups found by the #1313 driver:
 
 ### T749 · FNF[step-warning-notes] · attempt-scoped warning writes and the codex fallback's fence
 
-status: open · kind: design · found: #1307 driver 2026-11-21 · priority: P4
+status: done (#1324 fe4deb954, deployed 2026-11-23: notes belong to the attempt, retry notes append, a new attempt (Retry, reset, per-step CLI switch) clears them, RAG banner unchanged on purpose; the codex fallback note is fenced on its invocation; follow-ups T762) · kind: design · found: #1307 driver 2026-11-21 · priority: P4
 
 1. `retryWarning` (`worker/src/step-engine/step-runner.ts` ~:944, ~:3555, ~:4239) replaces the whole `warning_message`, wiping notes appended earlier in the attempt (the codex fallback, merge notes). Attempt-scoped on purpose, but the loss is real; decide whether a retry note should append or whether earlier notes belong to the attempt. PRE-EXISTING.
 2. The codex fallback write (`worker/src/queues/cli-exec/handlers.ts` ~:394) is fenced by status only: the cli-exec payload carries no generation, so a late invocation could annotate a retried attempt. The old write had no fence at all. PRE-EXISTING.
@@ -1118,6 +1118,16 @@ All PRE-EXISTING, minor, unless noted.
 2. Admin JSON carries `selects_own_providers` (whole-row spread, `task-types.ts` ~:188,465,559,630,845,855), but `AdminTaskType` (`web/src/lib/api-client.ts` ~:2640-2662) declares neither it nor `executionContract`, so an admin cannot see which module types skip the canary. A read-only badge on the admin task-types list.
 3. `api/test/task-type-own-providers.test.ts` ~:30-62 stubs the exact Drizzle select chain; a refactor of `readStepCatalog`/`readModuleStates` breaks it for unrelated reasons. Move the control into the real-Postgres matrix `task-type-definition.test.ts` (`TRAIT_ROWS`) as an own-providers row.
 4. Translator module (`martinambrus/haive-module-translator`), consequential: `README.md` ~:638 (M6) storage headroom. A tight consent quota can pass setup and then fail translation or render after paid work; the setup form's minimum does not reserve the headroom later passes need.
+
+### T762 · FNF[T749]: step warning column follow-ups (+3)
+
+status: open · kind: fix · found: T749 driver and review 2026-11-22 · priority: P4
+
+All PRE-EXISTING.
+
+1. Consequential: `web/src/lib/task-history.ts` ~:169 keys a headline ("finished with a warning") on `warningMessage` truthiness, against "a message column is display copy, never state" (AGENTS.md). Any stale or informational note becomes a state claim in the history panel. Key it on a structural signal, or drop the claim and show the note as text.
+2. Minor: the RAG writers update `task_steps` with a bare `ctx.db.update(taskSteps)` and no ownership fence (`_rag-index.ts` ~:647,1024, `10-rag-populate.ts` ~:443,814,1007), against `worker-restarts.md` (every pass write goes through `updateOwnedStep`). A superseded RAG pass can write its banner onto a retried row.
+3. Minor: `stepWarningAppend` (`worker/src/step-engine/step-ownership.ts` ~:92-95) dedups by substring (`strpos`), so a distinct shorter note contained in an earlier one is dropped. Retry notes carry their attempt number, so a clash is unlikely; dedup on whole notes if it bites.
 
 ### T721 · The Claude usage grant reaches sandbox environments
 
