@@ -1,4 +1,10 @@
 import {
+  composedLspAllowedSet,
+  resolvePreferredProvider,
+  type PreferredProviderRecord,
+} from '@haive/shared/cli-preferred-provider';
+import { parseImageReferences } from '@haive/shared/composed-image-references';
+import {
   ExecutionContractError,
   FIX_LOOP_TARGET_STEP_ID,
   executionContractSchema,
@@ -287,6 +293,101 @@ async function hidesInsightTriageSeat(
   return task?.autoActOnInsights !== true;
 }
 
+/** Read the same retained effective references as worker lspDispatchState, without readiness I/O. */
+async function loadComposedProviderSets(db: ReturnType<typeof getDb>, taskIds: string[]) {
+  const out = new Map<string, string[]>();
+  if (!taskIds.length) return out;
+  const tasks = await db
+    .select({
+      id: schema.tasks.id,
+      envTemplateId: schema.tasks.envTemplateId,
+      metadata: schema.tasks.metadata,
+      cliProviderId: schema.tasks.cliProviderId,
+    })
+    .from(schema.tasks)
+    .where(inArray(schema.tasks.id, taskIds));
+  const templateIds = [
+    ...new Set(tasks.flatMap((t) => (t.envTemplateId ? [t.envTemplateId] : []))),
+  ];
+  if (!templateIds.length) return out;
+  const templates = await db
+    .select({ id: schema.envTemplates.id, declaredDeps: schema.envTemplates.declaredDeps })
+    .from(schema.envTemplates)
+    .where(inArray(schema.envTemplates.id, templateIds));
+  for (const task of tasks) {
+    if (
+      templates.find((t) => t.id === task.envTemplateId)?.declaredDeps
+        ?.lspInstallContractVersion === 2
+    )
+      out.set(
+        task.id,
+        parseImageReferences(task.metadata)
+          .entries.filter((e) => e.effective)
+          .map((e) => e.providerId),
+      );
+  }
+  return out;
+}
+
+function effectiveStepProvider(args: {
+  providers: readonly (PreferredProviderRecord & { createdAt: Date })[];
+  composedIds: string[];
+  taskProviderId: string | null;
+  choices: Map<string, TaskCliChoice> | undefined;
+  stepId: string;
+  role: string;
+  round: number;
+  fixTarget: string | null | undefined;
+  ignoreSaved: boolean;
+  savedDefault: string | null;
+  savedRoles: Map<string, string>;
+}): { preferredId: string | null; effectiveId: string | null } {
+  const { providers, taskProviderId } = args;
+  const listed = (id: string | null | undefined) => !!id && providers.some((p) => p.id === id);
+  const slot = (role: string, round: number) =>
+    taskCliSlot(args.choices, args.stepId, role, round, args.fixTarget);
+  let id = taskProviderId;
+  let saved = false;
+  const read = (role: string, round: number): boolean => {
+    const choice = slot(role, round);
+    if (choice) {
+      if (listed(choice.cliProviderId)) {
+        id = choice.cliProviderId;
+        return true;
+      }
+      return role === 'default'; // default clear stops saved fallthrough; role clear falls to default
+    }
+    const pref = role === 'default' ? args.savedDefault : args.savedRoles.get(role);
+    if (!args.ignoreSaved && listed(pref)) {
+      id = pref!;
+      saved = true;
+      return true;
+    }
+    return false;
+  };
+  if (args.role === 'default' || !read(args.role, 0))
+    read('default', args.role === 'default' ? args.round : 0);
+  const preferred = resolvePreferredProvider({
+    providers,
+    preferredProviderId: id,
+    savedPreference: saved ? { taskProviderId } : undefined,
+    composedLspProviderIds: args.composedIds,
+  });
+  if (preferred.kind === 'locked') return { preferredId: null, effectiveId: null };
+  if (preferred.kind === 'disabled')
+    return { preferredId: preferred.provider.id, effectiveId: preferred.provider.id };
+  const allowed = composedLspAllowedSet(providers, args.composedIds)!;
+  return {
+    preferredId: preferred.providerId,
+    effectiveId:
+      preferred.providerId ??
+      resolveTaskCliProviderId(
+        null,
+        providers.filter((p) => allowed.has(p.id)),
+      ),
+  };
+}
+
 export async function enrichStepsWithCliPreferences<T extends { stepId: string; round?: number }>(
   db: ReturnType<typeof getDb>,
   flags: StepFlagMap,
@@ -298,6 +399,10 @@ export async function enrichStepsWithCliPreferences<T extends { stepId: string; 
 ): Promise<
   (T & {
     preferredCliProviderId: string | null;
+    /** Post-lock providers for display; an empty array is a dispatch refusal. */
+    effectiveCliProviderIds?: string[];
+    /** Post-lock explicit binding; null floats and must not count as a disable hold. */
+    effectivePreferredCliProviderId?: string | null;
     /** Active round choice cannot dispatch; never interpret it as a cleared slot. */
     roundCliUnavailable?: true;
     /** Per-step effort override (null = use the provider's configured effort);
@@ -341,12 +446,28 @@ export async function enrichStepsWithCliPreferences<T extends { stepId: string; 
       taskCliSlot(choicesByStep.get(s.stepId), s.stepId, 'default', s.round ?? round, fixTarget)
         ?.roundChoice,
   );
-  const ownedProviders = hasRoundChoice
-    ? await db
-        .select({ id: schema.cliProviders.id, enabled: schema.cliProviders.enabled })
-        .from(schema.cliProviders)
-        .where(eq(schema.cliProviders.userId, userId))
-    : [];
+  const composedSets = await loadComposedProviderSets(db, taskId ? [taskId] : []);
+  const composedIds = taskId ? composedSets.get(taskId) : undefined;
+  const [taskProvider] =
+    composedIds !== undefined
+      ? await db
+          .select({ cliProviderId: schema.tasks.cliProviderId })
+          .from(schema.tasks)
+          .where(eq(schema.tasks.id, taskId!))
+      : [];
+  const ownedProviders =
+    hasRoundChoice || composedIds !== undefined
+      ? await db
+          .select({
+            id: schema.cliProviders.id,
+            name: schema.cliProviders.name,
+            label: schema.cliProviders.label,
+            enabled: schema.cliProviders.enabled,
+            createdAt: schema.cliProviders.createdAt,
+          })
+          .from(schema.cliProviders)
+          .where(eq(schema.cliProviders.userId, userId))
+      : [];
   return steps.map((s) => {
     const roles = flags.get(s.stepId)?.cliRoles ?? undefined;
     const seats =
@@ -368,8 +489,44 @@ export async function enrichStepsWithCliPreferences<T extends { stepId: string; 
       if (choice) return choice.cliProviderId ? choice.effortLevel : null;
       return honor(saved);
     };
+    const effective =
+      composedIds !== undefined
+        ? (role: string) =>
+            effectiveStepProvider({
+              providers: ownedProviders,
+              composedIds,
+              taskProviderId: taskProvider?.cliProviderId ?? null,
+              choices,
+              stepId: s.stepId,
+              role,
+              round: s.round ?? round,
+              fixTarget,
+              ignoreSaved,
+              savedDefault: byStep.get(s.stepId) ?? null,
+              savedRoles: roleProviders,
+            })
+        : null;
+    const unavailable = unavailableRoundChoice(
+      taskCliSlot(choices, s.stepId, 'default', s.round ?? round, fixTarget),
+      ownedProviders,
+    );
+    const effectiveIds = effective
+      ? [
+          ...new Set(
+            ['default', ...(roles ?? []).map((r) => r.id), ...(seats ?? []).map((r) => r.id)]
+              .map((role) => effective(role).effectiveId)
+              .filter((id): id is string => !!id),
+          ),
+        ]
+      : undefined;
     return {
       ...s,
+      ...(effective
+        ? {
+            effectivePreferredCliProviderId: unavailable ? null : effective('default').preferredId,
+            effectiveCliProviderIds: unavailable ? [] : effectiveIds!,
+          }
+        : {}),
       preferredCliProviderId: provider('default', byStep.get(s.stepId) ?? null),
       preferredEffortLevel: effort('default', byStepEffort.get(s.stepId) ?? null),
       ...(unavailableRoundChoice(
@@ -447,6 +604,8 @@ export async function resolveCurrentStepCliProviderIds(
   const providerRows = await db
     .select({
       id: schema.cliProviders.id,
+      name: schema.cliProviders.name,
+      label: schema.cliProviders.label,
       enabled: schema.cliProviders.enabled,
       createdAt: schema.cliProviders.createdAt,
     })
@@ -467,6 +626,10 @@ export async function resolveCurrentStepCliProviderIds(
       .map((t) => t.id),
   );
 
+  const composedSets = await loadComposedProviderSets(
+    db,
+    tasks.map((t) => t.id),
+  );
   for (const task of tasks) {
     const stepId = task.currentStepId;
     const stepChoices = stepId ? choices.get(task.id)?.get(stepId) : undefined;
@@ -483,6 +646,38 @@ export async function resolveCurrentStepCliProviderIds(
       )
     ) {
       out.set(task.id, []);
+      continue;
+    }
+    const composedIds = composedSets.get(task.id);
+    if (composedIds !== undefined) {
+      const roles = [
+        ...((stepId ? miningSeats[stepId] : undefined) ?? []),
+        ...((stepId ? flags.get(stepId)?.cliRoles : undefined) ?? []),
+      ].filter(
+        (r) =>
+          !(
+            stepId === INSIGHT_STEP_ID &&
+            r.id === INSIGHT_TRIAGE_SEAT &&
+            !(INSIGHT_AUTO_ACTION_AVAILABLE && task.autoActOnInsights === true)
+          ),
+      );
+      const ids = ['default', ...roles.map((r) => r.id)].map(
+        (role) =>
+          effectiveStepProvider({
+            providers: providerRows,
+            composedIds,
+            taskProviderId: task.cliProviderId,
+            choices: stepChoices,
+            stepId: stepId ?? '',
+            role,
+            round: task.currentRound ?? 0,
+            fixTarget: fixTargets.get(task.id),
+            ignoreSaved: task.ignoreSavedStepClis,
+            savedDefault: (stepId ? prefs.byStep.get(stepId) : null) ?? null,
+            savedRoles: (stepId ? prefs.roleByStep.get(stepId) : null) ?? new Map(),
+          }).effectiveId,
+      );
+      out.set(task.id, [...new Set(ids.filter((id): id is string => !!id))]);
       continue;
     }
     const honor = (value: string | null): string | null =>

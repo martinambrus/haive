@@ -32,6 +32,7 @@ const PICKED_CLI = '00000000-0000-4000-8000-0000000000b3';
 function setup() {
   const fake = createFakeDb({
     tasks: schema.tasks,
+    envTemplates: schema.envTemplates,
     cliProviders: schema.cliProviders,
     taskStepCliChoices: schema.taskStepCliChoices,
     userStepCliPreferences: schema.userStepCliPreferences,
@@ -602,6 +603,7 @@ describe("the listing's usage strip for a task with no CLI of its own", () => {
 
   function providers(rows: { id: string; createdAt: Date; enabled?: boolean; userId?: string }[]) {
     const fake = createFakeDb({
+      tasks: schema.tasks,
       cliProviders: schema.cliProviders,
       taskStepCliChoices: schema.taskStepCliChoices,
       userStepCliPreferences: schema.userStepCliPreferences,
@@ -690,4 +692,46 @@ describe("the listing's usage strip for a task with no CLI of its own", () => {
     const out = await resolveCurrentStepCliProviderIds(db, flags, USER, [none()]);
     expect(out.get(TASK)).toEqual([]);
   });
+});
+
+describe('composed provider lock readers', () => {
+  it.each([true, false])(
+    'listing and detail skip a saved outside CLI, enabled=%s',
+    async (enabled) => {
+      const { fake, db, save } = setup();
+
+      const template = '00000000-0000-4000-8000-0000000000e1';
+      fake.insert(schema.envTemplates, {
+        id: template,
+        declaredDeps: { lspInstallContractVersion: 2 },
+      });
+      fake.insert(schema.tasks, {
+        id: TASK,
+        userId: USER,
+        cliProviderId: TASK_CLI,
+        envTemplateId: template,
+      });
+      fake.patch(schema.cliProviders, TASK_CLI, { name: 'claude-code' });
+      fake.patch(schema.cliProviders, SAVED_CLI, { enabled });
+      save('08c-code-review', SAVED_CLI);
+      save('08c-code-review', SAVED_CLI, 'peer-reviewer');
+      const [detail] = await enrichStepsWithCliPreferences(
+        db,
+        flags,
+        USER,
+        [{ stepId: '08c-code-review' }],
+        TASK,
+      );
+      expect(detail).toMatchObject({ effectiveCliProviderIds: [TASK_CLI] });
+      const listing = await resolveCurrentStepCliProviderIds(db, flags, USER, [
+        {
+          id: TASK,
+          currentStepId: '08c-code-review',
+          cliProviderId: TASK_CLI,
+          ignoreSavedStepClis: false,
+        },
+      ]);
+      expect(listing.get(TASK)).toEqual([TASK_CLI]);
+    },
+  );
 });
