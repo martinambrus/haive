@@ -9,7 +9,7 @@ vi.mock('@haive/database', async (original) => ({
   ...(await original<typeof import('@haive/database')>()),
   tryCliAuthLock: authLock.acquire,
 }));
-import { randomBytes } from 'node:crypto';
+import { randomBytes, randomUUID } from 'node:crypto';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const USER = vi.hoisted(() => '00000000-0000-4000-8000-0000000000a1');
@@ -894,6 +894,7 @@ it.each(['/', `/${PROVIDER}`])(
     const providers = path === '/' ? body.providers : [body.provider];
     expect(providers).toHaveLength(1);
     expect(providers[0]).not.toHaveProperty('authGeneration');
+    expect(secretsService.getMasterKek).not.toHaveBeenCalled();
   },
 );
 
@@ -962,48 +963,63 @@ it.each(['POST', 'PATCH'])(
 );
 
 describe('T748.1 clone ignores unconfigured secrets', () => {
-  it.each(['', ' \t\n\u00a0'])('skips blank legacy and stored values (%j)', async (blank) => {
-    const fake = setup(true);
-    const real = ` ${randomBytes(16).toString('hex')}\n`;
-    fake.patch(schema.cliProviders, PROVIDER, {
-      authMode: 'api_key',
-      envVars: { LEGACY_API_KEY: blank, FALLBACK_TOKEN: real, PLAIN: '' },
-    });
-    for (const [name, value] of Object.entries({
-      EMPTY_SECRET: blank,
-      REAL_TOKEN: real,
-      FALLBACK_TOKEN: blank,
-    })) {
-      fake.insert(schema.cliProviderSecrets, {
-        providerId: PROVIDER,
-        secretName: name,
-        ...envelopeEncrypt(value, KEK),
+  it.each(['', ' \t\n\u00a0'])(
+    'skips blank legacy values and exactly-empty stored values (%j)',
+    async (blank) => {
+      const fake = setup(true);
+      const real = ` ${randomBytes(16).toString('hex')}\n`;
+      fake.patch(schema.cliProviders, PROVIDER, {
+        authMode: 'api_key',
+        envVars: { LEGACY_API_KEY: blank, FALLBACK_TOKEN: real, PLAIN: '' },
       });
-    }
-    const before = fake.rows(schema.cliProviderSecrets);
-    const response = await send('POST', `/${PROVIDER}/clone`, {});
-    expect(response.status).toBe(201);
-    const clone = fake.rows(schema.cliProviders).find((row) => row.id !== PROVIDER)!;
-    expect(clone.envVars).toEqual({ PLAIN: '' });
-    const copied = fake
-      .rows(schema.cliProviderSecrets)
-      .filter((row) => row.providerId === clone.id);
-    expect(copied.map((row) => row.secretName).sort()).toEqual(['FALLBACK_TOKEN', 'REAL_TOKEN']);
-    expect(copied.every((row) => envelopeDecrypt(row as never, KEK) === real)).toBe(true);
-    expect(
-      fake.rows(schema.cliProviderSecrets).filter((row) => row.providerId === PROVIDER),
-    ).toEqual(before);
-    const event = fake.rows(schema.auditEvents).find((row) => row.action === 'cli_provider.clone')!;
-    expect(event.metadata).toMatchObject({
-      secretCount: 2,
-      secretNames: ['FALLBACK_TOKEN', 'REAL_TOKEN'],
-    });
-    expect((await response.text()).includes(real)).toBe(false);
-  });
+      for (const [name, value] of Object.entries({
+        EMPTY_SECRET: blank,
+        REAL_TOKEN: real,
+        FALLBACK_TOKEN: blank,
+      })) {
+        fake.insert(schema.cliProviderSecrets, {
+          providerId: PROVIDER,
+          secretName: name,
+          ...envelopeEncrypt(value, KEK),
+        });
+      }
+      const before = fake.rows(schema.cliProviderSecrets);
+      const response = await send('POST', `/${PROVIDER}/clone`, {});
+      expect(response.status).toBe(201);
+      const clone = fake.rows(schema.cliProviders).find((row) => row.id !== PROVIDER)!;
+      expect(clone.envVars).toEqual({ PLAIN: '' });
+      const copied = fake
+        .rows(schema.cliProviderSecrets)
+        .filter((row) => row.providerId === clone.id);
+      const names =
+        blank === ''
+          ? ['FALLBACK_TOKEN', 'REAL_TOKEN']
+          : ['EMPTY_SECRET', 'FALLBACK_TOKEN', 'REAL_TOKEN'];
+      expect(copied.map((row) => row.secretName).sort()).toEqual(names);
+      expect(
+        copied.every(
+          (row) =>
+            envelopeDecrypt(row as never, KEK) ===
+            (blank === '' || row.secretName === 'REAL_TOKEN' ? real : blank),
+        ),
+      ).toBe(true);
+      expect(
+        fake.rows(schema.cliProviderSecrets).filter((row) => row.providerId === PROVIDER),
+      ).toEqual(before);
+      const event = fake
+        .rows(schema.auditEvents)
+        .find((row) => row.action === 'cli_provider.clone')!;
+      expect(event.metadata).toMatchObject({
+        secretCount: names.length,
+        secretNames: names,
+      });
+      expect((await response.text()).includes(real)).toBe(false);
+    },
+  );
 });
 
 describe('T748.4 configured secrets list', () => {
-  it('omits empty and whitespace rows and exposes metadata only, including short real secrets', async () => {
+  it('omits exactly-empty rows and keeps legacy whitespace rows with metadata only', async () => {
     const fake = setup(true);
     const short = randomBytes(2).toString('hex');
     const padded = ` ${randomBytes(16).toString('hex')}\n`;
@@ -1025,7 +1041,13 @@ describe('T748.4 configured secrets list', () => {
     const response = await app.request(`/${PROVIDER}/secrets`);
     expect(response.status).toBe(200);
     const body = (await response.json()) as { secrets: Record<string, unknown>[] };
-    expect(body.secrets.map((row) => row.secretName).sort()).toEqual(['PADDED', 'SHORT']);
+    expect(body.secrets.map((row) => row.secretName).sort()).toEqual([
+      'BLANK',
+      'LONG_BLANK',
+      'PADDED',
+      'SHORT',
+    ]);
+    expect(secretsService.getMasterKek).not.toHaveBeenCalled();
     expect(
       body.secrets.every(
         (row) => !('encryptedValue' in row) && !('encryptedDek' in row) && !('value' in row),
@@ -1037,6 +1059,47 @@ describe('T748.4 configured secrets list', () => {
   it('does not load the KEK for an empty list', async () => {
     setup(true);
     expect((await app.request(`/${PROVIDER}/secrets`)).status).toBe(200);
+    expect(secretsService.getMasterKek).not.toHaveBeenCalled();
+  });
+  it('lists and clones undecryptable rows, including the worker-only grant, without a KEK', async () => {
+    const fake = setup(true);
+    fake.patch(schema.cliProviders, PROVIDER, { authMode: 'api_key' });
+    for (const secretName of ['REAL_TOKEN', 'CLAUDE_USAGE_OAUTH']) {
+      fake.insert(schema.cliProviderSecrets, {
+        providerId: PROVIDER,
+        secretName,
+        ...envelopeEncrypt(randomBytes(1).toString('hex'), KEK),
+        encryptedDek: randomUUID(),
+      });
+    }
+    vi.mocked(secretsService.getMasterKek).mockRejectedValue(new Error('KEK must not be loaded'));
+    const response = await app.request(`/${PROVIDER}/secrets`);
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as { secrets: Record<string, unknown>[] };
+    expect(body.secrets.map((row) => row.secretName).sort()).toEqual([
+      'CLAUDE_USAGE_OAUTH',
+      'REAL_TOKEN',
+    ]);
+    expect(
+      body.secrets.every((row) => !('encryptedValue' in row) && !('encryptedDek' in row)),
+    ).toBe(true);
+    const before = fake.rows(schema.cliProviderSecrets);
+    expect((await send('POST', `/${PROVIDER}/clone`, {})).status).toBe(201);
+    const clone = fake.rows(schema.cliProviders).find((row) => row.id !== PROVIDER)!;
+    const copies = fake
+      .rows(schema.cliProviderSecrets)
+      .filter((row) => row.providerId === clone.id);
+    expect(copies.length).toBe(before.length);
+    expect(
+      copies.every((row) =>
+        before.some(
+          (source) =>
+            source.secretName === row.secretName &&
+            source.encryptedValue === row.encryptedValue &&
+            source.encryptedDek === row.encryptedDek,
+        ),
+      ),
+    ).toBe(true);
     expect(secretsService.getMasterKek).not.toHaveBeenCalled();
   });
 });

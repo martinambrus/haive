@@ -868,7 +868,7 @@ describe.skipIf(!url)(
       });
 
       it.each(['', ' \t\n\u00a0'])(
-        'T748.1 clone skips a newest blank set token (%j)',
+        'T748.1 clone skips exactly-empty set tokens and copies legacy whitespace (%j)',
         async (value) => {
           await differ('B');
           await upsertProviderSecret(db, {
@@ -882,7 +882,7 @@ describe.skipIf(!url)(
           const res = await cloneOf('A');
           expect(res.status).toBe(201);
           const id = ((await res.json()) as { provider: { id: string } }).provider.id;
-          await expectJoined(id, 'A', 3);
+          await expectJoined(id, value === '' ? 'A' : 'B', 3);
           expect(await outside(['A', 'B', 'C', 'D', 'E', 'F'])).toEqual(before);
         },
       );

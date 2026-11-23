@@ -25,6 +25,7 @@ import {
   OLLAMA_MODEL_NOT_ALLOWED_MESSAGE,
   isRunnableCliVersion,
   lockLoginSet,
+  isEmptyEnvelope,
   logger,
   normalizeCliArgsArray,
   resolveDefaultCliProvider,
@@ -44,7 +45,6 @@ import {
   type SandboxImageBuildJobPayload,
   type SandboxImageRemoveJobPayload,
 } from '@haive/shared';
-import { configuredProviderSecrets } from '../lib/configured-provider-secrets.js';
 import { mayPullOllamaModel } from '../lib/ollama-pull-policy.js';
 import { HttpError, type AppEnv } from '../context.js';
 import { z } from 'zod';
@@ -1228,13 +1228,11 @@ cliProviderRoutes.post('/:id/clone', requireNewWorkAllowed, async (c) => {
         // Order: advisory auth lock, this set lock, then secret writes.
         const members = joinsSet ? await lockLoginSet(tx, row) : [];
 
-        const sourceSecrets = await configuredProviderSecrets(
-          (
-            await tx.query.cliProviderSecrets.findMany({
-              where: eq(schema.cliProviderSecrets.providerId, source.id),
-            })
-          ).filter((s) => !fromSet(s.secretName)),
-        );
+        const sourceSecrets = (
+          await tx.query.cliProviderSecrets.findMany({
+            where: eq(schema.cliProviderSecrets.providerId, source.id),
+          })
+        ).filter((s) => !fromSet(s.secretName) && !isEmptyEnvelope(s.encryptedValue));
         const legacySecrets = Object.entries(split.secrets).filter(
           ([name, value]) => !fromSet(name) && value.trim().length > 0,
         );
@@ -1330,14 +1328,13 @@ cliProviderRoutes.get('/:providerId/secrets', async (c) => {
       secretName: true,
       fingerprint: true,
       encryptedValue: true,
-      encryptedDek: true,
       createdAt: true,
       updatedAt: true,
     },
   });
-  const secrets = (await configuredProviderSecrets(rows)).map(
-    ({ encryptedValue: _value, encryptedDek: _dek, ...metadata }) => metadata,
-  );
+  const secrets = rows
+    .filter((row) => !isEmptyEnvelope(row.encryptedValue))
+    .map(({ encryptedValue: _value, ...metadata }) => metadata);
   return c.json({ secrets });
 });
 

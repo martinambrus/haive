@@ -22,6 +22,12 @@ export function encrypt(plaintext: string, keyHex: string): string {
   return `${iv.toString('hex')}:${authTag.toString('hex')}:${encrypted}`;
 }
 
+/** Identifies an exactly-empty value without a key; whitespace remains configured. */
+export function isEmptyEnvelope(encryptedValue: string): boolean {
+  const parts = encryptedValue.split(':');
+  return parts.length === 3 && parts[2] === '';
+}
+
 export function decrypt(encryptedData: string, keyHex: string): string {
   const parts = encryptedData.split(':');
   if (parts.length !== 3) {

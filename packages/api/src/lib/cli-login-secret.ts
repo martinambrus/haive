@@ -2,8 +2,7 @@ import { cliAuthScope, type CliAuthProvider } from '@haive/shared/cli-auth-state
 import { randomUUID } from 'node:crypto';
 import { and, asc, desc, eq, inArray, sql } from 'drizzle-orm';
 import { schema, tryCliAuthLock, type Database } from '@haive/database';
-import { lockLoginSet, secretsService, upsertProviderSecret } from '@haive/shared';
-import { configuredProviderSecrets } from './configured-provider-secrets.js';
+import { isEmptyEnvelope, lockLoginSet, secretsService, upsertProviderSecret } from '@haive/shared';
 import { insertAuditEvent, logAuditEvent, type AuditEvent } from './audit.js';
 
 /** Keep the captured credential, legacy-env cleanup and security trail together. */
@@ -233,7 +232,7 @@ export async function seedJoinerFromSet(
       ),
     )
     .orderBy(desc(schema.cliProviderSecrets.updatedAt), asc(schema.cliProviderSecrets.providerId));
-  const [source] = await configuredProviderSecrets(candidates);
+  const [source] = candidates.filter((candidate) => !isEmptyEnvelope(candidate.encryptedValue));
   if (!source) return { events: [] };
   const event: AuditEvent = {
     actorUserId: userId,
