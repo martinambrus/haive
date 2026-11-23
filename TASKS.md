@@ -1122,13 +1122,15 @@ All PRE-EXISTING, minor, unless noted.
 
 ### T762 · FNF[T749]: step warning column follow-ups (+3)
 
-status: open · kind: fix · found: T749 driver and review 2026-11-22 · priority: P4
+status: open for item 3 and the two test gaps below; items 1 and 2 DONE #1327 df46d2875 (deployed 2026-11-23: the history headline no longer reads the warning column; the five RAG banner writes go through `updateOwnedStep`) · kind: fix · found: T749 driver and review 2026-11-22 · priority: P4
 
 All PRE-EXISTING.
 
 1. Consequential: `web/src/lib/task-history.ts` ~:169 keys a headline ("finished with a warning") on `warningMessage` truthiness, against "a message column is display copy, never state" (AGENTS.md). Any stale or informational note becomes a state claim in the history panel. Key it on a structural signal, or drop the claim and show the note as text.
 2. Minor: the RAG writers update `task_steps` with a bare `ctx.db.update(taskSteps)` and no ownership fence (`_rag-index.ts` ~:647,1024, `10-rag-populate.ts` ~:443,814,1007), against `worker-restarts.md` (every pass write goes through `updateOwnedStep`). A superseded RAG pass can write its banner onto a retried row.
-3. Minor: `stepWarningAppend` (`worker/src/step-engine/step-ownership.ts` ~:92-95) dedups by substring (`strpos`), so a distinct shorter note contained in an earlier one is dropped. Retry notes carry their attempt number, so a clash is unlikely; dedup on whole notes if it bites.
+3. Minor: `stepWarningAppend` (`worker/src/step-engine/step-ownership.ts` ~:92-95) dedups by substring (`strpos`), so a distinct shorter note contained in an earlier one is dropped. Retry notes carry their attempt number, so a clash is unlikely; dedup on whole notes if it bites. #1327's driver found no whole-note rule that keeps the existing append contract (notes are space-joined, so boundaries are lost); a fix needs a separator change and its tests.
+4. Low, test: `worker/test/rag-step-warning-db.test.ts` (~:94-100) proves the SET side on real Postgres only for the two degraded onboarding sites; the workflow sites assert only the clear.
+5. Low, test: no history control that a note alone yields no entry (`web/src/lib/task-history.test.ts` ~:88-116; the `entry()` helper's default 07 step always matches the fix-pass branch).
 
 ### T763 · Flaky e2e: global KB empty-body validation
 
