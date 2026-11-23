@@ -857,6 +857,36 @@ describe('lease loss fences the attempt', () => {
     expect(await readFile(lock, 'utf8')).toBe(record(ext.token, 'updater', 7));
     expect(h.dockerExec.mock.calls.filter(([, args]) => args[0] === 'rm')).toEqual([]);
   };
+  it('emits exactly one refusal for a proven loss', async () => {
+    vi.mocked(run.phaseMigrate).mockImplementation(takeover);
+    expect(await main(opts)).toBe(3);
+    expect(
+      vi
+        .mocked(console.log)
+        .mock.calls.map(([line]) => JSON.parse(String(line)))
+        .filter((event) => event.event === 'refused' && event.refusal === 'stack-lock-lost'),
+    ).toHaveLength(1);
+  });
+  it.each(['ok', 'rolledBack'] as const)(
+    'keeps the decided %s result when the last mutation is followed by heartbeat loss',
+    async (outcome) => {
+      const proof = vi.spyOn(StackLock.prototype, 'assertOwned');
+      const lateLoss = async () => {
+        await takeover();
+        const holder = proof.mock.contexts.at(-1) as StackLock;
+        expect(await holder.beat()).toBe('lost');
+      };
+      if (outcome === 'ok') vi.mocked(run.phaseCommit).mockImplementation(lateLoss);
+      else {
+        vi.mocked(run.phaseVerify).mockResolvedValue(false);
+        vi.mocked(run.rollback).mockImplementation(lateLoss);
+      }
+      expect(await main(opts)).toBe(outcome === 'ok' ? 0 : 5);
+      expect(events().filter((event) => event === 'refused')).toEqual([]);
+      expect(journal.recordAttempt).not.toHaveBeenCalled();
+      expect(await readFile(lock, 'utf8')).toBe(record(ext.token, 'updater', 7));
+    },
+  );
   it.each([
     ['draining', 'phaseDraining', 'phaseMaintenance'],
     ['maintenance', 'phaseMaintenance', 'phaseSnapshot'],

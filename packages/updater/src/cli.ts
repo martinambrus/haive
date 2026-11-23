@@ -697,7 +697,8 @@ async function upgradeOwned(options: { stackLock?: StackLockOptions }): Promise<
     throw err;
   } finally {
     try {
-      if (stackLock?.lost) await assertStackLease();
+      // Keep a result already decided after the final mutation. A loss encountered by an
+      // attempt writer still propagates below; release itself is a no-op for a lost holder.
       if (locked && !hasRun && !flag('check') && terminal && !stackLock?.lost) {
         const attempt = terminal;
         try {
