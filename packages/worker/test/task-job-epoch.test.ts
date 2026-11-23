@@ -10,6 +10,7 @@ import {
   setContainerCleanupRunner,
 } from '../src/queues/task-queue.js';
 import { resetStepAndDownstream } from '../src/queues/_step-reset.js';
+import * as stepOwnership from '../src/step-engine/step-ownership.js';
 import { advanceStep } from '../src/step-engine/index.js';
 import { runtimeAdmission } from '../src/sandbox/runtime-admission.js';
 import { PROVIDER_FATAL_HEADLINES } from '../src/queues/cli-exec/failure-class.js';
@@ -123,6 +124,7 @@ const h = vi.hoisted(() => {
     landedTaskPatches: [] as Record<string, unknown>[],
     taskType: 'workflow',
     currentStepId: 'epoch-job-step',
+    currentRound: 0,
     /** Set when the task's repository is gone, so the job cannot resolve the task. */
     repoGone: false,
     /** Set when the task row itself cannot be read. */
@@ -181,7 +183,7 @@ const db = {
           ignoreSavedStepClis: false,
           executionPath: null,
           currentStepId: h.state.currentStepId,
-          currentRound: 0,
+          currentRound: h.state.currentRound,
           maxFixRounds: h.state.maxFixRounds,
         };
         h.state.onRead();
@@ -194,7 +196,7 @@ const db = {
     },
     cliProviders: { findFirst: async () => ({ name: 'claude-code' }) },
     // The root merge fence a reopen checks: no setup row, no merge claim, no merge left open.
-    taskSteps: { findFirst: async () => undefined },
+    taskSteps: { findFirst: async () => undefined, findMany: async () => [] },
     mergeDirClaims: { findFirst: async () => undefined },
     taskEvents: { findMany: async () => [] },
     taskTypeDefinitions: {
@@ -504,6 +506,7 @@ afterEach(() => {
   h.state.landedTaskPatches = [];
   h.state.taskType = 'workflow';
   h.state.currentStepId = 'epoch-job-step';
+  h.state.currentRound = 0;
   h.state.repoGone = false;
   h.state.taskReadFails = false;
   h.state.endedRuns = [];
@@ -757,13 +760,53 @@ describe('a job that resets steps itself', () => {
     expect(h.state.add).not.toHaveBeenCalled();
   });
 
+  it('resets the ordered batch before locking the source and re-reading the pointer', async () => {
+    h.state.readsAnswer = true;
+    vi.mocked(resetStepAndDownstream).mockClear();
+    const reset = vi.mocked(resetStepAndDownstream).mockResolvedValueOnce(null);
+    const lock = vi.spyOn(stepOwnership, 'lockOwnedStep');
+    const read = vi.spyOn(db.query.tasks, 'findFirst');
+    try {
+      const ctx = workflowTaskContext();
+      await handleResult(db as never, ctx as never, 'epoch-job-step', loopBack as never);
+      expect(reset).toHaveBeenLastCalledWith(
+        db,
+        'task-1',
+        '07-phase-2-implement',
+        1,
+        5,
+        false,
+        ['ts-1'],
+        undefined,
+      );
+      expect(lock).toHaveBeenCalledExactlyOnceWith(db, 'ts-1');
+      expect(reset.mock.invocationCallOrder.at(-1)).toBeLessThan(lock.mock.invocationCallOrder[0]!);
+      expect(lock.mock.invocationCallOrder[0]).toBeLessThan(read.mock.invocationCallOrder.at(-1)!);
+      expect(h.state.add.mock.lastCall?.[1]).toMatchObject({ round: 1, epoch: 5 });
+    } finally {
+      lock.mockRestore();
+      read.mockRestore();
+    }
+  });
+
   it('enters no fix round once a Retry reset its source step, whatever the epoch', async () => {
     h.state.readsAnswer = true;
     // The Retry has written the steps and not yet the task, so the epoch still matches.
     h.state.sourceOwned = false;
+    vi.mocked(resetStepAndDownstream).mockClear();
     vi.mocked(resetStepAndDownstream).mockResolvedValueOnce(null);
     const ctx = workflowTaskContext();
     await handleResult(db as never, ctx as never, 'epoch-job-step', loopBack as never);
+    expect(vi.mocked(resetStepAndDownstream)).toHaveBeenLastCalledWith(
+      db,
+      'task-1',
+      '07-phase-2-implement',
+      1,
+      5,
+      false,
+      ['ts-1'],
+      undefined,
+    );
     expect(h.state.taskWrites).toEqual([]);
     expect(h.state.events).toEqual(['step.loop_back']);
     expect(h.state.add).not.toHaveBeenCalled();
@@ -899,6 +942,7 @@ describe('the fix request a loop_back records', () => {
   });
 
   it('puts the guidance of both sides in the form the oscillation park shows', async () => {
+    h.state.currentRound = 2;
     const GUIDANCE_B = 'Treat the other check as authoritative on naming.';
     const events = (guidance?: string) => [
       { payload: { diagnosis: 'a defect', sourceStepId: 'epoch-job-step', round: 1 } },
@@ -939,6 +983,7 @@ describe('the fix request a loop_back records', () => {
   });
 
   it('carries the guidance of the verdict on the oscillation park', async () => {
+    h.state.currentRound = 2;
     h.state.readsAnswer = true;
     h.state.requestedEvents = [
       { payload: { diagnosis: 'a defect', sourceStepId: 'epoch-job-step', round: 1 } },
@@ -1045,6 +1090,7 @@ describe('the fix request a loop_back records', () => {
         { payload: { diagnosis: stored.diagnosis, sourceStepId: QA, round: 1 } },
         { payload: { diagnosis: 'a different defect', sourceStepId: 'another-step', round: 2 } },
       ];
+      h.state.currentRound = 2;
       await handleResult(db as never, ctx() as never, 'epoch-job-step', {
         ...result,
         row: { id: 'ts-1', round: 2 },
@@ -1230,6 +1276,8 @@ describe('a hand-off that a Retry overtakes after its epoch check', () => {
   });
 
   it('raises no round-cap gate on a task a Retry moved on', async () => {
+    h.state.currentStepId = 'epoch-chain-first';
+    h.state.currentRound = 0;
     h.state.readsAnswer = true;
     h.state.maxFixRounds = 0;
     h.state.onSelect = retryLands;
@@ -1245,6 +1293,8 @@ describe('a hand-off that a Retry overtakes after its epoch check', () => {
   });
 
   it('raises no oscillation gate on a task a Retry moved on', async () => {
+    h.state.currentStepId = 'epoch-chain-first';
+    h.state.currentRound = 2;
     h.state.readsAnswer = true;
     h.state.onSelect = retryLands;
     // The same complaint two rounds back, and another step's between them.
@@ -1265,6 +1315,11 @@ describe('a hand-off that a Retry overtakes after its epoch check', () => {
   });
 
   describe('resolving the fix-loop gate', () => {
+    // These gates enter a new round with no row for the shared reset to find.
+    beforeEach(() => vi.mocked(resetStepAndDownstream).mockResolvedValue(null));
+    afterEach(() =>
+      vi.mocked(resetStepAndDownstream).mockResolvedValue({ downstreamReset: 0, newEpoch: 7 }),
+    );
     const gate = { id: 'ts-1', stepId: 'epoch-chain-first', round: 1 };
 
     describe('says why it applied nothing', () => {

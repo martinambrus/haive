@@ -1,10 +1,14 @@
 import { randomBytes, randomUUID } from 'node:crypto';
+import { execFileSync } from 'node:child_process';
+import { cp, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { and, asc, eq, sql } from 'drizzle-orm';
 import { DelayedError } from 'bullmq';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createDatabase, schema, type Database } from '@haive/database';
-import { configService, TASK_JOB_NAMES, type WorkflowType } from '@haive/shared';
-import { moduleManifestSchema } from '@haive/shared/modularity';
+import { configService, logger, TASK_JOB_NAMES, type WorkflowType } from '@haive/shared';
+import { ExecutionContractError, moduleManifestSchema } from '@haive/shared/modularity';
 import { z } from 'zod';
 import {
   advanceStep,
@@ -48,6 +52,7 @@ import { recordFixLoopRequest } from '../src/step-engine/steps/workflow/_fix-loo
 
 const h = vi.hoisted(() => ({
   db: undefined as unknown,
+  userId: '',
   adds: [] as { name: string; data: Record<string, unknown> }[],
   fence: vi.fn(),
 }));
@@ -73,6 +78,26 @@ vi.mock('../src/step-engine/execution-contract-support.js', async (importOrigina
   ...(await importOriginal<typeof import('../src/step-engine/execution-contract-support.js')>()),
   assertWorkerExecutionContractSupported: h.fence,
 }));
+
+vi.mock('../../api/src/db.js', () => ({ getDb: () => h.db }));
+vi.mock('../../api/src/queues.js', () => ({
+  getTaskQueue: () => ({
+    add: async (name: string, data: Record<string, unknown>) => h.adds.push({ name, data }),
+  }),
+}));
+vi.mock('../../api/src/lib/sandbox-kill.js', () => ({ killTaskSandboxes: async () => 0 }));
+vi.mock('../../api/src/middleware/auth.js', () => ({
+  requireAuth: async (c: { set: (k: string, v: string) => void }, next: () => Promise<void>) => {
+    c.set('userId', h.userId);
+    c.set('userRole', 'user');
+    await next();
+  },
+  requireAdmin: async (_c: unknown, next: () => Promise<void>) => next(),
+}));
+
+// Runtime cross-package seam, as in guard-api-e2e-db: exercise the real Retry route
+// without adding API source to the worker's TypeScript compilation root.
+const apiSource = (rel: string) => new URL(`../../api/src/${rel}`, import.meta.url).pathname;
 
 const url = process.env.CUSTOM_FIX_RECOVERY_TEST_URL;
 if (url && !new URL(url).pathname.startsWith('/custom_fix_recovery_test'))
@@ -110,7 +135,11 @@ const LEGS: Leg[] = [
   },
 ];
 
+const RECONCILE = '07c-ddev-reconcile';
+const VALIDATE = '07b-phase-4-validate';
+
 const applied: Record<string, number> = {};
+const reviewBlocks: Record<string, boolean> = {};
 const gate = { held: undefined as Promise<void> | undefined, stepId: '' };
 
 function stub(id: string, index: number, type: string, over: object = {}): void {
@@ -144,11 +173,26 @@ describe.skipIf(!url)('recovery of a fix round on Postgres', () => {
   let db: Database;
   let userId: string;
   let repositoryId: string;
+  let template: string;
+  // The current test's own copy of the template; the late editor writes to it.
+  let worktree: string;
+  const copies: string[] = [];
   const email = randomBytes(8).toString('hex');
 
   beforeAll(async () => {
     db = createDatabase(url!);
     h.db = db;
+    // One real Git template for all validation-only round controls; each writing test copies it.
+    template = await mkdtemp(join(tmpdir(), 'haive-validation-only-'));
+    const git = (...args: string[]) => execFileSync('git', args, { cwd: template, stdio: 'pipe' });
+    git('init', '-q', '-b', 'main');
+    git('config', 'user.email', 'test@test.local');
+    git('config', 'user.name', 'Test');
+    await writeFile(join(template, 'a.ts'), 'export const a = 1;');
+    git('add', '-A');
+    git('commit', '-qm', 'base');
+    stub(RECONCILE, 1, LEGS[0]!.type);
+    stub(VALIDATE, 2, LEGS[0]!.type);
     const [user] = await db
       .insert(schema.users)
       .values({
@@ -160,6 +204,7 @@ describe.skipIf(!url)('recovery of a fix round on Postgres', () => {
       })
       .returning();
     userId = user!.id;
+    h.userId = userId;
     const [repository] = await db
       .insert(schema.repositories)
       .values({
@@ -186,15 +231,28 @@ describe.skipIf(!url)('recovery of a fix round on Postgres', () => {
         leg.pin ? { fixConsumer: { version: 1 }, editsCodeOrTests: true } : {},
       );
       stub(leg.ids.REVIEW, 1, leg.type, {
-        fixLoop: { evaluate: () => ({ blocking: true, diagnosis: 'the review found a defect' }) },
+        fixLoop: {
+          evaluate: () =>
+            reviewBlocks[leg.ids.REVIEW] === false
+              ? null
+              : { blocking: true, diagnosis: 'the review found a defect' },
+        },
       });
       stub(leg.ids.AFTER, 2, leg.type);
+      stub(`${leg.type}-late-editor`, 4, leg.type, {
+        editsCodeOrTests: true,
+        async apply() {
+          await writeFile(join(worktree, 'a.ts'), 'export const a = 2;');
+          return {};
+        },
+      });
     }
   });
   beforeEach(async () => {
     h.adds.length = 0;
     h.fence.mockReset();
     for (const key of Object.keys(applied)) delete applied[key];
+    for (const key of Object.keys(reviewBlocks)) delete reviewBlocks[key];
     gate.held = undefined;
     vi.spyOn(configService, 'getFresh').mockResolvedValue('normal');
     vi.spyOn(configService, 'getBoolean').mockResolvedValue(false);
@@ -209,6 +267,7 @@ describe.skipIf(!url)('recovery of a fix round on Postgres', () => {
         .delete(schema.taskTypeDefinitions)
         .where(eq(schema.taskTypeDefinitions.slug, leg.type));
     await db.$client.end({ timeout: 5 });
+    for (const dir of [template, ...copies]) await rm(dir, { recursive: true, force: true });
   });
 
   const seedTask = async (leg: Leg, over: Partial<typeof schema.tasks.$inferInsert> = {}) => {
@@ -383,6 +442,728 @@ describe.skipIf(!url)('recovery of a fix round on Postgres', () => {
         applies: {},
       });
     });
+
+    it('a direct duplicate loop_back leaves the entered round and events unchanged', async () => {
+      const id = await seedTask(leg);
+      const source = await seedRow(leg, id, 'REVIEW', 0, 'done', { endedAt: new Date() });
+      const ctx = await ctxFor(leg, id);
+      const result = {
+        status: 'loop_back' as const,
+        row: source,
+        sourceStepId: source.stepId,
+        diagnosis: 'defect',
+      };
+      await handleResult(db, ctx, source.stepId, result);
+      const before = await trace(leg, id);
+      await handleResult(db, ctx, source.stepId, result);
+      expect(await trace(leg, id)).toEqual(before);
+      expect(await eventsOf(id, 'fix_loop.requested')).toHaveLength(1);
+      expect(await eventsOf(id, 'fix_loop.started')).toHaveLength(1);
+      expect(await eventsOf(id, 'step.loop_back')).toHaveLength(1);
+    });
+
+    it('a direct duplicate loop_back does not reoffer an already parked cap gate', async () => {
+      const id = await seedTask(leg, { maxFixRounds: 0 });
+      const source = await seedRow(leg, id, 'REVIEW', 0, 'done', { endedAt: new Date() });
+      const ctx = await ctxFor(leg, id);
+      const result = {
+        status: 'loop_back' as const,
+        row: source,
+        sourceStepId: source.stepId,
+        diagnosis: 'defect',
+      };
+      await handleResult(db, ctx, source.stepId, result);
+      const before = await trace(leg, id);
+      const parked = await rowOf(source.id);
+      expect(parked.status).toBe('waiting_form');
+      await handleResult(db, ctx, source.stepId, result);
+      expect(await trace(leg, id)).toEqual(before);
+      expect(await rowOf(source.id)).toEqual(parked);
+      expect(await eventsOf(id, 'fix_loop.requested')).toHaveLength(1);
+      expect(await eventsOf(id, 'fix_loop.escalated')).toHaveLength(1);
+    });
+
+    if (!leg.pin)
+      it('two interleaved loop_back passes enter the fix round only once', async () => {
+        const id = await seedTask(leg);
+        const source = await seedRow(leg, id, 'REVIEW', 0, 'done');
+        const ctx = await ctxFor(leg, id);
+        const result = {
+          status: 'loop_back' as const,
+          row: source,
+          sourceStepId: source.stepId,
+          diagnosis: 'defect',
+        };
+        // Both real hand-offs must pass their unlocked guard before either transaction
+        // starts. PostgreSQL then serializes them on the same real source-row lock.
+        const refused = vi.spyOn(logger, 'info');
+        const bothReady = Promise.withResolvers<void>();
+        const transaction = db.transaction.bind(db);
+        let arrivals = 0;
+        const spy = vi.spyOn(db, 'transaction').mockImplementation(async (...args) => {
+          arrivals += 1;
+          if (arrivals === 2) bothReady.resolve();
+          await bothReady.promise;
+          return transaction(...args);
+        });
+        try {
+          await Promise.all([
+            handleResult(db, { ...ctx }, source.stepId, result),
+            handleResult(db, { ...ctx }, source.stepId, result),
+          ]);
+          expect(refused).toHaveBeenCalledExactlyOnceWith(
+            {
+              taskId: id,
+              stepId: source.stepId,
+              round: 0,
+              reason: 'task_pointer_moved_under_lock',
+            },
+            expect.any(String),
+          );
+          expect(arrivals).toBe(2);
+          expect(await eventsOf(id, 'fix_loop.requested')).toHaveLength(1);
+          expect(await eventsOf(id, 'fix_loop.started')).toHaveLength(1);
+          expect(h.adds).toHaveLength(1);
+          expect(await taskOf(id)).toMatchObject({
+            currentStepId: leg.ids.TARGET,
+            currentRound: 1,
+            orchestrationEpoch: BASE_EPOCH,
+          });
+        } finally {
+          spy.mockRestore();
+          refused.mockRestore();
+        }
+      });
+
+    it('a losing loop_back cannot reset the target created by the winner', async () => {
+      const id = await seedTask(leg);
+      const source = await seedRow(leg, id, 'REVIEW', 0, 'done');
+      const ctx = await ctxFor(leg, id);
+      const result = {
+        status: 'loop_back' as const,
+        row: source,
+        sourceStepId: source.stepId,
+        diagnosis: 'defect',
+      };
+      const guardRead = Promise.withResolvers<void>();
+      const resumeLoser = Promise.withResolvers<void>();
+      const targetRunning = Promise.withResolvers<void>();
+      const finishTarget = Promise.withResolvers<void>();
+      const findFirst = db.query.tasks.findFirst.bind(db.query.tasks);
+      const read = vi
+        .spyOn(db.query.tasks, 'findFirst')
+        // The epoch read precedes the unlocked pointer/park guard.
+        .mockImplementationOnce(findFirst)
+        .mockImplementationOnce((...args) => {
+          const query = findFirst(...args);
+          const execute = query.execute.bind(query);
+          // Preserve Drizzle's query builder and delay only its actual execution.
+          query.execute = async () => {
+            const row = await execute();
+            guardRead.resolve();
+            await resumeLoser.promise;
+            return row;
+          };
+          return query;
+        });
+      const target = stepRegistry.require(leg.ids.TARGET);
+      const apply = target.apply.bind(target);
+      const applying = vi.spyOn(target, 'apply').mockImplementation(async (...args) => {
+        targetRunning.resolve();
+        await finishTarget.promise;
+        return apply(...args);
+      });
+      const refused = vi.spyOn(logger, 'info');
+      const loser = handleResult(db, { ...ctx }, source.stepId, result);
+      let winnerAdvance: Promise<void> | undefined;
+      try {
+        await guardRead.promise;
+        // The loser retains the source pointer it read before the winner commits.
+        await handleResult(db, { ...ctx }, source.stepId, result);
+        winnerAdvance = processTaskJob(advance(leg, id, 'TARGET', 1, BASE_EPOCH));
+        await targetRunning.promise;
+        const running = await db.query.taskSteps.findFirst({
+          where: and(
+            eq(schema.taskSteps.taskId, id),
+            eq(schema.taskSteps.stepId, leg.ids.TARGET),
+            eq(schema.taskSteps.round, 1),
+          ),
+        });
+        expect(running?.status).toBe('running');
+        resumeLoser.resolve();
+        await loser;
+        expect(refused).toHaveBeenCalledExactlyOnceWith(
+          { taskId: id, stepId: source.stepId, round: 0, reason: 'task_pointer_moved_under_lock' },
+          expect.any(String),
+        );
+        expect(await taskOf(id)).toMatchObject({
+          currentStepId: leg.ids.TARGET,
+          currentRound: 1,
+          orchestrationEpoch: BASE_EPOCH,
+        });
+        expect(await rowOf(running!.id)).toEqual(running);
+        expect(await eventsOf(id, 'fix_loop.requested')).toHaveLength(1);
+        expect(await eventsOf(id, 'fix_loop.started')).toHaveLength(1);
+        expect(h.adds).toHaveLength(1);
+      } finally {
+        resumeLoser.resolve();
+        finishTarget.resolve();
+        try {
+          await Promise.all([loser, winnerAdvance]);
+        } finally {
+          read.mockRestore();
+          applying.mockRestore();
+          refused.mockRestore();
+        }
+      }
+      expect((await taskOf(id)).currentStepId).toBe(leg.ids.REVIEW);
+      expect(h.adds.at(-1)?.data).toMatchObject({ round: 1, epoch: BASE_EPOCH });
+    });
+
+    it('loop_back resets stale next-round rows and enqueues at the bumped epoch', async () => {
+      const id = await seedTask(leg);
+      const source = await seedRow(leg, id, 'REVIEW', 0, 'done');
+      const target = await seedRow(leg, id, 'TARGET', 1, 'done', { output: { stale: true } });
+      const review = await seedRow(leg, id, 'REVIEW', 1, 'done', { output: { stale: true } });
+      const ctx = await ctxFor(leg, id);
+      await handleResult(db, ctx, source.stepId, {
+        status: 'loop_back',
+        row: source,
+        sourceStepId: source.stepId,
+        diagnosis: 'defect',
+      });
+      for (const row of [target, review])
+        expect(await rowOf(row.id)).toMatchObject({
+          status: 'pending',
+          output: null,
+          rerunGeneration: 1,
+        });
+      expect(await rowOf(source.id)).toEqual(source);
+      expect(await taskOf(id)).toMatchObject({
+        currentStepId: leg.ids.TARGET,
+        currentRound: 1,
+        orchestrationEpoch: BASE_EPOCH + 1,
+      });
+      expect(ctx.orchestrationEpoch).toBe(BASE_EPOCH + 1);
+      expect(h.adds).toEqual([
+        {
+          name: TASK_JOB_NAMES.ADVANCE_STEP,
+          data: expect.objectContaining({
+            stepId: leg.ids.TARGET,
+            round: 1,
+            epoch: BASE_EPOCH + 1,
+          }),
+        },
+      ]);
+      expect(await eventsOf(id, 'fix_loop.requested')).toHaveLength(1);
+      expect(await eventsOf(id, 'fix_loop.started')).toHaveLength(1);
+    });
+
+    it('a Stop rolls back the stale next-round reset when the task write refuses', async () => {
+      const id = await seedTask(leg);
+      const source = await seedRow(leg, id, 'REVIEW', 0, 'done');
+      const target = await seedRow(leg, id, 'TARGET', 1, 'done', { output: { stale: true } });
+      const review = await seedRow(leg, id, 'REVIEW', 1, 'done', { output: { stale: true } });
+      const ctx = await ctxFor(leg, id);
+      // A crash-left live invocation lets the real Stop fail the task while leaving
+      // these finished rows alone; Stop does not move the task epoch.
+      await db.insert(schema.cliInvocations).values({
+        taskId: id,
+        taskStepId: source.id,
+        mode: 'cli',
+        prompt: 'crash-left run',
+      });
+      const { stopActiveCliInvocations } = await import(apiSource('lib/task-control.ts'));
+      expect(await stopActiveCliInvocations(db, id, { failTask: true })).toMatchObject({
+        cancelled: 1,
+        stopped: 0,
+        failedAt: expect.any(String),
+      });
+      const stopped = await taskOf(id);
+      expect(stopped).toMatchObject({ status: 'failed', orchestrationEpoch: BASE_EPOCH });
+      const refused = vi.spyOn(logger, 'info');
+      try {
+        await handleResult(db, ctx, source.stepId, {
+          status: 'loop_back',
+          row: source,
+          sourceStepId: source.stepId,
+          diagnosis: 'defect',
+        });
+        expect(await rowOf(target.id)).toEqual(target);
+        expect(await rowOf(review.id)).toEqual(review);
+        expect(await rowOf(source.id)).toEqual(source);
+        expect(await taskOf(id)).toEqual(stopped);
+        expect(ctx.orchestrationEpoch).toBe(BASE_EPOCH);
+        expect(h.adds).toEqual([]);
+        expect(await eventsOf(id, 'fix_loop.requested')).toEqual([]);
+        expect(await eventsOf(id, 'fix_loop.started')).toEqual([]);
+        expect(refused).toHaveBeenCalledExactlyOnceWith(
+          { taskId: id, stepId: source.stepId, round: 0, reason: 'task_write_refused' },
+          expect.any(String),
+        );
+      } finally {
+        refused.mockRestore();
+      }
+    });
+
+    it('a lost source rolls back the stale next-round reset', async () => {
+      const id = await seedTask(leg);
+      const source = await seedRow(leg, id, 'REVIEW', 0, 'done');
+      const target = await seedRow(leg, id, 'TARGET', 1, 'done');
+      const review = await seedRow(leg, id, 'REVIEW', 1, 'done');
+      const ctx = await ctxFor(leg, id);
+      // Retry writes the source before moving the task epoch.
+      await db
+        .update(schema.taskSteps)
+        .set({ status: 'pending' })
+        .where(eq(schema.taskSteps.id, source.id));
+      const refused = vi.spyOn(logger, 'info');
+      try {
+        await handleResult(db, ctx, source.stepId, {
+          status: 'loop_back',
+          row: source,
+          sourceStepId: source.stepId,
+          diagnosis: 'defect',
+        });
+        expect(await rowOf(target.id)).toEqual(target);
+        expect(await rowOf(review.id)).toEqual(review);
+        expect((await rowOf(source.id)).status).toBe('pending');
+        expect(await taskOf(id)).toMatchObject({
+          currentStepId: source.stepId,
+          currentRound: 0,
+          orchestrationEpoch: BASE_EPOCH,
+        });
+        expect(ctx.orchestrationEpoch).toBe(BASE_EPOCH);
+        expect(h.adds).toEqual([]);
+        expect(await eventsOf(id, 'fix_loop.requested')).toEqual([]);
+        expect(await eventsOf(id, 'fix_loop.started')).toEqual([]);
+        expect(refused).toHaveBeenCalledExactlyOnceWith(
+          { taskId: id, stepId: source.stepId, round: 0, reason: 'source_not_owned' },
+          expect.any(String),
+        );
+      } finally {
+        refused.mockRestore();
+      }
+    });
+
+    it('a null task pointer is not evidence of a move, including under the source lock', async () => {
+      const id = await seedTask(leg, { currentStepId: null, currentRound: 42 });
+      const source = await seedRow(leg, id, 'REVIEW', 0, 'done');
+      await loopBack(id, source, 'defect');
+      expect(await taskOf(id)).toMatchObject({
+        currentStepId: leg.ids.TARGET,
+        currentRound: 1,
+        orchestrationEpoch: BASE_EPOCH,
+      });
+      expect(await eventsOf(id, 'fix_loop.requested')).toHaveLength(1);
+      expect(await eventsOf(id, 'fix_loop.started')).toHaveLength(1);
+      expect(h.adds).toHaveLength(1);
+    });
+
+    it('logs only task_missing_under_lock when the locked task read finds nothing', async () => {
+      const id = await seedTask(leg);
+      const source = await seedRow(leg, id, 'REVIEW', 0, 'done');
+      const target = await seedRow(leg, id, 'TARGET', 1, 'done');
+      const review = await seedRow(leg, id, 'REVIEW', 1, 'done');
+      const transaction = db.transaction.bind(db);
+      const logged = vi.spyOn(logger, 'info');
+      // Deleting a real task cascades its source, failing lockOwnedStep first. Inject
+      // the missing read only inside the transaction, after taking the real row lock.
+      const spy = vi.spyOn(db, 'transaction').mockImplementation((callback, config) =>
+        transaction(async (tx) => {
+          const read = vi.spyOn(tx.query.tasks, 'findFirst').mockResolvedValueOnce(undefined);
+          try {
+            return await callback(tx);
+          } finally {
+            read.mockRestore();
+          }
+        }, config),
+      );
+      try {
+        await loopBack(id, source, 'defect');
+        expect(logged).toHaveBeenCalledExactlyOnceWith(
+          { taskId: id, stepId: source.stepId, round: 0, reason: 'task_missing_under_lock' },
+          expect.any(String),
+        );
+        expect(await eventsOf(id, 'fix_loop.requested')).toEqual([]);
+        expect(await eventsOf(id, 'fix_loop.started')).toEqual([]);
+        expect(h.adds).toEqual([]);
+        expect(await rowOf(target.id)).toEqual(target);
+        expect(await rowOf(review.id)).toEqual(review);
+        expect(await taskOf(id)).toMatchObject({
+          currentStepId: source.stepId,
+          currentRound: 0,
+          orchestrationEpoch: BASE_EPOCH,
+        });
+      } finally {
+        spy.mockRestore();
+        logged.mockRestore();
+      }
+    });
+
+    if (!leg.pin)
+      it.each(['task_missing', 'task_pointer_moved', 'task_round_moved', 'source_parked'])(
+        'logs the %s loop_back refusal without writing events',
+        async (refusal) => {
+          const id = await seedTask(leg);
+          const source = await seedRow(leg, id, 'REVIEW', 0, 'done');
+          const ctx = await ctxFor(leg, id);
+          if (refusal === 'task_missing')
+            await db.delete(schema.tasks).where(eq(schema.tasks.id, id));
+          else if (refusal === 'source_parked')
+            await db
+              .update(schema.taskSteps)
+              .set({ status: 'waiting_form' })
+              .where(eq(schema.taskSteps.id, source.id));
+          else
+            await db
+              .update(schema.tasks)
+              .set(
+                refusal === 'task_round_moved'
+                  ? { currentRound: 1 }
+                  : { currentStepId: leg.ids.TARGET },
+              )
+              .where(eq(schema.tasks.id, id));
+          const logged = vi.spyOn(logger, 'info');
+          try {
+            await handleResult(db, ctx, source.stepId, {
+              status: 'loop_back',
+              row: source,
+              sourceStepId: source.stepId,
+              diagnosis: 'defect',
+            });
+            expect(logged).toHaveBeenCalledWith(
+              {
+                taskId: id,
+                stepId: source.stepId,
+                round: 0,
+                reason: refusal === 'task_round_moved' ? 'task_pointer_moved' : refusal,
+              },
+              expect.any(String),
+            );
+            expect(await eventsOf(id)).toEqual([]);
+            expect(h.adds).toEqual([]);
+          } finally {
+            logged.mockRestore();
+          }
+        },
+      );
+
+    if (!leg.pin)
+      describe('Retry into a validation-only next round', () => {
+        const rewoundValidation = async (reconcile: boolean, cap = 0) => {
+          const editor = `${leg.type}-late-editor`;
+          const checks = [...(reconcile ? [RECONCILE] : []), VALIDATE];
+          const runListSnapshot = [
+            leg.ids.TARGET,
+            ...checks,
+            leg.ids.REVIEW,
+            editor,
+            leg.ids.AFTER,
+          ];
+          const id = await seedTask(leg, {
+            currentStepId: editor,
+            runListSnapshot,
+            maxFixRounds: cap,
+          });
+          // Round 0 already validated the base tree. The late editor changes it during apply.
+          worktree = await mkdtemp(join(tmpdir(), 'haive-validation-only-'));
+          copies.push(worktree);
+          await cp(template, worktree, { recursive: true });
+          await db.insert(schema.taskSteps).values({
+            taskId: id,
+            stepId: '01-worktree-setup',
+            title: 'Worktree setup',
+            stepIndex: -1,
+            runSeq: -1,
+            round: 0,
+            status: 'done',
+            output: { worktreePath: worktree, baseBranch: 'main' },
+          });
+          const { readValidationSnapshot } =
+            await import('../src/step-engine/steps/workflow/_validation-snapshot.js');
+          const before = await readValidationSnapshot({ db, taskId: id });
+          expect(before).not.toBeNull();
+          await db.insert(schema.taskSteps).values({
+            taskId: id,
+            stepId: VALIDATE,
+            title: 'Validation',
+            stepIndex: 2,
+            runSeq: runListSnapshot.indexOf(VALIDATE),
+            round: 0,
+            status: 'done',
+            output: { validationSnapshot: before },
+          });
+          const source = await seedRow(leg, id, 'REVIEW', 0, 'done', {
+            runSeq: runListSnapshot.indexOf(leg.ids.REVIEW),
+          });
+          const run = async (stepId: string, round: number) =>
+            processTaskJob(
+              job(TASK_JOB_NAMES.ADVANCE_STEP, {
+                taskId: id,
+                userId,
+                stepId,
+                round,
+                epoch: (await taskOf(id)).orchestrationEpoch,
+              }),
+            );
+          await run(editor, 0);
+          expect(await eventsOf(id, 'validation.recheck_requested')).toHaveLength(1);
+          expect(await taskOf(id)).toMatchObject({ currentStepId: checks[0], currentRound: 1 });
+          for (const check of checks) await run(check, 1);
+          const roundRows = () =>
+            db.query.taskSteps.findMany({
+              where: and(eq(schema.taskSteps.taskId, id), eq(schema.taskSteps.round, 1)),
+              orderBy: [asc(schema.taskSteps.runSeq)],
+            });
+          expect((await roundRows()).map((r) => [r.stepId, r.status])).toEqual(
+            checks.map((check) => [check, 'done']),
+          );
+          expect((await taskOf(id)).currentStepId).toBe(leg.ids.AFTER);
+          // Real Retry rewinds only round 0, leaving round 1's checks and no target row.
+          const { taskRoutes } = await import(apiSource('routes/tasks/index.ts'));
+          const { errorHandler } = await import(apiSource('middleware/error-handler.ts'));
+          taskRoutes.onError(errorHandler);
+          const retry = await taskRoutes.request(`/${id}/steps/${leg.ids.REVIEW}/action`, {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ action: 'retry', round: 0 }),
+          });
+          expect(retry.status, await retry.text()).toBe(200);
+          expect(await taskOf(id)).toMatchObject({
+            currentStepId: leg.ids.REVIEW,
+            currentRound: 0,
+            orchestrationEpoch: BASE_EPOCH + 1,
+          });
+          expect((await roundRows()).map((r) => [r.stepId, r.status])).toEqual(
+            checks.map((check) => [check, 'done']),
+          );
+          await run(leg.ids.REVIEW, 0);
+          return { id, checks, source: await rowOf(source.id), roundRows, run };
+        };
+
+        it.each([true, false])(
+          'Continue reruns checks without a target row (07c=%s)',
+          async (reconcile) => {
+            const { id, checks, source, roundRows, run } = await rewoundValidation(reconcile);
+            expect(source.status).toBe('waiting_form');
+            const ctx = await ctxFor(leg, id);
+            await resolveFixLoopGate(db, ctx, source, 'continue', 0, '');
+            expect
+              .soft(
+                (await roundRows()).map((r) => ({
+                  step: r.stepId,
+                  status: r.status,
+                  output: r.output,
+                  generation: r.rerunGeneration,
+                })),
+              )
+              .toEqual(
+                checks.map((step) => ({ step, status: 'pending', output: null, generation: 1 })),
+              );
+            expect.soft(ctx.orchestrationEpoch).toBe(BASE_EPOCH + 2);
+            await run(leg.ids.TARGET, 1);
+            expect(applied[leg.ids.TARGET]).toBe(1);
+            for (const check of checks) await run(check, 1);
+            // On unchanged code, both done checks are reused: neither apply runs again.
+            for (const check of checks) expect.soft(applied[check]).toBe(2);
+          },
+        );
+
+        it.each([true, false])(
+          'loop_back reruns checks without a target row (07c=%s)',
+          async (reconcile) => {
+            // A positive allowance takes direct loop_back instead of the Continue gate.
+            const { id, checks, source, roundRows, run } = await rewoundValidation(reconcile, 1);
+            expect(source.status).toBe('done');
+            expect(await eventsOf(id, 'fix_loop.started')).toHaveLength(1);
+            expect(await eventsOf(id, 'fix_loop.escalated')).toHaveLength(0);
+            expect
+              .soft(
+                (await roundRows()).map((r) => ({
+                  step: r.stepId,
+                  status: r.status,
+                  output: r.output,
+                  generation: r.rerunGeneration,
+                })),
+              )
+              .toEqual(
+                checks.map((step) => ({ step, status: 'pending', output: null, generation: 1 })),
+              );
+            expect.soft((await taskOf(id)).orchestrationEpoch).toBe(BASE_EPOCH + 2);
+            await run(leg.ids.TARGET, 1);
+            expect(applied[leg.ids.TARGET]).toBe(1);
+            for (const check of checks) await run(check, 1);
+            for (const check of checks) expect.soft(applied[check]).toBe(2);
+          },
+        );
+
+        it.each(['stale_epoch', 'lost_source', 'unavailable_cli'])(
+          'Continue preserves a validation-only round on %s',
+          async (refusal) => {
+            const { id, source, roundRows } = await rewoundValidation(true);
+            const ctx = await ctxFor(leg, id);
+            if (refusal === 'stale_epoch')
+              await db
+                .update(schema.tasks)
+                .set({ orchestrationEpoch: ctx.orchestrationEpoch + 1 })
+                .where(eq(schema.tasks.id, id));
+            if (refusal === 'lost_source')
+              await db
+                .update(schema.taskSteps)
+                .set({ status: 'pending' })
+                .where(eq(schema.taskSteps.id, source.id));
+            const rowsBefore = await roundRows();
+            const taskBefore = await taskOf(id);
+            const sourceBefore = await rowOf(source.id);
+            const eventsBefore = await eventsOf(id);
+            h.adds.length = 0;
+            await resolveFixLoopGate(
+              db,
+              ctx,
+              source,
+              'continue',
+              0,
+              '',
+              refusal === 'unavailable_cli' ? randomUUID() : undefined,
+            );
+            expect(await roundRows()).toEqual(rowsBefore);
+            expect(await eventsOf(id)).toEqual(eventsBefore);
+            expect(await taskOf(id)).toMatchObject({
+              status: taskBefore.status,
+              currentStepId: taskBefore.currentStepId,
+              currentRound: taskBefore.currentRound,
+              orchestrationEpoch: taskBefore.orchestrationEpoch,
+            });
+            if (refusal === 'unavailable_cli')
+              expect(await rowOf(source.id)).toMatchObject({
+                status: 'waiting_form',
+                formValues: null,
+              });
+            else expect(await rowOf(source.id)).toEqual(sourceBefore);
+            expect(h.adds).toEqual([]);
+          },
+        );
+      });
+
+    if (!leg.pin)
+      describe('Retry of an earlier source card', () => {
+        const rewoundGate = async () => {
+          const id = await seedTask(leg, { maxFixRounds: 1 });
+          const source = await seedRow(leg, id, 'REVIEW', 0, 'done');
+          await loopBack(id, source, 'the original defect');
+          // Real execution creates terminal TARGET@1 and REVIEW@1, leaving AFTER current.
+          reviewBlocks[leg.ids.REVIEW] = false;
+          await processTaskJob(advance(leg, id, 'TARGET', 1, BASE_EPOCH));
+          await processTaskJob(advance(leg, id, 'REVIEW', 1, BASE_EPOCH));
+          const roundRow = async (role: Role) =>
+            (await db.query.taskSteps.findFirst({
+              where: and(
+                eq(schema.taskSteps.taskId, id),
+                eq(schema.taskSteps.stepId, leg.ids[role]),
+                eq(schema.taskSteps.round, 1),
+              ),
+            }))!;
+          expect((await roundRow('TARGET')).status).toBe('done');
+          expect((await roundRow('REVIEW')).status).toBe('done');
+          expect((await taskOf(id)).currentStepId).toBe(leg.ids.AFTER);
+          const { taskRoutes } = await import(apiSource('routes/tasks/index.ts'));
+          const { errorHandler } = await import(apiSource('middleware/error-handler.ts'));
+          taskRoutes.onError(errorHandler);
+          const retry = await taskRoutes.request(`/${id}/steps/${leg.ids.REVIEW}/action`, {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ action: 'retry', round: 0 }),
+          });
+          expect(retry.status, await retry.text()).toBe(200);
+          const rewound = await taskOf(id);
+          expect(rewound.currentRound).toBe(0);
+          expect(rewound.orchestrationEpoch).toBe(BASE_EPOCH + 1);
+          expect((await roundRow('TARGET')).status).toBe('done');
+          expect((await roundRow('REVIEW')).status).toBe('done');
+          reviewBlocks[leg.ids.REVIEW] = true;
+          await processTaskJob(advance(leg, id, 'REVIEW', 0, rewound.orchestrationEpoch));
+          const gateRow = await rowOf(source.id);
+          expect(gateRow.status).toBe('waiting_form');
+          return { id, source, roundRow, rewound, gateRow };
+        };
+
+        it('Continue reruns terminal next-round rows', async () => {
+          const { id, roundRow, rewound, gateRow } = await rewoundGate();
+          await resolveFixLoopGate(db, await ctxFor(leg, id), gateRow, 'continue', 0, '');
+          const continued = await taskOf(id);
+          await processTaskJob(advance(leg, id, 'TARGET', 1, continued.orchestrationEpoch));
+          // A fresh implementation must run; unchanged code walks past TARGET@1 done.
+          expect(applied[leg.ids.TARGET]).toBe(2);
+          expect((await roundRow('TARGET')).rerunGeneration).toBe(1);
+          expect((await roundRow('REVIEW')).status).toBe('pending');
+          expect((await roundRow('REVIEW')).output).toBeNull();
+          expect(continued.orchestrationEpoch).toBe(rewound.orchestrationEpoch + 1);
+        });
+
+        it('an unavailable CLI reoffers the gate without resetting the later round', async () => {
+          const { id, roundRow, rewound, gateRow } = await rewoundGate();
+          const targetBefore = await roundRow('TARGET');
+          const reviewBefore = await roundRow('REVIEW');
+          const eventsBefore = await eventsOf(id);
+          h.adds.length = 0;
+          const ctx = await ctxFor(leg, id);
+          await resolveFixLoopGate(
+            db,
+            ctx,
+            gateRow,
+            'continue',
+            0,
+            'try another fix',
+            randomUUID(),
+          );
+          expect(await roundRow('TARGET')).toEqual(targetBefore);
+          expect(await roundRow('REVIEW')).toEqual(reviewBefore);
+          expect(await eventsOf(id)).toEqual(eventsBefore);
+          expect((await rowOf(gateRow.id)).status).toBe('waiting_form');
+          expect((await taskOf(id)).orchestrationEpoch).toBe(rewound.orchestrationEpoch);
+          expect(ctx.orchestrationEpoch).toBe(rewound.orchestrationEpoch);
+          expect(h.adds).toEqual([]);
+        });
+
+        it('a stale epoch rolls back the next-round reset and leaves the answer unapplied', async () => {
+          const { id, roundRow, gateRow } = await rewoundGate();
+          const targetBefore = await roundRow('TARGET');
+          const reviewBefore = await roundRow('REVIEW');
+          const eventsBefore = await eventsOf(id);
+          const ctx = await ctxFor(leg, id);
+          await db
+            .update(schema.tasks)
+            .set({ orchestrationEpoch: ctx.orchestrationEpoch + 1 })
+            .where(eq(schema.tasks.id, id));
+          h.adds.length = 0;
+          await resolveFixLoopGate(db, ctx, gateRow, 'continue', 0, '');
+          expect(await roundRow('TARGET')).toEqual(targetBefore);
+          expect(await roundRow('REVIEW')).toEqual(reviewBefore);
+          expect(await rowOf(gateRow.id)).toEqual(gateRow);
+          expect(await eventsOf(id)).toEqual(eventsBefore);
+          expect(h.adds).toEqual([]);
+        });
+
+        it('a lost source row rolls back the next-round reset', async () => {
+          const { id, roundRow, gateRow } = await rewoundGate();
+          const targetBefore = await roundRow('TARGET');
+          const reviewBefore = await roundRow('REVIEW');
+          const taskBefore = await taskOf(id);
+          const eventsBefore = await eventsOf(id);
+          await db
+            .update(schema.taskSteps)
+            .set({ status: 'pending' })
+            .where(eq(schema.taskSteps.id, gateRow.id));
+          h.adds.length = 0;
+          await resolveFixLoopGate(db, await ctxFor(leg, id), gateRow, 'continue', 0, '');
+          expect(await roundRow('TARGET')).toEqual(targetBefore);
+          expect(await roundRow('REVIEW')).toEqual(reviewBefore);
+          expect(await taskOf(id)).toEqual(taskBefore);
+          expect(await eventsOf(id)).toEqual(eventsBefore);
+          expect(h.adds).toEqual([]);
+        });
+      });
 
     it('the cap parks the source gate with an escalation and starts no further round', async () => {
       const id = await seedTask(leg, { maxFixRounds: 2 });

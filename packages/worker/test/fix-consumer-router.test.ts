@@ -189,7 +189,7 @@ const db = {
     },
     cliProviders: { findFirst: async () => ({ name: 'claude-code' }) },
     // The root merge fence a reopen checks: no setup row, no merge claim, no merge left open.
-    taskSteps: { findFirst: async () => undefined },
+    taskSteps: { findFirst: async () => undefined, findMany: async () => [] },
     mergeDirClaims: { findFirst: async () => undefined },
     taskEvents: { findMany: async () => [] },
     taskTypeDefinitions: {
@@ -612,6 +612,7 @@ describe('a fix round whose pinned custom target is valid', () => {
   });
 
   it('routes the round-limit Continue to the pinned step', async () => {
+    vi.mocked(resetStepAndDownstream).mockResolvedValueOnce(null);
     h.state.readsAnswer = true;
     await resolveFixLoopGate(
       db as never,

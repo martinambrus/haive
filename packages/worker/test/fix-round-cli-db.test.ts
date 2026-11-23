@@ -224,9 +224,17 @@ describe.skipIf(!url)('next-round CLI transaction on Postgres', () => {
             diagnosis: 'other defect',
           });
         }
-        await handleResult(db, ctxFor(id, LOOP), REVIEW, {
+        // This is a completed check raising a new gate, not an already parked gate.
+        const round = kind === 'cap' ? 0 : 2;
+        const [source] = await db
+          .update(schema.taskSteps)
+          .set({ status: 'done', round })
+          .where(eq(schema.taskSteps.id, gate.id))
+          .returning();
+        await db.update(schema.tasks).set({ currentRound: round }).where(eq(schema.tasks.id, id));
+        await handleResult(db, ctxFor(id, LOOP, { currentRound: round }), REVIEW, {
           status: 'loop_back',
-          row: { ...gate, round: kind === 'cap' ? 0 : 2 },
+          row: source!,
           diagnosis: 'same defect',
           sourceStepId: REVIEW,
         });
