@@ -1,5 +1,14 @@
 import { lspProviderIdentity } from '../lsp/composed-evidence.js';
-import { COMPOSED_LSP_VERIFIED_PROVIDER_NAMES } from '@haive/shared/composed-lsp-provider-lock';
+import {
+  composedLspAllowedSet,
+  resolvePreferredProvider,
+  type SkippedSavedPreference,
+} from '@haive/shared/cli-preferred-provider';
+export {
+  resolvePreferredProvider,
+  type PreferredProvider,
+  type SkippedSavedPreference,
+} from '@haive/shared/cli-preferred-provider';
 import { resolveTaskFacets } from '@haive/shared/global-kb';
 import { withTaskScratchWorkspace } from '../repo/scratch-workspace.js';
 import {
@@ -142,13 +151,6 @@ export type DispatchInvocation = DispatchInvocationCli | DispatchInvocationSubAg
  *  skipped saved pick yields to when the composed-LSP set allows it. */
 export interface SavedPreferenceSource {
   taskProviderId: string | null;
-}
-
-/** A saved per-step pick that the composed-LSP lock skipped. Structural fact only; the words
- *  shown for it are the caller's. */
-export interface SkippedSavedPreference {
-  providerId: string;
-  label: string | null;
 }
 
 export interface DispatchPlan {
@@ -725,54 +727,6 @@ export function* dispatchCandidates(
     if (opts.needsVision && isKnownBlind(provider)) continue;
     yield { provider, adapter };
   }
-}
-
-/** The providers a contract 2 task may launch: those holding an effective composed image, or,
- *  before the first build makes any image effective, the lock's verified providers, so the
- *  environment steps that build that image (and their AI repair) can still run. */
-function composedLspAllowedSet(
-  providers: readonly CliProviderRecord[],
-  composedIds: readonly string[] | null | undefined,
-): Set<string> | null {
-  if (!composedIds) return null;
-  if (composedIds.length > 0) return new Set(composedIds);
-  return new Set(
-    providers.filter((p) => COMPOSED_LSP_VERIFIED_PROVIDER_NAMES.includes(p.name)).map((p) => p.id),
-  );
-}
-
-/** What a request's preferred provider comes to before any plan is built: the provider the dispatch goes on with
- *  (null floats to the default order) and the saved pick the composed lock skipped, or the refusal. The step hold
- *  asks the same function, so a step parks exactly where a dispatch would refuse a switched-off provider. */
-export type PreferredProvider =
-  | { kind: 'use'; providerId: string | null; skipped: SkippedSavedPreference | null }
-  | { kind: 'disabled'; provider: CliProviderRecord }
-  | { kind: 'locked'; label: string | null };
-
-export function resolvePreferredProvider(
-  req: Pick<
-    DispatchRequest,
-    'providers' | 'preferredProviderId' | 'savedPreference' | 'composedLspProviderIds'
-  >,
-): PreferredProvider {
-  let preferredId = req.preferredProviderId ?? null;
-  const composedSet = composedLspAllowedSet(req.providers, req.composedLspProviderIds);
-  let skipped: SkippedSavedPreference | null = null;
-  if (composedSet && preferredId && !composedSet.has(preferredId)) {
-    const chosen = req.providers.find((p) => p.id === preferredId);
-    const label = chosen ? providerLabel(chosen) : null;
-    if (!req.savedPreference) {
-      const off = disabledProvider(req.providers, preferredId);
-      return off ? { kind: 'disabled', provider: off } : { kind: 'locked', label };
-    }
-    skipped = { providerId: preferredId, label };
-    const own = req.savedPreference.taskProviderId;
-    preferredId = own && composedSet.has(own) ? own : null;
-  }
-  const off = disabledProvider(req.providers, preferredId);
-  return off
-    ? { kind: 'disabled', provider: off }
-    : { kind: 'use', providerId: preferredId, skipped };
 }
 
 export function resolveDispatch(req: DispatchRequest): DispatchPlan {
