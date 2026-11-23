@@ -34,9 +34,9 @@ export async function resolveProviderSecrets(
       { encryptedValue: row.encryptedValue, encryptedDek: row.encryptedDek },
       masterKek,
     );
-    // An empty stored value means not set; injecting it would shadow a same-named adapter
+    // An empty or blank stored value means not set; injecting it would shadow a same-named adapter
     // default or plain env value.
-    if (value === '') continue;
+    if (value.trim() === '') continue;
     resolved[row.secretName] = value;
   }
   return resolved;

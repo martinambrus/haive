@@ -207,6 +207,23 @@ describe.skipIf(!url)(
           where: and(eq(schema.cliProviders.userId, U), eq(schema.cliProviders.label, label)),
         })
         .then((r) => r!);
+
+    it.each(['create', 'patch', 'manual'])(
+      'T748.5 %s refuses a blank token without changing the set',
+      async (kind) => {
+        const before = await world();
+        const value = ' \t\n\u00a0';
+        const res =
+          kind === 'create'
+            ? await call('POST', '', createBody(value))
+            : kind === 'patch'
+              ? await patch('C', { isolateAuth: false, envVars: { [TOKEN]: value } })
+              : await post('A', TOKEN, value);
+        expect(res.status).toBe(400);
+        expect(await world()).toEqual(before);
+      },
+    );
+
     /** Every member holds the token and one shared generation that differs from each old one. */
     const expectWritten = async (
       token: string,
@@ -849,6 +866,26 @@ describe.skipIf(!url)(
         expect(await joinEvents()).toEqual([]);
         await expectWritten(token, ['A', 'B', created.id]);
       });
+
+      it.each(['', ' \t\n\u00a0'])(
+        'T748.1 clone skips exactly-empty set tokens and copies legacy whitespace (%j)',
+        async (value) => {
+          await differ('B');
+          await upsertProviderSecret(db, {
+            providerId: rows.B.id,
+            name: TOKEN,
+            value,
+            masterKek: KEK,
+            onExisting: 'overwrite',
+          });
+          const before = await outside(['A', 'B', 'C', 'D', 'E', 'F']);
+          const res = await cloneOf('A');
+          expect(res.status).toBe(201);
+          const id = ((await res.json()) as { provider: { id: string } }).provider.id;
+          await expectJoined(id, value === '' ? 'A' : 'B', 3);
+          expect(await outside(['A', 'B', 'C', 'D', 'E', 'F'])).toEqual(before);
+        },
+      );
 
       it('a clone of the older member joins the set and takes the login of the newest member', async () => {
         await differ('B');

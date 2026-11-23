@@ -704,21 +704,25 @@ Connecting usage stores a new grant on every row of the login set (below); that 
 retires the old one is unverified.
 
 **A secret-named provider env var needs a value.** A create or a settings save whose `envVars`
-holds a name that `SECRET_LIKE_ENV_NAME` matches, with the empty string, is refused with a 400
+holds a name that `SECRET_LIKE_ENV_NAME` matches, with a value that is empty after trimming, is refused with a 400
 that names the key, before any row, audit event, lock or job (`createCliProviderRequestSchema`,
 which the settings schema inherits through `.partial()`; it classifies with `splitSecretLikeEnv`,
 the split that sends those names to the encrypted store). In a settings save a secret-named key
 that is present sets the secret and one that is absent leaves it alone; the save never deletes a
 secret, the secret route's DELETE does. Naming the login token without a value is no exception: the
 save is refused, so it neither blanks the stored token nor advances the generation.
-`POST /cli-providers/:providerId/secrets` refuses an empty value too, and the web form never sends
-one. A non-secret variable with an empty value is kept and reaches the container as `NAME=`.
-`resolveProviderSecrets` also skips a stored value that
-decrypts to the empty string, which a row written before this rule, or moved from a legacy
+`POST /cli-providers/:providerId/secrets` refuses a blank value too, every login-token writer refuses one before it
+spreads across the login set, and the web form trims and never sends one. A non-blank value is stored as sent,
+whitespace included. A non-secret variable with an empty value is kept and reaches the container as `NAME=`.
+`resolveProviderSecrets` also skips a stored value that is blank after decrypting, which a row written before this rule, or moved from a legacy
 plaintext `envVars` entry, can still hold: the merge puts a secret over a same-named adapter
 default or plain value, so injecting it would blank, for example, the ollama adapter's
-placeholder token. Such a row is found without decrypting it: its `encrypted_value` is
-`<iv>:<tag>:` with an empty third part.
+placeholder token. An exact-empty row is found without decrypting it: its `encrypted_value` is `<iv>:<tag>:` with an empty
+third part (`isEmptyEnvelope`, pinned against the real encryption). The secrets list, the provider clone and the
+login-token seed use that check and never decrypt, so they skip exact-empty rows only; a whitespace-only legacy row
+stays listed and is copied by a clone (inert, since the worker skips it at run time and no writer can create one).
+The seed takes the first configured candidate. An exact-empty row is hidden from the list and so cannot be deleted
+from the form; the worker's legacy move (`copyKeys`) can still write one (T748 item 2).
 
 Captured Claude OAuth credentials are verified before promotion. The login API envelope-encrypts
 its candidate with purpose, user and provider bindings before putting it on `cli-probe`; the

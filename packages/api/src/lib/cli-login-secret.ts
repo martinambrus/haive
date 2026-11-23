@@ -2,7 +2,7 @@ import { cliAuthScope, type CliAuthProvider } from '@haive/shared/cli-auth-state
 import { randomUUID } from 'node:crypto';
 import { and, asc, desc, eq, inArray, sql } from 'drizzle-orm';
 import { schema, tryCliAuthLock, type Database } from '@haive/database';
-import { lockLoginSet, secretsService, upsertProviderSecret } from '@haive/shared';
+import { isEmptyEnvelope, lockLoginSet, secretsService, upsertProviderSecret } from '@haive/shared';
 import { insertAuditEvent, logAuditEvent, type AuditEvent } from './audit.js';
 
 /** Keep the captured credential, legacy-env cleanup and security trail together. */
@@ -14,6 +14,7 @@ export async function saveCliLoginSecret(
   assertActive: () => void | Promise<void> = () => {},
   authLockHeld = false,
 ): Promise<void> {
+  if (!token.trim()) throw new Error('CLAUDE_CODE_OAUTH_TOKEN needs a non-blank value');
   if (!authLockHeld) {
     const provider = await db.query.cliProviders.findFirst({
       where: and(eq(schema.cliProviders.id, providerId), eq(schema.cliProviders.userId, userId)),
@@ -130,6 +131,7 @@ export async function writeLoginTokenToSet(
   },
 ): Promise<AuditEvent[]> {
   const { userId, viaId, members, source, value, masterKek, assertHeld } = opts;
+  if (!value.trim()) throw new Error('CLAUDE_CODE_OAUTH_TOKEN needs a non-blank value');
   if (!members.some((m) => m.id === viaId)) throw new Error('Provider not found');
   const events: AuditEvent[] = [];
   for (const member of members) {
@@ -201,14 +203,12 @@ export async function seedJoinerFromSet(
     joinerId: string;
     members: { id: string }[];
     assertHeld: () => Promise<void>;
-    /** The joiner keeps the generation it holds: the request advanced it, and the set's would undo that. */
-    keepGeneration?: boolean;
   },
 ): Promise<{ events: AuditEvent[]; row?: typeof schema.cliProviders.$inferSelect }> {
-  const { userId, joinerId, members, assertHeld, keepGeneration } = opts;
+  const { userId, joinerId, members, assertHeld } = opts;
   const others = members.filter((m) => m.id !== joinerId).map((m) => m.id);
   if (others.length === 0) return { events: [] };
-  const [source] = await tx
+  const candidates = await tx
     .select({
       providerId: schema.cliProviderSecrets.providerId,
       encryptedValue: schema.cliProviderSecrets.encryptedValue,
@@ -231,8 +231,8 @@ export async function seedJoinerFromSet(
         eq(schema.cliProviderSecrets.secretName, 'CLAUDE_CODE_OAUTH_TOKEN'),
       ),
     )
-    .orderBy(desc(schema.cliProviderSecrets.updatedAt), asc(schema.cliProviderSecrets.providerId))
-    .limit(1);
+    .orderBy(desc(schema.cliProviderSecrets.updatedAt), asc(schema.cliProviderSecrets.providerId));
+  const source = candidates.find((candidate) => !isEmptyEnvelope(candidate.encryptedValue));
   if (!source) return { events: [] };
   const event: AuditEvent = {
     actorUserId: userId,
@@ -266,7 +266,7 @@ export async function seedJoinerFromSet(
       authStatus: source.authStatus,
       authMessage: source.authMessage,
       authLastCheckedAt: sql`${source.authCheckedAt}::timestamp`,
-      ...(keepGeneration ? {} : { authGeneration: source.authGeneration }),
+      authGeneration: source.authGeneration,
     })
     .where(eq(schema.cliProviders.id, joinerId))
     .returning();

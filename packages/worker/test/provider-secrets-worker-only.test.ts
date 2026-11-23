@@ -98,3 +98,20 @@ describe('worker-only provider secrets', () => {
     expect(resolved.KEPT_API_KEY === KEPT).toBe(true);
   });
 });
+
+it('T748.5 omits whitespace secrets and preserves padded real values', async () => {
+  const value = ` ${randomBytes(16).toString('hex')}\n`;
+  const db = {
+    query: {
+      cliProviderSecrets: {
+        findMany: async () => [
+          { secretName: 'BLANK_TOKEN', ...envelopeEncrypt(' \t\n\u00a0', KEK) },
+          { secretName: 'REAL_TOKEN', ...envelopeEncrypt(value, KEK) },
+        ],
+      },
+    },
+  } as unknown as Database;
+  const resolved = await resolveProviderSecrets(db, PROVIDER);
+  expect(Object.keys(resolved)).toEqual(['REAL_TOKEN']);
+  expect(resolved.REAL_TOKEN === value).toBe(true);
+});
