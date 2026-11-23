@@ -11,9 +11,9 @@ it.each(['derived', 'workflow_paths', 'run_app_modes'] as const)(
     ).toThrow(/static/);
   },
 );
-it.each([null, [target, target]])(
-  'refuses a missing or duplicate static snapshot: %j',
-  (runListSnapshot) => {
+it.each([null, [target, target]].map((runListSnapshot) => ({ runListSnapshot })))(
+  'refuses a missing or duplicate static snapshot: $runListSnapshot',
+  ({ runListSnapshot }) => {
     expect(() =>
       assertWorkerExecutionContractSupported(pin, { runListStrategy: 'static', runListSnapshot }),
     ).toThrow(/unique pinned/);

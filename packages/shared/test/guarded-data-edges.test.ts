@@ -191,7 +191,7 @@ describe('guarded immutable data edges', () => {
 });
 
 describe('contract-aware availability', () => {
-  it('validates a selected capable target with trusted registration but still refuses a custom fix target', () => {
+  it('admits a selected capable module target with trusted registration', () => {
     const f = fixture(true);
     f.catalog.set(producer, entry(producer, { fixConsumer: { version: 1 } }));
     f.catalog.set(consumer, entry(consumer, { loopTargetStepId: '07-phase-2-implement' }));
@@ -215,15 +215,7 @@ describe('contract-aware availability', () => {
       generic: true,
       predicates,
     });
-    expect(result).toMatchObject({
-      available: false,
-      reason: 'invalid-composition',
-      issues: [
-        expect.objectContaining({
-          kind: 'invalid-execution-contract',
-        }),
-      ],
-    });
+    expect(result).toEqual({ available: true });
   });
   it.each([true, false])(
     'admits a structurally valid guarded contract only with trusted schemas (trusted schemas=%s)',

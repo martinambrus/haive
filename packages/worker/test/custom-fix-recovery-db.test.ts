@@ -990,8 +990,8 @@ describe.skipIf(!url)('recovery of a fix round on Postgres', () => {
       });
     });
 
-    describe('the closed fence', () => {
-      it('the real fence refuses the custom task in the judge and leaves the ordinary one alone', async () => {
+    describe('the supported execution fence', () => {
+      it('the real fence admits both capable custom and ordinary tasks without changing their rows', async () => {
         const actual = await vi.importActual<
           typeof import('../src/step-engine/execution-contract-support.js')
         >('../src/step-engine/execution-contract-support.js');
@@ -1008,14 +1008,8 @@ describe.skipIf(!url)('recovery of a fix round on Postgres', () => {
           redriveRetryDelaysMs: [],
         });
         const task = await taskOf(id);
-        if (leg.pin) {
-          expect(result).toMatchObject({ marked: 1, revived: 0 });
-          expect(task.deadAt).not.toBeNull();
-          expect(task.deadReason).toContain(new ExecutionContractError('refused').code);
-        } else {
-          expect(result).toMatchObject({ marked: 0, revived: 0 });
-          expect(task.deadAt).toBeNull();
-        }
+        expect(result).toMatchObject({ marked: 0, revived: 0 });
+        expect(task.deadAt).toBeNull();
         expect(
           await db.select().from(schema.taskSteps).where(eq(schema.taskSteps.taskId, id)),
         ).toEqual(before);

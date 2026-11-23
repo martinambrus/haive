@@ -644,3 +644,56 @@ it.each([
     expect.anything(),
   );
 });
+
+it('admits a capable module target and copies the execution pin at locked admission', async () => {
+  const target = 'module.fx.repair';
+  const pin = { ...empty, fixTarget: { stepId: target, capabilityVersion: 1 } };
+  const fake = setup(pin);
+  fake.insert(schema.modules, {
+    moduleId: 'fx',
+    packageName: '@haive/module-fx',
+    name: 'Fx',
+    installedVersion: '1',
+  });
+  fake.insert(schema.stepCatalog, {
+    stepId: target,
+    source: 'module:fx',
+    workflowType: 'module.fx',
+    composable: true,
+    dispatchesCli: false,
+    stepIndex: 2,
+    entry: {
+      stepId: target,
+      label: 'Repair',
+      group: 'build',
+      dispatchesCli: false,
+      requires: [],
+      provides: [],
+      fixConsumer: { version: 1 },
+    },
+  });
+  await fake.db
+    .update(schema.taskTypeDefinitions)
+    .set({ stepIds: ['lead', target, 'tail'] })
+    .where(eq(schema.taskTypeDefinitions.slug, 'test'));
+  const definition = await fake.db.transaction((tx) =>
+    definitionForCreate(tx as never, 'test', { generic: true, locked: true }),
+  );
+  expect(definition.executionContract).toEqual(pin);
+  expect(definition.runListSnapshot).toContain(target);
+  // The catalog cannot grant a capability the step never declared.
+  const stored = fake.rows(schema.stepCatalog).find((row) => row.stepId === target)!;
+  await fake.db
+    .update(schema.stepCatalog)
+    .set({ entry: { ...(stored.entry as object), fixConsumer: undefined } })
+    .where(eq(schema.stepCatalog.stepId, target));
+  await expect(
+    fake.db.transaction((tx) =>
+      definitionForCreate(tx as never, 'test', { generic: true, locked: true }),
+    ),
+  ).rejects.toMatchObject({
+    status: 409,
+    code: 'invalid-execution-contract',
+    message: expect.stringContaining(target),
+  });
+});

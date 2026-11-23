@@ -16,11 +16,23 @@ async function fixLoopTargetStepId(contract: unknown): Promise<string> {
 }
 
 describe('fence parity', () => {
-  it('still refuses a contract that pins a custom fix target', () => {
-    expect(() => assertExecutionContractSupported(pin, { staticPinnedList: true })).toThrow(
-      ExecutionContractError,
-    );
+  it('admits a static contract that pins a module fix target', () => {
+    expect(() => assertExecutionContractSupported(pin, { staticPinnedList: true })).not.toThrow();
   });
+});
+
+it.each([
+  '07-phase-2-implement',
+  'custom.fx.repair',
+  'module.fx._repair',
+  'module.fx.repair.extra',
+])('refuses an unsupported target by name: %s', (stepId) => {
+  expect(() =>
+    assertExecutionContractSupported(
+      { ...pin, fixTarget: { stepId, capabilityVersion: 1 } },
+      { staticPinnedList: true },
+    ),
+  ).toThrow(stepId);
 });
 
 describe('fixLoopTargetStepId', () => {

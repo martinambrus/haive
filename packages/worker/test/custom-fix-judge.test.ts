@@ -197,15 +197,14 @@ describe('deadTaskResolution with the real fence', () => {
     fence.assert.mockImplementation(actual.assertWorkerExecutionContractSupported);
   });
 
-  it('refuses any fixTarget, even a capable one', () => {
+  it('admits a capable module fixTarget in the pinned static list', () => {
     const registry = registryOf(stub(REVIEW, 1), stub(AFTER, 2), stub(TARGET, 0, capable));
     const found = deadTaskResolution(
       task({ executionContract: pinOf(TARGET) }),
       'static',
       registry,
     );
-    expect(found).toMatchObject({ unresolved: [], outsideList: null });
-    expect(found.supportReason).toContain(CONTRACT_REFUSED);
+    expect(found).toEqual(ORDINARY);
   });
 
   it('refuses an incapable fixTarget the same way', () => {

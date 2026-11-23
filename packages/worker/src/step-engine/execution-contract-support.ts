@@ -6,6 +6,7 @@ import {
 import type { RunListStrategy } from '@haive/shared/run-list';
 import { registeredGuardPredicates } from './guard-predicates.js';
 import { stepRegistry, type StepRegistry } from './registry.js';
+import { resolvePinnedFixConsumer } from './fix-consumer.js';
 
 export interface ExecutionContractScope {
   runListStrategy: RunListStrategy;
@@ -15,7 +16,7 @@ export interface ExecutionContractScope {
 
 /** Worker capability fence: a guarded pin runs only on a unique static snapshot whose
  * predicates this worker registers and whose spans do not start at the first step. A
- * custom fix target is refused. */
+ * custom target must be a registered, capable module step on that snapshot. */
 export function assertWorkerExecutionContractSupported(
   raw: unknown,
   scope: ExecutionContractScope,
@@ -37,9 +38,20 @@ export function assertWorkerExecutionContractSupported(
         ? `fix-target ${contract.fixTarget.stepId} needs a unique pinned run list`
         : 'guarded spans need a unique pinned run list',
     );
-  if (contract.fixTarget)
-    throw new ExecutionContractError('a custom fix target is not yet supported by this worker');
-  executionContractPaths(ids, new Map(), contract, registeredGuardPredicates(registry));
+  if (
+    contract.fixTarget &&
+    (!ids.includes(contract.fixTarget.stepId) ||
+      !resolvePinnedFixConsumer(contract.fixTarget, registry).ok)
+  )
+    throw new ExecutionContractError(
+      `fix-target ${contract.fixTarget.stepId} is off-list or not a registered module fix consumer at version ${contract.fixTarget.capabilityVersion}`,
+    );
+  executionContractPaths(
+    ids,
+    new Map(),
+    { ...contract, fixTarget: undefined },
+    registeredGuardPredicates(registry),
+  );
   for (const span of contract.guardedSpans)
     if (ids.indexOf(span.firstStepId) < 1)
       throw new ExecutionContractError(`span-entry ${span.id}: first step must not lead the list`);
