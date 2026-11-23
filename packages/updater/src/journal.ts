@@ -1,6 +1,7 @@
 import { UPGRADE_JOURNAL_DDL } from '@haive/database';
 import { maintenanceStateSchema, type MaintenanceState } from '@haive/shared';
 import type { ISql, Sql } from 'postgres';
+import { assertStackLease } from './lease-fence.js';
 import { attemptVersion } from './attempt-fields.js';
 import type { RunStatus, UpgradePhase } from './phases.js';
 
@@ -23,6 +24,7 @@ export interface UpgradeRun {
 }
 
 export async function ensureJournal(sql: Sql): Promise<void> {
+  await assertStackLease();
   await sql.unsafe(UPGRADE_JOURNAL_DDL, [], { simple: true });
 }
 
@@ -68,6 +70,7 @@ export async function startRun(
   sql: Sql,
   entry: { fromVersion: string; toVersion: string; channel: string; metadata?: RunMetadata },
 ): Promise<string> {
+  await assertStackLease();
   // Written in the INSERT itself: a kill before recordFoundState must still be distinguishable.
   const rows = await sql<{ id: string }[]>`
     INSERT INTO upgrade_runs (from_version, to_version, channel, phase, status, metadata)
@@ -89,16 +92,19 @@ export async function recordAttempt(
     metadata: RunMetadata;
   },
 ): Promise<void> {
+  await assertStackLease();
   const marker = '… [truncated]';
   const error =
     entry.error.length > 2048 ? entry.error.slice(0, 2048 - marker.length) + marker : entry.error;
   await sql.begin(async (tx) => {
+    await assertStackLease();
     const rows = await tx<{ id: string }[]>`
       INSERT INTO upgrade_runs (from_version, to_version, channel, phase, status, error, metadata, ended_at)
       VALUES (${entry.fromVersion}, ${attemptVersion(entry.toVersion)}, ${entry.channel}, 'preflight', ${entry.status},
               ${error}, ${tx.json(entry.metadata)}, now())
       RETURNING id`;
     // Must change together with attemptRow in packages/api/src/lib/upgrade-run.ts.
+    await assertStackLease();
     await tx`DELETE FROM upgrade_runs WHERE id IN (
       SELECT id FROM (
         SELECT id FROM upgrade_runs
@@ -112,10 +118,12 @@ export async function recordAttempt(
 /** Record the phase BEFORE doing it. A journal written after the fact cannot say what was in
  *  progress when the process died, which is the only question it exists to answer. */
 export async function enterPhase(sql: Sql, id: string, phase: UpgradePhase): Promise<void> {
+  await assertStackLease();
   await sql`UPDATE upgrade_runs SET phase = ${phase}, updated_at = now() WHERE id = ${id}`;
 }
 
 export async function mergeMetadata(sql: Sql, id: string, patch: RunMetadata): Promise<void> {
+  await assertStackLease();
   await sql`
     UPDATE upgrade_runs
        SET metadata = metadata || ${sql.json(patch)}, updated_at = now()
@@ -128,6 +136,7 @@ export async function recordFoundState(
   id: string,
   state: MaintenanceState,
 ): Promise<void> {
+  await assertStackLease();
   await sql`
     UPDATE upgrade_runs
        SET metadata = ${sql.json({ foundState: state })} || metadata, updated_at = now()
@@ -153,6 +162,7 @@ export async function finishRun(
   status: Exclude<RunStatus, 'running'>,
   error?: string,
 ): Promise<void> {
+  await assertStackLease();
   await sql`
     UPDATE upgrade_runs
        SET status = ${status}, error = ${error ?? null}, ended_at = now(), updated_at = now()
@@ -161,6 +171,7 @@ export async function finishRun(
 
 /** Records why a run could not be undone while leaving it `running`, so the next updater finds it. */
 export async function recordRunError(sql: Sql, id: string, error: string): Promise<void> {
+  await assertStackLease();
   await sql`UPDATE upgrade_runs SET error = ${error}, updated_at = now() WHERE id = ${id}`;
 }
 

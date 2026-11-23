@@ -2,6 +2,7 @@ import { randomBytes } from 'node:crypto';
 import { constants } from 'node:os';
 import { rename } from 'node:fs/promises';
 import { inInstall, type InstallDirectory } from './install-files.js';
+import { UpgradeRefusal } from './refusal.js';
 
 /** Wire contract shared with the Desktop extension bridge: file name and timings must match it. */
 export const STACK_LOCK_NAME = '.haive-stack-lock';
@@ -92,6 +93,7 @@ export class StackLock {
   private releasing: Promise<void> | undefined;
   private inFlight: Promise<'ok' | 'lost' | 'error'> | undefined;
   private timer: NodeJS.Timeout | undefined;
+  private checking: Promise<void> | undefined;
 
   constructor(
     private readonly installDir: string,
@@ -109,9 +111,62 @@ export class StackLock {
     return this.lostFlag;
   }
 
+  /** A phase needs a fresh proof from the store, not merely the absence of a failed heartbeat.
+   * Never recreate or refresh here: an absent or unreadable record proves no ownership. */
+  assertOwned(): Promise<void> {
+    if (this.lostFlag || this.releasing) return Promise.reject(this.lossRefusal());
+    return (this.checking ??= this.checkOwner().finally(() => {
+      this.checking = undefined;
+    }));
+  }
+
+  private async checkOwner(): Promise<void> {
+    // A heartbeat rewrites in place. Do not mistake its unfinished write for a foreign record.
+    await this.inFlight;
+    if (this.lostFlag || this.releasing) throw this.lossRefusal();
+    try {
+      const current = await inInstall(this.installDir, (dir) =>
+        dir.read(STACK_LOCK_NAME, this.options.maxBytes),
+      );
+      const owner = current && decode(current.bytes);
+      if (
+        this.lostFlag ||
+        this.releasing ||
+        !owner ||
+        owner.token !== this.token ||
+        owner.holder !== this.options.holder ||
+        owner.startedAt !== this.startedAt
+      ) {
+        throw this.lossRefusal();
+      }
+    } catch {
+      this.markLost();
+      throw this.lossRefusal();
+    }
+  }
+
+  private lossRefusal(): UpgradeRefusal {
+    return new UpgradeRefusal(
+      'stack-lock-lost',
+      'install stack lease ownership could not be proved; leaving the upgrade for its current holder to recover',
+    );
+  }
+
+  private markLost(): void {
+    if (this.lostFlag) return;
+    this.lostFlag = true;
+    this.stopTimer();
+    this.options.onEvent?.('stack-lock-lost', { token: this.token });
+  }
+
   beat(): Promise<'ok' | 'lost' | 'error'> {
     // After release has started a beat must never re-create the file.
     if (this.lostFlag || this.releasing) return Promise.resolve('lost');
+    if (this.checking)
+      return this.checking.then(
+        () => this.beat(),
+        () => 'lost' as const,
+      );
     // A tick that arrives while a write is still in flight joins it rather than overlapping.
     this.inFlight ??= this.beatOnce().finally(() => {
       this.inFlight = undefined;
@@ -145,9 +200,7 @@ export class StackLock {
         this.failing = false;
         return 'ok';
       }
-      this.lostFlag = true;
-      this.stopTimer();
-      this.options.onEvent?.('stack-lock-lost', { token: this.token });
+      this.markLost();
       return 'lost';
     } catch (error) {
       if (!this.failing) {

@@ -13,6 +13,7 @@ import { classifyBundle, requireUnmodifiedBundle, stageBundle } from './bundle.j
 import { ensureEnvKeys } from './envkeys.js';
 import { BundleBackupError, readBundleState } from './bundle-swap.js';
 import { UpgradeRefusal } from './refusal.js';
+import { assertStackLease, bindStackLease, isLeaseLoss, withStackLease } from './lease-fence.js';
 import { cleanupInstallTemps, requireRegularInstallFiles } from './install-files.js';
 import {
   acquireStackLock,
@@ -184,16 +185,21 @@ export async function loadManifest(options: {
  *  updater to find and finish. */
 async function undo(ctx: UpgradeContext, reason: string): Promise<number> {
   try {
+    await assertStackLease();
     await rollback(ctx, reason);
     return EXIT.rolledBack;
   } catch (err) {
-    return rollbackFailed(ctx, err);
+    if (isLeaseLoss(err)) throw err;
+    return await rollbackFailed(ctx, err);
   }
 }
 
 async function rollbackFailed(ctx: UpgradeContext, err: unknown): Promise<number> {
+  await assertStackLease();
   const message = scrubErrorPaths(safeErrorMessage(err));
-  await recordRunError(ctx.sql, ctx.runId, `rollback failed: ${message}`).catch(() => {});
+  await recordRunError(ctx.sql, ctx.runId, `rollback failed: ${message}`).catch((error) => {
+    if (isLeaseLoss(error)) throw error;
+  });
   emit('rollback-failed', {
     message,
     next:
@@ -224,7 +230,16 @@ export async function main(options: { stackLock?: StackLockOptions } = {}): Prom
     return EXIT.usage;
   }
 
-  return dk.withOneShotOwner(installId(), () => upgradeOwned(options));
+  try {
+    return await withStackLease(() =>
+      dk.withOneShotOwner(installId(), () => upgradeOwned(options)),
+    );
+  } catch (err) {
+    // A lease can also be lost in the final, otherwise best-effort attempt write.
+    if (!isLeaseLoss(err)) throw err;
+    emit('refused', { refusal: err.refusal, message: err.message });
+    return EXIT.refused;
+  }
 }
 
 async function upgradeOwned(options: { stackLock?: StackLockOptions }): Promise<number> {
@@ -361,6 +376,7 @@ async function upgradeOwned(options: { stackLock?: StackLockOptions }): Promise<
         throw new UpgradeRefusal('install-locked', describeBusy(outcome));
       if (outcome.status === 'held') {
         stackLock = outcome.lock;
+        bindStackLease(() => outcome.lock.assertOwned());
         stopSignals = releaseOnSignal(stackLock, process.exit, ['SIGTERM'], {
           beforeRelease: dk.oneShotSignalCleanup(),
           onError: (err) =>
@@ -376,7 +392,10 @@ async function upgradeOwned(options: { stackLock?: StackLockOptions }): Promise<
     }
     errorRunId = live?.id;
     await requireRegularInstallFiles(installDir);
-    if (live || !flag('check')) await cleanupInstallTemps(installDir);
+    if (live || !flag('check')) {
+      await assertStackLease();
+      await cleanupInstallTemps(installDir);
+    }
     fromVersion = (await readEnvVar(envFile, 'HAIVE_VERSION')) ?? 'unknown';
     const { imageSettings, manifestOptions, missingTarget } = await readInstall();
     installFieldsStarted = true;
@@ -420,10 +439,17 @@ async function upgradeOwned(options: { stackLock?: StackLockOptions }): Promise<
         log: emit,
       };
       try {
+        await assertStackLease();
         await resume(ctx, live.phase);
       } catch (err) {
-        if (isChildCleanupRefusal(err) || decideResume(live.phase).action !== 'reverse') throw err;
-        return rollbackFailed(ctx, err);
+        await assertStackLease();
+        if (
+          isLeaseLoss(err) ||
+          isChildCleanupRefusal(err) ||
+          decideResume(live.phase).action !== 'reverse'
+        )
+          throw err;
+        return await rollbackFailed(ctx, err);
       }
       return EXIT.ok;
     }
@@ -521,10 +547,13 @@ async function upgradeOwned(options: { stackLock?: StackLockOptions }): Promise<
 
     let pullCompose = compose;
     if (target.bundle) {
+      await assertStackLease();
       pullCompose = await stageBundle(compose, target.bundle, payload!);
+      await assertStackLease();
       envAdded = await ensureEnvKeys(envFile, target.bundle.env, { emit: report });
     }
     // Pull BEFORE any hold is applied. Generated keys intentionally remain after a later failure.
+    await assertStackLease();
     const targetImages = await prepareImages(
       pullCompose,
       envFile,
@@ -542,6 +571,7 @@ async function upgradeOwned(options: { stackLock?: StackLockOptions }): Promise<
       });
     report('pulled', { version: target.version });
 
+    await assertStackLease();
     const runId = await startRun(sql, {
       fromVersion,
       toVersion: target.version,
@@ -580,22 +610,30 @@ async function upgradeOwned(options: { stackLock?: StackLockOptions }): Promise<
 
     let verifyFailed = false;
     try {
+      await assertStackLease();
       await recordBundleBackup(ctx);
+      await assertStackLease();
       await phaseDraining(ctx);
+      await assertStackLease();
       await phaseMaintenance(ctx);
       if (pgVolume) {
+        await assertStackLease();
         const file = await phaseSnapshot(ctx);
+        await assertStackLease();
         await recordSnapshot(ctx, file);
       } else {
         report('snapshot-skipped', { reason: 'no --postgres-volume given' });
       }
+      await assertStackLease();
       await phaseMigrate(ctx);
 
+      await assertStackLease();
       verifyFailed = !(await phaseVerify(ctx));
     } catch (err) {
       // A failed child cleanup leaves a possible writer alive: keep the run for recovery instead
       // of rolling back concurrently with it. The next holder checks its labels before recovery.
-      if (isChildCleanupRefusal(err)) throw err;
+      await assertStackLease();
+      if (isLeaseLoss(err) || isChildCleanupRefusal(err)) throw err;
       const message = err instanceof Error ? err.message : String(err);
       report('error', { message });
       // Anything that throws before commit is reversible by construction; say so and undo it
@@ -608,19 +646,28 @@ async function upgradeOwned(options: { stackLock?: StackLockOptions }): Promise<
     // Past the point of no return (`decideResume`): the run stays at `commit`, and the next run
     // resumes it forward rather than restoring old images onto data already changed.
     try {
+      await assertStackLease();
       await phaseCommit(ctx);
       return EXIT.ok;
     } catch (err) {
-      if (isChildCleanupRefusal(err)) throw err;
+      await assertStackLease();
+      if (isLeaseLoss(err) || isChildCleanupRefusal(err)) throw err;
       const message = err instanceof Error ? err.message : String(err);
       report('error', { message, phase: 'commit', next: 'run the updater again to finish it' });
       return EXIT.failed;
     }
   } catch (err) {
+    try {
+      await assertStackLease();
+    } catch (loss) {
+      err = loss;
+    }
     if (err instanceof UpgradeRefusal) {
       if (errorRunId && isChildCleanupRefusal(err)) {
         await recordRunError(sql, errorRunId, scrubErrorPaths(safeErrorMessage(err))).catch(
-          () => {},
+          (error) => {
+            if (isLeaseLoss(error)) throw error;
+          },
         );
       }
       report('refused', { refusal: err.refusal, message: err.message });
@@ -633,28 +680,34 @@ async function upgradeOwned(options: { stackLock?: StackLockOptions }): Promise<
     };
     throw err;
   } finally {
-    if (locked && !hasRun && !flag('check') && terminal) {
-      try {
-        const fields = installFieldsStarted
-          ? { fromVersion, channel }
-          : await readAttemptInstallFields(installDir);
-        await recordAttempt(sql, {
-          fromVersion: fields.fromVersion,
-          toVersion,
-          channel: fields.channel,
-          ...terminal,
-          error: fields.note
-            ? `${terminal.error}${/[.!?]\s*$/.test(terminal.error) ? '' : '.'} ${fields.note}`
-            : terminal.error,
-        });
-      } catch (err) {
-        emit('attempt-record-failed', { message: safeErrorMessage(err) });
+    try {
+      if (stackLock?.lost) await assertStackLease();
+      if (locked && !hasRun && !flag('check') && terminal && !stackLock?.lost) {
+        try {
+          const fields = installFieldsStarted
+            ? { fromVersion, channel }
+            : await readAttemptInstallFields(installDir);
+          await assertStackLease();
+          await recordAttempt(sql, {
+            fromVersion: fields.fromVersion,
+            toVersion,
+            channel: fields.channel,
+            ...terminal,
+            error: fields.note
+              ? `${terminal.error}${/[.!?]\s*$/.test(terminal.error) ? '' : '.'} ${fields.note}`
+              : terminal.error,
+          });
+        } catch (err) {
+          if (isLeaseLoss(err)) throw err;
+          emit('attempt-record-failed', { message: safeErrorMessage(err) });
+        }
       }
+    } finally {
+      // A child can settle while SIGTERM cleanup is still running. Join it before releasing.
+      await stopSignals?.();
+      await stackLock?.release();
+      await sql.end({ timeout: 5 }).catch(() => {});
     }
-    // A child can settle while SIGTERM cleanup is still running. Join it before releasing.
-    await stopSignals?.();
-    await stackLock?.release();
-    await sql.end({ timeout: 5 }).catch(() => {});
   }
 }
 

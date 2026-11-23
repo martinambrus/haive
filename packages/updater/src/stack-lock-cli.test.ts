@@ -7,6 +7,8 @@ const h = vi.hoisted(() => ({
   sql: Object.assign(vi.fn(), { end: vi.fn(), options: { parsers: {}, serializers: {} } }),
   initialize: vi.fn(),
   dockerExec: vi.fn(),
+  setConfig: vi.fn(),
+  getFreshConfig: vi.fn(),
 }));
 vi.mock('node:child_process', () => ({
   execFile: Object.assign(vi.fn(), {
@@ -17,10 +19,12 @@ vi.mock('postgres', () => ({ default: vi.fn(() => h.sql) }));
 import postgres from 'postgres';
 vi.mock('@haive/shared', async (original) => ({
   ...(await original<typeof import('@haive/shared')>()),
-  configService: { initialize: h.initialize },
+  configService: { initialize: h.initialize, set: h.setConfig, getFresh: h.getFreshConfig },
 }));
 vi.mock('./journal.js', () => ({
   ensureJournal: vi.fn(),
+  enterPhase: vi.fn(),
+  recordFoundState: vi.fn(),
   findLiveRun: vi.fn(),
   lastDoneChannel: vi.fn(),
   recordRunError: vi.fn(),
@@ -757,4 +761,291 @@ describe('SIGTERM while a one-shot is running', () => {
       }
     },
   );
+});
+
+describe('lease loss fences the attempt', () => {
+  beforeEach(() => {
+    vi.mocked(journal.recordRunError).mockResolvedValue(undefined);
+    vi.mocked(journal.recordAttempt).mockResolvedValue(undefined);
+  });
+  const opts = { stackLock: { ...quick, sleep: idleSleep } };
+  const takeover = async () => writeFile(lock, record(ext.token, 'updater', 7));
+  const refused = async () => {
+    expect(await main(opts)).toBe(3);
+    expect(
+      vi.mocked(console.log).mock.calls.map(([line]) => JSON.parse(String(line))),
+    ).toContainEqual(expect.objectContaining({ event: 'refused', refusal: 'stack-lock-lost' }));
+    expect(run.rollback).not.toHaveBeenCalled();
+    expect(journal.recordRunError).not.toHaveBeenCalled();
+    expect(journal.recordAttempt).not.toHaveBeenCalled();
+    expect(await readFile(lock, 'utf8')).toBe(record(ext.token, 'updater', 7));
+    expect(h.dockerExec.mock.calls.filter(([, args]) => args[0] === 'rm')).toEqual([]);
+  };
+  it.each([
+    ['draining', 'phaseDraining', 'phaseMaintenance'],
+    ['maintenance', 'phaseMaintenance', 'phaseSnapshot'],
+    ['migrate', 'phaseMigrate', 'phaseVerify'],
+    ['verify', 'phaseVerify', 'phaseCommit'],
+  ] as const)(
+    'does not dispatch the next phase after %s loses ownership',
+    async (_name, phase, next) => {
+      vi.mocked(run[phase]).mockImplementation(async () => {
+        await takeover();
+        return true as never;
+      });
+      await refused();
+      expect(run[next]).not.toHaveBeenCalled();
+    },
+  );
+  it.each(['error', 'verify-false', 'rollback-error', 'commit-error', 'recovery-error'])(
+    'does not write or roll back after %s and takeover',
+    async (where) => {
+      const fail = async () => {
+        await takeover();
+        throw Object.assign(new Error('phase failed'), { code: 'EIO' });
+      };
+      if (where === 'error') vi.mocked(run.phaseMigrate).mockImplementation(fail);
+      if (where === 'verify-false')
+        vi.mocked(run.phaseVerify).mockImplementation(async () => {
+          await takeover();
+          return false;
+        });
+      if (where === 'rollback-error') {
+        vi.mocked(run.phaseVerify).mockResolvedValue(false);
+        vi.mocked(run.rollback).mockImplementation(fail);
+      }
+      if (where === 'commit-error') vi.mocked(run.phaseCommit).mockImplementation(fail);
+      if (where === 'recovery-error') {
+        vi.mocked(journal.findLiveRun).mockResolvedValue(liveRun as never);
+        vi.mocked(run.resume).mockImplementation(fail);
+      }
+      // A rollback entered while owning is permitted; its failure must not write over recovery.
+      if (where === 'rollback-error') {
+        expect(await main(opts)).toBe(3);
+        expect(run.rollback).toHaveBeenCalledTimes(1);
+        expect(journal.recordRunError).not.toHaveBeenCalled();
+        expect(await readFile(lock, 'utf8')).toBe(record(ext.token, 'updater', 7));
+      } else await refused();
+    },
+  );
+  it('does not start a run or record an attempt after preparation loses ownership', async () => {
+    vi.mocked(images.prepareImages).mockImplementation(async () => {
+      await takeover();
+      return images.emptyOverrides();
+    });
+    await refused();
+    expect(journal.startRun).not.toHaveBeenCalled();
+  });
+  it.each(['snapshot', 'restore', 'migration', 'builder', 'compose-up', 'compose-stop'])(
+    'does not start %s after takeover inside a phase',
+    async (role) => {
+      vi.mocked(run.phaseMigrate).mockImplementation(async () => {
+        await takeover();
+        const ctx = { dir, files: ['docker-compose.yml', 'docker-compose.run.yml'] };
+        if (role === 'snapshot') await dk.snapshotVolume('isolated', dir, 'backup.tgz');
+        if (role === 'restore') await dk.restoreVolume('isolated', dir, 'backup.tgz');
+        if (role === 'migration') await dk.runOneShot('target', ['migrate'], {});
+        if (role === 'builder') await dk.buildOwnModules('builder', dir, {});
+        if (role === 'compose-up') await dk.composeUp(ctx, {});
+        if (role === 'compose-stop') await dk.composeStop(ctx, {}, ['postgres']);
+      });
+      await refused();
+      expect(
+        h.dockerExec.mock.calls.filter(([, args]) => args[0] === 'run' || args[0] === 'compose'),
+      ).toEqual([]);
+    },
+  );
+  it('checks again after a builder pull, before docker run', async () => {
+    h.dockerExec.mockImplementation(async (_cmd, args) => {
+      if (args[0] === 'pull') await takeover();
+      return { stdout: '' };
+    });
+    vi.mocked(run.phaseMigrate).mockImplementation(async () =>
+      dk.buildOwnModules('builder', dir, {}),
+    );
+    await refused();
+    expect(h.dockerExec.mock.calls.filter(([, args]) => args[0] === 'run')).toEqual([]);
+  });
+  it('does not restart postgres in snapshot finally after takeover', async () => {
+    const actual = await vi.importActual<typeof import('./run.js')>('./run.js');
+    vi.mocked(run.phaseSnapshot).mockImplementation(actual.phaseSnapshot);
+    h.dockerExec.mockImplementation(async (_cmd, args) => {
+      if (args[0] === 'run') await takeover();
+      return { stdout: '' };
+    });
+    await refused();
+    expect(
+      h.dockerExec.mock.calls.filter(([, args]) => args[0] === 'compose').map(([, args]) => args),
+    ).toEqual([expect.arrayContaining(['stop', 'postgres'])]);
+    expect(run.recordSnapshot).not.toHaveBeenCalled();
+  });
+  it.each(['phase', 'metadata', 'finish', 'error', 'start', 'attempt', 'found'])(
+    'fences the actual %s journal writer after takeover',
+    async (writer) => {
+      const actual = await vi.importActual<typeof import('./journal.js')>('./journal.js');
+      const sql = Object.assign(
+        vi.fn(async () => [{ id: 'new' }]),
+        {
+          json: (value: unknown) => value,
+          begin: vi.fn(async (work: (tx: unknown) => Promise<void>) => work(sql)),
+        },
+      );
+      vi.mocked(run.phaseMigrate).mockImplementation(async () => {
+        await takeover();
+        const db = sql as never;
+        if (writer === 'phase') await actual.enterPhase(db, 'new-run', 'commit');
+        if (writer === 'metadata') await actual.mergeMetadata(db, 'new-run', {});
+        if (writer === 'finish') await actual.finishRun(db, 'new-run', 'done');
+        if (writer === 'error') await actual.recordRunError(db, 'new-run', 'failure');
+        if (writer === 'start')
+          await actual.startRun(db, {
+            fromVersion: '1.0.0',
+            toVersion: '9.9.9',
+            channel: 'public',
+          });
+        if (writer === 'attempt')
+          await actual.recordAttempt(db, {
+            fromVersion: '1.0.0',
+            toVersion: '9.9.9',
+            channel: 'public',
+            status: 'refused',
+            error: 'failure',
+            metadata: {},
+          });
+        if (writer === 'found') await actual.recordFoundState(db, 'new-run', 'normal');
+      });
+      await refused();
+      expect(sql).not.toHaveBeenCalled();
+      expect(sql.begin).not.toHaveBeenCalled();
+    },
+  );
+  it.each(['pin', 'atomic', 'mkdir', 'remove', 'prune', 'temps', 'env-keys'])(
+    'fences the actual %s install writer after takeover',
+    async (writer) => {
+      const actual = await vi.importActual<typeof import('./run.js')>('./run.js');
+      const { inInstall } = await import('./install-files.js');
+      const { ensureEnvKeys } = await import('./envkeys.js');
+      const victim = writer === 'temps' ? '..env.' + randomUUID() : 'victim';
+      if (writer !== 'temps') await writeFile(join(dir, victim), 'keep');
+      const envBefore = await readFile(join(dir, '.env'), 'utf8');
+      vi.mocked(run.phaseMigrate).mockImplementation(async () => {
+        if (writer === 'temps') await writeFile(join(dir, victim), 'keep');
+        await takeover();
+        if (writer === 'pin') await actual.setEnvVar(join(dir, '.env'), 'HAIVE_VERSION', '9.9.9');
+        else if (writer === 'env-keys')
+          await ensureEnvKeys(join(dir, '.env'), [
+            { key: 'MAILPIT_UI_PASSWORD', generate: 'hex', bytes: 24 },
+          ]);
+        else
+          await inInstall(dir, async (root) => {
+            if (writer === 'atomic') await root.atomic(victim, Buffer.from('changed'));
+            if (writer === 'mkdir') await (await root.child('new-directory', true)).close();
+            if (writer === 'remove') await root.remove(victim);
+            if (writer === 'prune') await root.removeTree(victim);
+            if (writer === 'temps') await root.removeTemps();
+          });
+      });
+      await refused();
+      expect(await readFile(join(dir, victim), 'utf8')).toBe('keep');
+      expect(await readFile(join(dir, '.env'), 'utf8')).toBe(envBefore);
+      await expect(stat(join(dir, 'new-directory'))).rejects.toMatchObject({ code: 'ENOENT' });
+    },
+  );
+  it('checks after waiting for the maintenance fence before changing configuration', async () => {
+    const actual = await vi.importActual<typeof import('./run.js')>('./run.js');
+    const fence = Object.assign(
+      vi.fn(async () => []),
+      { release: vi.fn() },
+    );
+    const sql = {
+      reserve: vi.fn(async () => {
+        await takeover();
+        return fence;
+      }),
+    };
+    vi.mocked(run.phaseMaintenance).mockImplementation(async (ctx) => {
+      await actual.phaseMaintenance({ ...ctx, sql: sql as never, drainForced: true });
+    });
+    await refused();
+    expect(h.setConfig).not.toHaveBeenCalled();
+    expect(fence.release).toHaveBeenCalledOnce();
+  });
+  it('checks again after a maintenance recount before changing configuration', async () => {
+    const actual = await vi.importActual<typeof import('./run.js')>('./run.js');
+    const fence = Object.assign(
+      vi.fn(async (parts: TemplateStringsArray) => {
+        if (parts.join('').includes('::text AS n')) {
+          await takeover();
+          return [{ n: '0' }];
+        }
+        return [{ has_dead_at: false }];
+      }),
+      { release: vi.fn() },
+    );
+    h.getFreshConfig.mockResolvedValue('draining');
+    vi.mocked(run.phaseMaintenance).mockImplementation(async (ctx) => {
+      await actual.phaseMaintenance({ ...ctx, sql: { reserve: async () => fence } as never });
+    });
+    await refused();
+    expect(h.setConfig).not.toHaveBeenCalled();
+    expect(fence.release).toHaveBeenCalledOnce();
+  });
+  it('propagates a lost lease during best-effort attempt recording as refusal exit 3', async () => {
+    vi.mocked(journal.lastDoneChannel).mockResolvedValue('other');
+    vi.mocked(journal.recordAttempt).mockImplementation(async () => {
+      await takeover();
+      const actual = await vi.importActual<typeof import('./journal.js')>('./journal.js');
+      await actual.recordAttempt(h.sql as never, {
+        fromVersion: '1.0.0',
+        toVersion: '9.9.9',
+        channel: 'public',
+        status: 'refused',
+        error: 'failure',
+        metadata: {},
+      });
+    });
+    expect(await main(opts)).toBe(3);
+    expect(
+      vi.mocked(console.log).mock.calls.map(([line]) => JSON.parse(String(line))),
+    ).toContainEqual(expect.objectContaining({ event: 'refused', refusal: 'stack-lock-lost' }));
+    expect(await readFile(lock, 'utf8')).toBe(record(ext.token, 'updater', 7));
+    expect(h.sql.end).toHaveBeenCalled();
+  });
+  it('client-failure cleanup only removes the old attempt children after takeover', async () => {
+    let attempt: string | undefined;
+    const children = new Map([
+      ['old-child', ''],
+      ['new-child', 'new-holder-attempt'],
+    ]);
+    h.dockerExec.mockImplementation(async (_cmd, args) => {
+      if (args[0] === 'run') {
+        attempt = args.find((a: string) => a.startsWith('org.haive.updater.attempt='));
+        children.set('old-child', attempt!);
+        await takeover();
+        throw Object.assign(new Error('client killed'), { signal: 'SIGKILL' });
+      }
+      if (args[1] === '-aq') {
+        expect(args).toContain('label=' + attempt);
+        return {
+          stdout: [...children]
+            .filter(([, owner]) => owner === attempt)
+            .map(([id]) => id)
+            .join('\n'),
+        };
+      }
+      if (args[0] === 'rm') for (const id of args.slice(2)) children.delete(id);
+      return { stdout: '' };
+    });
+    vi.mocked(run.phaseMigrate).mockImplementation(async () => {
+      await dk.runOneShot('target', ['migrate'], {});
+    });
+    expect(await main(opts)).toBe(3);
+    expect(
+      h.dockerExec.mock.calls.filter(([, args]) => args[0] === 'rm').map(([, args]) => args),
+    ).toEqual([['rm', '-f', 'old-child']]);
+    expect([...children.keys()]).toEqual(['new-child']);
+    expect(run.rollback).not.toHaveBeenCalled();
+    expect(journal.recordRunError).not.toHaveBeenCalled();
+    expect(await readFile(lock, 'utf8')).toBe(record(ext.token, 'updater', 7));
+  });
 });

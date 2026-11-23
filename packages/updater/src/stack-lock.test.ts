@@ -317,6 +317,97 @@ describe('size cap', () => {
   });
 });
 
+describe('phase ownership proofs', () => {
+  it('proves ownership without refreshing the stored record', async () => {
+    const lock = await held();
+    const before = await readFile(path, 'utf8');
+    await expect(lock.assertOwned()).resolves.toBeUndefined();
+    expect(await readFile(path, 'utf8')).toBe(before);
+    await lock.release();
+  });
+  it.each(['token', 'holder', 'startedAt', 'missing', 'invalid', 'unreadable'])(
+    'fails closed for %s without changing the replacement record',
+    async (field) => {
+      const lock = await held();
+      const own = await parse();
+      if (field === 'missing') await rm(path);
+      else if (field === 'invalid') await writeFile(path, '{');
+      else await writeFile(path, JSON.stringify({ ...own, [field]: token() }));
+      const before = await readFile(path, 'utf8').catch(() => null);
+      if (field === 'unreadable')
+        vi.spyOn(install.InstallDirectory.prototype, 'read').mockRejectedValueOnce(
+          Object.assign(new Error('read failed'), { code: 'EACCES' }),
+        );
+      await expect(lock.assertOwned()).rejects.toMatchObject({ refusal: 'stack-lock-lost' });
+      expect(lock.lost).toBe(true);
+      expect(await lock.beat()).toBe('lost');
+      await lock.release();
+      expect(await readFile(path, 'utf8').catch(() => null)).toBe(before);
+    },
+  );
+  it('fences the old holder after a real stale takeover while the new holder keeps ownership', async () => {
+    const old = await held();
+    const next = await held();
+    try {
+      const replacement = await readFile(path, 'utf8');
+      await expect(old.assertOwned()).rejects.toMatchObject({ refusal: 'stack-lock-lost' });
+      expect(await old.beat()).toBe('lost');
+      await old.release();
+      expect(await readFile(path, 'utf8')).toBe(replacement);
+      await expect(next.assertOwned()).resolves.toBeUndefined();
+      expect(await next.beat()).toBe('ok');
+    } finally {
+      await old.release();
+      await next.release();
+    }
+    expect(await readdir(dir)).toEqual([]);
+  });
+  it('fails fast after a heartbeat observes takeover even if its old bytes reappear', async () => {
+    const lock = await held();
+    const own = await readFile(path, 'utf8');
+    await writeFile(path, record(token(), 'updater', 1));
+    expect(await lock.beat()).toBe('lost');
+    await writeFile(path, own);
+    const read = vi.spyOn(install.InstallDirectory.prototype, 'read');
+    await expect(lock.assertOwned()).rejects.toMatchObject({ refusal: 'stack-lock-lost' });
+    expect(read).not.toHaveBeenCalled();
+    await lock.release();
+    expect(await readFile(path, 'utf8')).toBe(own);
+  });
+  it('waits for an in-flight heartbeat to finish before proving ownership', async () => {
+    const lock = await held();
+    const real = install.InstallDirectory.prototype.overwrite;
+    let finish!: () => void;
+    let entered!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      finish = resolve;
+    });
+    const writing = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    vi.spyOn(install.InstallDirectory.prototype, 'overwrite').mockImplementationOnce(
+      async function (this: install.InstallDirectory, name, bytes) {
+        await real.call(this, name, Buffer.alloc(0));
+        entered();
+        await gate;
+        await real.call(this, name, bytes);
+      },
+    );
+    const beat = lock.beat();
+    await writing;
+    try {
+      const proof = lock.assertOwned();
+      finish();
+      await expect(proof).resolves.toBeUndefined();
+      expect(await beat).toBe('ok');
+    } finally {
+      finish();
+      await beat;
+      await lock.release();
+    }
+  });
+});
+
 describe('release', () => {
   it('leaves a foreign token alone', async () => {
     const lock = await held();
