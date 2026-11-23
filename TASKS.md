@@ -964,7 +964,7 @@ A killed bridge can leave a Compose or installer child running while both leases
 
 ### T744 · FNF[orphan-children-vs-lease] · a lock holder's children outlive its lease
 
-status: open · kind: fix · found: #1304 driver 2026-11-21 · priority: P4
+status: done for the updater half (#1325 1c6c7b87d, 2026-11-23; updater is not part of the dev stack, so no deploy: one-shots carry install, attempt and role labels; a takeover refuses while another attempt's one-shot runs; cleanup by label when a client dies; no client timeout for labelled one-shots; SIGTERM cleanup bounded to 5 s and stops further launches). Desktop bridge half: T758 (design, owner scope). Lease fencing: T759. Follow-ups: T760 · kind: fix · found: #1304 driver 2026-11-21 · priority: P4
 
 A killed bridge leaves its Compose child running while the install lease lapses after 60 s (`docker/desktop-extension/bridge/main.go` ~:781), and an updater death can orphan the archive and migrate containers (`packages/updater/src/docker.ts` ~:163, ~:208), which no guard sees. PRE-EXISTING.
 
@@ -1101,12 +1101,13 @@ status: open · kind: design · found: T744 review 2026-11-23 · priority: P3
 
 `packages/updater/src/stack-lock.ts` ~:146-149: lease loss only stops heartbeats. A holder frozen over 60 s that resumes after a takeover keeps running its phases and can start one-shots the new holder's child check (T744) never saw. PRE-EXISTING, consequential. Fix direction: check lease ownership (a fencing token) before each phase and each container start, and abort on loss.
 
-### T760 · FNF[updater-takeover-order] · a takeover may fail before it reaches the child check (+1)
+### T760 · FNF[updater-takeover-order] · a takeover may fail before it reaches the child check (+2)
 
 status: open · kind: fix · found: T744 review 2026-11-23 · priority: P4
 
 1. `packages/updater/src/cli.ts` ~:336: `ensureJournal` and the database bootstrap run before the lock and the child check, so after an updater killed mid-snapshot (Postgres stopped by `composeStop`) a takeover probably fails at the journal connection with no named refusal. PRE-EXISTING, unverified: probe first.
 2. `packages/updater/src/docker.ts` ~:262 `restoreVolume` has no caller. PRE-EXISTING, minor.
+3. A `docker run` already exec'd when the SIGTERM cleanup marks the attempt stopping (`docker.ts` `stoppingAttempts`, #1325) can create its container after the cleanup's list, so it survives the exit; the next start's child check refuses on it (fails closed). Close it by re-listing once after removal. Low.
 
 ### T761 · FNF[T755]: own-provider type follow-ups (+3)
 
@@ -1128,6 +1129,12 @@ All PRE-EXISTING.
 1. Consequential: `web/src/lib/task-history.ts` ~:169 keys a headline ("finished with a warning") on `warningMessage` truthiness, against "a message column is display copy, never state" (AGENTS.md). Any stale or informational note becomes a state claim in the history panel. Key it on a structural signal, or drop the claim and show the note as text.
 2. Minor: the RAG writers update `task_steps` with a bare `ctx.db.update(taskSteps)` and no ownership fence (`_rag-index.ts` ~:647,1024, `10-rag-populate.ts` ~:443,814,1007), against `worker-restarts.md` (every pass write goes through `updateOwnedStep`). A superseded RAG pass can write its banner onto a retried row.
 3. Minor: `stepWarningAppend` (`worker/src/step-engine/step-ownership.ts` ~:92-95) dedups by substring (`strpos`), so a distinct shorter note contained in an earlier one is dropped. Retry notes carry their attempt number, so a clash is unlikely; dedup on whole notes if it bites.
+
+### T763 · Flaky e2e: global KB empty-body validation
+
+status: open · kind: test · found: #1325 CI 2026-11-23 · priority: P4
+
+`tests/e2e/settings/global-kb-edit.spec.ts:218` ("rejects an empty body and preserves corrections when saving fails") failed on every in-run retry at #1325's head 5f1fc9cc5 (run 45088903767: `dialog.getByText('The article body cannot be empty.')` not visible within 5 s), then passed on a job rerun; main and the PR's previous head were green, and the PR touched only the updater. Find why the validation message can fail to render (an async state the test does not wait on, a debounced validator) and fix the test or the race, not the timeout.
 
 ### T721 · The Claude usage grant reaches sandbox environments
 
