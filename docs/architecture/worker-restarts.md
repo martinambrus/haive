@@ -590,7 +590,9 @@ api Retry keeps its own, and a lost swap rolls the whole reset back and hands no
 hand-off after it points the task at the target only while the task is still at that epoch, and a
 fix round's request and `started` event are written in the same transaction, since a round a Retry overtook
 would otherwise count toward the cap. A new round usually has no row to reset, so no swap is taken; when a stale
-row exists at the next round, loop_back and gate Continue both reset it inside that transaction and take the swap
+row exists at the next round, loop_back and gate Continue both reset it (from the first row of the target-to-end range
+that exists there, since a validation-only round has no target row; see [Fix loop](fix-loop.md)) inside that
+transaction and take the swap
 there. That transaction follows the lock order below (runs, then one id-ordered batch of
 step rows, then the task row): it resets the next round's rows first, with the source row held in that ordered
 batch, then confirms the source is still the pass's own (`lockOwnedStep`, since a Retry writes the steps before it

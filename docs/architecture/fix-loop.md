@@ -296,7 +296,11 @@ step and `fix:<round>:default` role, inside the existing fenced transaction that
 the gate and moves the task pointer. The same transaction resets a terminal row already present
 at the next round for the target or a later step (`resetStepAndDownstream`, the reset loop_back
 uses): a Retry through the api can leave such a row `done`, and Continue then skipped the
-implementation step and ran the next round on the old output. Accept and Abort ignore the selector. Both user
+implementation step and ran the next round on the old output. The reset starts at the first row of the
+target-to-end range that exists at that round, not at the target: a late editor can start a validation-only round
+(07c or 07b on) with no implementation row, and a reset keyed on the missing target reset nothing, so the round's
+completed checks were reused for the fresh change. loop_back's entry resets the same way, as the insight continuation
+already did. Accept and Abort ignore the selector. Both user
 preference tables stay unchanged. With The same CLI or a legacy answer lacking the field,
 dispatch follows the existing chain. Only that implementation round's default role reads
 the round slot. The newest of that slot and the task's ordinary default slot wins, ordered
