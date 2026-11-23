@@ -10,6 +10,7 @@ import {
   setContainerCleanupRunner,
 } from '../src/queues/task-queue.js';
 import { resetStepAndDownstream } from '../src/queues/_step-reset.js';
+import * as runList from '../src/queues/run-list.js';
 import * as stepOwnership from '../src/step-engine/step-ownership.js';
 import { advanceStep } from '../src/step-engine/index.js';
 import { runtimeAdmission } from '../src/sandbox/runtime-admission.js';
@@ -696,6 +697,69 @@ const workflowTaskContext = (stepId = 'epoch-job-step') => ({
   runListSnapshot: ['epoch-job-target', stepId, '07-phase-2-implement'],
 });
 
+describe('off-list fix target reset protection', () => {
+  it.each(['loop_back', 'continue'])(
+    'refuses %s if its second run list omits the target',
+    async (route) => {
+      h.state.readsAnswer = true;
+      const ctx = workflowTaskContext();
+      const steps = await runList.buildRunList(ctx as never, db as never);
+      const target = '07-phase-2-implement';
+      const list = vi
+        .spyOn(runList, 'buildRunList')
+        .mockResolvedValueOnce(steps)
+        .mockResolvedValueOnce(steps.filter((step) => step.metadata.id !== target));
+      vi.mocked(resetStepAndDownstream).mockClear();
+      try {
+        const gate = { id: 'ts-1', stepId: 'epoch-job-step', round: 0 };
+        const attempt =
+          route === 'continue'
+            ? resolveFixLoopGate(db as never, ctx as never, gate as never, 'continue', 0, '')
+            : handleResult(db as never, ctx as never, gate.stepId, {
+                status: 'loop_back',
+                row: gate,
+                sourceStepId: gate.stepId,
+                diagnosis: 'defect',
+                uncapped: true,
+              } as never);
+        await expect(attempt).rejects.toMatchObject({ ids: [target] });
+        expect(vi.mocked(resetStepAndDownstream)).not.toHaveBeenCalled();
+        expect(h.state.add).not.toHaveBeenCalled();
+      } finally {
+        list.mockRestore();
+      }
+    },
+  );
+
+  it('refuses revise by the registered target name before reset or enqueue when the run list omits it', async () => {
+    h.state.readsAnswer = true;
+    const ctx = workflowTaskContext();
+    const target = 'epoch-job-target';
+    expect(stepRegistry.require(target).metadata.id).toBe(target);
+    const steps = await runList.buildRunList(ctx as never, db as never);
+    const list = vi
+      .spyOn(runList, 'buildRunList')
+      .mockResolvedValueOnce(steps.filter((step) => step.metadata.id !== target));
+    vi.mocked(resetStepAndDownstream).mockClear();
+    try {
+      await expect(
+        handleResult(db as never, ctx as never, 'epoch-job-step', {
+          status: 'revise',
+          row: { id: 'ts-1', round: 0 },
+          sourceStepId: 'epoch-job-step',
+          targetStepId: target,
+        } as never),
+      ).rejects.toMatchObject({ ids: [target] });
+      expect(vi.mocked(resetStepAndDownstream)).not.toHaveBeenCalled();
+      expect(h.state.add).not.toHaveBeenCalled();
+      expect(h.state.events).toEqual([]);
+      expect(h.state.taskWrites).toEqual([]);
+    } finally {
+      list.mockRestore();
+    }
+  });
+});
+
 describe('a job that resets steps itself', () => {
   const revise = {
     status: 'revise',
@@ -712,23 +776,18 @@ describe('a job that resets steps itself', () => {
     uncapped: true,
   };
 
-  it('holds the task at the epoch its own reset moved it to', async () => {
-    const ctx = { taskId: 'task-1', userId: 'user-1', orchestrationEpoch: 5 };
-    // The reset is the job's own, so a failure after it must land at the new epoch.
+  it('keeps the original epoch when the revise transaction throws', async () => {
+    const ctx = workflowTaskContext();
+    // The reset rolls back with the failed handoff, so the job retains its original epoch.
     await expect(
       handleResult(db as never, ctx as never, 'epoch-job-step', revise as never),
     ).rejects.toThrow('the job went no further');
-    expect(ctx.orchestrationEpoch).toBe(7);
+    expect(ctx.orchestrationEpoch).toBe(5);
   });
 
   it('hands nothing off when its reset finds the task moved on', async () => {
     vi.mocked(resetStepAndDownstream).mockResolvedValueOnce('superseded');
-    const ctx = {
-      taskId: 'task-1',
-      userId: 'user-1',
-      orchestrationEpoch: 5,
-      executionContract: null,
-    };
+    const ctx = { ...workflowTaskContext(), executionContract: null };
     // Resolving at all shows it stopped before the task writes that follow a reset.
     await handleResult(db as never, ctx as never, 'epoch-job-step', revise as never);
     expect(vi.mocked(resetStepAndDownstream)).toHaveBeenLastCalledWith(
@@ -738,7 +797,7 @@ describe('a job that resets steps itself', () => {
       1,
       5,
       false,
-      [],
+      ['ts-1'],
       ctx.executionContract,
     );
     expect(ctx.orchestrationEpoch).toBe(5);
@@ -756,7 +815,7 @@ describe('a job that resets steps itself', () => {
     await handleResult(db as never, ctx as never, 'epoch-job-step', loopBack as never);
     expect(h.state.taskWrites).toEqual([{ epochs: [5], landed: false }]);
     // No round recorded as requested or started, and nothing queued for it.
-    expect(h.state.events).toEqual(['step.loop_back']);
+    expect(h.state.events).toEqual([]);
     expect(h.state.add).not.toHaveBeenCalled();
   });
 
@@ -808,7 +867,7 @@ describe('a job that resets steps itself', () => {
       undefined,
     );
     expect(h.state.taskWrites).toEqual([]);
-    expect(h.state.events).toEqual(['step.loop_back']);
+    expect(h.state.events).toEqual([]);
     expect(h.state.add).not.toHaveBeenCalled();
   });
 
@@ -864,7 +923,7 @@ describe('a job that resets steps itself', () => {
     // The reset refused, so neither the pointer nor the task moved, and no round was recorded as
     // requested or started.
     expect(h.state.taskWrites).toEqual([]);
-    expect(h.state.events).toEqual(['step.loop_back']);
+    expect(h.state.events).toEqual([]);
   });
 });
 

@@ -133,6 +133,7 @@ function taskDb(
         }),
       };
     },
+    transaction: async (fn: (tx: Database) => Promise<unknown>) => fn(db),
     insert: (table: unknown) => {
       statements.push(`insert ${tableNameOf(table)}`);
       return {
@@ -152,7 +153,19 @@ function taskDb(
         limit: async () => rows,
         orderBy: () => ({ limit: async () => rows }),
       };
-      return { from: () => ({ where: () => result }) };
+      return {
+        from: (table: unknown) => ({
+          where: (cond: unknown) => ({
+            ...result,
+            for: async () => {
+              const values = conditionValues(cond);
+              const owned = values.includes('pending') && values.includes('skipped');
+              const taken = opts.rowStatus === 'pending' || opts.rowStatus === 'skipped';
+              return tableNameOf(table) === 'task_steps' && owned && taken ? [] : rows;
+            },
+          }),
+        }),
+      };
     },
   } as unknown as Database;
   return { db, statements, events };
@@ -213,10 +226,10 @@ describe('a result handed off after a Retry moved the task on', () => {
     });
     const loopBack = { status: 'loop_back', row, diagnosis: 'a defect', sourceStepId: STEP_ID };
     await handleResult(db, ctx, STEP_ID, loopBack as never);
-    expect(statements.at(-1)).toBe('update task_steps');
+    expect(statements).not.toContain('update task_steps');
     expect(statements).not.toContain('update tasks');
     // No request for a round the gate was never raised for.
-    expect(events).toEqual(['step.loop_back']);
+    expect(events).toEqual([]);
   });
 
   it('completes nothing, and reaps nothing, once the task moved to a newer epoch', async () => {
