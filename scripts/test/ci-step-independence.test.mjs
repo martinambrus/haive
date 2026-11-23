@@ -319,10 +319,19 @@ function checkJob(job, spec, workflow = workflows[spec.file]) {
           (check === gated ? outsideGatedSeconds : greenSeconds) +
             Number(check['timeout-minutes']) * 60,
     );
+    const crowdingMinutes = Math.ceil(
+      Math.max(
+        ...crowding.map(
+          (check) =>
+            (check === gated ? outsideGatedSeconds : greenSeconds) +
+            Number(check['timeout-minutes']) * 60,
+        ),
+      ) / 60,
+    );
     assert.equal(
       crowding.length,
       0,
-      `a check that runs to its limit leaves the checks after it too little of the job's ${limit} s: ${crowding.map(label).join('; ')}`,
+      `a check that runs to its limit leaves the checks after it too little of the job's ${limit} s: ${crowding.map(label).join('; ')}; raise the job's timeout-minutes to at least ${crowdingMinutes}`,
     );
     if (gated)
       assert.ok(
@@ -767,6 +776,26 @@ for (const spec of JOBS) {
     }
   });
 }
+
+describe('crowding diagnostics', () => {
+  for (const spec of JOBS.filter((candidate) => candidate.budget)) {
+    it(`names the required job minutes when a check crowds ${spec.id}`, () => {
+      const job = structuredClone(workflows[spec.file].jobs[spec.id]);
+      const last = job.steps.findIndex((step) => step.id === spec.prerequisite);
+      const { gated, greenSeconds } = model(job.steps.slice(last + 1), spec.budget);
+      const check = gated ?? job.steps[last + 1];
+      const minutes = Number(job['timeout-minutes']) - 1;
+      check['timeout-minutes'] = String(minutes);
+      const required = Math.ceil(
+        ((gated ? spec.budget.outsideGatedSeconds : greenSeconds) + minutes * 60) / 60,
+      );
+      assert.throws(
+        () => checkJob(job, spec),
+        new RegExp(`raise the job's timeout-minutes to at least ${required}\\b`),
+      );
+    });
+  }
+});
 
 describe('the limits the gated budget names', () => {
   const spec = JOBS.find((s) => s.id === 'postgres-gated');
