@@ -762,6 +762,7 @@ describe('a job that resets steps itself', () => {
 
   it('resets the ordered batch before locking the source and re-reading the pointer', async () => {
     h.state.readsAnswer = true;
+    vi.mocked(resetStepAndDownstream).mockClear();
     const reset = vi.mocked(resetStepAndDownstream).mockResolvedValueOnce(null);
     const lock = vi.spyOn(stepOwnership, 'lockOwnedStep');
     const read = vi.spyOn(db.query.tasks, 'findFirst');
@@ -792,6 +793,7 @@ describe('a job that resets steps itself', () => {
     h.state.readsAnswer = true;
     // The Retry has written the steps and not yet the task, so the epoch still matches.
     h.state.sourceOwned = false;
+    vi.mocked(resetStepAndDownstream).mockClear();
     vi.mocked(resetStepAndDownstream).mockResolvedValueOnce(null);
     const ctx = workflowTaskContext();
     await handleResult(db as never, ctx as never, 'epoch-job-step', loopBack as never);
