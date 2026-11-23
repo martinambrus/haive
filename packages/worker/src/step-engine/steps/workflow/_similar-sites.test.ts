@@ -94,7 +94,7 @@ describe('mergeSimilarSites', () => {
   });
 });
 
-/** Answers by TABLE: the loader reads the DAG issues and 07's rounds, one query each. */
+/** A legacy pin lookup plus the DAG issues and implementation rounds, answered by table. */
 function tableDb(issues: unknown[], rounds: unknown[]) {
   let rows: unknown[] = [];
   const chain: Record<string, unknown> = {};
@@ -107,7 +107,7 @@ function tableDb(issues: unknown[], rounds: unknown[]) {
     orderBy: () => chain,
     then: (resolve: (v: unknown) => unknown) => Promise.resolve(rows).then(resolve),
   });
-  return { select: () => chain } as never;
+  return { query: { tasks: { findFirst: async () => undefined } }, select: () => chain } as never;
 }
 
 describe('loadTaskSimilarSites', () => {

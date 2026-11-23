@@ -2,6 +2,7 @@ import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   GUARD_DECISION_BOUNDS,
+  GuardDecisionError,
   buildGuardPredicateContext,
   decideLoadedGuardDecision,
   guardContractHash,
@@ -22,7 +23,15 @@ import { sql } from 'drizzle-orm';
 
 it('ordinary and inert tasks return without a transaction, predicate or state write', async () => {
   const transaction = vi.fn();
-  for (const executionContract of [null, { version: 1, guardedSpans: [] }]) {
+  for (const executionContract of [
+    null,
+    { version: 1, guardedSpans: [] },
+    {
+      version: 1,
+      guardedSpans: [],
+      fixTarget: { stepId: 'module.fx.repair', capabilityVersion: 1 },
+    },
+  ]) {
     const db = {
       query: { tasks: { findFirst: async () => ({ executionContract }) } },
       transaction,
@@ -227,6 +236,180 @@ describe('guard decisions from loaded rows', () => {
     ctx.taskStepId = rows[step]!.id;
   }
   const currentContract = () => task.executionContract as ExecutionContract;
+
+  function pinFixTarget() {
+    currentContract().fixTarget = { stepId: 'module.fx.repair', capabilityVersion: 1 };
+    task.runListSnapshot = ['module.fx.repair', ...ids];
+  }
+  function nextRound(step = 'work', rerunGeneration = 7) {
+    const row: StepRow = {
+      ...rows[step]!,
+      id: randomUUID(),
+      round: 1,
+      rerunGeneration,
+      guardState: null,
+      status: 'pending' as const,
+    };
+    rows[`${step}-round-1`] = row;
+    ctx.round = task.currentRound = 1;
+    ctx.rerunGeneration = rerunGeneration;
+    task.currentStepId = step;
+    ctx.taskStepId = row.id;
+    return row;
+  }
+  it('evaluates and persists round zero for a fix-target pin', async () => {
+    pinFixTarget();
+    expect(await save()).toMatchObject({ round: 0, run: true });
+    expect(evaluate).toHaveBeenCalledOnce();
+  });
+  it.each([true, false])(
+    'reuses round zero (%s) at a different round and generation without evaluating',
+    async (run) => {
+      pinFixTarget();
+      evaluate.mockResolvedValue(run);
+      rows.work!.rerunGeneration = ctx.rerunGeneration = 3;
+      const original = await save();
+      const current = nextRound();
+      rows['plan-round-1'] = { ...rows.plan!, id: randomUUID(), round: 1, rerunGeneration: 9 };
+      evaluate.mockRejectedValue(new Error('the changed tree must never be read'));
+      const decision = await decide();
+      expect(decision).toEqual({ ...original, round: 1, generation: 7 });
+      expect(rows.work!.guardState).toEqual(original);
+      current.guardState = decision;
+      expect(await decide()).toEqual(decision);
+      expect(evaluate).toHaveBeenCalledOnce();
+    },
+  );
+  it.each(['work', 'tail', 'cleanup', 'plan', 'report'])(
+    'refuses a suppressed fix target inside the span, but permits one outside: %s',
+    async (target) => {
+      currentContract().fixTarget = { stepId: target, capabilityVersion: 1 };
+      currentContract().guardedSpans = [{ ...span('work', 'work'), lastStepId: 'cleanup' }];
+      evaluate.mockResolvedValue(false);
+      const original = await save();
+      const current = nextRound();
+      evaluate.mockRejectedValue(new Error('must not re-evaluate a suppressed fix target'));
+      const before = structuredClone(rows);
+      const result = decide();
+      if (['work', 'tail', 'cleanup'].includes(target)) {
+        await expect(result).rejects.toMatchObject({
+          name: 'GuardDecisionError',
+          code: 'guard-decision-invalid',
+          reason: 'fix-target-suppressed',
+        });
+      } else {
+        expect(await result).toEqual({ ...original, round: 1, generation: 7 });
+      }
+      expect(rows).toEqual(before);
+      expect(current.guardState).toBeNull();
+      expect(evaluate).toHaveBeenCalledOnce();
+    },
+  );
+  it('permits a running span containing the fix target on reuse and replay', async () => {
+    currentContract().fixTarget = { stepId: 'tail', capabilityVersion: 1 };
+    currentContract().guardedSpans = [{ ...span('work', 'work'), lastStepId: 'cleanup' }];
+    const original = await save();
+    const current = nextRound();
+    evaluate.mockRejectedValue(new Error('must not re-evaluate a running fix target'));
+    const decision = { ...original, round: 1, generation: 7 };
+    expect(await decide()).toEqual(decision);
+    current.guardState = decision;
+    expect(await decide()).toEqual(decision);
+    expect(evaluate).toHaveBeenCalledOnce();
+  });
+  it('keeps same-round evaluation for a no-target pin at round one', async () => {
+    await save();
+    nextRound();
+    evaluate.mockResolvedValue(false);
+    expect(await decide()).toMatchObject({ round: 1, generation: 7, run: false });
+    expect(evaluate).toHaveBeenCalledTimes(2);
+  });
+  it('requiresSpan and shared predicate reads at round one use round-zero entries', async () => {
+    pinFixTarget();
+    currentContract().guardedSpans[1]!.requiresSpan = 'work';
+    await save();
+    at('cleanup');
+    const original = await save('cleanup');
+    nextRound('cleanup');
+    expect(await decide('cleanup')).toEqual({ ...original, round: 1, generation: 7 });
+    expect(evaluate).toHaveBeenCalledOnce();
+  });
+  it('a dependency-suppressed span keeps its round-zero suppression', async () => {
+    pinFixTarget();
+    currentContract().guardedSpans[1]!.requiresSpan = 'work';
+    evaluate.mockResolvedValue(false);
+    await save();
+    at('cleanup');
+    const original = await save('cleanup');
+    expect(original).toMatchObject({ run: false, predicate: null });
+    nextRound('cleanup');
+    expect(await decide('cleanup')).toEqual({ ...original, round: 1, generation: 7 });
+    expect(evaluate).toHaveBeenCalledOnce();
+  });
+  it('fails closed when the round-zero dependency is missing', async () => {
+    pinFixTarget();
+    currentContract().guardedSpans[1]!.requiresSpan = 'work';
+    await save();
+    at('cleanup');
+    await save('cleanup');
+    rows.work!.guardState = null;
+    nextRound('cleanup');
+    await expect(decide('cleanup')).rejects.toMatchObject({
+      reason: 'fix-round-decision-unavailable',
+    });
+    expect(evaluate).toHaveBeenCalledOnce();
+  });
+  it('does not borrow round zero for a no-target requiresSpan read', async () => {
+    currentContract().guardedSpans[1]!.requiresSpan = 'work';
+    await save();
+    at('cleanup');
+    await save('cleanup');
+    nextRound('cleanup');
+    await expect(decide('cleanup')).rejects.toMatchObject({
+      reason: 'shared-decision-unavailable',
+    });
+    expect(evaluate).toHaveBeenCalledOnce();
+  });
+  it.each([
+    'missing',
+    'malformed',
+    'task',
+    'hash',
+    'span',
+    'round',
+    'generation',
+    'producer',
+    'required',
+  ])('fails closed by name for %s round-zero state', async (change) => {
+    pinFixTarget();
+    const original = await save();
+    if (change === 'missing') rows.work!.guardState = null;
+    else if (change === 'malformed') rows.work!.guardState = {};
+    else if (change === 'task') original.taskId = randomUUID();
+    else if (change === 'hash') original.contractHash = 'f'.repeat(64);
+    else if (change === 'span') original.spanId = 'wrong';
+    else if (change === 'round') original.round = 1;
+    else if (change === 'generation') rows.work!.rerunGeneration++;
+    else if (change === 'producer') rows.plan!.rerunGeneration++;
+    else original.required = { stepRowId: randomUUID(), spanId: 'wrong', generation: 0 };
+    if (!['missing', 'malformed'].includes(change)) rows.work!.guardState = original;
+    nextRound();
+    await expect(decide()).rejects.toMatchObject({
+      name: 'GuardDecisionError',
+      code: 'guard-decision-invalid',
+      reason: 'fix-round-decision-unavailable',
+    });
+    expect(evaluate).toHaveBeenCalledOnce();
+  });
+  it('refuses a tampered current-round copy without re-evaluating', async () => {
+    pinFixTarget();
+    await save();
+    const current = nextRound();
+    const decision = await decide();
+    current.guardState = { ...decision, run: false };
+    await expect(decide()).rejects.toBeInstanceOf(GuardDecisionError);
+    expect(evaluate).toHaveBeenCalledOnce();
+  });
 
   it('evaluates the exact settled producer without changing loaded rows', async () => {
     const before = structuredClone({ task, rows });

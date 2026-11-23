@@ -3,6 +3,7 @@ import { schema, type Database } from '@haive/database';
 import type { StatusSummaryItem } from '@haive/shared';
 import { collapseToLine, isSingleLine, safeKey, survivesFence } from '../_untrusted-repo.js';
 import { code } from './_plan-ops.js';
+import { loadHistoricalFixTargetStepId } from '../../fix-consumer.js';
 
 /** A place with the same code or defect that an implementing agent found and deliberately did
  *  NOT change, reported for the person at the review gate to decide on. */
@@ -75,13 +76,14 @@ export function mergeSimilarSites<T extends SimilarSite>(
 }
 
 /** Every site this task's implementing passes reported, in the order the work ran: the DAG
- *  build's issues, then each round of 07. Re-sanitised on read, since a stored value is only as
+ *  build's issues, then each round of the pinned fix target. Re-sanitised on read, since a stored value is only as
  *  good as whatever wrote it. Only the merged list is capped, and what the cap cuts is counted in
  *  `omitted`. */
 export async function loadTaskSimilarSites(
   db: Database,
   taskId: string,
 ): Promise<{ sites: GateSimilarSite[]; omitted: number }> {
+  const target = await loadHistoricalFixTargetStepId(db, taskId);
   const issues = await db
     .select({ issueKey: schema.taskDagIssues.issueKey, sites: schema.taskDagIssues.similarSites })
     .from(schema.taskDagIssues)
@@ -90,9 +92,7 @@ export async function loadTaskSimilarSites(
   const rounds = await db
     .select({ round: schema.taskSteps.round, output: schema.taskSteps.output })
     .from(schema.taskSteps)
-    .where(
-      and(eq(schema.taskSteps.taskId, taskId), eq(schema.taskSteps.stepId, '07-phase-2-implement')),
-    )
+    .where(and(eq(schema.taskSteps.taskId, taskId), eq(schema.taskSteps.stepId, target)))
     .orderBy(asc(schema.taskSteps.round));
   let all: GateSimilarSite[] = [];
   // The last pass that reported each site; the DAG build (-1) runs before every round.

@@ -56,7 +56,7 @@ it('reads committed and dirty changes, untracked text, deletion, mode and binary
     workspacePath: root,
     sandboxWorkdir: '/workspace',
     cliProviderId: null,
-    db: {} as Database,
+    db: { query: { tasks: { findFirst: async () => undefined } } } as unknown as Database,
     logger: logger.child({ test: 'review-git' }),
     signal: new AbortController().signal,
     throwIfCancelled() {},

@@ -32,6 +32,7 @@ function context() {
   const events = new Map<string, { id: string; payload: Record<string, unknown> }>();
   const db = {
     query: {
+      tasks: { findFirst: async () => ({ executionContract: null }) },
       taskEvents: {
         findFirst: async ({ where }: any) =>
           events.get(dialect.sqlToQuery(where).params[0] as string),

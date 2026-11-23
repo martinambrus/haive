@@ -487,8 +487,9 @@ and array fallbacks, and v3 retains current-round ceilings and newest-row Retry
 semantics. Old tasks and inputs absent from an older valid v3 pin retain canonical
 07 reads. No output or pin is backfilled.
 
-`_impl-changes.ts` keeps its physical 07/DAG/git collection, `_similar-sites.ts` keeps
-all physical rounds and DAG issues, and fix-loop routing keeps 07 as its only target.
+`_impl-changes.ts` keeps its physical fix-target/DAG/git collection and `_similar-sites.ts`
+keeps all physical rounds and DAG issues; both read the task's fix target (07, or the target a
+contract pins, `historicalFixTargetStepId`), as fix-loop routing does.
 An implementation-summary binding changes learning context only. It grants no
 replacement, skip, loop, root, approval or CLI-seat authority. No migration is needed.
 Rollback first disables new v3 admission; retain this contract and capable readers
@@ -1004,7 +1005,16 @@ including across process/client and recovery-epoch changes. A rollback before th
 write, after it or at commit leaves no decision and may evaluate again. This is
 exactly-once committed persistence, not exactly-once invocation of a callback.
 Malformed, stale and inconsistent references refuse rather than recomputing.
-It currently requires same-round span-entry decisions and a pinned static list.
+It currently requires same-round span-entry decisions and a pinned static list, except in a
+pin with a fix target: there every round after 0 reuses the span's persisted round-0 decision
+(the span decision and every `requiresSpan` shared read) and never evaluates the predicate again,
+the owner's decision of 2026-11-22. The reused copy binds to the current round's entry row and
+generation; its references keep pointing at round-0 rows. A missing, stale or malformed round-0
+decision fails closed with `fix-round-decision-unavailable` (the underlying reason is logged), and
+a reused `run:false` whose span contains the pinned fix target fails with `fix-target-suppressed`
+rather than skipping the target. Admission still refuses every pin with a fix target, so this path
+is dormant until the fence opens. Reuse is keyed on round > 0, not on fix rounds only; whether a
+revise or restart round should re-evaluate instead is open for that change.
 A stored decision also replays on its skipped entry; no predicate runs again.
 
 No migration is needed: 0245 already appended the nullable column. Rollback reverts
@@ -1157,9 +1167,9 @@ to this task, that span, the entry's round and rerun generation, and the pin's c
 Otherwise it fails with `guard-member-refused: <reason>` (`no-decision`, `malformed-state` or
 `decision-mismatch`). A member already skipped or finished never reaches the check.
 
-A task with no pin, or a pin with no spans, is untouched. Limits: a dependent span
-(`requiresSpan`) re-entered in a later fix round has no same-round shared decision and fails
-closed (`shared-decision-unavailable`); an independent span whose predecessor is not done fails
+A task with no pin, or a pin with no spans, is untouched. Limits: in a pin without a fix
+target, a dependent span (`requiresSpan`) re-entered in a later fix round has no same-round shared
+decision and fails closed (`shared-decision-unavailable`); an independent span whose predecessor is not done fails
 its entry (`producer-not-settled`) instead of waiting; a predicate that throws, times out or
 answers a non-boolean, such as one from a deactivated module, fails the entry the same way; the
 predicate also runs while the task is paused, because the hook sits before the pause hold, and

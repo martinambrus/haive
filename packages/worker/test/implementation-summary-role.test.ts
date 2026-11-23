@@ -16,6 +16,12 @@ import { loadPreviousStepOutput } from '../src/step-engine/steps/onboarding/_hel
 import { collectImplementationFiles } from '../src/step-engine/steps/workflow/_impl-changes.js';
 import { loadTaskSimilarSites } from '../src/step-engine/steps/workflow/_similar-sites.js';
 import type { StepContext } from '../src/step-engine/step-definition.js';
+import {
+  guidanceTargetStep,
+  parsePromptDefects,
+} from '../src/step-engine/steps/workflow/_prompt-defect.js';
+import { filterCandidates } from '../src/step-engine/steps/workflow/11e-prompt-guidance.js';
+import { loadRoleTaskPin } from '../src/step-engine/role-task-pin.js';
 
 vi.mock('../src/step-engine/task-ledger.js', () => ({ recordLedgerEntry: async () => {} }));
 vi.mock('../src/repo/git-exec.js', () => ({
@@ -69,6 +75,68 @@ const output = {
   filesTouched: ['src/rental.ts'],
   similarSites: [{ path: 'src/other.ts', reason: 'same defect' }],
 };
+
+for (const [name, executionContract, target] of [
+  [
+    'custom target',
+    { version: 1, guardedSpans: [], fixTarget: { stepId: alternate, capabilityVersion: 1 } },
+    alternate,
+  ],
+  ['legacy', null, single],
+  ['inert', { version: 1, guardedSpans: [] }, single],
+  ['malformed', { version: 99 }, single],
+] as const) {
+  it(`physical scope and similar sites follow the ${name}`, async () => {
+    const { ctx, fake, put } = setup();
+    fake.patch(schema.tasks, ctx.taskId, { executionContract });
+    put(single, {
+      filesTouched: ['legacy.ts'],
+      similarSites: [{ path: 'legacy-site.ts', reason: 'legacy' }],
+    });
+    put(alternate, {
+      filesTouched: ['custom.ts'],
+      similarSites: [{ path: 'custom-site.ts', reason: 'custom' }],
+    });
+    put(target, { filesTouched: ['newest.ts'], similarSites: [] }, 2);
+    const files = await collectImplementationFiles(ctx, '/nonexistent-pr7a', { maxRound: 0 });
+    expect(files.files).toContain(target === single ? 'legacy.ts' : 'custom.ts');
+    expect(files.files).not.toContain(target === single ? 'custom.ts' : 'legacy.ts');
+    expect(files.files).not.toContain('newest.ts');
+  });
+
+  it(`similar sites follow the ${name}`, async () => {
+    const { ctx, fake, put } = setup();
+    fake.patch(schema.tasks, ctx.taskId, { executionContract });
+    put(single, { similarSites: [{ path: 'legacy-site.ts', reason: 'legacy' }] });
+    put(alternate, { similarSites: [{ path: 'custom-site.ts', reason: 'custom' }] });
+    expect((await loadTaskSimilarSites(ctx.db, ctx.taskId)).sites).toEqual([
+      {
+        path: target === single ? 'legacy-site.ts' : 'custom-site.ts',
+        reason: target === single ? 'legacy' : 'custom',
+        source: 'implementation round 0',
+      },
+    ]);
+  });
+
+  it(`guidance target and fingerprints follow the ${name}`, async () => {
+    const { ctx, fake } = setup();
+    fake.patch(schema.tasks, ctx.taskId, { executionContract });
+    const task = await loadRoleTaskPin(ctx.db, ctx.taskId);
+    const raw = '## PROMPT-DEFECT\n- DEFECT: missing_context | State the invariant | src/a.ts:1';
+    for (const sourceStep of [
+      '07b-phase-4-validate',
+      '08a-browser-verify',
+      '08d-adversarial-qa',
+      '08c-code-review',
+    ]) {
+      expect(guidanceTargetStep(sourceStep, task)).toBe(target);
+      const defects = parsePromptDefects([{ stepId: sourceStep, raw }], task);
+      expect(defects[0]?.fingerprint).toMatch(new RegExp(`^${target}:`));
+      expect(filterCandidates(defects, [], task)[0]?.targetStep).toBe(target);
+    }
+    expect(guidanceTargetStep('unknown', task)).toBeNull();
+  });
+}
 function setup(ids = [single, learning], pinned = false, type = 'workflow') {
   const fake = createFakeDb({
     tasks: schema.tasks,

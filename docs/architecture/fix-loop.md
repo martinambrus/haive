@@ -70,8 +70,8 @@ reasons. `resolveDagPhase` derives its cursor as `levels.find(l => l.checkpointe
 so after a successful build every level is checkpointed and it resolves without dispatching an
 agent; the per-issue worktrees were removed at checkpoint; `buildCoderPrompt` has no diagnosis
 channel; and `PATH_REQUIRED_TARGETS` (`execution-paths.ts`) is a `Record<string, string>` that
-cannot hold two targets for one emitter, with a second independent copy of the same mapping in
-`_prompt-defect.ts`. The tree a fix pass must edit is `01-worktree-setup`'s integration
+cannot hold two targets for one emitter. (`_prompt-defect.ts` lists its guidance sources
+separately and attaches their guidance to the task's fix target.) The tree a fix pass must edit is `01-worktree-setup`'s integration
 worktree in BOTH modes, which is exactly what 07 already uses.
 
 A module or prompt step's `DataEdgePlanError` is an input/plan failure, never an implementation repair

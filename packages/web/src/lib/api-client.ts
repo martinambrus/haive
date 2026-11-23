@@ -1021,6 +1021,8 @@ export interface StatsThroughput {
 }
 
 export interface TaskStep {
+  /** This row is the custom fix target selected by the immutable task pin. */
+  isPinnedFixTarget?: true;
   /** Frozen output-role membership projected by the owner-scoped API. */
   outputRoles?: StepRoleId[];
   /** Returned by the step API; used for structural merge failure advice. */

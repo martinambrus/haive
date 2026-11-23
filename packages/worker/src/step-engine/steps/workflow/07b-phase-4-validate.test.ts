@@ -997,6 +997,7 @@ const stampOf = (...ids: string[]) => ({
  *  `setup` is what 01-worktree-setup recorded, when the task has a worktree. */
 function ruleWorld(stamps: Record<string, unknown>, setup?: Record<string, unknown>) {
   const fake = createFakeDb({
+    tasks: schema.tasks,
     cliInvocations: schema.cliInvocations,
     taskSteps: schema.taskSteps,
     taskDagIssues: schema.taskDagIssues,
@@ -2074,6 +2075,7 @@ describe('phase4ValidateStep: the change each validator pass is given', () => {
   /** The step's ctx over that branch, and the detect output the step would have stored for it. */
   async function task(dir: string, files = ['a.php', 'b.php']) {
     const fake = createFakeDb({
+      tasks: schema.tasks,
       cliInvocations: schema.cliInvocations,
       taskEvents: schema.taskEvents,
       taskSteps: schema.taskSteps,

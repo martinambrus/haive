@@ -103,12 +103,12 @@ export async function isStepGuidanceEnabled(db: Database, taskId: string): Promi
  *  is an optional nudge, so a config blip, an unmigrated database, or a transient
  *  query failure returns the input string UNCHANGED rather than failing the step.
  *
- *  COVERAGE: called from the step-runner's `llm` dispatch only, so it reaches
- *  07-phase-2-implement (the sole guidance target today) on a normal run and on every
- *  fix round. It does NOT reach the DAG coder prompts (`dagExecute` builds those in
+ *  COVERAGE: called with the executing step's id from the step-runner's `llm`
+ *  dispatch, including a pinned module fix target on its normal and fix passes.
+ *  It does NOT reach the DAG coder prompts (`dagExecute` builds those in
  *  dag-executor.ts) nor the agent-mining fan-outs — both build their prompts on paths
  *  of their own. A DAG-mode run therefore gets the guidance only once the fix loop
- *  routes back to 07. Widening this means calling it at those builders too, not
+ *  routes back to its target. Widening this means calling it at those builders too, not
  *  moving it. */
 export async function augmentPromptWithLearnedGuidance(
   db: Database,
