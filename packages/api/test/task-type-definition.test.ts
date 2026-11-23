@@ -31,6 +31,8 @@ const row = (slug: string, over: Partial<typeof schema.taskTypeDefinitions.$infe
 const CANARY = '00-model-health-workflow';
 const QUIET = 'ttd-quiet';
 const AGENT = 'ttd-agent';
+const MODULE_AGENT = 'module.fx.agent';
+const MODULE_QUIET = 'module.fx.quiet';
 const SIMPLIFY = '07a-code-simplify';
 const RESTORE = '01c1-restore-database';
 const SAVE = '11g-save-database';
@@ -56,6 +58,11 @@ const TRAIT_ROWS: Record<string, Partial<typeof schema.taskTypeDefinitions.$infe
   quiet: { stepIds: [QUIET] },
   agent: { stepIds: [QUIET, AGENT] },
   canary: { stepIds: [CANARY, AGENT] },
+  'own-providers': { stepIds: [MODULE_AGENT], selectsOwnProviders: true },
+  'own-providers-off': { stepIds: [MODULE_AGENT], selectsOwnProviders: false },
+  'own-providers-default': { stepIds: [MODULE_AGENT] },
+  'own-providers-canary': { stepIds: [CANARY, MODULE_AGENT], selectsOwnProviders: true },
+  'own-providers-quiet': { stepIds: [MODULE_QUIET], selectsOwnProviders: true },
   defaults: {
     stepIds: [QUIET],
     preAnswerDefaults: PRE_ANSWERS,
@@ -300,6 +307,8 @@ describe.skipIf(!url)('definitionForCreate on Postgres', () => {
           catalogRow(CANARY, true),
           catalogRow(QUIET),
           catalogRow(AGENT, true),
+          { ...catalogRow(MODULE_AGENT, true), source: 'module:fx' },
+          { ...catalogRow(MODULE_QUIET), source: 'module:fx' },
           catalogRow(SIMPLIFY),
           catalogRow(RESTORE),
           catalogRow(SAVE),
@@ -320,7 +329,7 @@ describe.skipIf(!url)('definitionForCreate on Postgres', () => {
       await db.delete(schema.stepCatalog);
     });
 
-    describe.each(SOURCES)('$source row', ({ tag, traits }) => {
+    describe.each(SOURCES)('$source row', ({ tag, source, traits }) => {
       const create = (name: string) =>
         definitionForCreate(db, traitSlug(tag, name), { locked: false, generic: true });
 
@@ -330,6 +339,25 @@ describe.skipIf(!url)('definitionForCreate on Postgres', () => {
         );
         expect((await create('quiet')).runListSnapshot).toEqual([QUIET]);
         expect((await create('canary')).runListSnapshot).toEqual([CANARY, AGENT]);
+      });
+
+      it.each(['own-providers', 'own-providers-off', 'own-providers-default'])(
+        'exempts only a module-owned provider policy from the automatic canary (%s)',
+        async (name) => {
+          const def = await create(name);
+          const exempt = source === 'module:fx' && name === 'own-providers';
+          expect(def.runListSnapshot).toEqual(
+            traits && !exempt ? [CANARY, MODULE_AGENT] : [MODULE_AGENT],
+          );
+        },
+      );
+
+      it('keeps an explicit canary and leaves non-CLI steps without an automatic one', async () => {
+        expect((await create('own-providers-canary')).runListSnapshot).toEqual([
+          CANARY,
+          MODULE_AGENT,
+        ]);
+        expect((await create('own-providers-quiet')).runListSnapshot).toEqual([MODULE_QUIET]);
       });
 
       it('takes the pre-answers and loop limits of its row', async () => {

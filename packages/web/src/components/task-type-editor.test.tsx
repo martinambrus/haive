@@ -100,6 +100,8 @@ const FIELDS = [
   'sortOrder',
 ];
 const ROW: AdminTaskType = {
+  executionContract: null,
+  selectsOwnProviders: false,
   slug: 'tt-x',
   displayName: 'Type X',
   description: null,
