@@ -453,3 +453,25 @@ it('a module target with no summary keys keeps git scope and DAG similar-site re
     { path: 'other.ts', reason: 'same defect', source: 'DAG issue ISSUE-1' },
   ]);
 });
+
+it.each([
+  ['number', 42, []],
+  ['object', { path: 'invalid.ts' }, []],
+  ['string', 'invalid.ts', []],
+  ['mixed array', [null, 42, { path: 'invalid.ts' }, true, 'reported.ts'], ['reported.ts']],
+] as const)(
+  'a module target tolerates %s filesTouched and retains only string array items',
+  async (_name, filesTouched, reported) => {
+    const { ctx, fake, put } = setup();
+    fake.patch(schema.tasks, ctx.taskId, {
+      executionContract: {
+        version: 1,
+        guardedSpans: [],
+        fixTarget: { stepId: alternate, capabilityVersion: 1 },
+      },
+    });
+    put(alternate, { filesTouched });
+    const result = await collectImplementationFiles(ctx, '/unused');
+    expect(result.files).toEqual([...reported, 'src/measured.ts']);
+  },
+);

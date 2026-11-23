@@ -490,8 +490,10 @@ async function reportedFiles(ctx: StepContext, maxRound?: number): Promise<Set<s
     await loadHistoricalFixTargetStepId(ctx.db, ctx.taskId),
     maxRound,
   );
-  const touched = (implement?.output as { filesTouched?: string[] } | null)?.filesTouched;
-  for (const f of touched ?? []) files.add(f);
+  const touched = (implement?.output as { filesTouched?: unknown } | null)?.filesTouched;
+  if (Array.isArray(touched)) {
+    for (const f of touched) if (typeof f === 'string') files.add(f);
+  }
   if (files.size === 0) {
     const issues = await ctx.db
       .select({ filesModified: schema.taskDagIssues.filesModified })
