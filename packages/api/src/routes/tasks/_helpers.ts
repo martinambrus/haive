@@ -294,7 +294,7 @@ async function hidesInsightTriageSeat(
 }
 
 /** Read the same retained effective references as worker lspDispatchState, without readiness I/O. */
-async function loadComposedProviderSets(db: ReturnType<typeof getDb>, taskIds: string[]) {
+export async function loadComposedProviderSets(db: ReturnType<typeof getDb>, taskIds: string[]) {
   const out = new Map<string, string[]>();
   if (!taskIds.length) return out;
   const tasks = await db
