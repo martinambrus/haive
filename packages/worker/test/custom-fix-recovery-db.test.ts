@@ -3,7 +3,7 @@ import { execFileSync } from 'node:child_process';
 import { cp, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { and, asc, eq } from 'drizzle-orm';
+import { and, asc, eq, sql } from 'drizzle-orm';
 import { DelayedError } from 'bullmq';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createDatabase, schema, type Database } from '@haive/database';
@@ -317,7 +317,13 @@ describe.skipIf(!url)('recovery of a fix round on Postgres', () => {
             ? and(eq(schema.taskEvents.taskId, id), eq(schema.taskEvents.eventType, type))
             : eq(schema.taskEvents.taskId, id),
         )
-        .orderBy(asc(schema.taskEvents.createdAt), asc(schema.taskEvents.eventType))
+        .orderBy(
+          asc(schema.taskEvents.createdAt),
+          // now() gives every write in one transaction the same timestamp.
+          // Keep the handoff's causal order for ties instead of alphabetizing it.
+          sql`case ${schema.taskEvents.eventType} when 'step.loop_back' then 0 when 'fix_loop.requested' then 1 else 2 end`,
+          asc(schema.taskEvents.eventType),
+        )
     ).map((e) => e);
   const ctxFor = async (leg: Leg, taskId: string): Promise<ResolvedTaskContext> => {
     const t = await taskOf(taskId);
@@ -467,6 +473,99 @@ describe.skipIf(!url)('recovery of a fix round on Postgres', () => {
       expect(await eventsOf(id, 'fix_loop.requested')).toHaveLength(1);
       expect(await eventsOf(id, 'fix_loop.escalated')).toHaveLength(1);
     });
+
+    if (!leg.pin)
+      describe('atomic escalation', () => {
+        it.each(
+          ['cap', 'oscillation'].flatMap((kind) =>
+            ['request', 'task', 'event'].map((cut) => ({ kind, cut })),
+          ),
+        )('rolls back $kind at the $cut write and replays completely', async ({ kind, cut }) => {
+          const round = kind === 'cap' ? 0 : 2;
+          const id = await seedTask(leg, {
+            currentRound: round,
+            maxFixRounds: kind === 'cap' ? 0 : 5,
+          });
+          const source = await seedRow(leg, id, 'REVIEW', round, 'done', { endedAt: new Date() });
+          if (kind === 'oscillation') {
+            await recordFixLoopRequest(db, id, source.id, {
+              round: 1,
+              sourceStepId: source.stepId,
+              diagnosis: 'same defect',
+            });
+            await recordFixLoopRequest(db, id, source.id, {
+              round: 2,
+              sourceStepId: 'another-check',
+              diagnosis: 'other defect',
+            });
+          }
+          const beforeTask = await taskOf(id);
+          const beforeRequests = await eventsOf(id, 'fix_loop.requested');
+          const event = kind === 'cap' ? 'fix_loop.escalated' : 'fix_loop.oscillation_detected';
+          // Fail the real SQL statement immediately after each preceding durable write.
+          // The trigger is task-scoped and removed before replay, even on assertion failure.
+          const name = `crash_${randomBytes(8).toString('hex')}`;
+          const table = cut === 'task' ? 'tasks' : 'task_events';
+          const condition =
+            cut === 'task'
+              ? `NEW.id = '${id}' AND NEW.status = 'waiting_user'`
+              : `NEW.task_id = '${id}' AND NEW.event_type = '${cut === 'request' ? 'fix_loop.requested' : event}'`;
+          await db.execute(
+            sql.raw(
+              `CREATE FUNCTION ${name}() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF ${condition} THEN RAISE EXCEPTION USING ERRCODE = 'P7571'; END IF; RETURN NEW; END $$`,
+            ),
+          );
+          await db.execute(
+            sql.raw(
+              `CREATE TRIGGER ${name} BEFORE ${cut === 'task' ? 'UPDATE' : 'INSERT'} ON ${table} FOR EACH ROW EXECUTE FUNCTION ${name}()`,
+            ),
+          );
+          const result = {
+            status: 'loop_back' as const,
+            row: source,
+            sourceStepId: source.stepId,
+            diagnosis: 'same defect',
+          };
+          try {
+            await expect(
+              handleResult(db, await ctxFor(leg, id), source.stepId, result),
+            ).rejects.toMatchObject({ cause: { code: 'P7571' } });
+            expect.soft(await rowOf(source.id)).toEqual(source);
+            expect.soft(await taskOf(id)).toEqual(beforeTask);
+            expect.soft(await eventsOf(id, 'fix_loop.requested')).toEqual(beforeRequests);
+            expect.soft(await eventsOf(id, event)).toEqual([]);
+            expect.soft(h.adds).toEqual([]);
+          } finally {
+            await db.execute(sql.raw(`DROP TRIGGER ${name} ON ${table}`));
+            await db.execute(sql.raw(`DROP FUNCTION ${name}()`));
+          }
+          await handleResult(db, await ctxFor(leg, id), source.stepId, result);
+          expect(await rowOf(source.id)).toMatchObject({
+            status: 'waiting_form',
+            endedAt: null,
+            waitingStartedAt: expect.any(Date),
+          });
+          expect(await taskOf(id)).toMatchObject({
+            status: 'waiting_user',
+            currentStepId: source.stepId,
+            currentRound: round,
+          });
+          expect(await eventsOf(id, 'fix_loop.requested')).toHaveLength(beforeRequests.length + 1);
+          expect(await eventsOf(id, event)).toHaveLength(1);
+          await resolveFixLoopGate(
+            db,
+            await ctxFor(leg, id),
+            await rowOf(source.id),
+            'continue',
+            round,
+            '',
+          );
+          expect(await taskOf(id)).toMatchObject({
+            currentStepId: leg.ids.TARGET,
+            currentRound: round + 1,
+          });
+        });
+      });
 
     if (!leg.pin)
       it('two interleaved loop_back passes enter the fix round only once', async () => {

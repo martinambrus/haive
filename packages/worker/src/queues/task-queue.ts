@@ -511,7 +511,7 @@ async function writeReviving(
 
 /** Park the task on a step. With a fence, only while it holds, as for markTaskRunningWithStep. */
 export async function markTaskWaiting(
-  db: Database,
+  db: Database | DbHandle,
   taskId: string,
   stepId: string,
   stepIndex: number,
@@ -2646,6 +2646,72 @@ export async function handleResult(
         round: nextRound,
         endedAt: endedAtOf(result.row),
       });
+      const parkEscalation = async (
+        formSchema: FormSchema,
+        eventType: string,
+        payload: Record<string, unknown>,
+        site: 'oscillation' | 'round_cap',
+      ) => {
+        let lost: LostHandoffSite = `${site}_row`;
+        try {
+          await db.transaction(async (tx) => {
+            // No runs are changed here. Take the source step before the task, as
+            // Retry/Stop do; every publication write commits or rolls back together.
+            if (!(await lockOwnedStep(tx, result.row.id)))
+              throw new StepSupersededError(result.row.id);
+            const source = await tx.query.taskSteps.findFirst({
+              where: eq(schema.taskSteps.id, result.row.id),
+              columns: { status: true },
+            });
+            if (source?.status === 'waiting_form') throw new StepSupersededError(result.row.id);
+            const [current] = await tx
+              .select({
+                currentStepId: schema.tasks.currentStepId,
+                currentRound: schema.tasks.currentRound,
+              })
+              .from(schema.tasks)
+              .where(eq(schema.tasks.id, ctx.taskId))
+              .for('no key update');
+            lost = `${site}_task`;
+            if (
+              !current ||
+              (current.currentStepId != null &&
+                (current.currentStepId !== stepId || current.currentRound !== result.row.round))
+            )
+              throw new StepSupersededError(result.row.id);
+            await updateOwnedStep(tx, result.row.id, {
+              status: 'waiting_form',
+              formSchema,
+              formValues: null,
+              endedAt: null,
+              waitingStartedAt: new Date(),
+            });
+            await recordFixLoopRequest(tx, ctx.taskId, result.row.id, {
+              diagnosis: result.diagnosis,
+              sourceStepId: result.sourceStepId,
+              round: nextRound,
+              guidance: result.guidance,
+              unfencedLegacy: result.unfencedLegacy,
+            });
+            if (
+              !(await markTaskWaiting(
+                tx,
+                ctx.taskId,
+                stepId,
+                computeGlobalStepIndex(stepDef.metadata.workflowType, stepDef.metadata.index),
+                result.row.round,
+                'waiting_user',
+                { epoch: ctx.orchestrationEpoch },
+              ))
+            )
+              throw new StepSupersededError(result.row.id);
+            await appendEvent(tx, ctx.taskId, result.row.id, eventType, payload);
+          });
+        } catch (err) {
+          if (!(err instanceof StepSupersededError)) throw err;
+          await logLost(lost);
+        }
+      };
       // Oscillation guard: before the round cap, catch a non-converging loop (two checks
       // with contradictory criteria ping-ponging) and escalate to the SAME Continue/Accept/
       // Abort gate early instead of burning every round. Skipped for uncapped human restarts
@@ -2669,9 +2735,8 @@ export async function handleResult(
               fixRoundTargetDef(ctx.executionContract, stepRegistry),
             ),
           };
-          const parked = await writeOwnedRow(db, result.row.id, {
-            status: 'waiting_form',
-            formSchema: buildOscillationEscalationSchema(
+          await parkEscalation(
+            buildOscillationEscalationSchema(
               result.sourceStepId,
               osc.conflictingStepId ?? 'another step',
               osc.conflictingDiagnoses[0],
@@ -2684,39 +2749,14 @@ export async function handleResult(
               },
               cliOptions,
             ),
-            formValues: null,
-            endedAt: null,
-            waitingStartedAt: new Date(),
-          });
-          if (!parked) {
-            await logLost('oscillation_row');
-            return;
-          }
-          await recordFixLoopRequest(db, ctx.taskId, result.row.id, {
-            diagnosis: result.diagnosis,
-            sourceStepId: result.sourceStepId,
-            round: nextRound,
-            guidance: result.guidance,
-            unfencedLegacy: result.unfencedLegacy,
-          });
-          const waiting = await markTaskWaiting(
-            db,
-            ctx.taskId,
-            stepId,
-            computeGlobalStepIndex(stepDef.metadata.workflowType, stepDef.metadata.index),
-            result.row.round,
-            'waiting_user',
-            { epoch: ctx.orchestrationEpoch },
+            'fix_loop.oscillation_detected',
+            {
+              sourceStepId: result.sourceStepId,
+              conflictingStepId: osc.conflictingStepId,
+              round: nextRound,
+            },
+            'oscillation',
           );
-          if (!waiting) {
-            await logLost('oscillation_task');
-            return;
-          }
-          await appendEvent(db, ctx.taskId, result.row.id, 'fix_loop.oscillation_detected', {
-            sourceStepId: result.sourceStepId,
-            conflictingStepId: osc.conflictingStepId,
-            round: nextRound,
-          });
           return;
         }
       }
@@ -2751,9 +2791,8 @@ export async function handleResult(
             fixRoundTargetDef(ctx.executionContract, stepRegistry),
           ),
         };
-        const parked = await writeOwnedRow(db, result.row.id, {
-          status: 'waiting_form',
-          formSchema: buildFixLoopEscalationSchema(
+        await parkEscalation(
+          buildFixLoopEscalationSchema(
             result.sourceStepId,
             result.diagnosis,
             cap,
@@ -2761,39 +2800,10 @@ export async function handleResult(
             HUMAN_REJECT_SOURCES.has(result.sourceStepId) && !result.unfencedLegacy,
             cliOptions,
           ),
-          formValues: null,
-          endedAt: null,
-          waitingStartedAt: new Date(),
-        });
-        if (!parked) {
-          await logLost('round_cap_row');
-          return;
-        }
-        await recordFixLoopRequest(db, ctx.taskId, result.row.id, {
-          diagnosis: result.diagnosis,
-          sourceStepId: result.sourceStepId,
-          round: nextRound,
-          guidance: result.guidance,
-          unfencedLegacy: result.unfencedLegacy,
-        });
-        const waiting = await markTaskWaiting(
-          db,
-          ctx.taskId,
-          stepId,
-          computeGlobalStepIndex(stepDef.metadata.workflowType, stepDef.metadata.index),
-          result.row.round,
-          'waiting_user',
-          { epoch: ctx.orchestrationEpoch },
+          'fix_loop.escalated',
+          { sourceStepId: result.sourceStepId, rounds: cap, round: nextRound },
+          'round_cap',
         );
-        if (!waiting) {
-          await logLost('round_cap_task');
-          return;
-        }
-        await appendEvent(db, ctx.taskId, result.row.id, 'fix_loop.escalated', {
-          sourceStepId: result.sourceStepId,
-          rounds: cap,
-          round: nextRound,
-        });
         return;
       }
       const target = await routableFixLoopTarget(db, ctx, result.row.id, () =>
