@@ -169,7 +169,7 @@ export class StackLock {
   private unprovenRefusal(): UpgradeRefusal {
     return new UpgradeRefusal(
       'stack-lock-unproven',
-      'install stack lease ownership could not be proved; refusing the phase and attempting normal failure recovery',
+      'install stack lease ownership could not be proved; refusing the phase',
     );
   }
 

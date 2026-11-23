@@ -467,7 +467,27 @@ about 150): every read takes at most 4097 bytes and those are what is compared. 
 it to a tomb beside it (exactly one breaker wins) and re-reads the tomb: bytes other than the observed ones
 mean a fresh lock was displaced, which is put back by exclusive create and reported as busy. A tomb that cannot
 be removed after an equal re-read does not stop the acquisition (the updater logs `stack-lock-tomb-left`); the
-leftover `.haive-stack-lock.stale.*` file is harmless. At most 3 rounds, then busy. A holder that finds another token in the file has lost the lock: the updater logs `stack-lock-lost` once (the bridge has no log for it), the holder stops beating and never removes another holder's file. The updater does not wait for its next beat to learn that: before each phase, each journal and install-file write, each maintenance-state write and each container start (`docker run`, `create`, `pull`, and Compose `up`, `stop` and `pull`) it proves ownership from the stored record (`StackLock.assertOwned`, waiting out an in-flight beat; `lease-fence.ts`). A parseable record with another token, holder or `startedAt` is a proven loss and sticks: the phase is refused with `stack-lock-lost`, exit 3, and the updater does no rollback, no journal or attempt write and no release, and removes only its own attempt's labelled children; the run stays for the new holder to recover. Anything that proves nothing (a read that fails `STACK_LOCK_PROOF_TRIES` times, 100 ms apart; an absent name, which breaking a stale lock briefly leaves; an empty or partial record, unless the holder's own beat is failing, when it counts as its own torn write, as in the beat) refuses the forward phase with `stack-lock-unproven`, exit 3, but marks nothing lost: failure recovery (the snapshot's database restart, rollback, the attempt row, release) still runs, re-proving before each action and stopping only at a proven loss, since leaving the database stopped turns a recoverable failure into an outage. A result already decided (done or rolled back) is not replaced when the beat notices a loss afterwards. Release removes the file only when it carries the holder's token, is shared by every
+leftover `.haive-stack-lock.stale.*` file is harmless. At most 3 rounds, then busy. A holder that finds another
+token in the file has lost the lock: the updater logs `stack-lock-lost` once (the bridge has no log for it), the
+holder stops beating and never removes another holder's file. The updater does not wait for its next beat to
+learn that: before each phase, each journal and install-file write, each maintenance-state write and each Docker
+call that starts or fetches something (`docker run`, `create`, `pull`, and Compose `up`, `stop` and `pull`) it
+proves ownership from the stored record (`StackLock.assertOwned`, waiting out an in-flight beat;
+`lease-fence.ts`). A record that parses, carries a token, holder and `startedAt`, and differs in any of them is
+a proven loss and sticks: the phase is refused with `stack-lock-lost`, exit 3, and the updater does no rollback,
+no journal or attempt write and no release, and removes only its own attempt's labelled children; the run stays
+for the new holder to recover. Anything that proves nothing (a read that fails `STACK_LOCK_PROOF_TRIES` times,
+100 ms apart; an absent name, which breaking a stale lock briefly leaves; a record that lacks a token, holder or
+`startedAt`; an empty or partial record, unless the holder's own beat is failing, when it counts as its own torn
+write, as in the beat) refuses the forward phase with `stack-lock-unproven` (exit 3 when no rollback is needed
+or it succeeds, 6 when it fails; in the commit phase the run stays at `commit`) but marks nothing lost: failure
+recovery (the snapshot's database restart, rollback, the attempt row, release) still runs, re-proving before
+each action and stopping only at a proven loss, since leaving the database stopped turns a recoverable failure
+into an outage. The residual: recovery is not fenced against a takeover whose record this holder cannot read (a
+lock unreadable or absent to it for 60 s or more while another holder took over), which a time bound on the last
+good proof or beat would close (T765). A result already decided (done or rolled back) is not replaced when the
+beat notices a loss afterwards. Release removes the file only when it carries the holder's token, is shared by
+every
 caller, never throws, and a failed removal leaves a lock that the stale rule clears. A non-regular entry at the
 name (a directory or a link) is refused and never followed or deleted. A holder name read from a record reaches
 an operator only as a plain token, since the file is writable by anyone with access to the install and
@@ -519,14 +539,21 @@ protection needs the target release's updater image (it runs the upgrade) and th
 
 A holder that dies leaves the file. The next contender clears it after 60 s without a change, logging
 `stack-lock-waiting` and then `stack-lock-broken` when it is the updater, so a crash never wedges the shared
-lock; a lock whose holder lives is never broken, since it changes at least every 5 s. Residual windows: a holder frozen for more than 60 s (SIGSTOP, a paused VM) while a contender is awake can lose the lock; it learns of it at its next proof, but a proof cannot fence an action already under way (a Compose or `docker run` call can run for 30 minutes) or a freeze between the proof and the action it guards; between the rename and the restore of a displaced fresh lock the name is briefly
+lock; a lock whose holder lives is never broken, since it changes at least every 5 s. Residual windows: a holder
+frozen for more than 60 s (SIGSTOP, a paused VM) while a contender is awake can lose the lock; it learns of it
+at its next proof, but a proof cannot fence an action already under way (a Compose or `docker run` call can run
+for 30 minutes) or a freeze between the proof and the action it guards; between the rename and the restore of a
+displaced fresh lock the name is briefly
 absent, so the displaced holder's next beat creates it again and a third party creating it first keeps it. A
 holder whose beat cannot be written (a full disk, say) stops refreshing the lock, which then lapses after 60 s;
 the extension's container-identity check still covers that case. A bridge process killed in the middle of Start
 or Stop (the Desktop window closes) can leave its Compose child running while both of its leases lapse, this
 one and the [window lock](#docker-desktop-extension); killed in the middle of Install, it can leave the
 installer running while the window lock lapses. A container started by an updater killed outright (SIGKILL, OOM)
-outlives it; the next updater's child check refuses while it runs, but only for containers labelled by this release's updater or later (an older updater's children carry no labels); a child started inside the proof-to-action window above is caught by the next start's check the same way.
+outlives it; the next updater's child check refuses while it runs, but only for containers labelled by this
+release's updater or later (an older updater's children carry no labels); a child started inside the
+proof-to-action window above runs next to a new holder already past its own check, and is caught only by the
+start after that.
 Docker Desktop's file-sharing coherence is not verified: the create is exclusive and no decision rests on a
 negative lookup. Delete `.haive-stack-lock` by hand
 only when no updater container and no extension operation is running.
