@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
+import { GATED_BUDGET, minimumLimits } from '../lib/ci-gated-budget.mjs';
 import { readWorkflow } from './workflow.mjs';
 import { shellSource, swallowedFailure } from './shell-source.mjs';
 
@@ -61,13 +62,7 @@ const JOBS = [
     // 120 s allows duplicate setup and module builds.
     // A new row needs no edit to the limits in ci.yml until the list outgrows them; the failure then names
     // the limits that hold the list plus rowHeadroom more rows, and the 2x ceiling bounds rowHeadroom.
-    budget: {
-      outsideGatedSeconds: 120,
-      secondsPerRow: 10,
-      slowRunnerFactor: 1.5,
-      marginSeconds: 600,
-      rowHeadroom: 25,
-    },
+    budget: GATED_BUDGET,
     setup: [
       'actions/checkout',
       'Setup pnpm',
@@ -118,7 +113,7 @@ const gatedRows = (check) => {
 
 // What a green run of the job is modelled to take: everything outside the gated step, plus
 // secondsPerRow for each row of the list that step loops over.
-function model(checks, { outsideGatedSeconds, secondsPerRow }) {
+function model(checks, { outsideGatedSeconds, secondsPerRow, shards = 1 }) {
   const gatedChecks = checks.filter((check) => gatedRows(check) !== null);
   assert.equal(
     gatedChecks.length,
@@ -126,30 +121,13 @@ function model(checks, { outsideGatedSeconds, secondsPerRow }) {
     'the job has its assigned GATED list count',
   );
   const [gated] = gatedChecks;
-  const rows = gated ? gatedRows(gated) : 0;
+  const rows = gated ? Math.ceil(gatedRows(gated) / shards) : 0;
   return {
     gated,
     rows,
     gatedSeconds: rows * secondsPerRow,
     greenSeconds: outsideGatedSeconds + rows * secondsPerRow,
   };
-}
-
-// The least whole-minute limits that hold `rows` GATED rows. The gated step holds
-// slowRunnerFactor times the time its rows are modelled to take. The job holds a green run plus
-// marginSeconds, and the setup plus the whole gated step limit. A list so short that the margin
-// alone is over twice a green run has no limits that fit.
-function minimumLimits(
-  rows,
-  { outsideGatedSeconds, secondsPerRow, slowRunnerFactor, marginSeconds },
-) {
-  const gatedSeconds = rows * secondsPerRow;
-  const stepMinutes = Math.ceil((slowRunnerFactor * gatedSeconds) / 60);
-  const jobSeconds = Math.max(
-    outsideGatedSeconds + gatedSeconds + marginSeconds,
-    outsideGatedSeconds + stepMinutes * 60,
-  );
-  return { stepMinutes, jobMinutes: Math.ceil(jobSeconds / 60) };
 }
 
 const guard = ({ prerequisite, leg }) =>
@@ -721,7 +699,7 @@ const MUTANTS = [
       );
       gated.run = gated.run.replace(
         /\nGATED(\n|$)/,
-        `${'\nx'.repeat(capacity + 1 - rows)}\nGATED$1`,
+        `${'\nx'.repeat((capacity + 1 - rows) * spec.budget.shards)}\nGATED$1`,
       );
     },
     (spec) => spec.id === 'postgres-gated',
@@ -814,7 +792,13 @@ describe('the limits the gated budget names', () => {
       /(<<'GATED'\n)([\s\S]+?)(\nGATED(?:\n|$))/,
       (_, open, list, close) => {
         const listed = list.split('\n');
-        return open + Array.from({ length: count }, (_, i) => listed[i] ?? 'x').join('\n') + close;
+        return (
+          open +
+          Array.from({ length: count * spec.budget.shards }, (_, i) => listed[i] ?? 'x').join(
+            '\n',
+          ) +
+          close
+        );
       },
     );
     gated['timeout-minutes'] = String(stepMinutes);
@@ -1227,13 +1211,14 @@ function checkSmokeSplit(workflow) {
   const postgres = workflow.jobs['postgres-gated'];
   assert.ok(postgres, 'Postgres-gated tests need a separate postgres-gated job');
   assert.equal(smokes.name, 'End-to-end smokes');
-  assert.equal(postgres.name, 'Postgres-gated tests');
+  assert.equal(postgres.name, 'Postgres-gated tests (shard ${{ matrix.shard }})');
   for (const [job, services] of [
     [smokes, ['postgres', 'redis']],
     [postgres, ['postgres', 'pgvector', 'redis']],
   ]) {
     assert.equal(job.needs, undefined, 'the split jobs start independently');
-    assert.equal(job.strategy, undefined, 'GATED files remain serial within one job');
+    if (job === smokes) assert.equal(job.strategy, undefined);
+    else assert.equal(job.strategy['fail-fast'], 'false');
     assert.deepEqual(Object.keys(job.services), services, 'each job owns its required services');
     assert.equal(job.services.postgres.image, 'postgres:18-alpine');
     assert.equal(job.services.redis.image, 'redis:8.4-alpine');
@@ -1260,11 +1245,7 @@ function checkSmokeSplit(workflow) {
   const holders = Object.entries(workflow.jobs).flatMap(([id, job]) =>
     (job.steps ?? []).filter((step) => gatedRows(step) !== null).map(() => id),
   );
-  assert.deepEqual(
-    holders,
-    ['postgres-gated'],
-    'exactly one serial GATED loop belongs to the new job',
-  );
+  assert.deepEqual(holders, ['postgres-gated'], 'exactly one GATED list feeds all shards');
   assert.deepEqual(
     smokes.steps.slice(smokes.steps.findIndex((step) => step.id === 'migrate') + 1).map(label),
     [
