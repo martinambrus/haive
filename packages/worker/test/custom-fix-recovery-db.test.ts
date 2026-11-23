@@ -8,7 +8,7 @@ import { DelayedError } from 'bullmq';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createDatabase, schema, type Database } from '@haive/database';
 import { configService, logger, TASK_JOB_NAMES, type WorkflowType } from '@haive/shared';
-import { ExecutionContractError, moduleManifestSchema } from '@haive/shared/modularity';
+import { moduleManifestSchema } from '@haive/shared/modularity';
 import { z } from 'zod';
 import {
   advanceStep,
