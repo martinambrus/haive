@@ -101,6 +101,11 @@ export default function TaskTypesPage() {
                   {row.enabled ? 'Enabled' : 'Disabled'}
                 </Badge>
                 {!row.requiresRepository && <Badge variant="info">No repository</Badge>}
+                {row.selectsOwnProviders && (
+                  <Badge className="border-indigo-800/60 bg-indigo-900/60 text-indigo-300">
+                    Selects own providers
+                  </Badge>
+                )}
               </div>
               <p className="font-mono text-[11px] text-neutral-500 [overflow-wrap:anywhere]">
                 {row.slug}
