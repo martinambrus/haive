@@ -6,7 +6,12 @@ vi.mock('node:child_process', () => ({
   execFile: Object.assign(vi.fn(), { [Symbol.for('nodejs.util.promisify.custom')]: h.exec }),
   spawn: h.spawn,
 }));
-import { readReleaseManifestImage, streamSingleFile, MANIFEST_MAX } from './docker.js';
+import {
+  readReleaseManifestImage,
+  streamSingleFile,
+  MANIFEST_MAX,
+  withOneShotOwner,
+} from './docker.js';
 import { loadManifest } from './cli.js';
 import { createHash, randomBytes } from 'node:crypto';
 
@@ -284,7 +289,9 @@ it('channel rollback inventory includes digest pins while public inventory stays
 
 it('channel own-module builder receives an install-local credential mount for its Docker client', async () => {
   const { buildOwnModules } = await import('./docker.js');
-  await buildOwnModules('private/builder@sha256:abc', '/modules', {}, '/host/install/.docker');
+  await withOneShotOwner('t534_test', () =>
+    buildOwnModules('private/builder@sha256:abc', '/modules', {}, '/host/install/.docker'),
+  );
   const args = h.exec.mock.calls[1]![1] as string[];
   expect(args).toContain(
     'type=bind,src=/host/install/.docker,dst=/run/haive-docker-config,readonly',
@@ -292,7 +299,7 @@ it('channel own-module builder receives an install-local credential mount for it
   expect(args).toContain('DOCKER_CONFIG=/run/haive-docker-config');
   expect(args).toContain('BUILDX_CONFIG=/tmp/buildx');
   h.exec.mockClear();
-  await buildOwnModules('public/builder:1', '/modules', {});
+  await withOneShotOwner('t534_test', () => buildOwnModules('public/builder:1', '/modules', {}));
   expect((h.exec.mock.calls[1]![1] as string[]).join(' ')).not.toContain('DOCKER_CONFIG');
   expect((h.exec.mock.calls[1]![1] as string[]).join(' ')).not.toContain('BUILDX_CONFIG');
 });

@@ -106,7 +106,7 @@ interface Write {
 
 /** Records every write with the transaction it ran in (null outside one). */
 function fakeDb(opts: {
-  lockedRun?: { id?: string; supersededAt: Date | null };
+  lockedRun?: { id?: string; supersededAt: Date | null; taskStepId?: string | null };
   summaryLands?: { stepId: string; round: number };
   /** A Retry or a Stop superseded the run between the job's read and its start. */
   supersededBeforeStart?: boolean;
@@ -159,7 +159,9 @@ function fakeDb(opts: {
     }),
     select: () => ({
       from: () => ({
-        where: () => ({ for: async () => (opts.lockedRun ? [opts.lockedRun] : []) }),
+        where: () => ({
+          for: async () => (opts.lockedRun ? [{ taskStepId: STEP, ...opts.lockedRun }] : []),
+        }),
       }),
     }),
     transaction: async (cb: (t: unknown) => Promise<unknown>) => cb(handle(++txSeq)),
@@ -698,18 +700,46 @@ describe('a codex run that fell back to codex exec', () => {
   };
 
   it('adds the fallback note to the step warning in one write', async () => {
-    const { db, writes } = fakeDb({ stepOwned: true });
+    const { db, writes } = fakeDb({ stepOwned: true, lockedRun: { supersededAt: null } });
     stubs.executeByKind.mockResolvedValue(fellBack);
     await handleCliExecJob(db, job);
     const stepWrites = writes.filter((w) => w.table === 'task_steps' && 'warningMessage' in w.set);
     expect(stepWrites).toHaveLength(1);
+    expect(stepWrites[0]!.tx).not.toBeNull();
     expect(applyWarningPatch('earlier note', stepWrites[0]!.set.warningMessage)).toBe(
       `earlier note ${codexAppServerFallbackWarning(failure, '1.2.3')}`,
     );
   });
 
+  it('writes no fallback note after Retry has superseded the run and reclaimed the step', async () => {
+    const { db, writes } = fakeDb({
+      stepOwned: true,
+      lockedRun: { supersededAt: new Date() },
+    });
+    stubs.executeByKind.mockResolvedValue(fellBack);
+    expect(await handleCliExecJob(db, job)).toMatchObject({ exitCode: 0 });
+    expect(
+      writes.filter((w) => w.table === 'task_steps' && 'warningMessage' in w.set),
+    ).toHaveLength(0);
+  });
+
+  it.each([undefined, null, 'other-step'])(
+    'writes no fallback note for a missing run or a different step link (%s)',
+    async (taskStepId) => {
+      const { db, writes } = fakeDb({
+        stepOwned: true,
+        ...(taskStepId === undefined ? {} : { lockedRun: { supersededAt: null, taskStepId } }),
+      });
+      stubs.executeByKind.mockResolvedValue(fellBack);
+      expect(await handleCliExecJob(db, job)).toMatchObject({ exitCode: 0 });
+      expect(
+        writes.filter((w) => w.table === 'task_steps' && 'warningMessage' in w.set),
+      ).toHaveLength(0);
+    },
+  );
+
   it('still completes when the step is no longer the job own', async () => {
-    const { db } = fakeDb({});
+    const { db } = fakeDb({ lockedRun: { supersededAt: null } });
     stubs.executeByKind.mockResolvedValue(fellBack);
     const result = await handleCliExecJob(db, job);
     expect(result).toMatchObject({ exitCode: 0, rawOutput: ok.rawOutput });

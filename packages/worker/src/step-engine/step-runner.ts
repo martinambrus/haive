@@ -58,6 +58,7 @@ import {
   notInArray,
   or,
   sql,
+  type SQL,
 } from 'drizzle-orm';
 import type { Database } from '@haive/database';
 import { schema, hasPgCode, isUniqueViolation, type StepIterationEntry } from '@haive/database';
@@ -180,6 +181,7 @@ import {
   insertOwnedRun,
   openPendingStep,
   updateOwnedStep,
+  stepWarningAppend,
 } from './step-ownership.js';
 import { isPinnedFixConsumer, isPinnedFixRepair, stepRunDecision } from './fix-consumer.js';
 import { isFixLoopSuppressed } from './steps/workflow/_fix-loop.js';
@@ -469,7 +471,7 @@ type UpdatePatch = Partial<{
   iterationCount: number;
   statusMessage: string | null;
   summary: string | null;
-  warningMessage: string | null;
+  warningMessage: string | SQL | null;
   errorMessage: string | null;
   errorHint: TaskStepRow['errorHint'];
   degradedNote: string | null;
@@ -925,10 +927,12 @@ async function resolveLlmPhase(
             'cli output truncated; retrying with a fresh (smaller) invocation',
           );
           await updateRow(db, current.id, {
-            warningMessage: retryWarning(
-              await countLlmAttempts(db, current.id),
-              stepDef.loop ? null : (llmRetry?.maxAttempts ?? null),
-              message,
+            warningMessage: stepWarningAppend(
+              retryWarning(
+                await countLlmAttempts(db, current.id),
+                stepDef.loop ? null : (llmRetry?.maxAttempts ?? null),
+                message,
+              ),
             ),
           });
           await markLatestInvocationConsumed(db, current.id);
@@ -3538,10 +3542,12 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
             // shouldRetryPreForm is a per-step predicate with no message of its own, so this
             // is the one retry whose reason really is generic. Still beats the card's guess.
             await updateRow(db, current.id, {
-              warningMessage: retryWarning(
-                attempts,
-                preFormRetry.maxAttempts,
-                'the run produced nothing this step could use',
+              warningMessage: stepWarningAppend(
+                retryWarning(
+                  attempts,
+                  preFormRetry.maxAttempts,
+                  'the run produced nothing this step could use',
+                ),
               ),
             });
             await markLatestInvocationConsumed(db, current.id);
@@ -4222,7 +4228,7 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
               'llm apply failed; retrying with a fresh invocation',
             );
             await updateRow(db, current.id, {
-              warningMessage: retryWarning(attempt, retry.maxAttempts, reason),
+              warningMessage: stepWarningAppend(retryWarning(attempt, retry.maxAttempts, reason)),
             });
             await markLatestInvocationConsumed(db, current.id);
             const retryLlm = await resolveLlmPhase(

@@ -6,6 +6,12 @@ import { join } from 'node:path';
 const h = vi.hoisted(() => ({
   sql: Object.assign(vi.fn(), { end: vi.fn(), options: { parsers: {}, serializers: {} } }),
   initialize: vi.fn(),
+  dockerExec: vi.fn(),
+}));
+vi.mock('node:child_process', () => ({
+  execFile: Object.assign(vi.fn(), {
+    [Symbol.for('nodejs.util.promisify.custom')]: h.dockerExec,
+  }),
 }));
 vi.mock('postgres', () => ({ default: vi.fn(() => h.sql) }));
 import postgres from 'postgres';
@@ -37,6 +43,7 @@ vi.mock('./run.js', async (original) => ({
   phaseCommit: vi.fn(),
 }));
 import { main } from './cli.js';
+import { UpgradeRefusal } from './refusal.js';
 import { STACK_LOCK_BEAT_MS, StackLock } from './stack-lock.js';
 import * as images from './images.js';
 import * as dk from './docker.js';
@@ -116,6 +123,7 @@ const quick = { heartbeat: false, staleMs: 5, pollMs: 1 };
 
 beforeEach(async () => {
   vi.resetAllMocks();
+  h.dockerExec.mockResolvedValue({ stdout: '' });
   dir = await mkdtemp(join(tmpdir(), 'rbr-lock-'));
   lock = join(dir, LOCK);
   ext = { token: randomBytes(16).toString('hex'), seq: 1 };
@@ -302,6 +310,41 @@ describe('every exit path releases the lock', () => {
     await gone();
     await files();
   });
+  it.each(['migrate', 'commit', 'resume', 'resume-commit'] as const)(
+    'journals a cleanup refusal and exits 3 without rollback during %s',
+    async (phase) => {
+      const refusal = new UpgradeRefusal(
+        'updater-child-cleanup-failed',
+        'could not stop migration containers (EACCES); original client failure: ERR_CHILD_PROCESS_STDIO_MAXBUFFER',
+      );
+      if (phase.startsWith('resume')) {
+        vi.mocked(journal.findLiveRun).mockResolvedValue({
+          ...liveRun,
+          phase: phase === 'resume-commit' ? 'commit' : 'migrate',
+        } as never);
+        vi.mocked(run.resume).mockRejectedValueOnce(refusal);
+      } else {
+        vi.mocked(phase === 'commit' ? run.phaseCommit : run.phaseMigrate).mockRejectedValueOnce(
+          refusal,
+        );
+      }
+      vi.mocked(journal.recordRunError).mockResolvedValueOnce(undefined);
+      expect(await main(opts)).toBe(3);
+      expect(run.rollback).not.toHaveBeenCalled();
+      expect(journal.recordRunError).toHaveBeenCalledWith(
+        h.sql,
+        phase.startsWith('resume') ? 'live' : 'new-run',
+        expect.stringContaining('ERR_CHILD_PROCESS_STDIO_MAXBUFFER'),
+      );
+      expect(journal.recordAttempt).not.toHaveBeenCalled();
+      expect(
+        vi.mocked(console.log).mock.calls.map(([line]) => JSON.parse(String(line))),
+      ).toContainEqual(
+        expect.objectContaining({ event: 'refused', refusal: 'updater-child-cleanup-failed' }),
+      );
+      await gone();
+    },
+  );
   it('verify failure rolled back 5', async () => {
     vi.mocked(run.phaseVerify).mockResolvedValue(false);
     vi.mocked(run.rollback).mockImplementation(mark);
@@ -352,6 +395,92 @@ describe('every exit path releases the lock', () => {
 });
 
 describe('crash recovery of an abandoned record', () => {
+  it.each([false, true])(
+    'refuses a surviving one-shot after breaking the dead holder lease (recovery=%s)',
+    async (recover) => {
+      await writeFile(lock, record(ext.token, 'updater', ext.seq));
+      if (recover) vi.mocked(journal.findLiveRun).mockResolvedValue(liveRun as never);
+      h.dockerExec.mockResolvedValue({ stdout: 'abc123\tdead-holder-attempt\tmigration\n' });
+      expect(await main({ stackLock: { ...quick, sleep: idleSleep } })).toBe(3);
+      expect(events()).toContain('stack-lock-broken');
+      expect(run.resume).not.toHaveBeenCalled();
+      expect(journal.startRun).not.toHaveBeenCalled();
+      expect(run.phaseDraining).not.toHaveBeenCalled();
+      expect(run.phaseSnapshot).not.toHaveBeenCalled();
+      expect(images.prepareImages).not.toHaveBeenCalled();
+      expect(fetch).not.toHaveBeenCalled();
+      expect(
+        vi.mocked(console.log).mock.calls.map(([line]) => JSON.parse(String(line))),
+      ).toContainEqual(
+        expect.objectContaining({ event: 'refused', refusal: 'updater-child-running' }),
+      );
+      expect(await heldBy()).toBeNull();
+      if (!recover) {
+        expect(journal.recordAttempt).toHaveBeenCalledWith(
+          h.sql,
+          expect.objectContaining({
+            status: 'refused',
+            metadata: { refusal: 'updater-child-running' },
+          }),
+        );
+      }
+    },
+  );
+  it('refuses an unavailable Docker check before recovery and releases the lease', async () => {
+    vi.mocked(journal.findLiveRun).mockResolvedValue(liveRun as never);
+    h.dockerExec.mockRejectedValue(new Error('docker unavailable'));
+    expect(await main({ stackLock: { ...quick, sleep: idleSleep } })).toBe(3);
+    expect(run.resume).not.toHaveBeenCalled();
+    expect(images.prepareImages).not.toHaveBeenCalled();
+    expect(await heldBy()).toBeNull();
+    expect(
+      vi.mocked(console.log).mock.calls.map(([line]) => JSON.parse(String(line))),
+    ).toContainEqual(
+      expect.objectContaining({ event: 'refused', refusal: 'updater-child-check-failed' }),
+    );
+  });
+  it('uses the install identity even when the network is overridden', async () => {
+    vi.stubEnv('HAIVE_INSTALL_ID', 'team_install');
+    process.argv.push('--network', 'custom-network');
+    h.dockerExec.mockResolvedValue({ stdout: 'abc123\tprior\tmigration\n' });
+    expect(await main({ stackLock: { ...quick, sleep: idleSleep } })).toBe(3);
+    expect(h.dockerExec.mock.calls[0]![1]).toEqual([
+      'ps',
+      '--filter',
+      'label=haive.install=team_install',
+      '--filter',
+      'label=org.haive.updater.attempt',
+      '--filter',
+      'label=org.haive.updater.role',
+      '--format',
+      '{{.ID}}\t{{.Label "org.haive.updater.attempt"}}\t{{.Label "org.haive.updater.role"}}',
+    ]);
+  });
+  it('checks children using the install Docker config that subsequent launches use', async () => {
+    vi.stubEnv('DOCKER_CONFIG', '/ambient');
+    vi.mocked(images.readImageSettings).mockResolvedValue({
+      ...settings,
+      HAIVE_CHANNEL: 'acme',
+      DOCKER_CONFIG: join(dir, '.docker'),
+    });
+    let checkedConfig: string | undefined;
+    h.dockerExec.mockImplementation(async () => {
+      checkedConfig = process.env.DOCKER_CONFIG;
+      return { stdout: 'abc123\tdead-holder-attempt\tmigration\n' };
+    });
+    expect(await main({ stackLock: { ...quick, sleep: idleSleep } })).toBe(3);
+    expect(checkedConfig).toBe(join(dir, '.docker'));
+    expect(journal.recordAttempt).toHaveBeenCalledWith(
+      h.sql,
+      expect.objectContaining({
+        channel: 'acme',
+        fromVersion: '1.0.0',
+        metadata: { refusal: 'updater-child-running' },
+      }),
+    );
+    expect(run.resume).not.toHaveBeenCalled();
+    expect(images.prepareImages).not.toHaveBeenCalled();
+  });
   it('breaks a record that never changes after exactly staleMs of sleeps, then proceeds', async () => {
     await writeFile(lock, record(ext.token, 'extension', ext.seq));
     expect(await main({ stackLock: { ...quick, sleep: idleSleep } })).toBe(0);
@@ -456,6 +585,7 @@ describe('read-only and absent installs', () => {
     });
     expect(await main({ stackLock: { ...quick, sleep } })).toBe(0);
     expect(sleep).not.toHaveBeenCalled();
+    expect(h.dockerExec).not.toHaveBeenCalled();
     expect(await readFile(lock, 'utf8')).toBe(record(ext.token, 'extension', ext.seq));
     expect(await readdir(dir)).toHaveLength(4);
   });
@@ -474,4 +604,157 @@ describe('read-only and absent installs', () => {
     expect(events()).toContain('stack-lock-skipped');
     expect(run.resume).toHaveBeenCalled();
   });
+});
+
+describe('SIGTERM while a one-shot is running', () => {
+  it('keeps the lock when the Docker client settles before SIGTERM cleanup finishes', async () => {
+    const saved = process.listeners('SIGTERM') as NodeJS.SignalsListener[];
+    process.removeAllListeners('SIGTERM');
+    let started: () => void = () => {};
+    let removed: () => void = () => {};
+    let committed: () => void = () => {};
+    let finishChild: () => void = () => {};
+    let finishRemoval: () => void = () => {};
+    const running = new Promise<void>((resolve) => {
+      started = resolve;
+    });
+    const removing = new Promise<void>((resolve) => {
+      removed = resolve;
+    });
+    const commit = new Promise<void>((resolve) => {
+      committed = resolve;
+    });
+    const child = new Promise<{ stdout: string }>((resolve) => {
+      finishChild = () => resolve({ stdout: '' });
+    });
+    const removal = new Promise<{ stdout: string }>((resolve) => {
+      finishRemoval = () => resolve({ stdout: '' });
+    });
+    h.dockerExec.mockImplementation(async (_cmd, args) => {
+      if (args[0] === 'run') {
+        started();
+        return child;
+      }
+      if (args[1] === '-aq') return { stdout: 'abc123\n' };
+      if (args[0] === 'rm') {
+        removed();
+        return removal;
+      }
+      return { stdout: '' };
+    });
+    vi.mocked(run.phaseMigrate).mockImplementation(async () => {
+      await dk.runOneShot('target', ['migrate'], {});
+    });
+    vi.mocked(run.phaseCommit).mockImplementation(async () => {
+      committed();
+    });
+    const release = vi.spyOn(StackLock.prototype, 'release');
+    let exitDone: () => void = () => {};
+    const exited = new Promise<void>((resolve) => {
+      exitDone = resolve;
+    });
+    vi.spyOn(process, 'exit').mockImplementation(() => {
+      exitDone();
+      return undefined as never;
+    });
+    const result = main({ stackLock: { ...quick, sleep: idleSleep } });
+    try {
+      await running;
+      process.emit('SIGTERM');
+      await removing;
+      finishChild();
+      await commit;
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(release).not.toHaveBeenCalled();
+      expect(await heldBy()).toBe('updater');
+    } finally {
+      finishChild();
+      finishRemoval();
+      await exited;
+      await result;
+      process.removeAllListeners('SIGTERM');
+      for (const listener of saved) process.on('SIGTERM', listener);
+    }
+  });
+
+  it.each([false, true])(
+    'removes owned children before release even when cleanup fails (%s)',
+    async (fails) => {
+      const saved = process.listeners('SIGTERM') as NodeJS.SignalsListener[];
+      process.removeAllListeners('SIGTERM');
+      let finish: () => void = () => {};
+      let started: () => void = () => {};
+      const running = new Promise<void>((resolve) => {
+        started = resolve;
+      });
+      const child = new Promise<{ stdout: string }>((resolve) => {
+        finish = () => resolve({ stdout: '' });
+      });
+      const checks: Array<string | null> = [];
+      h.dockerExec.mockImplementation(async (_cmd, args) => {
+        if (args[0] === 'run') {
+          started();
+          return child;
+        }
+        if (args[0] === 'ps' && args[1] === '-aq') {
+          checks.push(await heldBy());
+          return { stdout: 'abc123\n' };
+        }
+        if (args[0] === 'rm') {
+          checks.push(await heldBy());
+          if (fails) throw Object.assign(new Error('secret stderr'), { code: 'EACCES' });
+        }
+        return { stdout: '' };
+      });
+      vi.mocked(run.phaseMigrate).mockImplementation(async () => {
+        await dk.runOneShot('target', ['migrate'], {});
+      });
+      let exitDone: (code: number) => void = () => {};
+      const exited = new Promise<number>((resolve) => {
+        exitDone = resolve;
+      });
+      vi.spyOn(process, 'exit').mockImplementation((code) => {
+        exitDone(Number(code));
+        return undefined as never;
+      });
+      const result = main({ stackLock: { ...quick, sleep: idleSleep } });
+      try {
+        await running;
+        process.emit('SIGTERM');
+        expect(await exited).toBe(143);
+        expect(checks).toEqual(fails ? ['updater', 'updater', 'updater'] : ['updater', 'updater']);
+        expect(await heldBy()).toBeNull();
+        const launch = h.dockerExec.mock.calls.find(
+          ([, args]) => args[0] === 'run',
+        )![1] as string[];
+        const attemptLabel = launch.find((arg) => arg.startsWith('org.haive.updater.attempt='));
+        expect(h.dockerExec.mock.calls.find(([, args]) => args[1] === '-aq')?.[1]).toEqual([
+          'ps',
+          '-aq',
+          '--filter',
+          'label=haive.install=haive',
+          '--filter',
+          `label=${attemptLabel}`,
+          '--filter',
+          'label=org.haive.updater.role',
+        ]);
+        if (fails) {
+          expect(
+            vi.mocked(console.log).mock.calls.map(([line]) => JSON.parse(String(line))),
+          ).toContainEqual(
+            expect.objectContaining({
+              event: 'updater-child-cleanup-failed',
+              message: expect.stringContaining('EACCES'),
+            }),
+          );
+        }
+      } finally {
+        finish();
+        await result;
+        process.removeAllListeners('SIGTERM');
+        for (const listener of saved) process.on('SIGTERM', listener);
+      }
+    },
+  );
 });

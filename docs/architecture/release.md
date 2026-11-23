@@ -411,7 +411,7 @@ did not happen, from the admin page or from `./haive upgrade`, after the api tha
 gone. When the updater held the database and the lock, then neither created nor resumed a run, and
 the start was not `--check` or a dry plan, its last step (`recordAttempt`) writes one row with
 phase `preflight`: status `refused` with `metadata.refusal` (channel-changed,
-rollback-images-missing, install-locked, a preflight refusal), or `failed` for an error. `error` is capped at 2048
+rollback-images-missing, install-locked, updater-child-running, updater-child-check-failed, a preflight refusal), or `failed` for an error. `error` is capped at 2048
 characters, `channel` is the resolved one, and an unusable `--version` is stored as `unknown`. When the
 start ends before the install settings were read (`install-locked`, `install-file-linked`, a failure inside
 that read), the row records the literal `HAIVE_CHANNEL` and `HAIVE_VERSION` of `.env` instead
@@ -481,7 +481,28 @@ and holds it through rollback. That first read only decides whether a `--check` 
 outlast the run the read saw: the snapshot's database restart ends the first updater's session lock, so a second
 updater can pass it, read the first one's live run and wait while the first finishes. Under the lock the updater
 reads the live run again and recovers, cleans and records attempts from that read alone, so a finished run is
-never resumed or rolled back. It releases the lock in `finally` on every exit path and on SIGTERM (exit 143). That handler is new: as PID 1
+never resumed or rolled back. Before that recovery, and before any volume or database action, it checks for a
+running container a previous updater started: every one-shot (the volume archive, the restore, a migration, the
+module build) carries `haive.install` (the install id), `org.haive.updater.attempt` and
+`org.haive.updater.role` labels, and a running one with this install's id and another attempt (an empty attempt
+included) refuses the start with `updater-child-running`, exit 3, naming each container id and role, since its
+writer may still be touching the volumes or the database. When `docker ps` itself fails, the start refuses with
+`updater-child-check-failed` and the error's code or class, never its text: the check fails closed. A `--check`
+with no live run skips it. Removing a leftover by hand (`docker rm -f <id>`) is the way forward once it is known
+dead or finished. A labelled one-shot has no client timeout: the Docker client forwards a SIGTERM to the container, whose
+first process ignores it, so on earlier releases such a timeout never stopped one anyway, and enforcing it now
+would kill a long migration in the forward-only commit phase. When the client ends without an exit status of its
+own (killed by a signal, or by Node when the output passes its 32 MiB buffer) the container keeps running (the
+daemon owns it), so the updater removes that attempt's containers of that role by label before the error
+propagates; a removal that fails is checked by listing them again, never by reading Docker's message. When they
+cannot be removed it refuses with `updater-child-cleanup-failed` (exit 3, the run's error recorded with the original
+failure's code) and does not roll back, which would race the survivor: the run stays for recovery, and the next
+start's child check refuses until the container is gone. A SIGTERM to the updater removes this attempt's running
+one-shots before it releases the lock and exits 143, waiting at most `STACK_LOCK_SIGNAL_CLEANUP_TIMEOUT_MS` (5 s,
+under `docker stop`'s 10 s grace) so a hung daemon cannot keep the lock held; from the moment it starts, that attempt launches no further one-shot (`one-shot attempt is stopping`), so a later phase cannot start a child its list has already missed (one already being created when the mark lands can still survive, and the next start's check catches it); a removal that fails or overruns is
+logged and the lock still released, so the next start's check catches the survivor. A SIGTERM that lands while the
+updater is rolling back can end it mid-rollback: the run stays for recovery, and the next start reverses it, as after
+any crash. It releases the lock in `finally` on every exit path and on SIGTERM (exit 143). That handler is new: as PID 1
 the updater ignored SIGTERM, so `docker stop` waited out its grace period and then killed it, and now it exits
 at once and frees the lock. SIGINT stays unhandled, because Ctrl-C is ignored by PID 1 there today. A busy lock
 refuses with `install-locked`, exit 3, and an attempt row like any preflight refusal. A dry plan, a `--check`
@@ -509,8 +530,10 @@ holder whose beat cannot be written (a full disk, say) stops refreshing the lock
 the extension's container-identity check still covers that case. A bridge process killed in the middle of Start
 or Stop (the Desktop window closes) can leave its Compose child running while both of its leases lapse, this
 one and the [window lock](#docker-desktop-extension); killed in the middle of Install, it can leave the
-installer running while the window lock lapses. A container the updater started (the volume archive, a migration
-one-shot) can outlive the updater, and neither the lock nor the container-identity check covers it then.
+installer running while the window lock lapses. A container started by an updater killed outright (SIGKILL, OOM)
+outlives it; the next updater's child check refuses while it runs, but only for containers labelled by this release's
+updater or later (an older updater's children carry no labels), and a holder that lost the lock while frozen and then
+resumes can still start a new one-shot after the check (T759).
 Docker Desktop's file-sharing coherence is not verified: the create is exclusive and no decision rests on a
 negative lookup. Delete `.haive-stack-lock` by hand
 only when no updater container and no extension operation is running.

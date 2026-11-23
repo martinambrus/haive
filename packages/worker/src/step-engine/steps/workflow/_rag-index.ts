@@ -15,6 +15,7 @@ import {
 import type { OnboardingEnvironmentMirror, OnboardingToolingMirror } from '@haive/shared';
 import { fenceRagStore, type RagSyncLock } from '@haive/shared/rag';
 import { markProjectStateDirty } from '@haive/shared/project-state-outbox';
+import { updateOwnedStep } from '../../step-ownership.js';
 import type { StepContext } from '../../step-definition.js';
 import { acquireRepoRagSyncLock } from '../_rag-sync-lock.js';
 import { gitRun } from '../../../repo/git-push.js';
@@ -641,15 +642,12 @@ async function syncRepositoryIndex(
     // bury it). Clears to null on a healthy/unknown run so a stale warning from a
     // prior pass does not linger. Re-written after the loop with this run's result.
     const awaitingReembed = await startBannerAwaitsReembed(conn, health, repositoryId, ctx.logger);
-    await ctx.db
-      .update(schema.taskSteps)
-      .set({
-        warningMessage: composeRagWarning(
-          embedDeviceWarning(embedDevice),
-          ragEmbedWarning(health, { skippedChunks: 0, awaitingReembed }),
-        ),
-      })
-      .where(eq(schema.taskSteps.id, ctx.taskStepId));
+    await updateOwnedStep(ctx.db, ctx.taskStepId, {
+      warningMessage: composeRagWarning(
+        embedDeviceWarning(embedDevice),
+        ragEmbedWarning(health, { skippedChunks: 0, awaitingReembed }),
+      ),
+    });
 
     let inserted = 0;
     let updated = 0;
@@ -1016,18 +1014,15 @@ async function syncRepositoryIndex(
       health.degradedAt = null;
       health.degradedReason = null;
     }
-    await ctx.db
-      .update(schema.taskSteps)
-      .set({
-        warningMessage: composeRagWarning(
-          embedDeviceWarning(embedDevice),
-          ragEmbedWarning(health, {
-            skippedChunks: embedSkippedChunks,
-            hashedChunks,
-          }),
-        ),
-      })
-      .where(eq(schema.taskSteps.id, ctx.taskStepId));
+    await updateOwnedStep(ctx.db, ctx.taskStepId, {
+      warningMessage: composeRagWarning(
+        embedDeviceWarning(embedDevice),
+        ragEmbedWarning(health, {
+          skippedChunks: embedSkippedChunks,
+          hashedChunks,
+        }),
+      ),
+    });
 
     const skippedNote = embedSkippedChunks > 0 ? `, ${embedSkippedChunks} unindexed` : '';
     await ctx.emitProgress(

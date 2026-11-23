@@ -2549,6 +2549,7 @@ stepRoutes.patch('/:id/steps/:stepId/cli-provider', async (c) => {
           startedAt: null,
           endedAt: null,
           errorMessage: null,
+          warningMessage: null,
           mergeResolveState: ZERO_MERGE_RETRIES,
           idleMs: 0,
           waitingStartedAt: null,
