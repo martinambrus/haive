@@ -1105,6 +1105,69 @@ describe.skipIf(!url)('recovery of a fix round on Postgres', () => {
           },
         );
 
+        it('two Continue passes reset a validation-only round once', async () => {
+          const { id, checks, source, roundRows, run } = await rewoundValidation(true);
+          const ctx = await ctxFor(leg, id);
+          h.adds.length = 0;
+          const bothReady = Promise.withResolvers<void>();
+          const transaction = db.transaction.bind(db);
+          let arrivals = 0;
+          const spy = vi.spyOn(db, 'transaction').mockImplementation(async (...args) => {
+            if (++arrivals === 2) bothReady.resolve();
+            await bothReady.promise;
+            return transaction(...args);
+          });
+          try {
+            await Promise.all([
+              resolveFixLoopGate(db, { ...ctx }, source, 'continue', 0, ''),
+              resolveFixLoopGate(db, { ...ctx }, source, 'continue', 0, ''),
+            ]);
+          } finally {
+            spy.mockRestore();
+          }
+          expect(arrivals).toBe(2);
+          expect((await roundRows()).map((r) => [r.stepId, r.status, r.rerunGeneration])).toEqual(
+            checks.map((check) => [check, 'pending', 1]),
+          );
+          expect(await taskOf(id)).toMatchObject({
+            currentStepId: leg.ids.TARGET,
+            currentRound: 1,
+            orchestrationEpoch: ctx.orchestrationEpoch + 1,
+          });
+          expect(await eventsOf(id, 'fix_loop.continued')).toHaveLength(1);
+          expect(h.adds).toHaveLength(1);
+          await run(leg.ids.TARGET, 1);
+          for (const check of checks) await run(check, 1);
+          for (const check of checks) expect(applied[check]).toBe(2);
+        });
+
+        it('Stop after the validation-only reset refuses its queued advance', async () => {
+          const { id, checks, source, roundRows } = await rewoundValidation(true);
+          await resolveFixLoopGate(db, await ctxFor(leg, id), source, 'continue', 0, '');
+          const fresh = await roundRows();
+          expect(fresh.map((r) => [r.stepId, r.status, r.rerunGeneration])).toEqual(
+            checks.map((check) => [check, 'pending', 1]),
+          );
+          const queued = h.adds.at(-1)!;
+          // A crash-left invocation makes Stop applicable even before the new
+          // target row exists. Stop commits after the reset and keeps the epoch.
+          await db
+            .insert(schema.cliInvocations)
+            .values({ taskId: id, taskStepId: source.id, mode: 'cli', prompt: 'crash-left run' });
+          const { stopActiveCliInvocations } = await import(apiSource('lib/task-control.ts'));
+          expect(await stopActiveCliInvocations(db, id, { failTask: true })).toMatchObject({
+            cancelled: 1,
+            failedAt: expect.any(String),
+          });
+          const stopped = await taskOf(id);
+          expect(stopped.status).toBe('failed');
+          await processTaskJob(job(queued.name, queued.data));
+          expect(await taskOf(id)).toEqual(stopped);
+          expect(await roundRows()).toEqual(fresh);
+          expect(applied[leg.ids.TARGET]).toBeUndefined();
+          for (const check of checks) expect(applied[check]).toBe(1);
+        });
+
         it.each(['stale_epoch', 'lost_source', 'unavailable_cli'])(
           'Continue preserves a validation-only round on %s',
           async (refusal) => {
