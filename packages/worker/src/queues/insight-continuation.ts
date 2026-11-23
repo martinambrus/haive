@@ -117,7 +117,7 @@ export async function handoffInsightContinuation(
       });
       const firstExisting = range.find((id) => prior.some((row) => row.stepId === id));
       const reset = await resetStepAndDownstream(
-        tx as unknown as Database,
+        tx,
         ctx.taskId,
         firstExisting ?? next.metadata.id,
         round,
