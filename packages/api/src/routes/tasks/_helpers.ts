@@ -318,13 +318,18 @@ async function loadComposedProviderSets(db: ReturnType<typeof getDb>, taskIds: s
     if (
       templates.find((t) => t.id === task.envTemplateId)?.declaredDeps
         ?.lspInstallContractVersion === 2
-    )
-      out.set(
-        task.id,
-        parseImageReferences(task.metadata)
-          .entries.filter((e) => e.effective)
-          .map((e) => e.providerId),
-      );
+    ) {
+      try {
+        out.set(
+          task.id,
+          parseImageReferences(task.metadata)
+            .entries.filter((e) => e.effective)
+            .map((e) => e.providerId),
+        );
+      } catch {
+        logger.warn({ taskId: task.id }, 'Cannot read composed provider pin; using raw CLI view');
+      }
+    }
   }
   return out;
 }
