@@ -2819,9 +2819,9 @@ export async function handleResult(
       );
       if (!target) return;
       const steps = await buildRunList(ctx, db);
-      const resetRange = steps
-        .slice(steps.findIndex((step) => step.metadata.id === target.metadata.id))
-        .map((step) => step.metadata.id);
+      const targetIndex = steps.findIndex((step) => step.metadata.id === target.metadata.id);
+      if (targetIndex < 0) throw new UnresolvedStepError([target.metadata.id]);
+      const resetRange = steps.slice(targetIndex).map((step) => step.metadata.id);
       // Reset runs first, then all overlapping step rows (including the source) in
       // one id-ordered batch, and the task row last. Every refusal rolls back the
       // reset, so a loser cannot disturb the winner's target or advance epoch.
@@ -3254,9 +3254,9 @@ export async function resolveFixLoopGate(
     return;
   }
   const steps = await buildRunList(ctx, db);
-  const resetRange = steps
-    .slice(steps.findIndex((step) => step.metadata.id === target.metadata.id))
-    .map((step) => step.metadata.id);
+  const targetIndex = steps.findIndex((step) => step.metadata.id === target.metadata.id);
+  if (targetIndex < 0) throw new UnresolvedStepError([target.metadata.id]);
+  const resetRange = steps.slice(targetIndex).map((step) => step.metadata.id);
   const nextRound = round + 1;
   // A directive typed at the gate supersedes that recorded request. Written as a NEW event for
   // the same round rather than mutating the old one: task_events is append-only, and

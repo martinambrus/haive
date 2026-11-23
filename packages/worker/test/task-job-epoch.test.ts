@@ -10,6 +10,7 @@ import {
   setContainerCleanupRunner,
 } from '../src/queues/task-queue.js';
 import { resetStepAndDownstream } from '../src/queues/_step-reset.js';
+import * as runList from '../src/queues/run-list.js';
 import * as stepOwnership from '../src/step-engine/step-ownership.js';
 import { advanceStep } from '../src/step-engine/index.js';
 import { runtimeAdmission } from '../src/sandbox/runtime-admission.js';
@@ -694,6 +695,41 @@ const workflowTaskContext = (stepId = 'epoch-job-step') => ({
   workflowType: 'workflow',
   runListStrategy: 'static',
   runListSnapshot: ['epoch-job-target', stepId, '07-phase-2-implement'],
+});
+
+describe('off-list fix target reset protection', () => {
+  it.each(['loop_back', 'continue'])(
+    'refuses %s if its second run list omits the target',
+    async (route) => {
+      h.state.readsAnswer = true;
+      const ctx = workflowTaskContext();
+      const steps = await runList.buildRunList(ctx as never, db as never);
+      const target = '07-phase-2-implement';
+      const list = vi
+        .spyOn(runList, 'buildRunList')
+        .mockResolvedValueOnce(steps)
+        .mockResolvedValueOnce(steps.filter((step) => step.metadata.id !== target));
+      vi.mocked(resetStepAndDownstream).mockClear();
+      try {
+        const gate = { id: 'ts-1', stepId: 'epoch-job-step', round: 0 };
+        const attempt =
+          route === 'continue'
+            ? resolveFixLoopGate(db as never, ctx as never, gate as never, 'continue', 0, '')
+            : handleResult(db as never, ctx as never, gate.stepId, {
+                status: 'loop_back',
+                row: gate,
+                sourceStepId: gate.stepId,
+                diagnosis: 'defect',
+                uncapped: true,
+              } as never);
+        await expect(attempt).rejects.toMatchObject({ ids: [target] });
+        expect(vi.mocked(resetStepAndDownstream)).not.toHaveBeenCalled();
+        expect(h.state.add).not.toHaveBeenCalled();
+      } finally {
+        list.mockRestore();
+      }
+    },
+  );
 });
 
 describe('a job that resets steps itself', () => {
