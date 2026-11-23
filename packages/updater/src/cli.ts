@@ -450,8 +450,12 @@ async function upgradeOwned(options: { stackLock?: StackLockOptions }): Promise<
         log: emit,
       };
       try {
-        await assertStackLease();
-        await resume(ctx, live.phase);
+        const recover = async () => {
+          await assertStackLease();
+          await resume(ctx, live.phase);
+        };
+        if (decideResume(live.phase).action === 'reverse') await withStackLeaseRecovery(recover);
+        else await recover();
       } catch (err) {
         await withStackLeaseRecovery(assertStackLease);
         if (

@@ -25,6 +25,8 @@ vi.mock('./journal.js', () => ({
   ensureJournal: vi.fn(),
   enterPhase: vi.fn(),
   recordFoundState: vi.fn(),
+  readFoundState: vi.fn(),
+  finishRun: vi.fn(),
   findLiveRun: vi.fn(),
   lastDoneChannel: vi.fn(),
   recordRunError: vi.fn(),
@@ -54,6 +56,10 @@ import * as install from './install-files.js';
 import * as dk from './docker.js';
 import * as journal from './journal.js';
 import * as run from './run.js';
+import { backupBundle, swapBundle } from './bundle-swap.js';
+import { bundleHash, stageBundle } from './bundle.js';
+import { assertStackLease } from './lease-fence.js';
+import { parseReleaseManifest } from '@haive/shared/release';
 
 // The other party is simulated at protocol level on purpose. The lock module is imported only to
 // watch the updater's own beats.
@@ -170,6 +176,9 @@ beforeEach(async () => {
   vi.mocked(journal.findLiveRun).mockResolvedValue(null);
   vi.mocked(journal.lastDoneChannel).mockResolvedValue(null);
   vi.mocked(journal.startRun).mockResolvedValue('new-run');
+  vi.mocked(journal.readFoundState).mockResolvedValue(null);
+  vi.mocked(journal.finishRun).mockImplementation(assertStackLease);
+  vi.mocked(journal.recordRunError).mockResolvedValue(undefined);
   vi.mocked(run.phaseVerify).mockResolvedValue(true);
   vi.mocked(run.phaseSnapshot).mockResolvedValue('dump.sql');
   vi.mocked(run.readEnvVar).mockResolvedValue('1.0.0');
@@ -245,6 +254,107 @@ describe('race, other direction: the updater lock is exclusive for the whole run
     vi.mocked(run.rollback).mockImplementation(probe('rollback'));
     expect(await main(opts)).toBe(5);
     expect(seen).toEqual([['rollback', 'updater', true]]);
+  });
+});
+
+describe('real recovery under stack lease proofs', () => {
+  const opts = { stackLock: { ...quick, sleep: idleSleep } };
+  const interrupted = async () => {
+    const compose = { dir, files: ['docker-compose.yml', 'docker-compose.run.yml'] };
+    const payload = new Map(
+      compose.files.map((name) => [name, Buffer.from('services: {new: {}}\n')]),
+    );
+    const target = parseReleaseManifest({
+      ...manifest,
+      bundle: {
+        files: Object.fromEntries([...payload].map(([name, bytes]) => [name, bundleHash(bytes)])),
+        known: [],
+        env: [],
+      },
+    });
+    const bundle = await backupBundle(compose, 'live', target);
+    await stageBundle(compose, target.bundle!, payload);
+    await swapBundle(compose, bundle, target.version);
+    vi.mocked(journal.findLiveRun).mockResolvedValue({
+      ...liveRun,
+      metadata: { ...liveRun.metadata, bundle },
+    } as never);
+    const actual = await vi.importActual<typeof run>('./run.js');
+    vi.mocked(run.resume).mockImplementation(actual.resume);
+    return bundle;
+  };
+
+  it.each(['before-resume', 'after-restore'] as const)(
+    'finishes reverse recovery with an unproven record %s',
+    async (point) => {
+      await interrupted();
+      const unprove = async () => writeFile(lock, '{');
+      if (point === 'before-resume')
+        vi.mocked(images.readImageSettings).mockImplementationOnce(async () => {
+          await unprove();
+          return { ...settings };
+        });
+      else {
+        const atomic = install.InstallDirectory.prototype.atomic;
+        vi.spyOn(install.InstallDirectory.prototype, 'atomic').mockImplementation(async function (
+          this: install.InstallDirectory,
+          ...args
+        ) {
+          await atomic.call(this, ...args);
+          if (args[0] === '.env') await unprove();
+        });
+      }
+      expect(await main(opts)).toBe(0);
+      expect(await readFile(join(dir, 'docker-compose.yml'), 'utf8')).toBe('services: {}\n');
+      expect(h.dockerExec.mock.calls.some(([, args]) => args.includes('--remove-orphans'))).toBe(
+        true,
+      );
+      expect(journal.finishRun).toHaveBeenCalledWith(
+        h.sql,
+        'live',
+        'rolled_back',
+        expect.any(String),
+      );
+      expect(journal.recordRunError).not.toHaveBeenCalled();
+      expect(events()).toContain('rolled-back');
+      expect(await readFile(lock, 'utf8')).toBe('{');
+    },
+  );
+
+  it('stops reverse recovery on a proven foreign record after restoring the bundle', async () => {
+    await interrupted();
+    const foreign = record(ext.token, 'extension', 1);
+    const atomic = install.InstallDirectory.prototype.atomic;
+    vi.spyOn(install.InstallDirectory.prototype, 'atomic').mockImplementation(async function (
+      this: install.InstallDirectory,
+      ...args
+    ) {
+      await atomic.call(this, ...args);
+      if (args[0] === '.env') await writeFile(lock, foreign);
+    });
+    expect(await main(opts)).toBe(3);
+    expect(await readFile(join(dir, 'docker-compose.yml'), 'utf8')).toBe('services: {}\n');
+    expect(h.dockerExec.mock.calls.some(([, args]) => args.includes('--remove-orphans'))).toBe(
+      false,
+    );
+    expect(journal.finishRun).not.toHaveBeenCalled();
+    expect(journal.recordRunError).not.toHaveBeenCalled();
+    expect(await readFile(lock, 'utf8')).toBe(foreign);
+    expect(events()).toContain('stack-lock-lost');
+  });
+
+  it('keeps forward commit recovery strict for an unproven record', async () => {
+    await interrupted();
+    vi.mocked(journal.findLiveRun).mockResolvedValue({ ...liveRun, phase: 'commit' } as never);
+    vi.mocked(images.readImageSettings).mockImplementationOnce(async () => {
+      await writeFile(lock, '{');
+      return { ...settings };
+    });
+    expect(await main(opts)).toBe(3);
+    expect(run.resume).not.toHaveBeenCalled();
+    expect(journal.finishRun).not.toHaveBeenCalled();
+    expect(h.dockerExec.mock.calls.some(([, args]) => args[0] === 'run')).toBe(false);
+    expect(events()).toContain('refused');
   });
 });
 
