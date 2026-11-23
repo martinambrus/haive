@@ -413,6 +413,55 @@ describe('guard decisions from loaded rows', () => {
     });
     expect(evaluate).toHaveBeenCalledOnce();
   });
+  it.each(
+    (['required', 'source'] as const).flatMap((reference) =>
+      [
+        'missing-row',
+        'missing-state',
+        'malformed-state',
+        'row-task',
+        'row-step',
+        'task',
+        'span',
+        'round',
+        'hash',
+        'generation',
+        'reference-span',
+        'reference-generation',
+        'self-source',
+      ].map((change) => ({ reference, change })),
+    ),
+  )('fails closed for a damaged named $reference row: $change', async ({ reference, change }) => {
+    pinFixTarget();
+    if (reference === 'required') currentContract().guardedSpans[1]!.requiresSpan = 'work';
+    const parent = await save();
+    at('cleanup');
+    const dependent = await save('cleanup');
+    const savedRef = reference === 'required' ? dependent.required! : dependent.predicate!.source;
+    if (change === 'missing-row') savedRef.stepRowId = randomUUID();
+    else if (change === 'missing-state') rows.work!.guardState = null;
+    else if (change === 'malformed-state') rows.work!.guardState = {};
+    else if (change === 'row-task') rows.work!.taskId = randomUUID();
+    else if (change === 'row-step') rows.work!.stepId = 'tail';
+    else if (change === 'task') parent.taskId = randomUUID();
+    else if (change === 'span') parent.spanId = 'cleanup';
+    else if (change === 'round') parent.round = 1;
+    else if (change === 'hash') parent.contractHash = 'f'.repeat(64);
+    else if (change === 'generation') rows.work!.rerunGeneration++;
+    else if (change === 'reference-span') savedRef.spanId = 'cleanup';
+    else if (change === 'reference-generation') savedRef.generation++;
+    else parent.predicate!.source.stepRowId = rows.tail!.id;
+    if (['task', 'span', 'round', 'hash', 'self-source'].includes(change))
+      rows.work!.guardState = parent;
+    rows.cleanup!.guardState = dependent;
+    nextRound('cleanup');
+    await expect(decide('cleanup')).rejects.toMatchObject({
+      name: 'GuardDecisionError',
+      code: 'guard-decision-invalid',
+      reason: 'fix-round-decision-unavailable',
+    });
+    expect(evaluate).toHaveBeenCalledOnce();
+  });
   it.each([
     'missing',
     'malformed',
