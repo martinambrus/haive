@@ -196,7 +196,7 @@ const db = {
       },
     },
     // The root merge fence a reopen checks: no setup row, no merge claim, no merge left open.
-    taskSteps: { findFirst: async () => undefined },
+    taskSteps: { findFirst: async () => undefined, findMany: async () => [] },
     mergeDirClaims: { findFirst: async () => undefined },
     taskEvents: { findMany: async () => [] },
     taskTypeDefinitions: {
@@ -367,7 +367,8 @@ vi.mock('../src/step-engine/steps/workflow/_app-runtime.js', async (importOrigin
 }));
 vi.mock('../src/queues/_step-reset.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../src/queues/_step-reset.js')>()),
-  resetStepAndDownstream: vi.fn(async () => ({ newEpoch: 7 })),
+  // This fixture has no next-round row, so the shared reset is a no-op.
+  resetStepAndDownstream: vi.fn(async () => null),
 }));
 // A task's teardown would otherwise run docker against the host: every CLI's auth volume on a
 // failure, and the runners and the IDE's volume on a definitive end.

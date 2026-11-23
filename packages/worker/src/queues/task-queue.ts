@@ -2598,17 +2598,48 @@ export async function handleResult(
       return;
     }
     case 'loop_back': {
+      // Mirror the advance guard for a direct replay of this hand-off: after entry the
+      // pointer has moved, and after escalation the source is already a parked gate.
+      // Check both in the existing task read before appending any events. A real Retry
+      // restores the pointer and resets the source, so its new diagnosis still lands.
+      const logRefusal = (reason: string) =>
+        logger.info(
+          { taskId: ctx.taskId, stepId, round: result.row.round, reason },
+          'fix loop not entered: hand-off refused',
+        );
+      const taskRow = await db.query.tasks.findFirst({
+        where: eq(schema.tasks.id, ctx.taskId),
+        columns: { maxFixRounds: true, currentStepId: true, currentRound: true },
+        extras: {
+          sourceParked: sql<boolean>`exists (
+            select 1 from ${schema.taskSteps} as loop_source
+            where loop_source.id = ${result.row.id}
+              and loop_source.status = 'waiting_form'
+          )`.as('source_parked'),
+        },
+      });
+      if (!taskRow) {
+        logRefusal('task_missing');
+        return;
+      }
+      if (
+        taskRow.currentStepId != null &&
+        (taskRow.currentStepId !== stepId || taskRow.currentRound !== result.row.round)
+      ) {
+        logRefusal('task_pointer_moved');
+        return;
+      }
+      if (taskRow.sourceParked) {
+        logRefusal('source_parked');
+        return;
+      }
       if (stepId === '08-phase-5-verify')
         await recordGate3Check(db, ctx, result.row, 'verify_failed');
       // A downstream step found a blocking defect. Bump the round and re-enter at the
       // implementation step (which re-runs in fix mode with this diagnosis); the
       // forward walk then re-runs the whole post-implementation chain as round-N rows.
       const nextRound = result.row.round + 1;
-      const taskRow = await db.query.tasks.findFirst({
-        where: eq(schema.tasks.id, ctx.taskId),
-        columns: { maxFixRounds: true },
-      });
-      const cap = taskRow?.maxFixRounds ?? DEFAULT_MAX_FIX_ROUNDS;
+      const cap = taskRow.maxFixRounds ?? DEFAULT_MAX_FIX_ROUNDS;
       await record(db, ctx.taskId, result.row.id, 'step.loop_back', {
         stepId,
         sourceStepId: result.sourceStepId,
@@ -2769,63 +2800,85 @@ export async function handleResult(
         logLost('fix_target'),
       );
       if (!target) return;
-      // If a prior attempt at this round left a terminal row (e.g. a reaped/failed CLI
-      // whose invocation was never superseded — a worker reload mid-CLI), reset it so the
-      // re-entry runs a FRESH invocation instead of re-consuming the dead one. Returns null
-      // (no-op) when the round is new, which is the normal case. Mirrors the revise reset.
-      const reentryReset = await resetStepAndDownstream(
-        db,
-        ctx.taskId,
-        target.metadata.id,
-        nextRound,
-        ctx.orchestrationEpoch,
-        false,
-        [],
-        ctx.executionContract,
-      );
-      if (reentryReset === 'superseded') {
-        logger.info(
-          { taskId: ctx.taskId, stepId },
-          'fix loop not entered: the task moved to a newer epoch before its reset',
-        );
+      const steps = await buildRunList(ctx, db);
+      const resetRange = steps
+        .slice(steps.findIndex((step) => step.metadata.id === target.metadata.id))
+        .map((step) => step.metadata.id);
+      // Reset runs first, then all overlapping step rows (including the source) in
+      // one id-ordered batch, and the task row last. Every refusal rolls back the
+      // reset, so a loser cannot disturb the winner's target or advance epoch.
+      let entered;
+      let refusalReason = 'task_write_refused';
+      try {
+        entered = await db.transaction(async (tx) => {
+          const refuse = (reason: string): never => {
+            refusalReason = reason;
+            throw new StepSupersededError(result.row.id);
+          };
+          // As in Continue, a validation-only round may have checks but no target.
+          // Reset its first existing row in run-list order, holding the source too.
+          // A genuinely new round has no row anywhere in this range: reset is a no-op.
+          const prior = await tx.query.taskSteps.findMany({
+            where: and(
+              eq(schema.taskSteps.taskId, ctx.taskId),
+              eq(schema.taskSteps.round, nextRound),
+              inArray(schema.taskSteps.stepId, resetRange),
+            ),
+            columns: { stepId: true },
+          });
+          const firstExisting = resetRange.find((id) => prior.some((row) => row.stepId === id));
+          const reset = await resetStepAndDownstream(
+            tx,
+            ctx.taskId,
+            firstExisting ?? target.metadata.id,
+            nextRound,
+            ctx.orchestrationEpoch,
+            false,
+            [result.row.id],
+            ctx.executionContract,
+          );
+          if (reset === 'superseded') return refuse('reset_superseded');
+          if (!(await lockOwnedStep(tx, result.row.id))) refuse('source_not_owned');
+          const current = await tx.query.tasks.findFirst({
+            where: eq(schema.tasks.id, ctx.taskId),
+            columns: { currentStepId: true, currentRound: true },
+          });
+          if (!current) return refuse('task_missing_under_lock');
+          if (
+            current.currentStepId != null &&
+            (current.currentStepId !== stepId || current.currentRound !== result.row.round)
+          )
+            refuse('task_pointer_moved_under_lock');
+          const epoch = reset?.newEpoch ?? ctx.orchestrationEpoch;
+          const pointed = await markTaskRunningWithStep(
+            tx,
+            ctx.taskId,
+            target.metadata.id,
+            computeGlobalStepIndex(target.metadata.workflowType, target.metadata.index),
+            nextRound,
+            { epoch },
+          );
+          // Roll back the reset too when a Stop or Retry refuses the pointer write.
+          if (!pointed) refuse('task_write_refused');
+          await recordFixLoopRequest(tx, ctx.taskId, result.row.id, {
+            diagnosis: result.diagnosis,
+            sourceStepId: result.sourceStepId,
+            round: nextRound,
+            guidance: result.guidance,
+            unfencedLegacy: result.unfencedLegacy,
+          });
+          await appendEvent(tx, ctx.taskId, result.row.id, 'fix_loop.started', {
+            sourceStepId: result.sourceStepId,
+            round: nextRound,
+          });
+          return { epoch };
+        });
+      } catch (err) {
+        if (!(err instanceof StepSupersededError)) throw err;
+        logRefusal(refusalReason);
         return;
       }
-      if (reentryReset) ctx.orchestrationEpoch = reentryReset.newEpoch;
-      // The round is recorded with the pointer write that hands the task to it, and only while the
-      // source row is still this pass's and the task is still at the epoch this job holds: a round
-      // a Retry overtook would leave a `started` that counts toward the cap, and a diagnosis nobody
-      // was sent. The row is taken first, as a Retry takes the steps before the task.
-      const entered = await db.transaction(async (tx) => {
-        if (!(await lockOwnedStep(tx, result.row.id))) return false;
-        const pointed = await markTaskRunningWithStep(
-          tx,
-          ctx.taskId,
-          target.metadata.id,
-          computeGlobalStepIndex(target.metadata.workflowType, target.metadata.index),
-          nextRound,
-          { epoch: ctx.orchestrationEpoch },
-        );
-        if (!pointed) return false;
-        await recordFixLoopRequest(tx, ctx.taskId, result.row.id, {
-          diagnosis: result.diagnosis,
-          sourceStepId: result.sourceStepId,
-          round: nextRound,
-          guidance: result.guidance,
-          unfencedLegacy: result.unfencedLegacy,
-        });
-        await appendEvent(tx, ctx.taskId, result.row.id, 'fix_loop.started', {
-          sourceStepId: result.sourceStepId,
-          round: nextRound,
-        });
-        return true;
-      });
-      if (!entered) {
-        logger.info(
-          { taskId: ctx.taskId, stepId },
-          'fix loop not entered: a Retry overtook its hand-off',
-        );
-        return;
-      }
+      ctx.orchestrationEpoch = entered.epoch;
       await enqueueAdvance(
         ctx.taskId,
         ctx.userId,
@@ -3026,8 +3079,10 @@ export async function resolveFixLoopGate(
     target: StepDefinition,
     targetRound: number,
     record: (tx: DbHandle) => Promise<void>,
+    resetRange?: readonly string[],
   ): Promise<boolean> => {
     let applied = false;
+    let appliedEpoch = fence.epoch;
     try {
       await db.transaction(async (tx) => {
         if (fence.reviveFailed) {
@@ -3035,9 +3090,48 @@ export async function resolveFixLoopGate(
           const refusal = await refuseRevive(tx, ctx.taskId);
           if (refusal) throw new GateAnswerOvertaken('revive_refused', refusal.reason);
         }
-        await updateOwnedStep(tx, gateRow.id, { status: 'done', endedAt: new Date() });
         try {
-          await record(tx);
+          // The savepoint lets an unavailable CLI re-offer the gate without retaining a
+          // reset. Reset takes the source with its ordered step batch before closing it;
+          // gate close, target reset, choice, events and pointer all commit together.
+          await tx.transaction(async (attempt) => {
+            if (resetRange) {
+              // A validation-only round can have checks but no implementation row.
+              // Start at its first existing row in run-list order, on this savepoint.
+              const prior = await attempt.query.taskSteps.findMany({
+                where: and(
+                  eq(schema.taskSteps.taskId, ctx.taskId),
+                  eq(schema.taskSteps.round, targetRound),
+                  inArray(schema.taskSteps.stepId, [...resetRange]),
+                ),
+                columns: { stepId: true },
+              });
+              const firstExisting = resetRange.find((id) => prior.some((row) => row.stepId === id));
+              const reset = await resetStepAndDownstream(
+                attempt,
+                ctx.taskId,
+                firstExisting ?? target.metadata.id,
+                targetRound,
+                fence.epoch,
+                false,
+                [gateRow.id],
+                ctx.executionContract,
+              );
+              if (reset === 'superseded') throw new GateAnswerOvertaken('task_moved');
+              appliedEpoch = reset?.newEpoch ?? fence.epoch;
+            }
+            await updateOwnedStep(attempt, gateRow.id, { status: 'done', endedAt: new Date() });
+            await record(attempt);
+            const pointed = await markTaskRunningWithStep(
+              attempt,
+              ctx.taskId,
+              target.metadata.id,
+              computeGlobalStepIndex(target.metadata.workflowType, target.metadata.index),
+              targetRound,
+              { ...fence, epoch: appliedEpoch },
+            );
+            if (!pointed) throw new GateAnswerOvertaken('task_moved');
+          });
         } catch (err) {
           if (!(err instanceof FixRoundCliUnavailable)) throw err;
           const form = gateRow.formSchema as FormSchema;
@@ -3082,17 +3176,9 @@ export async function resolveFixLoopGate(
           notApplied('cli_unavailable');
           return;
         }
-        const pointed = await markTaskRunningWithStep(
-          tx,
-          ctx.taskId,
-          target.metadata.id,
-          computeGlobalStepIndex(target.metadata.workflowType, target.metadata.index),
-          targetRound,
-          fence,
-        );
-        if (!pointed) throw new GateAnswerOvertaken('task_moved');
         applied = true;
       });
+      if (applied) ctx.orchestrationEpoch = appliedEpoch;
       return applied;
     } catch (err) {
       if (err instanceof GateAnswerOvertaken) {
@@ -3148,6 +3234,10 @@ export async function resolveFixLoopGate(
     notApplied('no_routable_target');
     return;
   }
+  const steps = await buildRunList(ctx, db);
+  const resetRange = steps
+    .slice(steps.findIndex((step) => step.metadata.id === target.metadata.id))
+    .map((step) => step.metadata.id);
   const nextRound = round + 1;
   // A directive typed at the gate supersedes that recorded request. Written as a NEW event for
   // the same round rather than mutating the old one: task_events is append-only, and
@@ -3157,21 +3247,26 @@ export async function resolveFixLoopGate(
   const directive = instruction.trim();
   const prior =
     directive.length > 0 ? await loadRecordedDiagnosisForRound(db, ctx.taskId, nextRound) : null;
-  const landed = await reopen(target, nextRound, async (tx) => {
-    await recordFixRoundCliChoice(tx, ctx.userId, ctx.taskId, target, nextRound, cliProviderId);
-    if (prior) {
-      await recordFixLoopRequest(tx, ctx.taskId, gateRow.id, {
-        diagnosis: buildGateDirectiveDiagnosis(directive, prior.diagnosis),
-        sourceStepId: FIX_LOOP_GATE_SOURCE,
+  const landed = await reopen(
+    target,
+    nextRound,
+    async (tx) => {
+      await recordFixRoundCliChoice(tx, ctx.userId, ctx.taskId, target, nextRound, cliProviderId);
+      if (prior) {
+        await recordFixLoopRequest(tx, ctx.taskId, gateRow.id, {
+          diagnosis: buildGateDirectiveDiagnosis(directive, prior.diagnosis),
+          sourceStepId: FIX_LOOP_GATE_SOURCE,
+          round: nextRound,
+          guidance: prior.guidance,
+        });
+      }
+      await appendEvent(tx, ctx.taskId, gateRow.id, 'fix_loop.continued', {
         round: nextRound,
-        guidance: prior.guidance,
+        directed: directive.length > 0,
       });
-    }
-    await appendEvent(tx, ctx.taskId, gateRow.id, 'fix_loop.continued', {
-      round: nextRound,
-      directed: directive.length > 0,
-    });
-  });
+    },
+    resetRange,
+  );
   if (!landed) return;
   await enqueueAdvance(
     ctx.taskId,
