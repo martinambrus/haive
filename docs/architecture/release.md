@@ -482,9 +482,9 @@ for the new holder to recover. Anything that proves nothing (a read that fails `
 `startedAt`; an empty or partial record, unless this holder's own overwrite of its record failed, when it counts as its own torn
 write; a failed read or proof never enables that) refuses the forward phase with `stack-lock-unproven` (exit 3 when no rollback is needed
 or it succeeds, 6 when it fails; in the commit phase the run stays at `commit`) but marks nothing lost: failure recovery (the snapshot's database restart, rollback, a reverse resume of an interrupted run from its
-entry proof on, the attempt row, release) still runs, while the forward commit stays strict, re-proving before
-each action and stopping only at a proven loss, since leaving the database stopped turns a recoverable failure
-into an outage. The residual: recovery is not fenced against a takeover whose record this holder cannot read (a
+entry proof on, the attempt row, release) still runs, re-proving before each action and stopping only at a proven loss, since leaving the database
+stopped turns a recoverable failure into an outage; the forward commit stays strict and refuses at an
+unproven proof. The residual: recovery is not fenced against a takeover whose record this holder cannot read (a
 lock unreadable or absent to it for 60 s or more while another holder took over), which a time bound on the last
 good proof or beat would close (T765). A result already decided (done or rolled back) is not replaced when the beat notices a loss afterwards; a
 loss during the pruning after a commit stops the pruning and keeps `done` and exit 0. Release removes the file only when it carries the holder's token, is shared by
