@@ -1472,6 +1472,38 @@ describe.skipIf(!url)('recovery of a fix round on Postgres', () => {
         await seedEvent(taskId, 'fix_loop.started', { sourceStepId: leg.ids.REVIEW, round: 1 });
       };
 
+      if (!leg.pin)
+        it('recovers a real committed loop_back whose enqueue was lost', async () => {
+          const id = await seedTask(leg);
+          const source = await seedRow(leg, id, 'REVIEW', 0, 'done');
+          const { Queue } = await import('bullmq');
+          const lost = new Error('injected lost enqueue');
+          const add = vi.spyOn(Queue.prototype, 'add').mockRejectedValueOnce(lost);
+          try {
+            await expect(loopBack(id, source, 'durable diagnosis')).rejects.toBe(lost);
+          } finally {
+            add.mockRestore();
+          }
+          expect(h.adds).toEqual([]);
+          expect(await taskOf(id)).toMatchObject({
+            currentStepId: leg.ids.TARGET,
+            currentRound: 1,
+          });
+          const requests = await eventsOf(id, 'fix_loop.requested');
+          expect(requests).toHaveLength(1);
+          await twice();
+          expect(h.adds).toHaveLength(1);
+          expect(h.adds[0]!.data).toMatchObject({
+            stepId: leg.ids.TARGET,
+            round: 1,
+            epoch: BASE_EPOCH + 1,
+          });
+          await processTaskJob(job(h.adds[0]!.name, h.adds[0]!.data));
+          expect(applied[leg.ids.TARGET]).toBe(1);
+          expect(await eventsOf(id, 'fix_loop.requested')).toEqual(requests);
+          expect(await eventsOf(id, 'fix_loop.started')).toHaveLength(1);
+        });
+
       it('pointer at the target with a started round and no row', async () => {
         const id = await seedTask(leg, { currentStepId: leg.ids.TARGET, currentRound: 1 });
         await entered(id, (await seedRow(leg, id, 'REVIEW', 0, 'done')).id);
