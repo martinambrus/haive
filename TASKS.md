@@ -929,7 +929,7 @@ Follow-ups found by the #1310 driver:
 
 ### T741 · FNF[fix-gate-continue-stale-row] · gate Continue does not reset a stale row at the next round
 
-status: open · kind: fix · found: custom fix recovery driver (#1303), code reading only, not probe-verified · priority: P4
+status: done (#1326 2b78b319d, deployed 2026-11-23: gate Continue and loop_back reset the next round from the first existing row of the target-to-end range, in one transaction with reset-first lock order; duplicate or concurrent handoffs fenced, losers neither reset nor record; item 2 fixed there). Follow-ups: T757 · kind: fix · found: custom fix recovery driver (#1303), code reading only, not probe-verified · priority: P4
 
 1. The fix gate's Continue path (`worker/src/queues/task-queue.ts` ~:3126-3163) does not reset a stale terminal row at the next round, while loop_back does (~:2757-2767). Verify with a probe before fixing. PRE-EXISTING.
 2. A direct duplicate loop_back call duplicates fix-loop events (~:2581-2760); production redelivery is already stopped by the advance guard, so only a direct second call shows it. PRE-EXISTING, LOW.
@@ -1080,7 +1080,7 @@ status: open · kind: fix · found: #1321 reviews 2026-11-22 · priority: P4
 7. The disagree and invalid-channel controls were never shown red on the base. Minor.
 8. The note-joining punctuation regex and literal vs resolved channel inside `readInstall` are untested edges. Minor.
 
-### T757 · FNF[fix-loop-escalation-atomicity] · cap/oscillation escalation is four separate writes (+3)
+### T757 · FNF[fix-loop-escalation-atomicity] · cap/oscillation escalation is four separate writes (+7)
 
 status: open · kind: fix · found: T741 review 2026-11-23 · priority: P3
 
@@ -1088,6 +1088,11 @@ status: open · kind: fix · found: T741 review 2026-11-23 · priority: P3
 2. `packages/worker/test/custom-fix-recovery-db.test.ts` ~:441 skips the pinned custom-target leg for the Continue reset (`if (!leg.pin)`); the pinned path is only unit-stubbed (`fix-consumer-router.test.ts` ~:614-628). Minor; dormant while the custom-fix fence is closed (T689 PR7b).
 3. `packages/worker/src/queues/insight-continuation.ts` ~:120: the `tx as unknown as Database` cast is redundant now that `resetStepAndDownstream` takes `Database | DbTx`. Minor.
 4. `task-queue.ts` ~:3201-3221 `reopen(target, nextRound, record, true)`: bare boolean; a named option reads better. Minor.
+5. `task-queue.ts` ~:2869 (Codex connector on #1326): the fix-round handoff enqueues the next job after its transaction commits; a crash between commit and enqueue leaves the pointer moved with no job until the stalled re-drive picks it up. Verify the re-drive covers it before changing anything. PRE-EXISTING, consequential if the re-drive misses it.
+6. `task-queue.ts` loop_back losers: a handoff that lost the race may still record its `step.loop_back` event (Codex connector on #1326). PRE-EXISTING, minor.
+7. `task-queue.ts` ~:2804-2806 and ~:3237-3240: `steps.slice(steps.findIndex(...))` is unguarded; a -1 would reset only the last step. Unreachable today (the target comes from the same list). Guard it or derive the range from `routableFixLoopTarget`'s list. Low.
+8. Revise has the same gap #1326 closed for Continue and loop_back: `task-queue.ts` ~:2965 resets only `result.targetStepId` at the forked round, so after a late editor's validation-only round a Retry of an early card whose gate revises reuses stale downstream rows. Contrived reachability; `successor.recheck` (~:2476) not examined. PRE-EXISTING, related first-party.
+9. Test gaps (#1326 review 5): no first-existing control on the pinned custom-target leg; no two-pass or Stop-after-reset control over a validation-only round. Low.
 
 ### T758 · Desktop bridge: a killed bridge leaves its Compose child running past its install lease
 
@@ -1132,11 +1137,13 @@ All PRE-EXISTING.
 4. Low, test: `worker/test/rag-step-warning-db.test.ts` (~:94-100) proves the SET side on real Postgres only for the two degraded onboarding sites; the workflow sites assert only the clear.
 5. Low, test: no history control that a note alone yields no entry (`web/src/lib/task-history.test.ts` ~:88-116; the `entry()` helper's default 07 step always matches the fix-pass branch).
 
-### T763 · Flaky e2e: global KB empty-body validation
+### T763 · Flaky tests: global KB empty-body e2e (+1)
 
 status: open · kind: test · found: #1325 CI 2026-11-23 · priority: P4
 
 `tests/e2e/settings/global-kb-edit.spec.ts:218` ("rejects an empty body and preserves corrections when saving fails") failed on every in-run retry at #1325's head 5f1fc9cc5 (run 45088903767: `dialog.getByText('The article body cannot be empty.')` not visible within 5 s), then passed on a job rerun; main and the PR's previous head were green, and the PR touched only the updater. Find why the validation message can fail to render (an async state the test does not wait on, a debounced validator) and fix the test or the race, not the timeout.
+
+2. `packages/shared/test/rag-connection-guard.test.ts:67` ("dials a loopback store the allowlist covers") timed out at 5 s in the Unit tests (other packages) job on #1328 (run 45094064034), which does not touch RAG; the job's logs show ECONNREFUSED dials just before. Same approach: find the wait, not the timeout.
 
 ### T721 · The Claude usage grant reaches sandbox environments
 
