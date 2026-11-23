@@ -728,7 +728,7 @@ describe.skipIf(!url)('Retry and Resume of a fix round on Postgres', () => {
       iterations: 2,
       paused: true,
     };
-    const refused: [string, (taskId: string) => Promise<Response>][] = [
+    const actions: [string, (taskId: string) => Promise<Response>][] = [
       ['step Retry', (id) => stepAction(custom, id, 'TARGET', 1, 'retry')],
       ['step Resume', (id) => stepAction(custom, id, 'TARGET', 1, 'resume')],
       [
@@ -743,11 +743,21 @@ describe.skipIf(!url)('Retry and Resume of a fix round on Postgres', () => {
       ['task Resume', (id) => post(`/tasks/${id}/action`, { action: 'resume' })],
     ];
 
-    it.each(refused)(
-      '%s on a custom pinned task answers 409 and changes nothing',
+    it.each(actions)(
+      '%s on an unsupported non-module fix target answers 409 and changes nothing',
       async (_n, go) => {
         h.realFence = true;
         const id = await seed(custom, fixture);
+        await db
+          .update(schema.tasks)
+          .set({
+            executionContract: {
+              version: 1,
+              guardedSpans: [],
+              fixTarget: { stepId: LEGS[0]!.ids.TARGET, capabilityVersion: 1 },
+            },
+          })
+          .where(eq(schema.tasks.id, id));
         const before = await dump(id);
 
         const res = await go(id);
@@ -758,6 +768,21 @@ describe.skipIf(!url)('Retry and Resume of a fix round on Postgres', () => {
         expect(h.queued).toEqual([]);
       },
     );
+
+    it.each(actions)('%s admits a supported module fix-target pin', async (name, go) => {
+      h.realFence = true;
+      const id = await seed(custom, fixture);
+      const before = await dump(id);
+
+      const res = await go(id);
+
+      expect(res.status, await res.clone().text()).toBe(200);
+      const after = await dump(id);
+      expect(after).not.toEqual(before);
+      expect(after.task!.executionContract).toEqual(before.task!.executionContract);
+      expect(after.task!.runListSnapshot).toEqual(before.task!.runListSnapshot);
+      expect(h.queued).toHaveLength(name === 'task Resume' ? 0 : 1);
+    });
 
     it('lets the same Retry through on a task with no pin', async () => {
       h.realFence = true;

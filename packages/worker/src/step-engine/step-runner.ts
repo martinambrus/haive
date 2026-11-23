@@ -183,7 +183,7 @@ import {
   updateOwnedStep,
   stepWarningAppend,
 } from './step-ownership.js';
-import { isPinnedFixRepair, stepRunDecision } from './fix-consumer.js';
+import { isPinnedFixConsumer, isPinnedFixRepair, stepRunDecision } from './fix-consumer.js';
 import { isFixLoopSuppressed } from './steps/workflow/_fix-loop.js';
 import { resolveCuratedSummary } from './_step-summary.js';
 import { promptCarriesPastedPersona, templatePersonaIds } from './steps/_retrieval-guidance.js';
@@ -1234,6 +1234,7 @@ async function resolveLlmPhase(
       undefined,
       llmSpec.requiredCapabilities,
       promptStepNamedText(stepDef, detected, formValues ?? {}),
+      await isPinnedFixConsumer(ctx, stepDef),
     ),
     invokeOpts: {
       cwd: params.workspacePath,
@@ -1529,6 +1530,7 @@ async function resolveAiFixPhase(
       undefined,
       stepDef.llm?.requiredCapabilities,
       promptStepNamedText(stepDef, current.detectOutput, (current.formValues ?? {}) as FormValues),
+      await isPinnedFixConsumer(ctx, stepDef),
     ),
     invokeOpts: { cwd: params.workspacePath, effortLevel: preferredEffort ?? undefined },
   });

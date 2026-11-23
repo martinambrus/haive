@@ -1410,6 +1410,44 @@ describe('collectChangedLineMap', () => {
       });
     });
 
+    it('a module target without summary keys retains committed, dirty, untracked and deleted scope from git', async () => {
+      await inRepo(
+        { 'app.php': 'a\nb\n', 'gone.php': 'gone\n', 'dirty.php': 'old\n' },
+        async (dir) => {
+          await writeFile(path.join(dir, 'app.php'), 'a\nB\n');
+          await rm(path.join(dir, 'gone.php'));
+          await commitAll(dir);
+          await writeFile(path.join(dir, 'dirty.php'), 'new\n');
+          await writeFile(path.join(dir, 'fresh.php'), 'fresh\n');
+          const ctx = ctxFor();
+          Object.assign(ctx.db.query.tasks, {
+            findFirst: async () => ({
+              executionContract: {
+                version: 1,
+                guardedSpans: [],
+                fixTarget: { stepId: 'module.fx.repair', capabilityVersion: 1 },
+              },
+            }),
+          });
+          loadPreviousStepOutput.mockImplementation(
+            async (_db: unknown, _task: unknown, id: string) =>
+              id === '01-worktree-setup' ? { output: { baseBranch: 'main' } } : { output: {} },
+          );
+          const out = await collectImplementationFiles(ctx, dir);
+          expect([...out.files].sort()).toEqual(['app.php', 'dirty.php', 'fresh.php', 'gone.php']);
+          expect(out.scanError).toBeNull();
+          expect(out.truncated).toBe(false);
+          expect(
+            loadPreviousStepOutput.mock.calls.some((call) => call[2] === 'module.fx.repair'),
+          ).toBe(true);
+          await git(dir, ['branch', '-D', 'main']);
+          const unread = await collectImplementationFiles(ctx, dir);
+          expect(fileCoverage(unread)).toMatchObject({ scanFailed: true });
+          expect(changedFilesBlock(unread, 'Changed files', '')).toContain('COVERAGE');
+        },
+      );
+    });
+
     it('lists a committed binary change and a committed mode change, which the diff prints no header for', async () => {
       await inRepo(
         { 'logo.png': Buffer.from([0, 1, 2, 3]), 'run.sh': 'echo hi\n' },

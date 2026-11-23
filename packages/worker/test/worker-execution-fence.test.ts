@@ -227,3 +227,41 @@ describe('worker execution fence: refused shapes', () => {
     }
   });
 });
+
+it.each([[], [span()]].map((guardedSpans) => ({ guardedSpans })))(
+  'admits a capable module target with spans $guardedSpans',
+  ({ guardedSpans }) => {
+    const target = 'module.fx.repair';
+    const registry = registryOf('module.fx');
+    registry.register({
+      ...stub(target, 0, 'module.fx', false),
+      fixConsumer: { version: 1 },
+      editsCodeOrTests: true,
+    });
+    const pin = { version: 1, guardedSpans, fixTarget: { stepId: target, capabilityVersion: 1 } };
+    const scope = { runListStrategy: 'static' as const, runListSnapshot: [target, ...ids] };
+    expect(() => assertWorkerExecutionContractSupported(pin, scope, registry)).not.toThrow();
+    // Isolate membership: this executable is registered and capable, but off-list.
+    expect(() =>
+      assertWorkerExecutionContractSupported(
+        pin,
+        {
+          ...scope,
+          runListSnapshot: ids,
+        },
+        registry,
+      ),
+    ).toThrow(target);
+    for (const stepId of ['module.fx.gone', 'fx-a', 'custom.fx.repair']) {
+      expect(() =>
+        assertWorkerExecutionContractSupported(
+          { ...pin, fixTarget: { stepId, capabilityVersion: 1 } },
+          scope,
+          registry,
+        ),
+      ).toThrow(stepId);
+    }
+    (registry.get(target) as { fixConsumer: unknown }).fixConsumer = undefined;
+    expect(() => assertWorkerExecutionContractSupported(pin, scope, registry)).toThrow(target);
+  },
+);

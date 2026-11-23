@@ -78,7 +78,7 @@ const rows: Row[] = [
     name: 'valid fixTarget',
     pin: { version: 1, guardedSpans: [], fixTarget },
     predicates: supplied,
-    admittedOnlyOnStatic: false,
+    admittedOnlyOnStatic: true,
   },
   {
     name: 'invalid fixTarget',
@@ -90,7 +90,7 @@ const rows: Row[] = [
     name: 'guarded and fixTarget',
     pin: { version: 1, guardedSpans: [span], fixTarget },
     predicates: supplied,
-    admittedOnlyOnStatic: false,
+    admittedOnlyOnStatic: true,
   },
   {
     name: 'entry at first index',

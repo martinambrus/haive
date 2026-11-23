@@ -8,6 +8,7 @@ import {
 } from '@haive/shared/modularity';
 import { TaskCancelledError, type StepContext, type StepDefinition } from '@haive/shared/step';
 import { z } from 'zod';
+import { FIX_LOOP_REQUESTED } from './steps/workflow/_fix-loop.js';
 
 const generation = z.number().int().nonnegative();
 const reference = z.strictObject({
@@ -120,7 +121,7 @@ export function prepareGuardDecision(
   if (!ids || new Set(ids).size !== ids.length)
     throw new GuardDecisionError('missing-run-list-pin');
   // Validate guard declarations without inventing a capability catalog. Admission
-  // and the fix router own target capability checks; both admission fences stay closed.
+  // and the fix router own target capability checks.
   executionContractPaths(ids, new Map(), { ...contract, fixTarget: undefined }, predicates);
   const spans = [...contract.guardedSpans].sort(
     (a, b) => ids.indexOf(a.firstStepId) - ids.indexOf(b.firstStepId),
@@ -135,7 +136,6 @@ export function prepareGuardDecision(
     span,
     hash,
     fixTarget: contract.fixTarget,
-    reuseRoundZero: !!contract.fixTarget && ctx.round > 0,
   };
 }
 
@@ -181,9 +181,41 @@ export async function decideLoadedGuardDecision(
   tx: StepContext['db'],
   bounds: Bounds,
 ): Promise<{ decision: GuardDecision; entry: StepRow; replay: boolean }> {
-  const { task, ids, spans, span, hash, fixTarget, reuseRoundZero } = prepared;
+  const { task, ids, spans, span, hash, fixTarget } = prepared;
+  // The same structural event as isFixRound, loaded once under the held transaction.
+  const fixRounds = new Set(
+    fixTarget && ctx.round > 0
+      ? (
+          await tx
+            .select({ payload: schema.taskEvents.payload })
+            .from(schema.taskEvents)
+            .where(
+              and(
+                eq(schema.taskEvents.taskId, ctx.taskId),
+                eq(schema.taskEvents.eventType, FIX_LOOP_REQUESTED),
+              ),
+            )
+        ).map((r) => (r.payload as { round?: number } | null)?.round)
+      : [],
+  );
+  const reuseEarlierDecision = fixRounds.has(ctx.round);
+  let decisionRound = ctx.round;
+  if (reuseEarlierDecision) {
+    // A revise round may have changed the branch, or reached it for the first time.
+    // Only this span needs a baseline; its references name its dependencies.
+    // Fix receipts are never baselines.
+    decisionRound = -1;
+    for (let round = ctx.round - 1; round >= 0; round--) {
+      if (round > 0 && fixRounds.has(round)) continue;
+      if (
+        rows.some((r) => r.stepId === span.firstStepId && r.round === round && r.guardState != null)
+      ) {
+        decisionRound = round;
+        break;
+      }
+    }
+  }
   const spanId = span.id;
-  const decisionRound = reuseRoundZero ? 0 : ctx.round;
   const entry = (s: Span) =>
     rows.find((r) => r.stepId === s.firstStepId && r.round === decisionRound);
   const current = rows.find((r) => r.stepId === span.firstStepId && r.round === ctx.round);
@@ -196,24 +228,29 @@ export async function decideLoadedGuardDecision(
     task.currentStepId !== span.firstStepId
   )
     throw new GuardDecisionError('entry-fence-lost');
-  const predecessor = (s: Span) => {
+  const predecessor = (s: Span, round = decisionRound) => {
     const id = ids[ids.indexOf(s.firstStepId) - 1];
     const row = rows
-      .filter((r) => r.stepId === id && r.round <= decisionRound)
+      .filter((r) => r.stepId === id && r.round <= round)
       .sort((a, b) => b.round - a.round)[0];
     if (!row || row.status !== 'done') throw new GuardDecisionError('producer-not-settled');
     return row;
   };
+  const referencedEntry = (s: Span, savedRef: GuardDecision['required'], round: number) =>
+    reuseEarlierDecision
+      ? rows.find((r) => r.id === savedRef?.stepRowId && r.round === round)
+      : entry(s);
   const loaded = new Map<string, GuardDecision>();
-  const read = (s: Span): GuardDecision => {
-    const known = loaded.get(s.id);
-    if (known) return known;
-    const row = entry(s);
+  const read = (s: Span, row: StepRow | undefined): GuardDecision => {
     if (!row || row.guardState == null) throw new GuardDecisionError('shared-decision-unavailable');
+    if (row.taskId !== task.id || row.stepId !== s.firstStepId)
+      throw new GuardDecisionError('stale-decision');
+    const known = loaded.get(row.id);
+    if (known) return known;
     const saved = parseGuardDecision(row.guardState);
     if (
       saved.taskId !== task.id ||
-      saved.round !== decisionRound ||
+      saved.round !== row.round ||
       saved.spanId !== s.id ||
       saved.generation !== row.rerunGeneration ||
       saved.contractHash !== hash
@@ -221,8 +258,11 @@ export async function decideLoadedGuardDecision(
       throw new GuardDecisionError('stale-decision');
     const requiredSpan =
       s.requiresSpan === undefined ? undefined : spans.find((p) => p.id === s.requiresSpan)!;
-    const required = requiredSpan ? read(requiredSpan) : null;
-    if (!same(saved.required, requiredSpan ? ref(entry(requiredSpan)!, requiredSpan) : null))
+    const requiredRow = requiredSpan
+      ? referencedEntry(requiredSpan, saved.required, row.round)
+      : undefined;
+    const required = requiredSpan ? read(requiredSpan, requiredRow) : null;
+    if (!same(saved.required, requiredSpan ? ref(requiredRow, requiredSpan) : null))
       throw new GuardDecisionError('stale-required-decision');
     if (required?.run === false) {
       if (saved.run || saved.predicate !== null || saved.boundary !== null)
@@ -235,31 +275,37 @@ export async function decideLoadedGuardDecision(
       )
         throw new GuardDecisionError('invalid-predicate-decision');
       const sourceSpan = spans.find((p) => p.id === saved.predicate!.source.spanId);
+      const sourceRow =
+        sourceSpan?.id === s.id
+          ? row
+          : sourceSpan
+            ? referencedEntry(sourceSpan, saved.predicate.source, row.round)
+            : undefined;
       if (
         !sourceSpan ||
         sourceSpan.predicateId !== s.predicateId ||
         ids.indexOf(sourceSpan.firstStepId) > ids.indexOf(s.firstStepId) ||
-        !same(saved.predicate.source, ref(entry(sourceSpan)!, sourceSpan))
+        !same(saved.predicate.source, ref(sourceRow, sourceSpan))
       )
         throw new GuardDecisionError('stale-predicate-source');
       if (sourceSpan.id === s.id) {
-        if (!same(saved.boundary, producerRef(predecessor(s))))
+        if (!same(saved.boundary, producerRef(predecessor(s, row.round))))
           throw new GuardDecisionError('stale-producer');
       } else {
-        const source = read(sourceSpan);
+        const source = read(sourceSpan, sourceRow);
         if (!same(saved.predicate, source.predicate) || !same(saved.boundary, source.boundary))
           throw new GuardDecisionError('shared-result-mismatch');
       }
     }
-    loaded.set(s.id, saved);
+    loaded.set(row.id, saved);
     return saved;
   };
-  if (reuseRoundZero) {
+  if (reuseEarlierDecision) {
     let original: GuardDecision;
     try {
-      // Round zero's own generation and references remain authoritative. A later
-      // round/generation cannot reinterpret its branch against the changed tree.
-      original = read(span);
+      // The latest earlier non-fix decision's generation and references remain
+      // authoritative; a fix cannot reinterpret its branch against the changed tree.
+      original = read(span, entry(span));
     } catch (err) {
       if (!(err instanceof GuardDecisionError)) throw err;
       throw new GuardDecisionError('fix-round-decision-unavailable', { cause: err });
@@ -273,7 +319,7 @@ export async function decideLoadedGuardDecision(
     )
       throw new GuardDecisionError('fix-target-suppressed');
     // Keep a current-round receipt for the existing skip/reopen protocols, while
-    // retaining round-zero source, dependency and predecessor references.
+    // retaining the baseline source, dependency and predecessor references.
     const decision = { ...original, round: ctx.round, generation: current.rerunGeneration };
     if (current.guardState != null && !same(parseGuardDecision(current.guardState), decision))
       throw new GuardDecisionError('stale-decision');
@@ -282,14 +328,14 @@ export async function decideLoadedGuardDecision(
     return { decision, entry: current, replay: current.guardState != null };
   }
   if (current.guardState != null) {
-    const decision = read(span);
+    const decision = read(span, entry(span));
     if (current.status === 'skipped' && decision.run)
       throw new GuardDecisionError('entry-fence-lost');
     return { decision, entry: current, replay: true };
   }
   const requiredSpan =
     span.requiresSpan === undefined ? undefined : spans.find((s) => s.id === span.requiresSpan)!;
-  const required = requiredSpan ? read(requiredSpan) : null;
+  const required = requiredSpan ? read(requiredSpan, entry(requiredSpan)) : null;
   let predicate: GuardDecision['predicate'] = null;
   let settled: GuardDecision['boundary'] = null;
   if (required?.run !== false) {
@@ -297,7 +343,7 @@ export async function decideLoadedGuardDecision(
     const earlier = spans
       .slice(0, spans.indexOf(span))
       .filter((s) => s.predicateId === span.predicateId)
-      .map(read);
+      .map((s) => read(s, entry(s)));
     const shared = earlier.find((d) => d.predicate !== null);
     if (shared) {
       predicate = shared.predicate;
