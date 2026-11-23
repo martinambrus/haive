@@ -294,33 +294,42 @@ beforeEach(async () => {
     }),
     update: (table: unknown) => ({
       set: (values: Record<string, unknown>) => ({
-        where: async (condition: never) => {
-          if (table === schema.taskSteps && 'warningMessage' in values)
-            warnings.push(values.warningMessage as string | null);
-          if (table !== schema.repositories) return [];
-          if ('scopeExcludeGlobs' in values || 'ragEmbedDegradedAt' in values) {
-            if (failDegradedWrite && values.ragEmbedDegradedAt) throw new Error('database is down');
-            if ('ragEmbedDegradedAt' in values) order.push('degraded');
+        where: (condition: never) => {
+          const updated = (async () => {
+            if (table === schema.taskSteps && 'warningMessage' in values)
+              warnings.push(values.warningMessage as string | null);
+            if (table !== schema.repositories) return [];
+            if ('scopeExcludeGlobs' in values || 'ragEmbedDegradedAt' in values) {
+              if (failDegradedWrite && values.ragEmbedDegradedAt)
+                throw new Error('database is down');
+              if ('ragEmbedDegradedAt' in values) order.push('degraded');
+              writes.push(values);
+              Object.assign(repo, values);
+              return [];
+            }
+            const query = dialect.sqlToQuery(condition);
+            expect(query.sql).toContain('"onboarding_tooling" is null');
+            expect(query.sql).toContain('"onboarding_environment" is null');
+            expect(query.sql).toContain('"onboarding_reset_at" is null');
+            expect(query.sql).toContain('NOT EXISTS');
+            if (
+              repo.source !== 'blank' ||
+              repo.onboardingTooling ||
+              repo.onboardingEnvironment ||
+              repo.onboardingResetAt ||
+              onboarding
+            )
+              return [];
             writes.push(values);
             Object.assign(repo, values);
             return [];
-          }
-          const query = dialect.sqlToQuery(condition);
-          expect(query.sql).toContain('"onboarding_tooling" is null');
-          expect(query.sql).toContain('"onboarding_environment" is null');
-          expect(query.sql).toContain('"onboarding_reset_at" is null');
-          expect(query.sql).toContain('NOT EXISTS');
-          if (
-            repo.source !== 'blank' ||
-            repo.onboardingTooling ||
-            repo.onboardingEnvironment ||
-            repo.onboardingResetAt ||
-            onboarding
-          )
-            return [];
-          writes.push(values);
-          Object.assign(repo, values);
-          return [];
+          })();
+          return Object.assign(updated, {
+            returning: async () => {
+              await updated;
+              return [{ id: 'step-1' }];
+            },
+          });
         },
       }),
     }),

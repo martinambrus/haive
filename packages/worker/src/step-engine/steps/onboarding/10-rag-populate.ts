@@ -4,6 +4,7 @@ import { schema } from '@haive/database';
 import type { FormSchema } from '@haive/shared';
 import { KB_DIR } from '@haive/shared/knowledge-paths';
 import { fenceRagStore, type RagSyncLock } from '@haive/shared/rag';
+import { updateOwnedStep } from '../../step-ownership.js';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
 import { listFilesMatching, loadPreviousStepOutput } from './_helpers.js';
 import { loadRepoScopeExcludeGlobs } from './_scope.js';
@@ -436,16 +437,13 @@ async function embedAndStore(opts: {
       // the banner and the tooling-page actions available afterwards. The warning
       // carries the guidance the bare error cannot.
       await recordRagEmbedDegraded(opts.ctx.db, opts.repositoryId, outcome.reason, opts.ctx.logger);
-      await opts.ctx.db
-        .update(schema.taskSteps)
-        .set({
-          warningMessage: ragEmbedWarning({
-            degradedAt: new Date(),
-            degradedReason: outcome.reason,
-            lexicalOnly: false,
-          }),
-        })
-        .where(eq(schema.taskSteps.id, opts.ctx.taskStepId));
+      await updateOwnedStep(opts.ctx.db, opts.ctx.taskStepId, {
+        warningMessage: ragEmbedWarning({
+          degradedAt: new Date(),
+          degradedReason: outcome.reason,
+          lexicalOnly: false,
+        }),
+      });
       throw new RagEmbedFailureError(outcome.reason);
     }
     const embeddings = outcome.embeddings;
@@ -806,15 +804,12 @@ export const ragPopulateStep: StepDefinition<RagPopulateDetect, RagPopulateApply
           repositoryId ?? null,
           ctx.logger,
         );
-        await ctx.db
-          .update(schema.taskSteps)
-          .set({
-            warningMessage: composeRagWarning(
-              embedDeviceWarning(embedDevice),
-              ragEmbedWarning(health, { skippedChunks: 0, awaitingReembed }),
-            ),
-          })
-          .where(eq(schema.taskSteps.id, ctx.taskStepId));
+        await updateOwnedStep(ctx.db, ctx.taskStepId, {
+          warningMessage: composeRagWarning(
+            embedDeviceWarning(embedDevice),
+            ragEmbedWarning(health, { skippedChunks: 0, awaitingReembed }),
+          ),
+        });
 
         let kbChunkCount = 0;
         let codeChunkCount = 0;
@@ -997,22 +992,19 @@ export const ragPopulateStep: StepDefinition<RagPopulateDetect, RagPopulateApply
         // A completed run with real embeddings is the only evidence that clears the
         // degradation — a hash-mode run proves nothing about whether embeddings work.
         if (hashed.chunks > 0) {
-          await ctx.db
-            .update(schema.taskSteps)
-            .set({
-              warningMessage: composeRagWarning(
-                embedDeviceWarning(embedDevice),
-                ragEmbedWarning(
-                  {
-                    degradedAt: health.degradedAt ?? new Date(),
-                    degradedReason: HASH_WITH_ENDPOINT_REASON,
-                    lexicalOnly: false,
-                  },
-                  { skippedChunks: 0, hashedChunks: hashed.chunks },
-                ),
+          await updateOwnedStep(ctx.db, ctx.taskStepId, {
+            warningMessage: composeRagWarning(
+              embedDeviceWarning(embedDevice),
+              ragEmbedWarning(
+                {
+                  degradedAt: health.degradedAt ?? new Date(),
+                  degradedReason: HASH_WITH_ENDPOINT_REASON,
+                  lexicalOnly: false,
+                },
+                { skippedChunks: 0, hashedChunks: hashed.chunks },
               ),
-            })
-            .where(eq(schema.taskSteps.id, ctx.taskStepId));
+            ),
+          });
         } else if (
           useOllama &&
           hashed.realEmbedding &&
