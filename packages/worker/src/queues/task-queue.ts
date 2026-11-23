@@ -3066,7 +3066,7 @@ export async function resolveFixLoopGate(
     target: StepDefinition,
     targetRound: number,
     record: (tx: DbHandle) => Promise<void>,
-    resetTarget = false,
+    resetRange?: readonly string[],
   ): Promise<boolean> => {
     let applied = false;
     let appliedEpoch = fence.epoch;
@@ -3082,11 +3082,22 @@ export async function resolveFixLoopGate(
           // reset. Reset takes the source with its ordered step batch before closing it;
           // gate close, target reset, choice, events and pointer all commit together.
           await tx.transaction(async (attempt) => {
-            if (resetTarget) {
+            if (resetRange) {
+              // A validation-only round can have checks but no implementation row.
+              // Start at its first existing row in run-list order, on this savepoint.
+              const prior = await attempt.query.taskSteps.findMany({
+                where: and(
+                  eq(schema.taskSteps.taskId, ctx.taskId),
+                  eq(schema.taskSteps.round, targetRound),
+                  inArray(schema.taskSteps.stepId, [...resetRange]),
+                ),
+                columns: { stepId: true },
+              });
+              const firstExisting = resetRange.find((id) => prior.some((row) => row.stepId === id));
               const reset = await resetStepAndDownstream(
                 attempt,
                 ctx.taskId,
-                target.metadata.id,
+                firstExisting ?? target.metadata.id,
                 targetRound,
                 fence.epoch,
                 false,
@@ -3210,6 +3221,10 @@ export async function resolveFixLoopGate(
     notApplied('no_routable_target');
     return;
   }
+  const steps = await buildRunList(ctx, db);
+  const resetRange = steps
+    .slice(steps.findIndex((step) => step.metadata.id === target.metadata.id))
+    .map((step) => step.metadata.id);
   const nextRound = round + 1;
   // A directive typed at the gate supersedes that recorded request. Written as a NEW event for
   // the same round rather than mutating the old one: task_events is append-only, and
@@ -3237,7 +3252,7 @@ export async function resolveFixLoopGate(
         directed: directive.length > 0,
       });
     },
-    true,
+    resetRange,
   );
   if (!landed) return;
   await enqueueAdvance(

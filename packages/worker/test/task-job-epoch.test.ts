@@ -196,7 +196,7 @@ const db = {
     },
     cliProviders: { findFirst: async () => ({ name: 'claude-code' }) },
     // The root merge fence a reopen checks: no setup row, no merge claim, no merge left open.
-    taskSteps: { findFirst: async () => undefined },
+    taskSteps: { findFirst: async () => undefined, findMany: async () => [] },
     mergeDirClaims: { findFirst: async () => undefined },
     taskEvents: { findMany: async () => [] },
     taskTypeDefinitions: {

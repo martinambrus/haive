@@ -1,4 +1,8 @@
 import { randomBytes, randomUUID } from 'node:crypto';
+import { execFileSync } from 'node:child_process';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { and, asc, eq } from 'drizzle-orm';
 import { DelayedError } from 'bullmq';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -116,6 +120,9 @@ const LEGS: Leg[] = [
   },
 ];
 
+const RECONCILE = '07c-ddev-reconcile';
+const VALIDATE = '07b-phase-4-validate';
+
 const applied: Record<string, number> = {};
 const reviewBlocks: Record<string, boolean> = {};
 const gate = { held: undefined as Promise<void> | undefined, stepId: '' };
@@ -151,11 +158,23 @@ describe.skipIf(!url)('recovery of a fix round on Postgres', () => {
   let db: Database;
   let userId: string;
   let repositoryId: string;
+  let worktree: string;
   const email = randomBytes(8).toString('hex');
 
   beforeAll(async () => {
     db = createDatabase(url!);
     h.db = db;
+    // One real Git fixture for all validation-only round controls.
+    worktree = await mkdtemp(join(tmpdir(), 'haive-validation-only-'));
+    const git = (...args: string[]) => execFileSync('git', args, { cwd: worktree, stdio: 'pipe' });
+    git('init', '-q', '-b', 'main');
+    git('config', 'user.email', 'test@test.local');
+    git('config', 'user.name', 'Test');
+    await writeFile(join(worktree, 'a.ts'), 'export const a = 1;');
+    git('add', '-A');
+    git('commit', '-qm', 'base');
+    stub(RECONCILE, 1, LEGS[0]!.type);
+    stub(VALIDATE, 2, LEGS[0]!.type);
     const [user] = await db
       .insert(schema.users)
       .values({
@@ -202,6 +221,13 @@ describe.skipIf(!url)('recovery of a fix round on Postgres', () => {
         },
       });
       stub(leg.ids.AFTER, 2, leg.type);
+      stub(`${leg.type}-late-editor`, 4, leg.type, {
+        editsCodeOrTests: true,
+        async apply() {
+          await writeFile(join(worktree, 'a.ts'), 'export const a = 2;');
+          return {};
+        },
+      });
     }
   });
   beforeEach(async () => {
@@ -223,6 +249,7 @@ describe.skipIf(!url)('recovery of a fix round on Postgres', () => {
         .delete(schema.taskTypeDefinitions)
         .where(eq(schema.taskTypeDefinitions.slug, leg.type));
     await db.$client.end({ timeout: 5 });
+    await rm(worktree, { recursive: true, force: true });
   });
 
   const seedTask = async (leg: Leg, over: Partial<typeof schema.tasks.$inferInsert> = {}) => {
@@ -803,6 +830,173 @@ describe.skipIf(!url)('recovery of a fix round on Postgres', () => {
           }
         },
       );
+
+    if (!leg.pin)
+      describe('Retry into a validation-only next round', () => {
+        const rewoundValidation = async (reconcile: boolean, cap = 0) => {
+          const editor = `${leg.type}-late-editor`;
+          const checks = [...(reconcile ? [RECONCILE] : []), VALIDATE];
+          const runListSnapshot = [
+            leg.ids.TARGET,
+            ...checks,
+            leg.ids.REVIEW,
+            editor,
+            leg.ids.AFTER,
+          ];
+          const id = await seedTask(leg, {
+            currentStepId: editor,
+            runListSnapshot,
+            maxFixRounds: cap,
+          });
+          // Round 0 already validated the base tree. The late editor changes it during apply.
+          await writeFile(join(worktree, 'a.ts'), 'export const a = 1;');
+          await db.insert(schema.taskSteps).values({
+            taskId: id,
+            stepId: '01-worktree-setup',
+            title: 'Worktree setup',
+            stepIndex: -1,
+            runSeq: -1,
+            round: 0,
+            status: 'done',
+            output: { worktreePath: worktree, baseBranch: 'main' },
+          });
+          const { readValidationSnapshot } =
+            await import('../src/step-engine/steps/workflow/_validation-snapshot.js');
+          const before = await readValidationSnapshot({ db, taskId: id });
+          expect(before).not.toBeNull();
+          await db.insert(schema.taskSteps).values({
+            taskId: id,
+            stepId: VALIDATE,
+            title: 'Validation',
+            stepIndex: 2,
+            runSeq: runListSnapshot.indexOf(VALIDATE),
+            round: 0,
+            status: 'done',
+            output: { validationSnapshot: before },
+          });
+          const source = await seedRow(leg, id, 'REVIEW', 0, 'done', {
+            runSeq: runListSnapshot.indexOf(leg.ids.REVIEW),
+          });
+          const run = async (stepId: string, round: number) =>
+            processTaskJob(
+              job(TASK_JOB_NAMES.ADVANCE_STEP, {
+                taskId: id,
+                userId,
+                stepId,
+                round,
+                epoch: (await taskOf(id)).orchestrationEpoch,
+              }),
+            );
+          await run(editor, 0);
+          expect(await eventsOf(id, 'validation.recheck_requested')).toHaveLength(1);
+          expect(await taskOf(id)).toMatchObject({ currentStepId: checks[0], currentRound: 1 });
+          for (const check of checks) await run(check, 1);
+          const roundRows = () =>
+            db.query.taskSteps.findMany({
+              where: and(eq(schema.taskSteps.taskId, id), eq(schema.taskSteps.round, 1)),
+              orderBy: [asc(schema.taskSteps.runSeq)],
+            });
+          expect((await roundRows()).map((r) => [r.stepId, r.status])).toEqual(
+            checks.map((check) => [check, 'done']),
+          );
+          expect((await taskOf(id)).currentStepId).toBe(leg.ids.AFTER);
+          // Real Retry rewinds only round 0, leaving round 1's checks and no target row.
+          const { taskRoutes } = await import(apiSource('routes/tasks/index.ts'));
+          const { errorHandler } = await import(apiSource('middleware/error-handler.ts'));
+          taskRoutes.onError(errorHandler);
+          const retry = await taskRoutes.request(`/${id}/steps/${leg.ids.REVIEW}/action`, {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ action: 'retry', round: 0 }),
+          });
+          expect(retry.status, await retry.text()).toBe(200);
+          expect(await taskOf(id)).toMatchObject({
+            currentStepId: leg.ids.REVIEW,
+            currentRound: 0,
+            orchestrationEpoch: BASE_EPOCH + 1,
+          });
+          expect((await roundRows()).map((r) => [r.stepId, r.status])).toEqual(
+            checks.map((check) => [check, 'done']),
+          );
+          await run(leg.ids.REVIEW, 0);
+          return { id, checks, source: await rowOf(source.id), roundRows, run };
+        };
+
+        it.each([true, false])(
+          'Continue reruns checks without a target row (07c=%s)',
+          async (reconcile) => {
+            const { id, checks, source, roundRows, run } = await rewoundValidation(reconcile);
+            expect(source.status).toBe('waiting_form');
+            const ctx = await ctxFor(leg, id);
+            await resolveFixLoopGate(db, ctx, source, 'continue', 0, '');
+            expect
+              .soft(
+                (await roundRows()).map((r) => ({
+                  step: r.stepId,
+                  status: r.status,
+                  output: r.output,
+                  generation: r.rerunGeneration,
+                })),
+              )
+              .toEqual(
+                checks.map((step) => ({ step, status: 'pending', output: null, generation: 1 })),
+              );
+            expect.soft(ctx.orchestrationEpoch).toBe(BASE_EPOCH + 2);
+            await run(leg.ids.TARGET, 1);
+            expect(applied[leg.ids.TARGET]).toBe(1);
+            for (const check of checks) await run(check, 1);
+            // On unchanged code, both done checks are reused: neither apply runs again.
+            for (const check of checks) expect.soft(applied[check]).toBe(2);
+          },
+        );
+
+        it.each(['stale_epoch', 'lost_source', 'unavailable_cli'])(
+          'Continue preserves a validation-only round on %s',
+          async (refusal) => {
+            const { id, source, roundRows } = await rewoundValidation(true);
+            const ctx = await ctxFor(leg, id);
+            if (refusal === 'stale_epoch')
+              await db
+                .update(schema.tasks)
+                .set({ orchestrationEpoch: ctx.orchestrationEpoch + 1 })
+                .where(eq(schema.tasks.id, id));
+            if (refusal === 'lost_source')
+              await db
+                .update(schema.taskSteps)
+                .set({ status: 'pending' })
+                .where(eq(schema.taskSteps.id, source.id));
+            const rowsBefore = await roundRows();
+            const taskBefore = await taskOf(id);
+            const sourceBefore = await rowOf(source.id);
+            const eventsBefore = await eventsOf(id);
+            h.adds.length = 0;
+            await resolveFixLoopGate(
+              db,
+              ctx,
+              source,
+              'continue',
+              0,
+              '',
+              refusal === 'unavailable_cli' ? randomUUID() : undefined,
+            );
+            expect(await roundRows()).toEqual(rowsBefore);
+            expect(await eventsOf(id)).toEqual(eventsBefore);
+            expect(await taskOf(id)).toMatchObject({
+              status: taskBefore.status,
+              currentStepId: taskBefore.currentStepId,
+              currentRound: taskBefore.currentRound,
+              orchestrationEpoch: taskBefore.orchestrationEpoch,
+            });
+            if (refusal === 'unavailable_cli')
+              expect(await rowOf(source.id)).toMatchObject({
+                status: 'waiting_form',
+                formValues: null,
+              });
+            else expect(await rowOf(source.id)).toEqual(sourceBefore);
+            expect(h.adds).toEqual([]);
+          },
+        );
+      });
 
     if (!leg.pin)
       describe('Retry of an earlier source card', () => {
