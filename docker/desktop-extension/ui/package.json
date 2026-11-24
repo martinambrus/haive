@@ -9,6 +9,6 @@
     "@docker/extension-api-client": "0.4.2"
   },
   "devDependencies": {
-    "esbuild": "0.28.1"
+    "esbuild": "0.28.2"
   }
 }
