@@ -22,8 +22,8 @@
   },
   "devDependencies": {
     "@types/bcrypt": "^6.0.0",
-    "@types/node": "^26.6.4",
+    "@types/node": "^26.6.6",
     "typescript": "^5.7.3",
-    "vitest": "^5.0.3"
+    "vitest": "^5.1.1"
   }
 }
