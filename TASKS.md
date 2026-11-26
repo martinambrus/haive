@@ -782,7 +782,7 @@ Related, measured 2026-11-20: `src/db/setup.ts:155-163` (`accountedStorage`) cha
 
 ### T728 · FNF[composed-lsp-provider-lock] · composed LSP provider lock and template replacement leftovers (+16)
 
-status: open for item 21 (OWNER DECISION 2026-11-26: keep failing, plus (a) name the disabled providers in the lock reason and (b) warn in the disable preview; in work 2026-11-26, worktree T728B) and coverage items 2-14; items 15 and 17-20 DONE in #1337 (f2b591b1a, deployed 2026-11-26 with `pnpm docker libs`: shared preferred-provider and image-reference subpaths, composed substitute on step cards and task detail, preview counts the post-lock binding, persona names the substitute, step 01 capability from current rows, malformed pins isolated per task); items 1 and 16 DONE in #1315 (da1f5ed69, deployed 2026-11-21 22:28Z: locked task CLI read under the lock, `resolvePreferredProvider` shared by dispatch and hold) · kind: fix · found: legacy template replacement build and review (#1288) 2026-11-20 · priority: P4
+status: open for coverage items 2-14 and 22; item 21 DONE in #1343 (9b4c358aa, deployed 2026-11-26 via watchers: owner decision keep failing; the reason names disabled set members, at most five; the disable preview lists live tasks whose next CLI step would fail, ids capped at five) and coverage items 2-14; items 15 and 17-20 DONE in #1337 (f2b591b1a, deployed 2026-11-26 with `pnpm docker libs`: shared preferred-provider and image-reference subpaths, composed substitute on step cards and task detail, preview counts the post-lock binding, persona names the substitute, step 01 capability from current rows, malformed pins isolated per task); items 1 and 16 DONE in #1315 (da1f5ed69, deployed 2026-11-21 22:28Z: locked task CLI read under the lock, `resolvePreferredProvider` shared by dispatch and hold) · kind: fix · found: legacy template replacement build and review (#1288) 2026-11-20 · priority: P4
 
 Paths are under `packages/`. NEW means introduced by #1288.
 
@@ -808,6 +808,7 @@ Paths are under `packages/`. NEW means introduced by #1288.
 19. DONE (#1337). The persona pin check names the saved CLI, not the substitute the dispatcher runs (`worker/src/queues/task-queue.ts` ~:3270-3290, `providerNameFor`); advisory event only. PRE-EXISTING, low.
 20. DONE (#1337). Coverage: no hold-versus-dispatch parity test; no hold cases for a fix-round choice, ignored saved CLIs or non-default roles; step 01's locked decision has no real-Postgres control. Low.
 21. Design: a composed task with nothing saved, no own CLI and no enabled provider in the lock's set fails with the lock reason (`dispatcher.ts` ~:789), while a disabled own CLI parks. Whether that should park set-wide is a choice.
+22. Low (#1343 review): the disable warning says the listed tasks fail "at their next CLI step" even for a live composed task with no CLI step left.
 
 ### T729 · A CLI remembered on another task can be refused at dispatch for a composed LSP task
 
