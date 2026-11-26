@@ -1212,7 +1212,7 @@ Today consent reserves worst-case storage for all `8 x U` calls up front (about 
 
 1. Design: one task per book with one glossary and one approved style, translated and reviewed in batches with storage reserved per batch (recommended), versus part tasks importing an earlier part's approved glossary and style. Plan in `docs/plans/` before building; review at xhigh (consent, money).
 
-- PR1 review (2026-11-26), found-not-fixed for later PRs: F8 `ownerResources` runs about 25 aggregates per owner task, several times per admission under the owner lock (scale; PR2's bounded lookups). F9 the unused render reserve and control headroom of a completed book stay counted until purge (same order as the old whole-run reservation; PR3).
+- PR1 review (2026-11-26), found-not-fixed for later PRs: F8 `ownerResources` runs about 25 aggregates per owner task, several times per admission under the owner lock (scale; PR2's bounded lookups). F9 the unused render reserve and control headroom of a completed book stay counted until purge (same order as the old whole-run reservation; PR3). R5 (review 2): batch-mode readers use a per-row correlated `EXISTS` with no batch-mode scale test (PR2).
 
 ### T768 · Translator: keep terms refused when the target language declines them
 
