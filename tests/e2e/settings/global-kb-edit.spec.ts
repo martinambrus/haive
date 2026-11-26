@@ -222,7 +222,13 @@ test.describe('global KB authoring and editing', () => {
     const dialog = page.locator('[data-haive-dialog]');
     await dialog.getByRole('button', { name: 'Edit body' }).click();
     const editor = dialog.locator('[contenteditable="true"]');
-    await editor.fill('');
+    // TipTap's deferred startup focus (and ProseMirror's selection reset after it) can replace a
+    // native DOM select-all such as fill('') uses. The editor's own keymap selects through a state
+    // transaction, which a late reset re-applies, so clear with it and prove the body is empty.
+    await expect(editor).toBeFocused();
+    await editor.press('ControlOrMeta+a');
+    await editor.press('Delete');
+    await expect(editor).toBeEmpty();
     await dialog.getByRole('button', { name: 'Save body' }).click();
     await expect(dialog.getByText('The article body cannot be empty.')).toBeVisible();
     expect(mock.patches).toHaveLength(0);

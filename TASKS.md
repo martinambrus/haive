@@ -864,18 +864,20 @@ In `martinambrus/haive-module-translator`.
 
 ### T736 · FNF[translator-grouping] · Translator unit grouping and calibration envelope leftovers (+8)
 
-status: open · kind: fix · found: tiny-unit grouping build and review (module PR #12) 2026-11-20 · priority: P4
+status: open for items 3, 4, 5, 8, 9, 10; items 1, 2, 6, 7 DONE in translator #19 (c3c988d, deployed 2026-11-26: serialized single-block overflow marked exceptional and labelled at source review, one envelope constant bound into SQL, `test:ingest` builds first, acceptance coverage from the unit count) · kind: fix · found: tiny-unit grouping build and review (module PR #12) 2026-11-20 · priority: P4
 
 In `martinambrus/haive-module-translator`.
 
-1. PRE-EXISTING: a single block under the word and character caps that serializes past 9,000 characters (roughly 8,950 to 12,000 characters of text, or heavy escaping) becomes a non-exceptional one-block unit. The ingest review form lists only exceptional units (`src/steps/tr-ingest.ts:84`), and calibration refuses the unit later (`src/db/setup.ts:112`). Fix direction: mark such a block exceptional at ingest, or name it on the review form.
-2. PRE-EXISTING duplication, one more copy since module PR #12: the 9,000 envelope is spelled in `src/db/setup.ts:112` (an SQL literal no test pins), `src/steps/tr-setup.ts:98` and `:140`, and `src/ingest/model.ts:6` (`LIMITS.unitEnvelopeChars`, pinned by `test/ingest.test.ts:98`). Fix direction: one constant, passed into the SQL.
+1. DONE (translator #19). PRE-EXISTING: a single block under the word and character caps that serializes past 9,000 characters (roughly 8,950 to 12,000 characters of text, or heavy escaping) becomes a non-exceptional one-block unit. The ingest review form lists only exceptional units (`src/steps/tr-ingest.ts:84`), and calibration refuses the unit later (`src/db/setup.ts:112`). Fix direction: mark such a block exceptional at ingest, or name it on the review form.
+2. DONE (translator #19). PRE-EXISTING duplication, one more copy since module PR #12: the 9,000 envelope is spelled in `src/db/setup.ts:112` (an SQL literal no test pins), `src/steps/tr-setup.ts:98` and `:140`, and `src/ingest/model.ts:6` (`LIMITS.unitEnvelopeChars`, pinned by `test/ingest.test.ts:98`). Fix direction: one constant, passed into the SQL.
 3. LOW: a heading that joins a unit below the minimum is stranded when its first paragraph does not fit, so the paragraph starts the next unit (`src/chunking/group.ts:20-27`); the next unit's `headingIds` still names the heading.
 4. NEGLIGIBLE: the unit-count limit throws before the final join (`src/chunking/group.ts:28`), so a book whose 1,001st unit would have joined back still fails.
 5. COVERAGE, low: the ingest step's replay under a changed grouping (`src/steps/tr-ingest.ts:43-47`) has no step-level test; `saveSource` and the readers are pinned.
-6. TEST TRAP, PRE-EXISTING: `test/path.test.mjs:13-19` imports `../dist/...` (`groupUnits` at :19), so `pnpm test:ingest` tests whatever `dist/` was last built. Fix direction: build first in the script, or import the source.
-7. TEST FRAGILITY, PRE-EXISTING: `test/acceptance.test.mjs:126` caps at `Math.min(51, ...)` from the old 21-unit book; module PR #12 fixed the same kind at :128 by deriving the bound.
+6. DONE (translator #19). TEST TRAP, PRE-EXISTING: `test/path.test.mjs:13-19` imports `../dist/...` (`groupUnits` at :19), so `pnpm test:ingest` tests whatever `dist/` was last built. Fix direction: build first in the script, or import the source.
+7. DONE (translator #19). TEST FRAGILITY, PRE-EXISTING: `test/acceptance.test.mjs:126` caps at `Math.min(51, ...)` from the old 21-unit book; module PR #12 fixed the same kind at :128 by deriving the bound.
 8. COVERAGE REGRESSION from module PR #12, low: the Arabic fixture (`test/acceptance.test.mjs:30`, `targetWords: 60`) is now below the minimum and no longer exercises heading splits (its 4 units are unchanged).
+9. Low (#19 review F2): an admitted unit over the serialized envelope can never calibrate (`representative` refuses it), so admission is a dead end until the owner splits it; the review form could say so. PRE-EXISTING in kind.
+10. Low (#19 review F3): `serialized` counts UTF-16 units while Postgres `length()` counts code points, so a block heavy in astral characters can be flagged exceptional when calibration would accept it. Conservative.
 
 ### T737 · FNF[fresh-worktree-typecheck] · A fresh worktree's worker typecheck fails until the statistics module is built
 
@@ -1074,16 +1076,16 @@ In `martinambrus/haive` (host), with a one-line follow-up in `martinambrus/haive
 
 ### T756 · FNF[updater-attempt-fields-followups] · minor follow-ups of the early-refusal fields (+8)
 
-status: open · kind: fix · found: #1321 reviews 2026-11-22 · priority: P4
+status: open for items 2 and 3; items 1, 4, 5, 6, 7, 8 DONE in #1339 (a1849f0ad, 2026-11-26: attempt note kept within the error cap, one strict env parser, held-directory version read, ordering and edge controls) · kind: fix · found: #1321 reviews 2026-11-22 · priority: P4
 
-1. `packages/updater/src/journal.ts` ~:94: truncating the refusal message drops the appended note. REGRESSION, minor.
+1. DONE (#1339). `packages/updater/src/journal.ts` ~:94: truncating the refusal message drops the appended note. REGRESSION, minor.
 2. `packages/updater/src/envkeys.ts` ~:48: `literalEnvValues` is exported generically though only the display read uses it. PRE-EXISTING, minor.
 3. `envkeys.ts` ~:35: the multiline parser is quadratic on long values (bounded by the 256 KiB cap). PRE-EXISTING, minor.
-4. `packages/updater/src/run.ts` ~:104-107 parses `.env` differently from `envkeys.ts`; the two can disagree on a quoted value. PRE-EXISTING, minor.
-5. `.env` is lstat'ed through the held directory, then read by path in `readInstall`. PRE-EXISTING, minor (fs-safe conversion).
-6. No test pins lstat-before-open for the display read (the FIFO case proves no block, not the order). Minor.
-7. The disagree and invalid-channel controls were never shown red on the base. Minor.
-8. The note-joining punctuation regex and literal vs resolved channel inside `readInstall` are untested edges. Minor.
+4. DONE (#1339). `packages/updater/src/run.ts` ~:104-107 parses `.env` differently from `envkeys.ts`; the two can disagree on a quoted value. PRE-EXISTING, minor.
+5. DONE (#1339). `.env` is lstat'ed through the held directory, then read by path in `readInstall`. PRE-EXISTING, minor (fs-safe conversion).
+6. DONE (#1339). No test pins lstat-before-open for the display read (the FIFO case proves no block, not the order). Minor.
+7. DONE (#1339). The disagree and invalid-channel controls were never shown red on the base. Minor.
+8. DONE (#1339). The note-joining punctuation regex and literal vs resolved channel inside `readInstall` are untested edges. Minor.
 
 ### T757 · FNF[fix-loop-escalation-atomicity] · cap/oscillation escalation is four separate writes (+7)
 
@@ -1113,11 +1115,11 @@ status: done (#1330 9974653a3, 2026-11-23; updater code, ships with the next rel
 
 ### T760 · FNF[updater-takeover-order] · a takeover may fail before it reaches the child check (+2)
 
-status: open · kind: fix · found: T744 review 2026-11-23 · priority: P4
+status: open for item 2; items 1 and 3 DONE in #1339 (a1849f0ad, 2026-11-26: connection-class journal bootstrap failures refuse with `updater-bootstrap-failed`, exit 3, naming the code and the one-shot survivor check; boot and other errors pass through; a second cleanup listing) · kind: fix · found: T744 review 2026-11-23 · priority: P4
 
-1. `packages/updater/src/cli.ts` ~:336: `ensureJournal` and the database bootstrap run before the lock and the child check, so after an updater killed mid-snapshot (Postgres stopped by `composeStop`) a takeover probably fails at the journal connection with no named refusal. PRE-EXISTING, unverified: probe first.
+1. DONE (#1339). `packages/updater/src/cli.ts` ~:336: `ensureJournal` and the database bootstrap run before the lock and the child check, so after an updater killed mid-snapshot (Postgres stopped by `composeStop`) a takeover probably fails at the journal connection with no named refusal. PRE-EXISTING, unverified: probe first.
 2. `packages/updater/src/docker.ts` ~:262 `restoreVolume` has no caller. PRE-EXISTING, minor.
-3. A `docker run` already exec'd when the SIGTERM cleanup marks the attempt stopping (`docker.ts` `stoppingAttempts`, #1325) can create its container after the cleanup's list, so it survives the exit; the next start's child check refuses on it (fails closed). Close it by re-listing once after removal. Low.
+3. DONE (#1339). A `docker run` already exec'd when the SIGTERM cleanup marks the attempt stopping (`docker.ts` `stoppingAttempts`, #1325) can create its container after the cleanup's list, so it survives the exit; the next start's child check refuses on it (fails closed). Close it by re-listing once after removal. Low.
 
 ### T761 · FNF[T755]: own-provider type follow-ups (+6)
 
@@ -1149,7 +1151,7 @@ All PRE-EXISTING.
 
 ### T763 · Flaky tests: global KB empty-body e2e (+1)
 
-status: open · kind: test · found: #1325 CI 2026-11-23 · priority: P4
+status: done 2026-11-26 (#1340, 7c1fa45d0: the e2e clears through the editor keymap after focus and asserts emptiness; the RAG guard fake server answers a terminal `28P01` and asserts one dial; docs `testing.md`) · kind: test · found: #1325 CI 2026-11-23 · priority: P4
 
 `tests/e2e/settings/global-kb-edit.spec.ts:218` ("rejects an empty body and preserves corrections when saving fails") failed on every in-run retry at #1325's head 5f1fc9cc5 (run 45088903767: `dialog.getByText('The article body cannot be empty.')` not visible within 5 s), then passed on a job rerun; main and the PR's previous head were green, and the PR touched only the updater. Find why the validation message can fail to render (an async state the test does not wait on, a debounced validator) and fix the test or the race, not the timeout.
 
