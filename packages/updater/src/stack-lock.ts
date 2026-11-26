@@ -31,6 +31,8 @@ export interface StackLockOptions {
   releasePauseMs?: number;
   heartbeat?: boolean;
   sleep?: (ms: number) => Promise<void>;
+  /** Monotonic elapsed-time clock, independent of the informational startedAt. */
+  now?: () => number;
   onEvent?: (event: string, fields?: Record<string, unknown>) => void;
   hooks?: { beforeBreak?: () => Promise<void> };
 }
@@ -59,6 +61,7 @@ function resolve(options: StackLockOptions): Resolved {
     releasePauseMs: options.releasePauseMs ?? STACK_LOCK_RELEASE_PAUSE_MS,
     heartbeat: options.heartbeat ?? true,
     sleep: options.sleep ?? realSleep,
+    now: options.now ?? (() => performance.now()),
     onEvent: options.onEvent,
     hooks: options.hooks,
   };
@@ -93,6 +96,7 @@ const parses = (bytes: Buffer): boolean => {
 };
 
 export class StackLock {
+  // Consume each attempted sequence even on failure: the bytes may already have landed.
   private seq = 1;
   private lostFlag = false;
   private failing = false;
@@ -107,6 +111,7 @@ export class StackLock {
     readonly token: string,
     private readonly startedAt: string,
     private readonly options: Resolved,
+    private lastGood: number,
   ) {
     if (options.heartbeat) {
       this.timer = setInterval(() => void this.beat(), options.beatMs);
@@ -150,7 +155,7 @@ export class StackLock {
       // takeover from absence, or recreate the record as a side effect of a phase proof.
       if (!current) throw this.unprovenRefusal();
       if (!parses(current.bytes)) {
-        if (this.ownWriteFailed) return;
+        if (this.ownWriteFailed && !this.proofExpired()) return;
         throw this.unprovenRefusal();
       }
       const owner = decode(current.bytes);
@@ -167,7 +172,13 @@ export class StackLock {
     }
   }
 
+  private proofExpired(): boolean {
+    if (this.options.now() - this.lastGood >= this.options.staleMs) this.markLost();
+    return this.lostFlag;
+  }
+
   private unprovenRefusal(): UpgradeRefusal {
+    if (this.proofExpired()) return this.lossRefusal();
     return new UpgradeRefusal(
       'stack-lock-unproven',
       'install stack lease ownership could not be proved; refusing the phase',
@@ -204,20 +215,23 @@ export class StackLock {
   }
 
   private async beatOnce(): Promise<'ok' | 'lost' | 'error'> {
+    const started = this.options.now();
     try {
       const outcome = await inInstall(this.installDir, async (dir) => {
         const current = await dir.read(STACK_LOCK_NAME, this.options.maxBytes);
         // A break-then-restore leaves the name absent for a moment: take it back; EEXIST fails the beat.
         if (!current) {
+          if (this.proofExpired()) return 'lost' as const;
+          this.seq += 1;
           await dir.createExclusive(
             STACK_LOCK_NAME,
-            encode(this.token, this.options.holder, this.startedAt, this.seq + 1),
+            encode(this.token, this.options.holder, this.startedAt, this.seq),
           );
           return 'created' as const;
         }
         // A write that failed after truncating leaves our own record empty or partial: not a loss.
         const parsed = parses(current.bytes);
-        if (!parsed && !this.ownWriteFailed) throw this.unprovenRefusal();
+        if (!parsed && (!this.ownWriteFailed || this.proofExpired())) throw this.unprovenRefusal();
         const owner = decode(current.bytes);
         if (parsed && (!owner.token || !owner.holder || !owner.startedAt))
           throw this.unprovenRefusal();
@@ -228,21 +242,26 @@ export class StackLock {
             owner.startedAt !== this.startedAt)
         )
           return 'lost' as const;
+        let truncated = false;
+        this.seq += 1;
         try {
           await dir.overwrite(
             STACK_LOCK_NAME,
-            encode(this.token, this.options.holder, this.startedAt, this.seq + 1),
+            encode(this.token, this.options.holder, this.startedAt, this.seq),
+            () => {
+              truncated = true;
+            },
           );
         } catch (error) {
           // Only our own failed rewrite can explain torn bytes. A read or proof failure
           // may have observed another holder's unfinished write and grants no tolerance.
-          this.ownWriteFailed = true;
+          this.ownWriteFailed ||= truncated;
           throw error;
         }
         return 'ok' as const;
       });
       if (outcome === 'ok' || outcome === 'created') {
-        this.seq += 1;
+        this.lastGood = started;
         this.failing = false;
         this.ownWriteFailed = false;
         return 'ok';
@@ -250,6 +269,7 @@ export class StackLock {
       this.markLost();
       return 'lost';
     } catch (error) {
+      if (this.proofExpired()) return 'lost';
       if (!this.failing) {
         this.failing = true;
         this.options.onEvent?.('stack-lock-beat-failed', { code: code(error) });
@@ -309,12 +329,13 @@ export async function acquireStackLock(
   let waiting = false;
 
   for (let round = 0; round < opts.rounds; round++) {
+    const started = opts.now();
     try {
       await op((dir) =>
         dir.createExclusive(STACK_LOCK_NAME, encode(token, opts.holder, startedAt, 1)),
       );
       opts.onEvent?.('stack-lock-acquired', { holder: opts.holder });
-      return { status: 'held', lock: new StackLock(installDir, token, startedAt, opts) };
+      return { status: 'held', lock: new StackLock(installDir, token, startedAt, opts, started) };
     } catch (error) {
       // Only the directory open can report ENOENT: the create itself is inside an open directory.
       if (code(error) === 'ENOENT') {

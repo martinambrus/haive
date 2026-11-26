@@ -1033,3 +1033,433 @@ func TestStackLockTombRemovalFailureAfterEqualReadIsNotBusy(t *testing.T) {
 		t.Fatalf("expected the tomb left behind, got %v", tombs)
 	}
 }
+
+func TestStackLockOnlyOwnOverwriteExcusesTornRecord(t *testing.T) {
+	for _, failure := range []string{"read", "create"} {
+		t.Run(failure, func(t *testing.T) {
+			b := fixture(t)
+			b.lockCfg.beat = time.Hour
+			failWrites := false
+			b.lockCfg.write = func(f *os.File, data []byte) error {
+				if failWrites {
+					return errors.New("disk full")
+				}
+				_, err := f.Write(data)
+				return err
+			}
+			l, err := b.acquireStackLock(context.Background())
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer l.releaseLock()
+			if err := os.Remove(l.path); err != nil {
+				t.Fatal(err)
+			}
+			if failure == "read" {
+				if err := os.Mkdir(l.path, 0755); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				failWrites = true
+			}
+			if got := l.beat(); got != "error" {
+				t.Fatalf("failed %s: %s", failure, got)
+			}
+			failWrites = false
+			os.Remove(l.path)
+			partial := []byte(`{"v":1,"tok`)
+			if err := os.WriteFile(l.path, partial, 0644); err != nil {
+				t.Fatal(err)
+			}
+			if got := l.beat(); got != "lost" {
+				t.Fatalf("foreign torn record after %s: %s", failure, got)
+			}
+			if data, _ := os.ReadFile(l.path); !bytes.Equal(data, partial) {
+				t.Fatalf("foreign record overwritten: %q", data)
+			}
+		})
+	}
+}
+
+func TestStackLockTornOwnRecordExpires(t *testing.T) {
+	b := fixture(t)
+	b.lockCfg.beat = time.Hour
+	b.lockCfg.stale = 20 * time.Millisecond
+	now := time.Now()
+	b.lockCfg.now = func() time.Time { return now }
+	failWrites := false
+	b.lockCfg.write = func(f *os.File, data []byte) error {
+		if failWrites {
+			return errors.New("disk full")
+		}
+		_, err := f.Write(data)
+		return err
+	}
+	l, err := b.acquireStackLock(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.releaseLock()
+	failWrites = true
+	if got := l.beat(); got != "error" {
+		t.Fatalf("failed overwrite: %s", got)
+	}
+	now = now.Add(19 * time.Millisecond)
+	if got := l.beat(); got != "error" || l.isLost() {
+		t.Fatalf("before deadline: %s lost=%v", got, l.isLost())
+	}
+	now = now.Add(time.Millisecond)
+	failWrites = false
+	if got := l.beat(); got != "lost" || !l.isLost() {
+		t.Fatalf("at deadline: %s lost=%v", got, l.isLost())
+	}
+	if data, _ := os.ReadFile(l.path); len(data) != 0 {
+		t.Fatalf("expired torn record rewritten: %q", data)
+	}
+	if err := os.WriteFile(l.path, encodeLockRecord(l.token, l.startedAt, 1), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if got := l.beat(); got != "lost" {
+		t.Fatalf("loss not sticky: %s", got)
+	}
+	l.releaseLock()
+	if _, err := os.Stat(l.path); err != nil {
+		t.Fatalf("lost holder removed lease: %v", err)
+	}
+}
+
+func TestStackLockUnprovenBeatExpires(t *testing.T) {
+	for _, missing := range []bool{false, true} {
+		t.Run(fmt.Sprint(missing), func(t *testing.T) {
+			b := fixture(t)
+			b.lockCfg.beat = time.Hour
+			b.lockCfg.stale = 20 * time.Millisecond
+			now := time.Now()
+			b.lockCfg.now = func() time.Time { return now }
+			l, err := b.acquireStackLock(context.Background())
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer l.releaseLock()
+			if err := os.Remove(l.path); err != nil {
+				t.Fatal(err)
+			}
+			if !missing {
+				if err := os.Mkdir(l.path, 0755); err != nil {
+					t.Fatal(err)
+				}
+			}
+			now = now.Add(20 * time.Millisecond)
+			if got := l.beat(); got != "lost" || !l.isLost() {
+				t.Fatalf("unproven beat at deadline: %s lost=%v", got, l.isLost())
+			}
+			if missing {
+				if _, err := os.Stat(l.path); !os.IsNotExist(err) {
+					t.Fatalf("expired lease recreated: %v", err)
+				}
+			}
+		})
+	}
+}
+
+func TestStackLockGoodBeatRenewsDeadline(t *testing.T) {
+	b := fixture(t)
+	b.lockCfg.beat = time.Hour
+	b.lockCfg.stale = 20 * time.Millisecond
+	now := time.Now()
+	b.lockCfg.now = func() time.Time { return now }
+	failWrites := false
+	b.lockCfg.write = func(f *os.File, data []byte) error {
+		if failWrites {
+			return errors.New("disk full")
+		}
+		_, err := f.Write(data)
+		return err
+	}
+	l, err := b.acquireStackLock(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.releaseLock()
+	now = now.Add(19 * time.Millisecond)
+	if got := l.beat(); got != "ok" {
+		t.Fatalf("good beat: %s", got)
+	}
+	now = now.Add(19 * time.Millisecond)
+	failWrites = true
+	if got := l.beat(); got != "error" || l.isLost() {
+		t.Fatalf("renewed deadline not used: %s lost=%v", got, l.isLost())
+	}
+	now = now.Add(time.Millisecond)
+	failWrites = false
+	if got := l.beat(); got != "lost" {
+		t.Fatalf("renewed deadline did not expire: %s", got)
+	}
+}
+
+// Observe the new bytes before the holder returns from I/O, then let the contender's
+// single stale-window poll finish. The holder must expire by that earliest break.
+func TestStackLockDeadlinePrecedesContenderBreak(t *testing.T) {
+	for _, kind := range []string{"acquire", "beat", "recreate"} {
+		t.Run(kind, func(t *testing.T) {
+			b := fixture(t)
+			b.lockCfg.beat = time.Hour
+			b.lockCfg.stale = 20 * time.Millisecond
+			now := time.Now()
+			b.lockCfg.now = func() time.Time { return now }
+			armed := kind == "acquire"
+			observed := make(chan struct{})
+			finishPoll := make(chan struct{})
+			type result struct {
+				lock       *stackLock
+				err        error
+				holderBeat string
+			}
+			done := make(chan result, 1)
+			var l *stackLock
+			b.lockCfg.write = func(f *os.File, data []byte) error {
+				if _, err := f.Write(data); err != nil {
+					return err
+				}
+				if !armed {
+					return nil
+				}
+				armed = false
+				contender := b
+				contender.lockCfg.write = nil
+				contender.lockCfg.poll = contender.lockCfg.stale
+				verdict := ""
+				contender.lockCfg.beforeBreak = func() { verdict = l.beat() }
+				contender.sleep = func(time.Duration) {
+					close(observed)
+					<-finishPoll
+					now = now.Add(10 * time.Millisecond)
+				}
+				go func() {
+					next, err := contender.acquireStackLock(context.Background())
+					done <- result{next, err, verdict}
+				}()
+				<-observed
+				now = now.Add(10 * time.Millisecond)
+				return nil
+			}
+			var err error
+			l, err = b.acquireStackLock(context.Background())
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer l.releaseLock()
+			if kind != "acquire" {
+				if kind == "recreate" {
+					if err := os.Remove(l.path); err != nil {
+						t.Fatal(err)
+					}
+				}
+				now = now.Add(5 * time.Millisecond)
+				armed = true
+				if got := l.beat(); got != "ok" {
+					t.Fatalf("write: %s", got)
+				}
+			}
+			// Only this holder's reads fail; the contender still sees the unchanged record.
+			l.path = b.dir
+			close(finishPoll)
+			next := <-done
+			if next.lock != nil {
+				defer next.lock.releaseLock()
+			}
+			if next.err != nil {
+				t.Fatal(next.err)
+			}
+			if next.holderBeat != "lost" || !l.isLost() {
+				t.Fatalf("holder at contender's earliest break: %s lost=%v", next.holderBeat, l.isLost())
+			}
+		})
+	}
+}
+
+func TestStackLockWriteThenErrorDoesNotRenewDeadline(t *testing.T) {
+	b := fixture(t)
+	b.lockCfg.beat = time.Hour
+	b.lockCfg.stale = 20 * time.Millisecond
+	now := time.Now()
+	b.lockCfg.now = func() time.Time { return now }
+	fail := false
+	b.lockCfg.write = func(f *os.File, data []byte) error {
+		if _, err := f.Write(data); err != nil {
+			return err
+		}
+		if fail {
+			return errors.New("write landed but close failed")
+		}
+		return nil
+	}
+	l, err := b.acquireStackLock(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.releaseLock()
+	now = now.Add(19 * time.Millisecond)
+	fail = true
+	if got := l.beat(); got != "error" {
+		t.Fatalf("failed beat: %s", got)
+	}
+	data, err := os.ReadFile(l.path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var record lockRecord
+	if json.Unmarshal(data, &record) != nil || record.Seq != 2 {
+		t.Fatalf("write did not land: %q", data)
+	}
+	now = now.Add(time.Millisecond)
+	l.path = b.dir
+	if got := l.beat(); got != "lost" {
+		t.Fatalf("failed write renewed the deadline: %s", got)
+	}
+}
+
+func TestStackLockRetryChangesBytesKeepsContenderBusy(t *testing.T) {
+	b := fixture(t)
+	b.lockCfg.beat = time.Hour
+	b.lockCfg.stale = 20 * time.Millisecond
+	b.lockCfg.poll = b.lockCfg.stale
+	now := time.Now()
+	b.lockCfg.now = func() time.Time { return now }
+	fail := false
+	b.lockCfg.write = func(f *os.File, data []byte) error {
+		if _, err := f.Write(data); err != nil {
+			return err
+		}
+		if fail {
+			return errors.New("write landed but close failed")
+		}
+		return nil
+	}
+	l, err := b.acquireStackLock(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.releaseLock()
+	now = now.Add(time.Millisecond)
+	fail = true
+	if got := l.beat(); got != "error" {
+		t.Fatalf("landed failed beat: %s", got)
+	}
+	first, err := os.ReadFile(l.path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := recordSeq(t, l.path); got != 2 {
+		t.Fatalf("landed failed sequence: %d, want 2", got)
+	}
+	fail = false
+	contender := b
+	contender.lockCfg.write = nil
+	breaks := 0
+	contender.lockCfg.beforeBreak = func() { breaks++ }
+	contender.sleep = func(time.Duration) {
+		now = now.Add(5 * time.Millisecond)
+		if got := l.beat(); got != "ok" {
+			t.Fatalf("retry: %s", got)
+		}
+		now = now.Add(15 * time.Millisecond)
+	}
+	next, err := contender.acquireStackLock(context.Background())
+	if next != nil {
+		next.releaseLock()
+	}
+	if err == nil || err.Error() != extensionBusyMessage || breaks != 0 {
+		t.Fatalf("contender should stay busy without breaking: %v, breaks=%d", err, breaks)
+	}
+	data, err := os.ReadFile(l.path)
+	if err != nil || bytes.Equal(data, first) || recordSeq(t, l.path) != 3 || l.isLost() {
+		t.Fatalf("retry failed to advance live record: %q, %v, lost=%v", data, err, l.isLost())
+	}
+}
+
+func TestStackLockFailedRecreateConsumesSequence(t *testing.T) {
+	b := fixture(t)
+	b.lockCfg.beat = time.Hour
+	b.lockCfg.now = func() time.Time { return time.Unix(0, 0) }
+	l, err := b.acquireStackLock(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.releaseLock()
+	if err := os.Remove(l.path); err != nil {
+		t.Fatal(err)
+	}
+	var attempted []int
+	write := l.cfg.write
+	l.cfg.write = func(f *os.File, data []byte) error {
+		var record lockRecord
+		if err := json.Unmarshal(data, &record); err != nil {
+			t.Fatal(err)
+		}
+		attempted = append(attempted, record.Seq)
+		if err := write(f, data); err != nil {
+			return err
+		}
+		if len(attempted) <= 2 {
+			return errors.New("write landed but close failed")
+		}
+		return nil
+	}
+	for _, want := range []string{"error", "error", "ok"} {
+		if got := l.beat(); got != want {
+			t.Fatalf("beat: %s, want %s", got, want)
+		}
+	}
+	if !reflect.DeepEqual(attempted, []int{2, 3, 4}) || recordSeq(t, l.path) != 4 {
+		t.Fatalf("recreated sequence reused after failed writes: %v", attempted)
+	}
+}
+
+func TestStackLockOverwriteOpenFailureGrantsNoTornExcuse(t *testing.T) {
+	b := fixture(t)
+	b.lockCfg.beat = time.Hour
+	b.lockCfg.now = func() time.Time { return time.Unix(0, 0) }
+	opens, writes := 0, 0
+	b.lockCfg.openOverwrite = func(path string) (*os.File, error) {
+		opens++
+		return nil, &os.PathError{Op: "open", Path: path, Err: os.ErrPermission}
+	}
+	b.lockCfg.write = func(f *os.File, data []byte) error {
+		writes++
+		_, err := f.Write(data)
+		return err
+	}
+	l, err := b.acquireStackLock(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.releaseLock()
+	own, err := os.ReadFile(l.path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := l.beat(); got != "error" || l.isLost() {
+		t.Fatalf("failed open: %s lost=%v", got, l.isLost())
+	}
+	if opens != 1 || writes != 1 {
+		t.Fatalf("open/write calls: %d/%d", opens, writes)
+	}
+	if data, err := os.ReadFile(l.path); err != nil || !bytes.Equal(data, own) {
+		t.Fatalf("open failure touched the record: %q, %v", data, err)
+	}
+	partial := []byte(`{"v":1,"tok`)
+	if err := os.WriteFile(l.path, partial, 0644); err != nil {
+		t.Fatal(err)
+	}
+	if got := l.beat(); got != "lost" || !l.isLost() {
+		t.Fatalf("open failure excused a foreign torn record: %s lost=%v", got, l.isLost())
+	}
+	if opens != 1 || writes != 1 {
+		t.Fatalf("torn record reached open/write: %d/%d", opens, writes)
+	}
+	l.releaseLock()
+	if data, err := os.ReadFile(l.path); err != nil || !bytes.Equal(data, partial) {
+		t.Fatalf("foreign torn record changed or removed: %q, %v", data, err)
+	}
+}

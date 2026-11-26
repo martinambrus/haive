@@ -132,7 +132,7 @@ const idleSleep = async (): Promise<void> => {
 };
 const events = (): string[] =>
   vi.mocked(console.log).mock.calls.map(([line]) => String(JSON.parse(String(line)).event));
-const quick = { heartbeat: false, staleMs: 5, pollMs: 1 };
+const quick = { heartbeat: false, staleMs: 5, pollMs: 1, now: () => 0 };
 
 beforeEach(async () => {
   vi.resetAllMocks();
@@ -320,6 +320,47 @@ describe('real recovery under stack lease proofs', () => {
       expect(journal.recordRunError).not.toHaveBeenCalled();
       expect(events()).toContain('rolled-back');
       expect(await readFile(lock, 'utf8')).toBe('{');
+    },
+  );
+
+  it.each(['entry', 'after-restore'] as const)(
+    'expires an unproven reverse resume at %s before further mutations',
+    async (point) => {
+      vi.useFakeTimers();
+      await interrupted();
+      const expire = async () => {
+        await writeFile(lock, '{');
+        await vi.advanceTimersByTimeAsync(20);
+      };
+      if (point === 'entry')
+        vi.mocked(images.readImageSettings).mockImplementationOnce(async () => {
+          await expire();
+          return { ...settings };
+        });
+      else {
+        const atomic = install.InstallDirectory.prototype.atomic;
+        vi.spyOn(install.InstallDirectory.prototype, 'atomic').mockImplementation(async function (
+          this: install.InstallDirectory,
+          ...args
+        ) {
+          await atomic.call(this, ...args);
+          if (args[0] === '.env') await expire();
+        });
+      }
+      expect(
+        await main({
+          stackLock: { ...quick, staleMs: 20, now: () => Date.now(), sleep: idleSleep },
+        }),
+      ).toBe(3);
+      if (point === 'entry') expect(run.resume).not.toHaveBeenCalled();
+      expect(h.dockerExec.mock.calls.some(([, args]) => args.includes('--remove-orphans'))).toBe(
+        false,
+      );
+      expect(journal.finishRun).not.toHaveBeenCalled();
+      expect(journal.recordRunError).not.toHaveBeenCalled();
+      expect(journal.recordAttempt).not.toHaveBeenCalled();
+      expect(await readFile(lock, 'utf8')).toBe('{');
+      expect(events().filter((event) => event === 'stack-lock-lost')).toHaveLength(1);
     },
   );
 
@@ -1552,4 +1593,86 @@ describe('bootstrap errors that must retain their diagnosis', () => {
       expect.objectContaining({ refusal: refusal.refusal, message: refusal.message }),
     );
   });
+});
+
+describe('CLI lease deadline controls', () => {
+  const opts = { stackLock: { ...quick, staleMs: 20, now: () => Date.now(), sleep: idleSleep } };
+  it.each([19, 20])(
+    'keeps forward commit strict after %i ms of unproven ownership',
+    async (elapsed) => {
+      vi.useFakeTimers();
+      const actual = await vi.importActual<typeof run>('./run.js');
+      vi.mocked(run.phaseCommit).mockImplementation(actual.phaseCommit);
+      vi.mocked(journal.mergeMetadata).mockImplementation(assertStackLease);
+      h.dockerExec.mockImplementation(async (_cmd, args) => {
+        if (args[0] === 'run') {
+          await writeFile(lock, '{');
+          await vi.advanceTimersByTimeAsync(elapsed);
+        }
+        return { stdout: '' };
+      });
+      expect(await main(opts)).toBe(3);
+      expect(journal.enterPhase).toHaveBeenCalledWith(h.sql, 'new-run', 'commit');
+      expect(journal.finishRun).not.toHaveBeenCalled();
+      expect(h.setConfig).not.toHaveBeenCalled();
+      expect(run.rollback).not.toHaveBeenCalled();
+      expect(journal.recordRunError).not.toHaveBeenCalled();
+      expect(journal.recordAttempt).not.toHaveBeenCalled();
+      expect(await readFile(lock, 'utf8')).toBe('{');
+      expect(
+        vi.mocked(console.log).mock.calls.map(([line]) => JSON.parse(String(line))),
+      ).toContainEqual(
+        expect.objectContaining({
+          event: 'refused',
+          refusal: elapsed === 20 ? 'stack-lock-lost' : 'stack-lock-unproven',
+        }),
+      );
+    },
+  );
+  it.each([19, 20])(
+    'handles a full-disk snapshot with torn own bytes after %i ms',
+    async (elapsed) => {
+      vi.useFakeTimers();
+      const actual = await vi.importActual<typeof run>('./run.js');
+      vi.mocked(run.phaseSnapshot).mockImplementation(actual.phaseSnapshot);
+      vi.mocked(run.rollback).mockImplementation(assertStackLease);
+      h.sql.mockResolvedValue([]);
+      const proof = vi.spyOn(StackLock.prototype, 'assertOwned');
+      const probe = await open(join(dir, 'probe'), 'w');
+      const proto = Object.getPrototypeOf(probe) as { writeFile: () => Promise<void> };
+      await probe.close();
+      h.dockerExec.mockImplementation(async (_cmd, args) => {
+        if (args[0] === 'run') {
+          // The real overwrite truncates the held lock, then its write fails with ENOSPC.
+          vi.spyOn(proto, 'writeFile').mockRejectedValueOnce(
+            Object.assign(new Error('full'), { code: 'ENOSPC' }),
+          );
+          expect(await (proof.mock.contexts.at(-1) as StackLock).beat()).toBe('error');
+          expect(await readFile(lock, 'utf8')).toBe('');
+          await vi.advanceTimersByTimeAsync(elapsed);
+          throw Object.assign(new Error('snapshot disk full'), { code: 'ENOSPC' });
+        }
+        return { stdout: '' };
+      });
+      expect(await main(opts)).toBe(elapsed === 20 ? 3 : 5);
+      const composeCalls = h.dockerExec.mock.calls
+        .filter(([, args]) => args[0] === 'compose')
+        .map(([, args]) => args);
+      expect(composeCalls).toHaveLength(elapsed === 20 ? 1 : 2);
+      expect(composeCalls[0]).toEqual(expect.arrayContaining(['stop', 'postgres']));
+      if (elapsed === 19) {
+        expect(composeCalls[1]).toEqual(expect.arrayContaining(['up', '-d', 'postgres']));
+        expect(run.rollback).toHaveBeenCalledOnce();
+      } else expect(run.rollback).not.toHaveBeenCalled();
+      expect(run.phaseMigrate).not.toHaveBeenCalled();
+      expect(run.phaseCommit).not.toHaveBeenCalled();
+      expect(run.recordSnapshot).not.toHaveBeenCalled();
+      expect(journal.recordRunError).not.toHaveBeenCalled();
+      expect(journal.recordAttempt).not.toHaveBeenCalled();
+      expect(await readFile(lock, 'utf8')).toBe('');
+      expect(events().filter((event) => event === 'stack-lock-lost')).toHaveLength(
+        elapsed === 20 ? 1 : 0,
+      );
+    },
+  );
 });

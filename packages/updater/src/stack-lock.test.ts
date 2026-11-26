@@ -56,7 +56,13 @@ const record = (token: string, holder: string, seq: number): string =>
 const token = () => randomBytes(16).toString('hex');
 const parse = async () => JSON.parse(await readFile(path, 'utf8')) as Record<string, unknown>;
 const idle = async () => {};
-const base: StackLockOptions = { heartbeat: false, sleep: idle, staleMs: 5, pollMs: 1 };
+const base: StackLockOptions = {
+  heartbeat: false,
+  sleep: idle,
+  staleMs: 5,
+  pollMs: 1,
+  now: () => 0,
+};
 const held = async (options: StackLockOptions = {}): Promise<StackLock> => {
   const outcome = await acquireStackLock(dir, { ...base, ...options });
   if (outcome.status !== 'held') throw new Error(`expected held, got ${outcome.status}`);
@@ -389,8 +395,8 @@ describe('phase ownership proofs', () => {
     const lock = await held();
     const overwrite = install.InstallDirectory.prototype.overwrite;
     vi.spyOn(install.InstallDirectory.prototype, 'overwrite').mockImplementationOnce(
-      async function (this: install.InstallDirectory, name) {
-        await overwrite.call(this, name, Buffer.from('{'));
+      async function (this: install.InstallDirectory, name, _bytes, onTruncated) {
+        await overwrite.call(this, name, Buffer.from('{'), onTruncated);
         throw Object.assign(new Error('full'), { code: 'ENOSPC' });
       },
     );
@@ -415,7 +421,7 @@ describe('phase ownership proofs', () => {
         await rm(path);
         const create = install.InstallDirectory.prototype.createExclusive;
         vi.spyOn(install.InstallDirectory.prototype, 'createExclusive').mockImplementationOnce(
-          async function (this: install.InstallDirectory, name, bytes) {
+          async function (this: install.InstallDirectory, name: string, bytes: Buffer) {
             await writeFile(path, partial);
             return create.call(this, name, bytes);
           },
@@ -485,7 +491,7 @@ describe('phase ownership proofs', () => {
       entered = resolve;
     });
     vi.spyOn(install.InstallDirectory.prototype, 'overwrite').mockImplementationOnce(
-      async function (this: install.InstallDirectory, name, bytes) {
+      async function (this: install.InstallDirectory, name: string, bytes: Buffer) {
         await real.call(this, name, Buffer.alloc(0));
         entered();
         await gate;
@@ -603,6 +609,50 @@ describe('release', () => {
 });
 
 describe('heartbeat', () => {
+  it.each(['overwrite', 'createExclusive'] as const)(
+    'changes bytes on retry after a landed %s reports failure, keeping the contender busy',
+    async (method) => {
+      vi.useFakeTimers();
+      const options = { ...base, staleMs: 20, pollMs: 20, now: () => Date.now() };
+      const lock = await held(options);
+      try {
+        await vi.advanceTimersByTimeAsync(1);
+        if (method === 'createExclusive') await rm(path);
+        const original = install.InstallDirectory.prototype[method];
+        vi.spyOn(install.InstallDirectory.prototype, method).mockImplementationOnce(async function (
+          this: install.InstallDirectory,
+          name: string,
+          bytes: Buffer,
+        ) {
+          await original.call(this, name, bytes);
+          throw new Error('write landed but close failed');
+        });
+        expect(await lock.beat()).toBe('error');
+        const first = await readFile(path);
+        expect(await parse()).toMatchObject({ seq: 2 });
+        const beforeBreak = vi.fn();
+        const contender = await acquireStackLock(dir, {
+          ...options,
+          sleep: async () => {
+            await vi.advanceTimersByTimeAsync(5);
+            expect(await lock.beat()).toBe('ok');
+            await expect(lock.assertOwned()).resolves.toBeUndefined();
+            await vi.advanceTimersByTimeAsync(15);
+          },
+          hooks: { beforeBreak },
+        });
+        // Clean up even on the old implementation, which incorrectly takes over.
+        if (contender.status === 'held') await contender.lock.release();
+        expect(contender.status).toBe('busy');
+        expect(beforeBreak).not.toHaveBeenCalled();
+        expect(await readFile(path)).not.toEqual(first);
+        expect(await parse()).toMatchObject({ seq: 3, token: lock.token });
+        expect(lock.lost).toBe(false);
+      } finally {
+        await lock.release();
+      }
+    },
+  );
   it('beat bumps seq and changes the bytes', async () => {
     const lock = await held();
     const before = await readFile(path, 'utf8');
@@ -677,7 +727,7 @@ describe('heartbeat', () => {
     expect(await lock.beat()).toBe('error');
     expect(await lock.beat()).toBe('ok');
     expect(lock.lost).toBe(false);
-    expect(await parse()).toMatchObject({ token: lock.token, seq: 2 });
+    expect(await parse()).toMatchObject({ token: lock.token, seq: 3 });
     await lock.release();
     expect(await readdir(dir)).toEqual([]);
   });
@@ -706,15 +756,15 @@ describe('heartbeat', () => {
     const lock = await held({ onEvent: (event) => void events.push(event) });
     const real = install.InstallDirectory.prototype.overwrite;
     vi.spyOn(install.InstallDirectory.prototype, 'overwrite').mockImplementationOnce(
-      async function (this: install.InstallDirectory, name: string) {
-        await real.call(this, name, Buffer.alloc(0));
+      async function (this: install.InstallDirectory, name: string, _bytes, onTruncated) {
+        await real.call(this, name, Buffer.alloc(0), onTruncated);
         throw new Error('io');
       },
     );
     expect(await lock.beat()).toBe('error');
     expect(await readFile(path, 'utf8')).toBe('');
     expect(await lock.beat()).toBe('ok');
-    expect(await parse()).toMatchObject({ token: lock.token, seq: 2 });
+    expect(await parse()).toMatchObject({ token: lock.token, seq: 3 });
     expect(lock.lost).toBe(false);
     expect(events).not.toContain('stack-lock-lost');
     await lock.release();
@@ -927,5 +977,234 @@ describe('describeBusy', () => {
     expect(describeBusy({ status: 'busy', holder: 'other-tool.2' })).toContain(
       'another process (other-tool.2)',
     );
+  });
+});
+
+describe('unproven lease deadline', () => {
+  it.each(['missing', 'malformed', 'incomplete', 'unreadable'])(
+    'bounds recovery for %s ownership and keeps loss sticky',
+    async (kind) => {
+      vi.useFakeTimers();
+      const events: string[] = [];
+      const lock = await held({
+        staleMs: 20,
+        now: () => Date.now(),
+        onEvent: (event) => void events.push(event),
+      });
+      const own = await readFile(path);
+      if (kind === 'missing') await rm(path);
+      if (kind === 'malformed') await writeFile(path, '{');
+      if (kind === 'incomplete') await writeFile(path, '{}');
+      const read = vi.spyOn(install.InstallDirectory.prototype, 'read');
+      if (kind === 'unreadable') read.mockRejectedValue(new Error('unreadable'));
+      await withStackLease(async () => {
+        bindStackLease(() => lock.assertOwned());
+        await vi.advanceTimersByTimeAsync(19);
+        await expect(lock.assertOwned()).rejects.toMatchObject({ refusal: 'stack-lock-unproven' });
+        await expect(withStackLeaseRecovery(assertStackLease)).resolves.toBeUndefined();
+        await vi.advanceTimersByTimeAsync(1);
+        await expect(withStackLeaseRecovery(assertStackLease)).rejects.toMatchObject({
+          refusal: 'stack-lock-lost',
+        });
+      });
+      read.mockRestore();
+      await writeFile(path, own);
+      await expect(lock.assertOwned()).rejects.toMatchObject({ refusal: 'stack-lock-lost' });
+      expect(await lock.beat()).toBe('lost');
+      await lock.release();
+      expect(await readFile(path)).toEqual(own);
+      expect(events.filter((event) => event === 'stack-lock-lost')).toHaveLength(1);
+    },
+  );
+  it('renews the deadline on a good beat', async () => {
+    vi.useFakeTimers();
+    const lock = await held({ staleMs: 20, now: () => Date.now() });
+    await vi.advanceTimersByTimeAsync(19);
+    expect(await lock.beat()).toBe('ok');
+    await rm(path);
+    await vi.advanceTimersByTimeAsync(19);
+    await expect(lock.assertOwned()).rejects.toMatchObject({ refusal: 'stack-lock-unproven' });
+    await vi.advanceTimersByTimeAsync(1);
+    await expect(lock.assertOwned()).rejects.toMatchObject({ refusal: 'stack-lock-lost' });
+    await lock.release();
+  });
+  it('does not renew the deadline on a good proof while beats fail', async () => {
+    vi.useFakeTimers();
+    const lock = await held({ staleMs: 20, now: () => Date.now() });
+    const overwrite = vi.spyOn(install.InstallDirectory.prototype, 'overwrite');
+    overwrite.mockRejectedValue(new Error('write refused before truncation'));
+    const contender = await acquireStackLock(dir, {
+      ...base,
+      staleMs: 20,
+      pollMs: 20,
+      sleep: async () => {
+        await vi.advanceTimersByTimeAsync(19);
+        expect(await lock.beat()).toBe('error');
+        await expect(lock.assertOwned()).resolves.toBeUndefined();
+        await vi.advanceTimersByTimeAsync(1);
+      },
+      hooks: {
+        beforeBreak: async () => {
+          const read = vi.spyOn(install.InstallDirectory.prototype, 'read');
+          read.mockRejectedValue(new Error('holder cannot read'));
+          await expect(lock.assertOwned()).rejects.toMatchObject({ refusal: 'stack-lock-lost' });
+          read.mockRestore();
+        },
+      },
+    });
+    expect(contender.status).toBe('held');
+    overwrite.mockRestore();
+    await lock.release();
+    if (contender.status === 'held') await contender.lock.release();
+  });
+  it.each(['acquire', 'beat', 'recreate'] as const)(
+    'expires no later than a contender can break after a delayed %s write',
+    async (kind) => {
+      vi.useFakeTimers();
+      let lock: StackLock;
+      let contender: ReturnType<typeof acquireStackLock> | undefined;
+      let firstPoll!: () => void;
+      const observed = new Promise<void>((resolve) => {
+        firstPoll = resolve;
+      });
+      let finishPoll!: () => void;
+      const poll = new Promise<void>((resolve) => {
+        finishPoll = resolve;
+      });
+      const method = kind === 'beat' ? 'overwrite' : 'createExclusive';
+      const original = install.InstallDirectory.prototype[method];
+      const write = vi.spyOn(install.InstallDirectory.prototype, method);
+      if (kind !== 'acquire') {
+        lock = await held({ staleMs: 20, now: () => Date.now() });
+        if (kind === 'recreate') await rm(path);
+        await vi.advanceTimersByTimeAsync(5);
+      }
+      write.mockImplementationOnce(async function (
+        this: install.InstallDirectory,
+        name: string,
+        bytes: Buffer,
+      ) {
+        await original.call(this, name, bytes);
+        // The contender observes the changed bytes while the holder is still inside I/O.
+        contender = acquireStackLock(dir, {
+          ...base,
+          staleMs: 20,
+          pollMs: 20,
+          sleep: async () => {
+            firstPoll();
+            await poll;
+            await vi.advanceTimersByTimeAsync(10);
+          },
+          hooks: {
+            beforeBreak: async () => {
+              const read = vi.spyOn(install.InstallDirectory.prototype, 'read');
+              read.mockRejectedValue(new Error('holder cannot read'));
+              expect(await lock.beat()).toBe('lost');
+              read.mockRestore();
+            },
+          },
+        });
+        await observed;
+        await vi.advanceTimersByTimeAsync(10);
+      });
+      if (kind === 'acquire') lock = await held({ staleMs: 20, now: () => Date.now() });
+      else expect(await lock!.beat()).toBe('ok');
+      finishPoll();
+      const next = await contender!;
+      expect(next.status).toBe('held');
+      expect(lock!.lost).toBe(true);
+      write.mockRestore();
+      await lock!.release();
+      if (next.status === 'held') await next.lock.release();
+    },
+  );
+  it('does not renew when a beat writes the record but then throws', async () => {
+    vi.useFakeTimers();
+    const lock = await held({ staleMs: 20, now: () => Date.now() });
+    await vi.advanceTimersByTimeAsync(19);
+    const original = install.InstallDirectory.prototype.overwrite;
+    vi.spyOn(install.InstallDirectory.prototype, 'overwrite').mockImplementationOnce(
+      async function (this: install.InstallDirectory, ...args) {
+        await original.call(this, ...args);
+        throw new Error('close failed after the write');
+      },
+    );
+    expect(await lock.beat()).toBe('error');
+    expect((await parse()).seq).toBe(2);
+    await vi.advanceTimersByTimeAsync(1);
+    vi.spyOn(install.InstallDirectory.prototype, 'read').mockRejectedValue(new Error('unreadable'));
+    expect(await lock.beat()).toBe('lost');
+    await lock.release();
+  });
+  it.each(['missing', 'unreadable'])(
+    'expires an unproven %s heartbeat before it can recreate the lease',
+    async (kind) => {
+      vi.useFakeTimers();
+      const lock = await held({ staleMs: 20, now: () => Date.now() });
+      if (kind === 'missing') await rm(path);
+      else
+        vi.spyOn(install.InstallDirectory.prototype, 'read').mockRejectedValue(
+          new Error('unreadable'),
+        );
+      await vi.advanceTimersByTimeAsync(20);
+      expect(await lock.beat()).toBe('lost');
+      expect(lock.lost).toBe(true);
+      await lock.release();
+      if (kind === 'missing') await expect(stat(path)).rejects.toMatchObject({ code: 'ENOENT' });
+    },
+  );
+});
+
+describe('own torn-record deadline', () => {
+  it.each(['proof', 'beat'])(
+    'expires own torn bytes before the next %s without renewing on tolerance',
+    async (kind) => {
+      vi.useFakeTimers();
+      const lock = await held({ staleMs: 20, now: () => Date.now() });
+      const probe = await open(join(dir, 'probe'), 'w');
+      const proto = Object.getPrototypeOf(probe) as { writeFile: () => Promise<void> };
+      await probe.close();
+      vi.spyOn(proto, 'writeFile').mockRejectedValueOnce(
+        Object.assign(new Error('full'), { code: 'ENOSPC' }),
+      );
+      expect(await lock.beat()).toBe('error');
+      expect(await readFile(path, 'utf8')).toBe('');
+      await vi.advanceTimersByTimeAsync(19);
+      await expect(lock.assertOwned()).resolves.toBeUndefined();
+      await vi.advanceTimersByTimeAsync(1);
+      if (kind === 'proof')
+        await expect(lock.assertOwned()).rejects.toMatchObject({ refusal: 'stack-lock-lost' });
+      else expect(await lock.beat()).toBe('lost');
+      expect(lock.lost).toBe(true);
+      expect(await readFile(path, 'utf8')).toBe('');
+      await lock.release();
+    },
+  );
+  it('does not excuse torn bytes after overwrite failed at open', async () => {
+    vi.useFakeTimers();
+    const lock = await held({ staleMs: 20, now: () => Date.now() });
+    const own = await readFile(path, 'utf8');
+    const target = join(dir, 'untouched');
+    await writeFile(target, 'keep');
+    const read = install.InstallDirectory.prototype.read;
+    vi.spyOn(install.InstallDirectory.prototype, 'read').mockImplementationOnce(async function (
+      this: install.InstallDirectory,
+      ...args
+    ) {
+      const current = await read.call(this, ...args);
+      await rm(path);
+      await symlink(target, path);
+      return current;
+    });
+    // The real O_NOFOLLOW open fails before O_TRUNC can touch the link target.
+    expect(await lock.beat()).toBe('error');
+    expect(await readFile(target, 'utf8')).toBe('keep');
+    await rm(path);
+    await writeFile(path, own);
+    await writeFile(path, '{');
+    await expect(lock.assertOwned()).rejects.toMatchObject({ refusal: 'stack-lock-unproven' });
+    expect(await lock.beat()).toBe('error');
+    expect(await readFile(path, 'utf8')).toBe('{');
+    await lock.release();
   });
 });
