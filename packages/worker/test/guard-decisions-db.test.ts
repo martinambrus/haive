@@ -7,7 +7,13 @@ import { TaskCancelledError, type StepContext, type StepDefinition } from '@haiv
 import { z } from 'zod';
 import { evaluateGuardDecision } from '../src/step-engine/guard-decisions.js';
 import { skipGuardSpan } from '../src/step-engine/guard-span-skip.js';
-import { FIX_LOOP_REQUESTED } from '../src/step-engine/steps/workflow/_fix-loop.js';
+import {
+  FIX_LOOP_REQUESTED,
+  isFixRound,
+  loadFixLoopDiagnosis,
+  loadRecordedDiagnosisForRound,
+  recordFixLoopRequest,
+} from '../src/step-engine/steps/workflow/_fix-loop.js';
 
 const url = process.env.GUARD_DECISIONS_TEST_URL;
 if (url && !new URL(url).pathname.startsWith('/guard_decisions_test'))
@@ -244,6 +250,109 @@ describe.skipIf(!url)('durable guard decisions on Postgres', () => {
       });
     return { ...ctx, round, taskStepId: current!.id, rerunGeneration: current!.rerunGeneration };
   }
+  it.each(['stamped', 'legacy'])(
+    'scopes stamped START requests and preserves the unscoped legacy fallback (%s)',
+    async (kind) => {
+      await pinFixTarget();
+      await db.insert(schema.taskEvents).values({ taskId, eventType: 'task.running' });
+      if (kind === 'stamped')
+        await recordFixLoopRequest(db, taskId, rows.plan!.id, {
+          round: 1,
+          sourceStepId: 'check',
+          diagnosis: 'Old generation defect',
+        });
+      else
+        await db
+          .insert(schema.taskEvents)
+          .values({ taskId, eventType: FIX_LOOP_REQUESTED, payload: { round: 1 } });
+      expect(await isFixRound({ ...ctx, round: 1 })).toBe(true);
+      await db.insert(schema.taskEvents).values({ taskId, eventType: 'task.running' });
+      await evaluateGuardDecision(ctx, 'work', predicates);
+      const revise = await enterRound(1, false);
+      expect(await isFixRound(revise)).toBe(kind === 'legacy');
+      evaluate.mockResolvedValue(false);
+      const baseline = await evaluateGuardDecision(revise, 'work', predicates);
+      expect(baseline!.run).toBe(kind === 'legacy');
+      const evaluations = kind === 'legacy' ? 1 : 2;
+      expect(evaluate).toHaveBeenCalledTimes(evaluations);
+      const fix = await enterRound(2, false);
+      await recordFixLoopRequest(db, taskId, rows.plan!.id, {
+        round: 2,
+        sourceStepId: 'check',
+        diagnosis: '',
+      });
+      expect(await isFixRound(fix)).toBe(true);
+      evaluate.mockRejectedValue(new Error('fix must reuse current START revise'));
+      expect(await evaluateGuardDecision(fix, 'work', predicates)).toEqual({
+        ...baseline,
+        round: 2,
+        generation: 4,
+      });
+      expect(evaluate).toHaveBeenCalledTimes(evaluations);
+      await db
+        .update(schema.tasks)
+        .set({ orchestrationEpoch: 1 })
+        .where(eq(schema.tasks.id, taskId));
+      expect(await isFixRound({ ...fix, epoch: 1 })).toBe(true);
+      expect(await evaluateGuardDecision({ ...fix, epoch: 1 }, 'work', predicates)).toEqual({
+        ...baseline,
+        round: 2,
+        generation: 4,
+      });
+      expect(evaluate).toHaveBeenCalledTimes(evaluations);
+    },
+  );
+  it.each(['stamped', 'legacy', 'null-stamped'])(
+    'uses the same START scope for classification, diagnosis and gate directives (%s)',
+    async (kind) => {
+      await db.insert(schema.taskEvents).values({ taskId, eventType: 'task.running' });
+      const request = {
+        round: 1,
+        sourceStepId: 'check',
+        diagnosis: 'Earlier START defect',
+        guidance: 'Earlier guidance',
+      };
+      if (kind === 'stamped') await recordFixLoopRequest(db, taskId, rows.plan!.id, request);
+      else
+        await db.insert(schema.taskEvents).values({
+          taskId,
+          eventType: FIX_LOOP_REQUESTED,
+          payload: { ...request, ...(kind === 'null-stamped' ? { startEventId: null } : {}) },
+        });
+      const next = { ...ctx, round: 1 };
+      expect(await loadFixLoopDiagnosis(next)).toMatchObject({ diagnosis: request.diagnosis });
+      await db.insert(schema.taskEvents).values({ taskId, eventType: 'task.running' });
+      expect(await isFixRound(next)).toBe(kind !== 'stamped');
+      expect(await loadFixLoopDiagnosis(next)).toEqual(
+        kind === 'stamped'
+          ? null
+          : {
+              diagnosis: request.diagnosis,
+              guidance: request.guidance,
+              humanSourced: false,
+              marked: false,
+            },
+      );
+      expect(await loadRecordedDiagnosisForRound(db, taskId, 1)).toEqual({
+        diagnosis: kind === 'stamped' ? '' : request.diagnosis,
+        guidance: kind === 'stamped' ? '' : request.guidance,
+      });
+      await recordFixLoopRequest(db, taskId, rows.plan!.id, {
+        ...request,
+        diagnosis: 'Current START defect',
+        guidance: 'Current guidance',
+      });
+      expect(await isFixRound(next)).toBe(true);
+      expect(await loadFixLoopDiagnosis(next)).toMatchObject({
+        diagnosis: 'Current START defect',
+        guidance: 'Current guidance',
+      });
+      expect(await loadRecordedDiagnosisForRound(db, taskId, 1)).toEqual({
+        diagnosis: 'Current START defect',
+        guidance: 'Current guidance',
+      });
+    },
+  );
   it('reuses the revise decision when spec-gate revise preceded the first span entry', async () => {
     await pinFixTarget();
     const revise = await enterRound(1, false);
@@ -403,6 +512,40 @@ describe.skipIf(!url)('durable guard decisions on Postgres', () => {
       expect(evaluate).toHaveBeenCalledTimes(baselineCalls + 1);
       expect((await row('work'))!.guardState).toEqual(parent);
       expect((await row('cleanup'))!.guardState).toEqual(original);
+    },
+  );
+  it.each([true, false])(
+    'refuses a reset named requiresSpan dependency without writes (%s)',
+    async (run) => {
+      await pinFixTarget(true);
+      evaluate.mockResolvedValue(run);
+      await evaluateGuardDecision(ctx, 'work', predicates);
+      await db
+        .update(schema.tasks)
+        .set({ currentStepId: 'cleanup' })
+        .where(eq(schema.tasks.id, taskId));
+      const baseline = await evaluateGuardDecision(
+        { ...ctx, taskStepId: rows.cleanup!.id },
+        'cleanup',
+        predicates,
+      );
+      expect(baseline!.required!.stepRowId).toBe(rows.work!.id);
+      // Explicit reset invalidates the exact row the dependent's saved decision names.
+      await db
+        .update(schema.taskSteps)
+        .set({ guardState: null, rerunGeneration: 1 })
+        .where(eq(schema.taskSteps.id, rows.work!.id));
+      const fix = await enterRound(1, true, 'cleanup');
+      evaluate.mockClear();
+      const before = await snapshot();
+      await expect(evaluateGuardDecision(fix, 'cleanup', predicates)).rejects.toMatchObject({
+        name: 'GuardDecisionError',
+        code: 'guard-decision-invalid',
+        reason: 'fix-round-decision-unavailable',
+      });
+      expect(evaluate).not.toHaveBeenCalled();
+      expect(await snapshot()).toEqual(before);
+      await assertLocksReleased();
     },
   );
   it('serializes duplicate advances and replays after an acknowledgement loss or epoch recovery', async () => {

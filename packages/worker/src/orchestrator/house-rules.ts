@@ -45,7 +45,9 @@ export function houseRulesFor(
   namedText?: string,
   pinnedFixConsumer = false,
 ): HouseRulesRequest | undefined {
-  if (pinnedFixConsumer && parseStepId(stepId)?.kind === 'module') return { mode: 'write' };
+  if (pinnedFixConsumer && parseStepId(stepId)?.kind === 'module') {
+    return capabilities?.includes('file_write') ? { mode: 'write' } : undefined;
+  }
   if (parseStepId(stepId)?.kind === 'custom') {
     if (!capabilities?.includes('file_write')) return undefined;
     return namedText === undefined ? { mode: 'write' } : { mode: 'write', namedText };

@@ -1969,6 +1969,7 @@ describe('fix-loop guidance', () => {
     ): Promise<Record<string, unknown>> => {
       const rows: { payload: Record<string, unknown> }[] = [];
       const db = {
+        query: { taskEvents: { findFirst: async () => undefined } },
         insert: () => ({
           values: async (v: { payload: Record<string, unknown> }) => void rows.push(v),
         }),

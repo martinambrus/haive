@@ -92,12 +92,16 @@ function fakeDb(world: World, writes: string[] = []): Database {
       taskSteps: { findFirst: async () => world.step },
       taskTypeDefinitions: { findFirst: async () => undefined },
     },
-    select: () => ({
+    select: (fields?: Record<string, unknown>) => ({
       from: () => ({
         where: () => ({
           orderBy: async () => rows(),
           then: (ok: (r: unknown) => unknown, err?: (e: unknown) => unknown) =>
-            Promise.resolve(rows()).then(ok, err),
+            Promise.resolve(
+              fields && 'round' in fields
+                ? rows().map((e) => ({ round: e.payload.round }))
+                : rows(),
+            ).then(ok, err),
         }),
       }),
     }),

@@ -1,6 +1,6 @@
 import { readStepRole, STEP_ROLES } from '@haive/shared/step-outputs';
 import { loadRoleTaskPin } from '../../role-task-pin.js';
-import { and, desc, eq } from 'drizzle-orm';
+import { and, desc, eq, sql } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
 import { FIX_LOOP_ACTION_FIELD, type FormSchema } from '@haive/shared';
 import { fenceOpener, scanFences } from '@haive/shared/markdown-fences';
@@ -425,6 +425,15 @@ export async function recordFixLoopRequest(
   sourceTaskStepId: string,
   req: FixLoopRequest,
 ): Promise<void> {
+  // task.running is stamped once per claimed START. Recovery changes epochs, not this identity.
+  const start = await db.query.taskEvents.findFirst({
+    where: and(
+      eq(schema.taskEvents.taskId, taskId),
+      eq(schema.taskEvents.eventType, 'task.running'),
+    ),
+    columns: { id: true },
+    orderBy: [desc(schema.taskEvents.createdAt), desc(schema.taskEvents.id)],
+  });
   const { guidance, unfencedLegacy, ...rest } = req;
   await db.insert(schema.taskEvents).values({
     taskId,
@@ -432,6 +441,7 @@ export async function recordFixLoopRequest(
     eventType: FIX_LOOP_REQUESTED,
     payload: {
       ...rest,
+      startEventId: start?.id ?? null,
       ...(guidance?.trim() ? { guidance } : {}),
       ...(HUMAN_REJECT_SOURCES.has(req.sourceStepId) && !unfencedLegacy
         ? { machineFenced: true }
@@ -476,6 +486,7 @@ export async function loadRecordedDiagnosisForRound(
       and(
         eq(schema.taskEvents.taskId, taskId),
         eq(schema.taskEvents.eventType, FIX_LOOP_REQUESTED),
+        currentStartFixRequest(taskId),
       ),
     )
     .orderBy(desc(schema.taskEvents.createdAt));
@@ -640,6 +651,7 @@ export async function loadFixLoopDiagnosis(ctx: StepContext): Promise<{
       and(
         eq(schema.taskEvents.taskId, ctx.taskId),
         eq(schema.taskEvents.eventType, FIX_LOOP_REQUESTED),
+        currentStartFixRequest(ctx.taskId),
       ),
     )
     .orderBy(desc(schema.taskEvents.createdAt));
@@ -754,12 +766,25 @@ export function repeatedFlagLines(
   ];
 }
 
+/** Match the current START identity; legacy unstamped requests keep their unscoped fallback.
+ * This is shared by 07 and the guard baseline reader inside its held transaction. */
+export function currentStartFixRequest(taskId: string) {
+  return sql`(${schema.taskEvents.payload}->>'startEventId' IS NOT DISTINCT FROM (
+    SELECT start.id::text FROM ${schema.taskEvents} AS start
+    WHERE start.task_id = ${taskId} AND start.event_type = 'task.running'
+    ORDER BY start.created_at DESC, start.id DESC LIMIT 1
+  ) OR ${schema.taskEvents.payload}->>'startEventId' IS NULL)`;
+}
+
 /** Was THIS round entered by the fix loop?
  *
  *  `ctx.round` alone cannot answer it: the counter is shared with the revise loop, which forks a
  *  round forward on a human gate-1 spec reject (task-queue.ts, case 'revise') without any fix
- *  having been requested. The presence of a recorded request is the invariant — every path that
- *  re-enters the implementation step records one at the target round first: the normal loop_back,
+ *  having been requested. A recorded request for this round must belong to the current START:
+ *  its startEventId matches the latest task.running id. Legacy requests without that stamp
+ *  (missing or null) keep the old unscoped fallback, even with multiple START markers, so a
+ *  deploy cannot strand an in-flight fix round. Every path that re-enters implementation
+ *  records a request at the target round first: the normal loop_back,
  *  the oscillation gate, the round-cap escalation (recorded up front so Continue can re-enter),
  *  and restartLoop, which returns loop_back too. The round-cap counter already keys on the events
  *  rather than the number for the same reason.
@@ -769,15 +794,16 @@ export function repeatedFlagLines(
 export async function isFixRound(ctx: StepContext): Promise<boolean> {
   if (ctx.round <= 0) return false;
   const rows = await ctx.db
-    .select({ payload: schema.taskEvents.payload })
+    .select({ round: sql<unknown>`${schema.taskEvents.payload}->'round'` })
     .from(schema.taskEvents)
     .where(
       and(
         eq(schema.taskEvents.taskId, ctx.taskId),
         eq(schema.taskEvents.eventType, FIX_LOOP_REQUESTED),
+        currentStartFixRequest(ctx.taskId),
       ),
     );
-  return rows.some((r) => (r.payload as { round?: number } | null)?.round === ctx.round);
+  return rows.some((r) => r.round === ctx.round);
 }
 
 /** Source steps whose fix-loop diagnoses are OBJECTIVE/runtime failures the implementation

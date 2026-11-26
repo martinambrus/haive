@@ -12,6 +12,8 @@ vi.mock('./_app-runtime.js', async (importOriginal) => ({
 }));
 
 import { schema } from '@haive/database';
+import { PgDialect } from 'drizzle-orm/pg-core';
+import { isPinnedFixRepair } from '../../fix-consumer.js';
 import { TaskCancelledError, type StepContext } from '../../step-definition.js';
 import { UNTRUSTED_CLOSE, UNTRUSTED_OPEN } from '../_untrusted-repo.js';
 import {
@@ -597,9 +599,7 @@ describe('phase2ImplementStep same-check repeat in the form', () => {
 // a human had rejected the spec at gate 1 (task ef954a3d).
 function shouldRunDb(mode: string | null, requestedRounds: FixRequest[]) {
   const stepRows = mode === null ? [] : [{ detectOutput: null, output: { mode }, iterations: [] }];
-  const eventRows = requestedRounds.map((r) => ({
-    payload: { round: r.round, diagnosis: r.diagnosis ?? 'tests failed' },
-  }));
+  const eventRows = requestedRounds.map((r) => ({ round: r.round }));
   let rows: unknown[] = stepRows;
   const chain: Record<string, unknown> = {};
   Object.assign(chain, {
@@ -636,6 +636,41 @@ describe('07 shouldRun', () => {
     expect(
       await phase2ImplementStep.shouldRun!(shouldRunCtx('dag', 4, [{ round: 2 }, { round: 4 }])),
     ).toBe(true);
+  });
+
+  it('runs 07 and the pinned consumer for a legacy fix request on a two-START task', async () => {
+    // SQL filtering is exercised by the gated PostgreSQL control. At this unit seam,
+    // both callers must use the legacy fallback without a START-count restriction.
+    const ctx = shouldRunCtx('dag', 1, [{ round: 1 }]);
+    const chain = ctx.db as unknown as Record<string, unknown>;
+    const where = vi.fn((condition: Parameters<PgDialect['sqlToQuery']>[0]) => {
+      const query = new PgDialect().sqlToQuery(condition).sql;
+      if (query.includes('startEventId')) {
+        expect(query).toContain("->>'startEventId' IS NULL");
+        expect(query).not.toContain('OFFSET 1');
+      }
+      return chain;
+    });
+    chain.where = where;
+    const id = 'module.fx.repair';
+    chain.query = {
+      tasks: {
+        findFirst: async () => ({
+          executionContract: {
+            version: 1,
+            guardedSpans: [],
+            fixTarget: { stepId: id, capabilityVersion: 1 },
+          },
+        }),
+      },
+    };
+    const def = {
+      metadata: { id },
+      fixConsumer: { version: 1 },
+    } as unknown as import('@haive/shared/step').StepDefinition;
+    expect(await phase2ImplementStep.shouldRun!(ctx)).toBe(true);
+    expect(await isPinnedFixRepair(ctx, def)).toBe(true);
+    expect(where).toHaveBeenCalledTimes(3); // mode, 07's round, consumer's round
   });
 
   it('still skips a DAG round the REVISE loop forked — no fix was requested for it', async () => {

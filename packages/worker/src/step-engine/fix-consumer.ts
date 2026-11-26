@@ -58,9 +58,9 @@ export function resolvePinnedFixConsumer(
 
 /** Why this worker cannot run the fix target a task pinned, or null when it can or the task pins
  *  none. A target that is not on the task's pinned run list can never be routed. A registered one
- *  must be a capable module step at the pinned version. An unregistered one is left to the
- *  unresolved-step check, so a missing module keeps that path's wording. A malformed contract
- *  throws, it is never read as no target. */
+ *  must be a capable module step at the pinned version. This helper returns null for an
+ *  unregistered target; deadTaskResolution's execution-contract fence runs first and refuses it
+ *  before unresolved-step checks. A malformed contract throws, never read as no target. */
 export function unsupportedPinnedFixTarget(
   task: {
     executionContract?: unknown;
@@ -75,7 +75,10 @@ export function unsupportedPinnedFixTarget(
   const runList = pinnedTaskStepIds(task);
   if (runList !== null && !runList.includes(target.stepId))
     return `the pinned fix target ${target.stepId} is not in the run list of this task`;
-  if (!registry.get(target.stepId)) return null;
+  const def = registry.get(target.stepId);
+  if (!def) return null;
+  if (def.fixConsumer !== undefined && def.agentMining !== undefined)
+    return `the pinned fix target ${target.stepId} uses fan-out, which cannot capture repair evidence`;
   return resolvePinnedFixConsumer(target, registry).ok
     ? null
     : `the pinned fix target ${target.stepId} is not a registered module step with fix consumer version ${target.capabilityVersion} on this worker`;

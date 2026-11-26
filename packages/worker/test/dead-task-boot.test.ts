@@ -960,7 +960,7 @@ describe.skipIf(!url)('dead tasks at worker boot, on Postgres', () => {
     const SUPPORTED = { version: 1, guardedSpans: [gspan()] };
     const UNSUPPORTED: [string, unknown, Partial<typeof schema.tasks.$inferInsert>][] = [
       [
-        'a custom fix target',
+        'a core fix target',
         { version: 1, guardedSpans: [], fixTarget: { stepId: A, capabilityVersion: 1 } },
         {},
       ],

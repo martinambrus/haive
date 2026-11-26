@@ -60,7 +60,7 @@ interface MockDbOptions {
 function makeMockDb(state: MockState, opts: MockDbOptions = {}, inTransaction = false): Database {
   let nextId = 1;
   const db = {
-    select: () => ({
+    select: (fields?: Record<string, unknown>) => ({
       from: (table: unknown) => {
         const tableName = tableNameOf(table);
         // Every row of the table, for the un-limited/un-ordered form of the query.
@@ -68,7 +68,9 @@ function makeMockDb(state: MockState, opts: MockDbOptions = {}, inTransaction = 
           tableName === 'task_steps' && state.taskStepRow.id
             ? [state.taskStepRow]
             : tableName === 'task_events'
-              ? (state.requests ?? [])
+              ? (state.requests ?? []).map((e) =>
+                  fields && 'round' in fields ? { round: e.payload.round } : e,
+                )
               : tableName === 'tasks'
                 ? [{ executionContract: state.executionContract ?? null }]
                 : [];

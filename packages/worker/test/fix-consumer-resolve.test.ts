@@ -177,7 +177,7 @@ describe('resolveFixLoopTarget with a pinned fix target', () => {
     const fanOut = { ...def(MODULE_TARGET, { version: 1 }), agentMining: {} } as StepDefinition;
     expect(
       resolveFixLoopTarget(args({ registry: registryOf([fanOut]), runList: [fanOut] })),
-    ).toEqual({ ok: false, reason: notCapable(MODULE_TARGET) });
+    ).toEqual({ ok: false, reason: expect.stringContaining('fan-out') });
   });
 
   it('refuses a core step id even when the registry marks it capable', () => {

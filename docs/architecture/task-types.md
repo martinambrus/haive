@@ -1004,7 +1004,8 @@ pin with a fix target on a fix round: there the span reuses the persisted decisi
 not itself a fix round and holds a decision for that span, and never evaluates the predicate again. A `requiresSpan` dependency or a shared predicate's source is read at the row the reused decision names, not at its own baseline, so the reused decision's own references always come from one consistent round; a named row that was reset or no longer holds that decision is refused. The dependency span itself, when the fix round reaches it, still reuses its own latest decision, so after a revise round that flipped it the two spans may act on different rounds' results; that pairing is accepted rather than refused, since refusing it would strand the task. With no revise round between, that is round 0, the owner's decision of 2026-11-22
 (item d). After a revise round it is that round's decision, since the fix round repairs what the revise round ran;
 round 0 may hold no decision at all when a spec gate forked the round before the span was reached. A fix round is one
-with a `fix_loop.requested` event for its number, read inside the held transaction (a restartLoop round records one, a
+with a `fix_loop.requested` event of the current START for its number (see [Fix loop](fix-loop.md); a request recorded
+before requests were stamped counts under any START), read inside the held transaction (a restartLoop round records one, a
 revise round does not, so a revise round evaluates as a pin without a fix target does). The reused copy binds to the
 current round's entry row and generation; its references keep pointing at the source round's rows. No earlier decision,
 or a stale or malformed one, fails closed with `fix-round-decision-unavailable` (the underlying reason is logged), and a
