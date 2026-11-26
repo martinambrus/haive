@@ -1371,7 +1371,13 @@ the decision with a closed reason: `run_list`, `providers`, or none when adopted
 repeated inside the transaction that inserts and links the row, under the task row lock (see Provider
 lock), from the task row's CLI read under it. A task with no own CLI uses the oldest enabled provider
 among the provider rows that decision reads (`composedLspAdoptable`), never the CLI resolved when
-the step started: provider rows are written without the task lock, so that value can be stale. A choice, default CLI or provider change that landed in between demotes the new row to the legacy variant, stored without the key, and the log says so. Apply also refreshes LSP capability (`cliSupportsLsp`) from the task's current CLI, resolving a null own CLI to the oldest enabled provider, rather than trusting the flag detect computed; so a task with no own CLI can adopt composed LSP at apply although detect hid the LSP section, which is the null-as-default contract `composedLspAdoptable` already follows. Replacement re-evaluates capability the same way under the task lock.
+the step started: provider rows are written without the task lock, so that value can be stale. A
+choice, default CLI or provider change that landed in between demotes the new row to the legacy
+variant, stored without the key, and the log says so. Apply also refreshes LSP capability
+(`cliSupportsLsp`) from the task row and provider rows it reads at apply time (a null own CLI
+resolves to the oldest enabled provider, as at detect), rather than trusting the flag detect
+computed, so a default or provider change after detect is honoured. Replacement re-evaluates
+capability the same way under the task lock.
 
 Replacing a legacy template. A task linked to a stored absent/1 template (it ticked the opt-out,
 or it was created while adoption was off) can move to 2 from step 01's visible form. The checkbox
@@ -1455,7 +1461,13 @@ provider the dispatch goes on with and the pick it skipped, the disabled provide
 lock's refusal. `resolveDispatch` and `providerHoldFor` (`task-queue.ts`) both call it, so the hold
 parks on the provider the dispatcher would refuse, never on a saved pick it skips. The hold reads
 the lock's set (`lspDispatchState`) only when `savedPreference` is set, since only a saved pick can
-be skipped. The persona pin check (`personaProviderNameFor`, `task-queue.ts`) asks the same function, so it names the substitute that will run, for an enabled and a disabled saved pick alike. The api readers parse the retained image references with the shared parser (`@haive/shared` `composed-image-references`); a task whose `composedLspImageRefs` pin is malformed is logged by id only and left on its pre-lock view in the listing, the step cards and the disable preview, so it can still be opened and stopped. Dispatch stays strict and refuses it.
+be skipped. The persona pin check (`personaProviderNameFor`, `task-queue.ts`) asks the same
+function, so on a composed task it names the substitute that will run, for an enabled and a disabled
+saved pick alike. The api readers parse the retained image references with the shared parser
+(`@haive/shared` `composed-image-references`); a task whose `composedLspImageRefs` pin is malformed
+is logged by id only and left on its pre-lock view in the listing, the task detail, the step cards
+and the disable preview, so it can still be opened and stopped. Dispatch stays strict and refuses
+it.
 
 The rule and what it guards change in different transactions, so one lock orders them: the task row,
 taken `FOR NO KEY UPDATE` by `lockTaskForComposedLsp` (`@haive/shared/composed-lsp-provider-lock`).
