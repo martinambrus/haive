@@ -39,11 +39,11 @@ that proves it. An assertion on elapsed wall time ("finished within 800 ms") is 
 loaded runner. Assert the order of events or the timer that was armed instead.
 
 A fake server must answer the way the code under test treats as final. postgres.js retries a closed connection
-during startup with a randomized backoff, so a listener that accepts and destroys the socket turns one dial into
+during startup with a randomized backoff, so a listener that accepts and destroys the socket can turn one dial into
 several over seconds (`rag-connection-guard.test.ts` timed out that way); answer with a terminal PostgreSQL error
 such as `28P01` and assert the number of dials. In an e2e spec, a rich-text editor's deferred autofocus can collapse
-a selection made before it lands: wait for the editor to have focus, then clear it, and assert it is empty before
-saving (`global-kb-edit.spec.ts`).
+a native DOM selection made before it lands, so clear the editor with its own keymap (`ControlOrMeta+a`, `Delete`),
+not `fill('')`, and assert it is empty before saving (`global-kb-edit.spec.ts`).
 
 ## Fixtures are built once
 
