@@ -1222,6 +1222,25 @@ In `martinambrus/haive-module-translator`. The owner's English-to-Slovak run fai
 
 1. Accept a declined form (same stem, up to 2 trailing letters changed on words of 5+ letters) at every keep-term check; a translated name still fails; codes and short words stay exact. Then the owner Retries the step.
 
+### T775 · Step terminal runs carry a title saying what each run did
+
+status: open, design pending owner confirmation · kind: ux · found: owner task ae8fb29c 2026-11-26 · priority: P2
+
+Runs of a single-agent step show only "Run 1", "Run 2" (`web/src/components/terminal/StepTerminal.tsx:295`). `cli_invocations.agent_title` already exists and the terminal header shows it, but only loop roles, mining agents and step summaries set it; a module's pre-form dispatch cannot.
+
+1. Host: an optional run title from the step's llm phase (computed host-side from detection, bounded, plain text), stored in `agent_title`; no change for steps that do not supply one.
+2. Translator: titles such as "Review, part 3 of 12", "Re-review after corrections, part 1", "Translate (accuracy), part 3 of 12". No source or reply text in a title.
+
+### T774 · Translator review: an ignored correction stays ignored; explicit "later"
+
+status: open, design pending owner confirmation · kind: ux · found: owner task ae8fb29c 2026-11-26 · priority: P1
+
+Unticked corrections are recorded as rejected, but every re-review of a unit stores its corrections as new proposals with no comparison to earlier decisions, so a rejected correction returns whenever its unit is reviewed again (ae8fb29c: 17 proposals, 17 distinct fingerprints; unit 1 block b3 proposed twice, b8 four times as reworded variants, so an exact-fingerprint match would not catch them).
+
+1. Per correction: Apply, Ignore (never), Later (kept, does not block applying the rest, shown again on a later page).
+2. A new proposal overlapping an ignored span in a block whose text is unchanged since the ignore is recorded as ignored automatically and not shown; a changed block shows new proposals again.
+3. The step summary and output say how many corrections were ignored or left for later.
+
 ### T773 · Translator review: finish without more calls, keeping the current text
 
 status: open, in work (module branch `feat/review-finish-waiver` on T772's PR D); plan approved 2026-11-26 (`docs/plans/translator-review-continuation.md` PR E, after T772's PR D) · kind: feature · found: owner decision 2026-11-26 · priority: P2
