@@ -1244,7 +1244,7 @@ status: open, plan approved 2026-11-26 (`docs/plans/translator-review-continuati
 
 ### T771 · Translator review: ticked corrections continue without a Retry stop
 
-status: open, plan approved 2026-11-26 (`docs/plans/translator-review-continuation.md` PRs A1, C); host A1 merged #1348 f8f350fe1 and live; module PR C in work · kind: ux · found: owner task ae8fb29c 2026-11-26 · priority: P2
+status: open, plan approved 2026-11-26 (`docs/plans/translator-review-continuation.md` PRs A1, C); host A1 merged #1348 f8f350fe1 and live (a crash between saving a held pre-form schema and its park re-prepares; fixed in #1349 b045dde91); module PR C is #22, deploy together with T772's PR D · kind: ux · found: owner task ae8fb29c 2026-11-26 · priority: P2
 
 OWNER DECISION 2026-11-26: submitting the correction form continues on its own. When applied corrections change text around other units, `tr-review` reopens with a form whose only action is Retry (`buildRetry`, `submitAction: 'retry'`), and Retry is the button a failed step shows. The ticks are the consent to the re-review cost; Retry stays for failures. Nothing ticked already finishes the step.
 
