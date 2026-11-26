@@ -1,5 +1,6 @@
 import {
   pgTable,
+  primaryKey,
   uuid,
   text,
   varchar,
@@ -296,6 +297,14 @@ export const repositories = pgTable(
     refreshPending: boolean('refresh_pending').notNull().default(false),
     /** BullMQ job owning refreshPending; only that job may clear it. LAST for migration parity. */
     refreshJobId: text('refresh_job_id'),
+    /** One-time legacy inode-alias repair. LAST for migration column-order parity. */
+    worktreeAliasesSweptAt: timestamp('worktree_aliases_swept_at'),
+    /** Bounded discovery cursor; its inode names live in worktree_alias_names. LAST for parity. */
+    worktreeAliasScan: jsonb('worktree_alias_scan').$type<{
+      cursor: string;
+      examined: number;
+      complete: boolean;
+    }>(),
   },
   (table) => [
     index('repositories_user_id_idx').on(table.userId),
@@ -493,3 +502,17 @@ export const repoCredentialsRelations = relations(repoCredentials, ({ one, many 
 export const repoUploadsRelations = relations(repoUploads, ({ one }) => ({
   user: one(users, { fields: [repoUploads.userId], references: [users.id] }),
 }));
+
+/** Sparse discovery journal: only multiply-linked names are recorded, at most the sweep's cap. */
+export const worktreeAliasNames = pgTable(
+  'worktree_alias_names',
+  {
+    repositoryId: uuid('repository_id')
+      .notNull()
+      .references(() => repositories.id, { onDelete: 'cascade' }),
+    path: text('path').notNull(),
+    dev: text('dev').notNull(),
+    ino: text('ino').notNull(),
+  },
+  (table) => [primaryKey({ columns: [table.repositoryId, table.path] })],
+);

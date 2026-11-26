@@ -1,4 +1,4 @@
-import { lstat, mkdir, mkdtemp, readdir, rm, symlink, writeFile } from 'node:fs/promises';
+import { link, lstat, mkdir, mkdtemp, readdir, rm, symlink, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { afterAll, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -14,6 +14,8 @@ vi.mock('@haive/shared/fs-safe', async (importOriginal) => {
 // fixture root has to exist and be exported before the modules are pulled in.
 const storageRoot = await mkdtemp(path.join(os.tmpdir(), 'haive-worktrees-boundary-'));
 process.env.REPO_STORAGE_ROOT = storageRoot;
+
+const { writeFileNoFollow } = await import('@haive/shared/fs-safe');
 
 const { worktreesBoundary } = await import('../src/queues/cli-exec/worktrees-boundary.js');
 
@@ -197,5 +199,31 @@ describe('worktreesBoundary: what it refuses', () => {
     await expect(worktreesBoundary(rootMount, root)).rejects.toThrow(/is not a directory/);
     await expect(lstat(repoDir)).rejects.toMatchObject({ code: 'ENOENT' });
     expect(ensureDir).not.toHaveBeenCalled();
+  });
+});
+
+// T308: plant before preparing #800's mounts, as on an upgraded installation.
+describe('legacy hard-link aliases', () => {
+  it('isolates a task file from a host in-place write through the writable checkout', async () => {
+    const protectedRel = `${WORKTREE_REL}/source.ts`;
+    await writeFile(path.join(repoDir, protectedRel), 'original');
+    await link(path.join(repoDir, protectedRel), path.join(repoDir, 'legacy-alias.ts'));
+    const before = await lstat(path.join(repoDir, protectedRel), { bigint: true });
+    expect(before.nlink).toBe(2n);
+    expect((await lstat(path.join(repoDir, 'legacy-alias.ts'), { bigint: true })).ino).toBe(
+      before.ino,
+    );
+
+    // The background repair runs once; the invocation boundary still performs no full walk.
+    const { sweepWorktreeAliases } = await import('../src/repo/worktree-alias-sweep.js');
+    for await (const _ of sweepWorktreeAliases(repoDir)) {
+      /* drain owned fixture */
+    }
+    expect(await worktreesBoundary(rootMount, root)).toEqual(rootMounts);
+    await writeFileNoFollow(repoDir, 'legacy-alias.ts', 'changed through alias', {
+      mode: 'overwrite-in-place',
+    });
+    const { readTextNoFollow } = await import('@haive/shared/fs-safe');
+    expect(await readTextNoFollow(repoDir, protectedRel)).toBe('original');
   });
 });

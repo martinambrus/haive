@@ -677,6 +677,7 @@ jobs:
           worker test/dead-task-boot.test.ts DEAD_TASK_BOOT_TEST_URL dead_task_boot_test pg
           worker test/custom-fix-recovery-db.test.ts CUSTOM_FIX_RECOVERY_TEST_URL custom_fix_recovery_test pg
           worker test/fix-round-cli-db.test.ts FIX_ROUND_CLI_TEST_URL fix_round_cli_test pg
+          worker test/worktree-alias-sweep-db.test.ts WORKTREE_ALIAS_TEST_URL worktree_alias_test pg
           worker test/upload-reaper-db.test.ts UPLOAD_REAPER_TEST_URL upload_reaper_test pg
           worker test/step-row-lock-order-db.test.ts WORKER_STEP_ROW_LOCK_ORDER_TEST_URL worker_step_row_lock_order_test pg
           worker test/credential-refresh-lock-order-db.test.ts CREDENTIAL_REFRESH_LOCK_ORDER_TEST_URL credential_refresh_lock_order_test pg

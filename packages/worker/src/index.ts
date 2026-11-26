@@ -1,4 +1,5 @@
 import './fs-recovery.js';
+import { WorktreeAliasSweeper, worktreeAliasStore } from './repo/worktree-alias-background.js';
 import { reapPlanChatSnapshotsAtBoot } from './plan/chat-snapshot.js';
 import { finalizeModuleDrains } from '@haive/shared/modularity-server';
 import { logger, configService, CONFIG_KEYS, retryWhileConfigUnavailable } from '@haive/shared';
@@ -330,6 +331,11 @@ async function main(): Promise<void> {
   moduleJobsScheduler.start();
   const stopModuleActivationWatch = startModuleActivationWatch(() => moduleJobsScheduler.request());
 
+  const worktreeAliasSweeper = new WorktreeAliasSweeper(
+    worktreeAliasStore(getDb(), repoStoragePath),
+  );
+  worktreeAliasSweeper.start();
+
   logger.info('haive-worker ready');
   const stopBackgroundDataMigrations = startBackgroundDataMigrations(getDb());
 
@@ -359,6 +365,7 @@ async function main(): Promise<void> {
       terminalManager.stop().catch((err) => {
         logger.warn({ err }, 'terminal manager stop failed');
       }),
+      worktreeAliasSweeper.stop(),
     ]);
     await Promise.allSettled([
       repoWorker.close(true),

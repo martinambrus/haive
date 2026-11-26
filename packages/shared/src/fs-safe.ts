@@ -499,6 +499,10 @@ export async function readTextNoFollow(
 }
 
 export interface ReadDirOptions extends StrictOption {
+  /** Worker migration: recover old parks, and refuse a still-live/interrupted park. */
+  recoverParks?: boolean;
+  /** Refuse undecodable raw names; requires maxEntries to keep the listing bounded. */
+  strictNames?: boolean;
   /** Bound allocation by iterating the held directory. Exceeding the cap refuses the whole
    * listing (EDIRENTRYLIMIT when strict, null otherwise), never returns an incomplete prefix. */
   maxEntries?: number;
@@ -513,6 +517,8 @@ export async function readdirNoFollow(
   opts: ReadDirOptions = {},
 ): Promise<Dirent[] | null> {
   const safe = toSafeRel(relDir);
+  if (opts.strictNames && opts.maxEntries === undefined)
+    throw new RangeError('strictNames requires maxEntries');
   if (
     opts.maxEntries !== undefined &&
     (!Number.isSafeInteger(opts.maxEntries) || opts.maxEntries < 0)
@@ -526,7 +532,11 @@ export async function readdirNoFollow(
       try {
         if (opts.maxEntries !== undefined) {
           const entries: Dirent[] = [];
-          const listing = await opendir(fdPath(dir.fh.fd), { bufferSize: 32 });
+          // latin1 preserves every raw filename byte, unlike UTF-8's replacement decoding.
+          const listing = await opendir(fdPath(dir.fh.fd), {
+            bufferSize: 32,
+            encoding: opts.strictNames ? 'latin1' : 'utf8',
+          });
           // The async iterator closes the listing on completion, early return, or throw.
           for await (const entry of listing) {
             if (entries.length === opts.maxEntries) {
@@ -535,7 +545,44 @@ export async function readdirNoFollow(
                 { code: 'EDIRENTRYLIMIT' },
               );
             }
+            if (opts.strictNames) {
+              const decoded = decodeUtf8Strict(Buffer.from(entry.name, 'latin1'));
+              if (decoded === null) throw new NotUtf8Error(safe);
+              entry.name = decoded;
+            }
             entries.push(entry);
+          }
+          if (opts.recoverParks) {
+            const parks = entries.filter(
+              (entry) =>
+                PARK_NAME.test(entry.name) ||
+                ALIAS_PARK_NAME.test(
+                  entry.name.endsWith('.name') ? entry.name.slice(0, -5) : entry.name,
+                ),
+            );
+            if (parks.length > 0) {
+              const st = await dir.fh.stat({ bigint: true });
+              const key = `${st.dev}:${st.ino}`;
+              for (const entry of parks) {
+                if (
+                  ALIAS_PARK_NAME.test(
+                    entry.name.endsWith('.name') ? entry.name.slice(0, -5) : entry.name,
+                  )
+                ) {
+                  await recoverAliasPark(dir, anchor, safe, entry.name);
+                } else await recoverStalePark(dir, anchor, safe, entry.name, key);
+                const remains = await lstat(at(dir.fh.fd, entry.name)).catch((err: unknown) => {
+                  if (errno(err) === 'ENOENT') return null;
+                  throw err;
+                });
+                if (remains !== null)
+                  throw Object.assign(new Error('File park awaits recovery'), {
+                    code: 'EPARKPENDING',
+                  });
+              }
+              // Recovery can restore names. Re-open a fresh bounded listing before counting.
+              return (await readdirNoFollow(anchor, safe, { ...opts, recoverParks: false }))!;
+            }
           }
           return entries;
         }
@@ -1924,6 +1971,9 @@ type ParkedVerdict = 'remove' | 'keep' | Buffer;
  *  under NAME_MAX (255) beside the pid and uuid; a shorter leaf parks under its whole name. */
 const PARK_LEAF_MAX_BYTES = 100;
 
+const ALIAS_PARK_NAME =
+  /^\.(.+)\.haive-alias-park-([1-9][0-9]*)-([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/;
+
 const PARK_NAME =
   /^\.(.+)\.haive-park-([1-9][0-9]*)-([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/;
 
@@ -2783,4 +2833,187 @@ export async function readLinkNoFollow(
     },
     opts.rethrow,
   );
+}
+
+export const COPY_REPLACE_MAX_BYTES = 256 * 1024 * 1024;
+
+/** Detach one legacy hard-link name without writing the shared inode. The original is parked
+ * first and judged by bigint identity; publication uses an exclusive link, so a concurrent save
+ * at the public name is never overwritten. An interrupted park is recovered by the existing
+ * worker write-path recovery. Only the name in this tree is removed, never any outside alias.
+ * A changing source or an over-limit copy refuses completion instead of publishing stale bytes. */
+export async function copyReplaceFileIfIdentityNoFollow(
+  anchor: string,
+  rel: string,
+  identity: FileIdentity,
+  opts: { internalNames: number; maxBytes?: number },
+): Promise<'replaced' | 'unneeded' | 'changed' | 'absent'> {
+  const maxBytes = opts.maxBytes ?? COPY_REPLACE_MAX_BYTES;
+  if (
+    !Number.isSafeInteger(opts.internalNames) ||
+    opts.internalNames < 1 ||
+    !Number.isSafeInteger(maxBytes) ||
+    maxBytes < 0
+  )
+    throw new RangeError('Invalid copy limits');
+  const safe = toSafeRel(rel);
+  const segs = segments(safe);
+  const leaf = segs.pop();
+  if (!leaf) throw new PathContainmentError('invalid-path', anchor, rel, rel);
+  const dir = await walkDir(anchor, safe, segs);
+  const parked = `.${parkLeaf(leaf)}.haive-alias-park-${process.pid}-${randomUUID()}`;
+  const tmp = `.${parkLeaf(leaf)}.haive-tmp-${process.pid}-${randomUUID()}`;
+  let original: FileHandle | undefined;
+  let copy: FileHandle | undefined;
+  let parkedRemains = false;
+  let tempExists = false;
+  let nameRecord = false;
+  let published = false;
+  const restore = async (cause?: unknown) => {
+    try {
+      await assertHeldAt(dir.fh, dir.real, anchor, safe, segs.join('/'));
+      await restoreNoReplace(dir, parked, leaf);
+      parkedRemains = false;
+    } catch (err) {
+      throw new ParkedFileError(safe, [...segs, parked].join('/'), errno(err), {
+        cause: cause ?? err,
+      });
+    }
+  };
+  try {
+    const before = await lstat(at(dir.fh.fd, leaf), { bigint: true }).catch((err: unknown) => {
+      if (errno(err) === 'ENOENT') return null;
+      throw err;
+    });
+    if (!before) return 'absent';
+    if (!before.isFile() || before.dev !== identity.dev || before.ino !== identity.ino)
+      return 'changed';
+    if (before.nlink <= BigInt(opts.internalNames)) return 'unneeded';
+    if (before.size > BigInt(maxBytes)) throw new RangeError('Hard-link copy exceeds byte limit');
+    // The recovery record is required for names that parkLeaf truncates.
+    if (Buffer.byteLength(leaf) >= PARK_LEAF_MAX_BYTES - 3) {
+      const record = await open(
+        at(dir.fh.fd, `${parked}.name`),
+        O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW,
+        0o600,
+      );
+      nameRecord = true;
+      try {
+        await record.writeFile(leaf);
+        await record.sync();
+      } finally {
+        await record.close();
+      }
+    }
+    await assertHeldAt(dir.fh, dir.real, anchor, safe, segs.join('/'));
+    await rename(at(dir.fh.fd, leaf), at(dir.fh.fd, parked));
+    parkedRemains = true;
+    original = await open(at(dir.fh.fd, parked), O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_NOCTTY);
+    const st = await original.stat({ bigint: true });
+    if (!st.isFile() || st.dev !== identity.dev || st.ino !== identity.ino) {
+      await restore();
+      return 'changed';
+    }
+    await assertHeldAt(original, below(dir.real, parked), anchor, safe, safe);
+    if (st.nlink <= BigInt(opts.internalNames)) {
+      await restore();
+      return 'unneeded';
+    }
+    if (st.size > BigInt(maxBytes)) throw new RangeError('Hard-link copy exceeds byte limit');
+    copy = await open(at(dir.fh.fd, tmp), O_RDWR | O_CREAT | O_EXCL | O_NOFOLLOW, 0o600);
+    tempExists = true;
+    const buffer = Buffer.alloc(64 * 1024);
+    let position = 0;
+    while (position < Number(st.size)) {
+      const { bytesRead } = await original.read(
+        buffer,
+        0,
+        Math.min(buffer.length, Number(st.size) - position),
+        position,
+      );
+      if (!bytesRead) throw new Error('Hard-link source changed during copy');
+      let written = 0;
+      while (written < bytesRead) {
+        const result = await copy.write(buffer, written, bytesRead - written, position + written);
+        if (!result.bytesWritten) throw new Error('Hard-link copy made no progress');
+        written += result.bytesWritten;
+      }
+      position += bytesRead;
+    }
+    const after = await original.stat({ bigint: true });
+    if (after.size !== st.size || after.mtimeNs !== st.mtimeNs || after.ctimeNs !== st.ctimeNs) {
+      throw new Error('Hard-link source changed during copy');
+    }
+    await copy.chown(Number(st.uid), Number(st.gid));
+    await copy.chmod(Number(st.mode & 0o7777n));
+    await copy.utimes(Number(st.atimeNs) / 1e9, Number(st.mtimeNs) / 1e9);
+    await copy.sync();
+    await assertHeldAt(dir.fh, dir.real, anchor, safe, segs.join('/'));
+    await assertHeldAt(copy, below(dir.real, tmp), anchor, safe, safe);
+    await assertHeldAt(original, below(dir.real, parked), anchor, safe, safe);
+    const finalSource = await original.stat({ bigint: true });
+    if (
+      finalSource.size !== st.size ||
+      finalSource.mtimeNs !== st.mtimeNs ||
+      finalSource.ctimeNs !== st.ctimeNs
+    ) {
+      throw new Error('Hard-link source changed during copy');
+    }
+    await link(at(dir.fh.fd, tmp), at(dir.fh.fd, leaf));
+    published = true;
+    await unlink(at(dir.fh.fd, parked));
+    parkedRemains = false;
+    return 'replaced';
+  } catch (err) {
+    if (parkedRemains && !published) await restore(err);
+    throw err;
+  } finally {
+    await original?.close();
+    await copy?.close();
+    if (tempExists) await unlink(at(dir.fh.fd, tmp)).catch(() => undefined);
+    if (nameRecord && !parkedRemains)
+      await unlink(at(dir.fh.fd, `${parked}.name`)).catch(() => undefined);
+    await closeQuietly(dir.fh);
+  }
+}
+
+/** Alias parks belong only to the serialized one-time sweep, so its next pass can recover them
+ * immediately. If publication or another save already filled the public name, retain BOTH byte
+ * versions. The kept name becomes ordinary scan input and is detached if it still links outside. */
+async function recoverAliasPark(
+  dir: HeldDir,
+  anchor: string,
+  rel: string,
+  entry: string,
+): Promise<void> {
+  const parked = entry.endsWith('.name') ? entry.slice(0, -5) : entry;
+  const match = ALIAS_PARK_NAME.exec(parked);
+  if (!match) return;
+  const st = await lstat(at(dir.fh.fd, parked)).catch((err: unknown) => {
+    if (errno(err) === 'ENOENT') return null;
+    throw err;
+  });
+  if (st === null) {
+    if (entry.endsWith('.name'))
+      await unlink(at(dir.fh.fd, entry)).catch((err: unknown) => {
+        if (errno(err) !== 'ENOENT') throw err;
+      });
+    return;
+  }
+  if (!st.isFile()) throw new PathContainmentError('not-regular-file', anchor, rel, parked);
+  let leaf = match[1]!;
+  if (Buffer.byteLength(leaf) >= PARK_LEAF_MAX_BYTES - 3)
+    leaf = await originalParkLeaf(dir, parked, leaf, anchor, rel);
+  if (leaf === '.' || leaf === '..')
+    throw new PathContainmentError('invalid-path', anchor, rel, leaf);
+  await assertHeldAt(dir.fh, dir.real, anchor, rel, rel);
+  try {
+    await restoreNoReplace(dir, parked, leaf);
+  } catch (err) {
+    if (errno(err) !== 'EEXIST') throw err;
+    await restoreNoReplace(dir, parked, `.${parkLeaf(leaf)}.haive-alias-kept-${randomUUID()}`);
+  }
+  await unlink(at(dir.fh.fd, `${parked}.name`)).catch((err: unknown) => {
+    if (errno(err) !== 'ENOENT') throw err;
+  });
 }

@@ -1328,3 +1328,15 @@ removal is settled. Older workers do not understand staged verification phases a
 must not resume an unchecked staged move. Keep the event records. Reverting code cannot restore removed
 worktrees; retained Git commits can be checked out again from the base. No migration
 is added or reversed.
+
+## Legacy worktree alias sweep recovery
+
+The one-time background `WorktreeAliasSweeper` is independent of task jobs. Its discovery cursor
+and sparse multiply-linked-name journal commit together in Postgres (migration 0250). A replacement
+worker resumes discovery from that cursor; copying restarts discovery to recover any interrupted
+alias parks and include retained copies in its inode counts. A failed pass clears its checkpoint
+and retries after other repositories. No completion stamp is written until the scan and every
+required copy have succeeded. The stop path waits for the current bounded batch and closes the
+iterator. The dedicated park namespace permits immediate recovery by the next serialized sweep;
+ordinary fs-safe parks retain their age policy. Details and limits are in
+[Secret and git-data masking](sandbox-masking.md).

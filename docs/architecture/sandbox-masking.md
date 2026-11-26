@@ -174,12 +174,60 @@ appears inside the read-only mount. A `.haive` or `.haive/worktrees` that is a f
 refuses the run. The check and the mount are separate steps, the same window the `.haive-data`
 boundary has.
 
-The boundary does not look for hard links, unlike the `.haive-data` one. A worktree is a full
-checkout, often with `node_modules`, so an inode count over every worktree would walk tens of
-thousands of files on every root-mounted invocation. No new link can be made across the mounts
-(`Cross-device link`, the same mount shape `.haive-data` measured). A link a root-mounted agent
-planted before the boundary existed survives, though: an alias of a worktree file in the writable
-checkout stays writable.
+The boundary does not count hard links on each invocation. A worktree is a full checkout, often
+with `node_modules`. No new link can be made across the mounts (`Cross-device link`, as measured
+for `.haive-data`), but a link planted before #800 survives. T308 reproduced the current consequence
+in an owned fixture: after `worktreesBoundary` prepares its mounts, an fs-safe host in-place write
+to a checkout alias changes the task's source file too.
+
+`WorktreeAliasSweeper` now repairs managed writable repositories once in the background, starting
+with the worker and stopping with it. Read-only local-folder imports are excluded. Migration 0250
+adds the trusted `repositories.worktree_aliases_swept_at` completion stamp, the discovery cursor
+`worktree_alias_scan`, and `worktree_alias_names` (only multiply-linked names, bigint device/inode
+identities encoded as decimal text). Cursor and newly discovered names commit together. Discovery
+resumes after its committed DFS cursor; a restart during copying rediscovers the tree so any
+recovery artifacts join the count. Successful completion clears the cursor and name journal in the
+stamp's transaction. A failed scan or checkpoint never stamps completion; failed repositories rotate
+behind the others. This follows the install's existing single-worker assumption.
+
+The walker uses only fs-safe lookups and bounded listings under the repository-root anchor. It
+refuses undecodable filenames, never follows a link and never changes a name outside `.haive/worktrees`. It counts all in-tree
+names per inode and copy-replaces a name only when its current `st_nlink` exceeds the remaining
+in-tree names; internal-only aliases retain their inode. Each replacement parks and verifies the
+original by bigint identity, streams through held descriptors into a new inode, preserves owner,
+mode and mtime (microsecond precision), checks for source changes, fsyncs and publishes exclusively.
+An overlapping save at the public name is preserved. Detected moves or writes require a new scan.
+
+Alias parks use a dedicated namespace: the next serialized sweep recovers them immediately,
+restoring a missing public name. If publication or a concurrent save already filled it, the old
+bytes are retained as `.NAME.haive-alias-kept-<uuid>` and that ordinary file joins discovery and
+is detached too. Neither version is discarded. Generic fs-safe parks keep their existing recovery
+age. Retained copies can be inspected and removed by the operator after recovery.
+
+Bounds are injectable: 256 generator steps or 100 ms between operations per one-second tick, at
+most one replacement per batch, 10,000 entries per directory, 128 directory levels, 2,000,000 total
+entries, 200,000 multiply-linked names, and 256 MiB per copied file with a 64 KiB buffer. The time
+budget cannot interrupt one syscall or copy. A limit or unreadable path keeps the repository
+unfinished and logs a warning. There is no synchronous invocation gate: existing aliases remain
+reachable until that repository's sweep completes. This one-time migration does not provide an
+atomic snapshot against arbitrary concurrent filesystem writers or revoke already-open descriptors;
+run it while a legacy checkout is quiet. New cross-mount aliases remain prevented by #800.
+
+MEASURED before implementation, on an owned 50,000-file/200-package synthetic dependency tree:
+the existing held walk plus bigint lookup took 39.33 s and 39.14 s, process RSS 122 MiB. The new
+unthrottled discovery measured 35.98 s and 52.34 s (RSS 205–209 MiB, alongside unit suites); the 256-step cap alone requires at least 197 batches,
+with the 100 ms budget potentially adding batches. This is why it runs once in the background.
+A final run using the 100 ms budget took 35.33 s of processing across 352 windows (longest 106 ms,
+RSS 204 MiB), projecting about 351 s at the production tick before database overhead. These
+figures include the benchmark process, not incremental worker heap. The detailed benchmark
+and test reports are in the T308 execution evidence.
+
+Rollback: let the current batch finish and recover any pending alias parks with a compatible
+worker before removing the sweeper or its fs-safe helpers. Keep migration 0250 and its additive
+columns/table; schema rollback is roll-forward only. Detached files stay independent and need no
+undo. To request a fresh pass, stop this worker, clear this repository's stamp and cursor and delete
+its `worktree_alias_names` rows in one transaction, then start a compatible worker. Do not recreate
+the old inode aliases.
 
 Step 11 asks its agent to edit the knowledge base on every task, and a blank repository has no `knowledge_base/` by design. So in a task worktree its `prepare` creates the directory, owned like the worktree root, before the agent runs; an empty directory is never committed, so it cannot fake the marker. At the repository root (01 skipped) it creates nothing: it skips the KB-sync half and offers no local investigation (a global promotion still works), and records why in `kbSyncSkipped`.
 
