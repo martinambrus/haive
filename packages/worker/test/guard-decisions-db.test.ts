@@ -10,6 +10,8 @@ import { skipGuardSpan } from '../src/step-engine/guard-span-skip.js';
 import {
   FIX_LOOP_REQUESTED,
   isFixRound,
+  loadFixLoopDiagnosis,
+  loadRecordedDiagnosisForRound,
   recordFixLoopRequest,
 } from '../src/step-engine/steps/workflow/_fix-loop.js';
 
@@ -298,6 +300,57 @@ describe.skipIf(!url)('durable guard decisions on Postgres', () => {
         generation: 4,
       });
       expect(evaluate).toHaveBeenCalledTimes(evaluations);
+    },
+  );
+  it.each(['stamped', 'legacy', 'null-stamped'])(
+    'uses the same START scope for classification, diagnosis and gate directives (%s)',
+    async (kind) => {
+      await db.insert(schema.taskEvents).values({ taskId, eventType: 'task.running' });
+      const request = {
+        round: 1,
+        sourceStepId: 'check',
+        diagnosis: 'Earlier START defect',
+        guidance: 'Earlier guidance',
+      };
+      if (kind === 'stamped') await recordFixLoopRequest(db, taskId, rows.plan!.id, request);
+      else
+        await db.insert(schema.taskEvents).values({
+          taskId,
+          eventType: FIX_LOOP_REQUESTED,
+          payload: { ...request, ...(kind === 'null-stamped' ? { startEventId: null } : {}) },
+        });
+      const next = { ...ctx, round: 1 };
+      expect(await loadFixLoopDiagnosis(next)).toMatchObject({ diagnosis: request.diagnosis });
+      await db.insert(schema.taskEvents).values({ taskId, eventType: 'task.running' });
+      expect(await isFixRound(next)).toBe(kind !== 'stamped');
+      expect(await loadFixLoopDiagnosis(next)).toEqual(
+        kind === 'stamped'
+          ? null
+          : {
+              diagnosis: request.diagnosis,
+              guidance: request.guidance,
+              humanSourced: false,
+              marked: false,
+            },
+      );
+      expect(await loadRecordedDiagnosisForRound(db, taskId, 1)).toEqual({
+        diagnosis: kind === 'stamped' ? '' : request.diagnosis,
+        guidance: kind === 'stamped' ? '' : request.guidance,
+      });
+      await recordFixLoopRequest(db, taskId, rows.plan!.id, {
+        ...request,
+        diagnosis: 'Current START defect',
+        guidance: 'Current guidance',
+      });
+      expect(await isFixRound(next)).toBe(true);
+      expect(await loadFixLoopDiagnosis(next)).toMatchObject({
+        diagnosis: 'Current START defect',
+        guidance: 'Current guidance',
+      });
+      expect(await loadRecordedDiagnosisForRound(db, taskId, 1)).toEqual({
+        diagnosis: 'Current START defect',
+        guidance: 'Current guidance',
+      });
     },
   );
   it('reuses the revise decision when spec-gate revise preceded the first span entry', async () => {

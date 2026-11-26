@@ -486,6 +486,7 @@ export async function loadRecordedDiagnosisForRound(
       and(
         eq(schema.taskEvents.taskId, taskId),
         eq(schema.taskEvents.eventType, FIX_LOOP_REQUESTED),
+        currentStartFixRequest(taskId),
       ),
     )
     .orderBy(desc(schema.taskEvents.createdAt));
@@ -650,6 +651,7 @@ export async function loadFixLoopDiagnosis(ctx: StepContext): Promise<{
       and(
         eq(schema.taskEvents.taskId, ctx.taskId),
         eq(schema.taskEvents.eventType, FIX_LOOP_REQUESTED),
+        currentStartFixRequest(ctx.taskId),
       ),
     )
     .orderBy(desc(schema.taskEvents.createdAt));
