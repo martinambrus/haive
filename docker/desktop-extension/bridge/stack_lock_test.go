@@ -1033,3 +1033,166 @@ func TestStackLockTombRemovalFailureAfterEqualReadIsNotBusy(t *testing.T) {
 		t.Fatalf("expected the tomb left behind, got %v", tombs)
 	}
 }
+
+func TestStackLockOnlyOwnOverwriteExcusesTornRecord(t *testing.T) {
+	for _, failure := range []string{"read", "create"} {
+		t.Run(failure, func(t *testing.T) {
+			b := fixture(t)
+			b.lockCfg.beat = time.Hour
+			failWrites := false
+			b.lockCfg.write = func(f *os.File, data []byte) error {
+				if failWrites {
+					return errors.New("disk full")
+				}
+				_, err := f.Write(data)
+				return err
+			}
+			l, err := b.acquireStackLock(context.Background())
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer l.releaseLock()
+			if err := os.Remove(l.path); err != nil {
+				t.Fatal(err)
+			}
+			if failure == "read" {
+				if err := os.Mkdir(l.path, 0755); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				failWrites = true
+			}
+			if got := l.beat(); got != "error" {
+				t.Fatalf("failed %s: %s", failure, got)
+			}
+			failWrites = false
+			os.Remove(l.path)
+			partial := []byte(`{"v":1,"tok`)
+			if err := os.WriteFile(l.path, partial, 0644); err != nil {
+				t.Fatal(err)
+			}
+			if got := l.beat(); got != "lost" {
+				t.Fatalf("foreign torn record after %s: %s", failure, got)
+			}
+			if data, _ := os.ReadFile(l.path); !bytes.Equal(data, partial) {
+				t.Fatalf("foreign record overwritten: %q", data)
+			}
+		})
+	}
+}
+
+func TestStackLockTornOwnRecordExpires(t *testing.T) {
+	b := fixture(t)
+	b.lockCfg.beat = time.Hour
+	b.lockCfg.stale = 20 * time.Millisecond
+	now := time.Now()
+	b.lockCfg.now = func() time.Time { return now }
+	failWrites := false
+	b.lockCfg.write = func(f *os.File, data []byte) error {
+		if failWrites {
+			return errors.New("disk full")
+		}
+		_, err := f.Write(data)
+		return err
+	}
+	l, err := b.acquireStackLock(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.releaseLock()
+	failWrites = true
+	if got := l.beat(); got != "error" {
+		t.Fatalf("failed overwrite: %s", got)
+	}
+	now = now.Add(19 * time.Millisecond)
+	if got := l.beat(); got != "error" || l.isLost() {
+		t.Fatalf("before deadline: %s lost=%v", got, l.isLost())
+	}
+	now = now.Add(time.Millisecond)
+	failWrites = false
+	if got := l.beat(); got != "lost" || !l.isLost() {
+		t.Fatalf("at deadline: %s lost=%v", got, l.isLost())
+	}
+	if data, _ := os.ReadFile(l.path); len(data) != 0 {
+		t.Fatalf("expired torn record rewritten: %q", data)
+	}
+	if err := os.WriteFile(l.path, encodeLockRecord(l.token, l.startedAt, 1), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if got := l.beat(); got != "lost" {
+		t.Fatalf("loss not sticky: %s", got)
+	}
+	l.releaseLock()
+	if _, err := os.Stat(l.path); err != nil {
+		t.Fatalf("lost holder removed lease: %v", err)
+	}
+}
+
+func TestStackLockUnprovenBeatExpires(t *testing.T) {
+	for _, missing := range []bool{false, true} {
+		t.Run(fmt.Sprint(missing), func(t *testing.T) {
+			b := fixture(t)
+			b.lockCfg.beat = time.Hour
+			b.lockCfg.stale = 20 * time.Millisecond
+			now := time.Now()
+			b.lockCfg.now = func() time.Time { return now }
+			l, err := b.acquireStackLock(context.Background())
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer l.releaseLock()
+			if err := os.Remove(l.path); err != nil {
+				t.Fatal(err)
+			}
+			if !missing {
+				if err := os.Mkdir(l.path, 0755); err != nil {
+					t.Fatal(err)
+				}
+			}
+			now = now.Add(20 * time.Millisecond)
+			if got := l.beat(); got != "lost" || !l.isLost() {
+				t.Fatalf("unproven beat at deadline: %s lost=%v", got, l.isLost())
+			}
+			if missing {
+				if _, err := os.Stat(l.path); !os.IsNotExist(err) {
+					t.Fatalf("expired lease recreated: %v", err)
+				}
+			}
+		})
+	}
+}
+
+func TestStackLockGoodBeatRenewsDeadline(t *testing.T) {
+	b := fixture(t)
+	b.lockCfg.beat = time.Hour
+	b.lockCfg.stale = 20 * time.Millisecond
+	now := time.Now()
+	b.lockCfg.now = func() time.Time { return now }
+	failWrites := false
+	b.lockCfg.write = func(f *os.File, data []byte) error {
+		if failWrites {
+			return errors.New("disk full")
+		}
+		_, err := f.Write(data)
+		return err
+	}
+	l, err := b.acquireStackLock(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.releaseLock()
+	now = now.Add(19 * time.Millisecond)
+	if got := l.beat(); got != "ok" {
+		t.Fatalf("good beat: %s", got)
+	}
+	now = now.Add(19 * time.Millisecond)
+	failWrites = true
+	if got := l.beat(); got != "error" || l.isLost() {
+		t.Fatalf("renewed deadline not used: %s lost=%v", got, l.isLost())
+	}
+	now = now.Add(time.Millisecond)
+	failWrites = false
+	if got := l.beat(); got != "lost" {
+		t.Fatalf("renewed deadline did not expire: %s", got)
+	}
+}

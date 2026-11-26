@@ -38,6 +38,7 @@ const windowLockSuffix = ".extension-lock"
 
 // Zero values select the wire-contract defaults; the fields exist for tests.
 type lockConfig struct {
+	now               func() time.Time
 	beat, stale, poll time.Duration
 	rounds            int
 	maxBytes          int
@@ -74,6 +75,9 @@ func decodeLockRecord(data []byte) (token, holder string) {
 }
 
 func (c lockConfig) resolved() lockConfig {
+	if c.now == nil {
+		c.now = time.Now
+	}
 	if c.beat <= 0 {
 		c.beat = stackLockBeatMs * time.Millisecond
 	}
@@ -148,11 +152,12 @@ type stackLock struct {
 	cfg       lockConfig
 	b         bridge
 
-	mu       sync.Mutex
-	seq      int
-	lost     bool
-	failing  bool
-	released bool
+	mu             sync.Mutex
+	seq            int
+	lost           bool
+	ownWriteFailed bool
+	lastGood       time.Time
+	released       bool
 
 	stop    chan struct{}
 	done    chan struct{}
@@ -165,8 +170,22 @@ func (l *stackLock) isLost() bool {
 	return l.lost
 }
 
-// A failed write can leave our own record empty or partial: while a failure
-// streak is open that is not a loss. Without a streak it is.
+// Only a failed truncating overwrite can explain our own empty or partial record.
+// That exception ends at the same stale deadline a contender uses to break the lease.
+func (l *stackLock) proofExpired() bool {
+	if l.cfg.now().Sub(l.lastGood) >= l.cfg.stale {
+		l.lost = true
+	}
+	return l.lost
+}
+
+func (l *stackLock) beatFailed() string {
+	if l.proofExpired() {
+		return "lost"
+	}
+	return "error"
+}
+
 func (l *stackLock) beat() string {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -176,22 +195,24 @@ func (l *stackLock) beat() string {
 	}
 	current, err := readLockFile(l.path, l.cfg.maxBytes)
 	if errors.Is(err, fs.ErrNotExist) {
+		if l.proofExpired() {
+			return "lost"
+		}
 		// A break-then-restore leaves the name absent for a moment: take it back. A failed create
 		// (the name was taken meanwhile) is a failed beat; the next read decides.
 		if createLockFile(l.path, encodeLockRecord(l.token, l.startedAt, l.seq+1), l.cfg.write) != nil {
-			l.failing = true
-			return "error"
+			return l.beatFailed()
 		}
 		l.seq++
-		l.failing = false
+		l.ownWriteFailed = false
+		l.lastGood = l.cfg.now()
 		return "ok"
 	}
 	if err != nil {
-		l.failing = true
-		return "error"
+		return l.beatFailed()
 	}
 	token, _ := decodeLockRecord(current)
-	if token != l.token && !(l.failing && !json.Valid(current)) {
+	if token != l.token && !(l.ownWriteFailed && !json.Valid(current) && !l.proofExpired()) {
 		l.lost = true
 		return "lost"
 	}
@@ -201,13 +222,17 @@ func (l *stackLock) beat() string {
 		if closeErr := f.Close(); err == nil {
 			err = closeErr
 		}
+		// Open succeeded with O_TRUNC: a later failure may have left our bytes torn.
+		if err != nil {
+			l.ownWriteFailed = true
+		}
 	}
 	if err != nil {
-		l.failing = true
-		return "error"
+		return l.beatFailed()
 	}
 	l.seq++
-	l.failing = false
+	l.ownWriteFailed = false
+	l.lastGood = l.cfg.now()
 	return "ok"
 }
 
@@ -347,7 +372,7 @@ func (b bridge) acquireLease(ctx context.Context, path string) (*stackLock, erro
 	for round := 0; round < cfg.rounds; round++ {
 		err := createLockFile(path, encodeLockRecord(token, startedAt, 1), cfg.write)
 		if err == nil {
-			l := &stackLock{path: path, token: token, startedAt: startedAt, cfg: cfg, b: b, seq: 1,
+			l := &stackLock{path: path, token: token, startedAt: startedAt, cfg: cfg, b: b, seq: 1, lastGood: cfg.now(),
 				stop: make(chan struct{}), done: make(chan struct{})}
 			go l.heartbeat()
 			return l, nil
