@@ -851,7 +851,7 @@ status: open · kind: fix · found: translator scale and acceptance milestone 20
 
 ### T735 · Translator first paid run and its prerequisites
 
-status: open (2026-11-26: the calibration sign-off was explained to the owner: evidence, editable style JSON, quality assessment, two ticks for at most 16 translation/review calls on the 2-unit sample, then translate, review, render; waits on the owner), in work 2026-11-20 (the owner approved the first paid run and runs it, guided); UNBLOCKED by the owner 2026-11-22; item 4 done 2026-11-22 (switch ticked, free steps walked); waits on the owner's paid run (provider row, source) and quality sign-off; items 6 and 7 done 2026-11-21 · kind: feature · found: owner decisions 2026-11-20 · priority: P2
+status: open, ON HOLD by the owner 2026-11-26 until T771 and T772 ship (ae8fb29c: translate done after T768; tr-review failed on the 16-call ceiling after 4 cascading review rounds; resume testing there) (2026-11-26: the calibration sign-off was explained to the owner: evidence, editable style JSON, quality assessment, two ticks for at most 16 translation/review calls on the 2-unit sample, then translate, review, render; waits on the owner), in work 2026-11-20 (the owner approved the first paid run and runs it, guided); UNBLOCKED by the owner 2026-11-22; item 4 done 2026-11-22 (switch ticked, free steps walked); waits on the owner's paid run (provider row, source) and quality sign-off; items 6 and 7 done 2026-11-21 · kind: feature · found: owner decisions 2026-11-20 · priority: P2
 
 In `martinambrus/haive-module-translator`.
 
