@@ -156,6 +156,15 @@ describe('houseRulesFor', () => {
     ).toBeUndefined();
   });
 
+  it.each([undefined, [], ['tool_use']])(
+    'withholds pinned module write rules without file_write (%j)',
+    (capabilities) => {
+      expect(
+        houseRulesFor('module.fx.repair', 'default', undefined, capabilities, undefined, true),
+      ).toBeUndefined();
+    },
+  );
+
   it('gives an exempt or unknown (step, role) nothing', () => {
     expect(houseRulesFor('05-phase-0b5-spec-quality', 'reviewer')).toBeUndefined();
     expect(houseRulesFor('06c-dag-execute', 'reviewer')).toBeUndefined();
