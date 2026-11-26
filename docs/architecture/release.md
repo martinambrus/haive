@@ -396,7 +396,16 @@ reads still refuse key generation. The journal is created independently of migra
 
 The updater creates the journal table itself, at every start: `ensureJournal` runs
 `UPGRADE_JOURNAL_DDL`, which `@haive/database` exports once and the api's tests build the table
-from, so nothing keeps a copy of it.
+from, so nothing keeps a copy of it. That runs before the database lock, the stack lock and the child check, so
+when it cannot reach PostgreSQL (an updater killed mid-snapshot can leave it stopped) the start refuses with
+`updater-bootstrap-failed`, exit 3, before any lock and with no attempt row. The refusal names the error's code and
+tells the operator to look for and remove this install's surviving updater one-shots (labels
+`org.haive.updater.attempt` / `org.haive.updater.role`) before starting PostgreSQL again, since the child check
+that would catch a still-running volume archive cannot run without the database. Only connection-class failures,
+keyed on stable codes (`ECONNREFUSED`, `ENOTFOUND`, `EAI_AGAIN`, `ETIMEDOUT`, postgres.js `CONNECT_TIMEOUT` and
+`CONNECTION_*`, SQLSTATE class `08` and `57P0x`), become that refusal. Configuration boot runs first and keeps its
+own diagnoses (the encryption-key refusals in [Error diagnostics](error-diagnostics.md)), and any other journal
+error passes through unchanged.
 
 The API's upgrade launch commits its `maintenance.start_upgrade` row (metadata `from`, `to`,
 `force`) in its own short transaction before it starts the updater container, so no main-database
@@ -412,13 +421,13 @@ did not happen, from the admin page or from `./haive upgrade`, after the api tha
 gone. When the updater held the database and the lock, then neither created nor resumed a run, and
 the start was not `--check` or a dry plan, its last step (`recordAttempt`) writes one row with
 phase `preflight`: status `refused` with `metadata.refusal` (channel-changed,
-rollback-images-missing, install-locked, updater-child-running, updater-child-check-failed, stack-lock-unproven, a preflight refusal), or `failed` for an error. `error` is capped at 2048
-characters, `channel` is the resolved one, and an unusable `--version` is stored as `unknown`. When the
+rollback-images-missing, install-locked, updater-child-running, updater-child-check-failed, stack-lock-unproven, a preflight refusal), or `failed` for an error. `error` is capped at 2048 characters with room kept for the sentence appended below, so truncation never drops it, `channel` is the resolved one, and an unusable `--version` is stored as `unknown`. When the
 start ends before the install settings were read (`install-locked`, `install-file-linked`, a failure inside
 that read), the row records the literal `HAIVE_CHANNEL` and `HAIVE_VERSION` of `.env` instead
 (`readAttemptInstallFields`; an empty channel is `public`). A value that is absent, invalid or interpolated is
 stored as `unknown`, and a `.env` that is missing, linked, not a regular file, over 256 KiB or unparsable puts
-`not-read` in both columns; either way a sentence appended to `error` says which. The read runs without the
+`not-read` in both columns (every updater read of `.env`, this one and the version read, uses the one strict
+parser in `envkeys.ts` and reads through the held install directory, never by path); either way a sentence appended to `error` says which. The read runs without the
 stack lock in the `install-locked` case, so it shows what `.env` held at that moment. In
 the same transaction, after the insert, it deletes the attempt rows beyond the newest 50 (ordered
 `started_at DESC, id DESC`, never the row it just wrote), so repeated refusals cannot grow the
@@ -517,7 +526,8 @@ cannot be removed it refuses with `updater-child-cleanup-failed` (exit 3, the ru
 failure's code) and does not roll back, which would race the survivor: the run stays for recovery, and the next
 start's child check refuses until the container is gone. A SIGTERM to the updater removes this attempt's running
 one-shots before it releases the lock and exits 143, waiting at most `STACK_LOCK_SIGNAL_CLEANUP_TIMEOUT_MS` (5 s,
-under `docker stop`'s 10 s grace) so a hung daemon cannot keep the lock held; from the moment it starts, that attempt launches no further one-shot (`one-shot attempt is stopping`), so a later phase cannot start a child its list has already missed (one already being created when the mark lands can still survive, and the next start's check catches it); a removal that fails or overruns is
+under `docker stop`'s 10 s grace) so a hung daemon cannot keep the lock held; from the moment it starts, that attempt launches no further one-shot (`one-shot attempt is stopping`), so a later phase cannot start a child its list has already missed after removing what it listed it lists once more within the same bound and removes what the first listing missed, so only
+a child created after that second listing can survive, and the next start's check catches it; a removal that fails or overruns is
 logged and the lock still released, so the next start's check catches the survivor. A SIGTERM that lands while the
 updater is rolling back can end it mid-rollback: the run stays for recovery, and the next start reverses it, as after
 any crash. It releases the lock in `finally` on every exit path and on SIGTERM (exit 143), except after a proven loss, when release is a no-op and SIGTERM still removes only this attempt's children. That handler is new: as PID 1
