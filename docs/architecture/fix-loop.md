@@ -306,6 +306,8 @@ by PostgreSQL's full timestamp precision (the ordinary slot wins an exact tie). 
 step-card pick made after the gate replaces its override, including a disabled or deleted
 provider; an earlier card choice stays below it. A later card clear replaces it too.
 
+Accept with a next step accepts the round's open review findings in the same transaction as the gate and the pointer move (a savepoint isolates a telemetry failure), so a refused or overtaken Accept leaves them open; Accept with no next step still accepts them in a separate statement after the gate closes (see [Review findings](review-findings.md)).
+
 Reaching the round cap or the oscillation guard publishes the escalation in one transaction under the same fences and lock order: the parked gate row, the next-round request (`recordFixLoopRequest`), the `step.loop_back` event, the waiting task status and the escalation event (`fix_loop.escalated` or `fix_loop.oscillation_detected`) commit together or not at all, so a crash between them can no longer leave a parked gate with no request for Continue to read. A pass that lost the race to a Retry, Stop or another pass writes none of them.
 
 The slot expires from resolution at the next round; the row is retained, so consumed means

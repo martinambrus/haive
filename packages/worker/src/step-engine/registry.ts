@@ -1,13 +1,25 @@
 import { assertStepOutputDeclaration } from './step-output-contract.js';
 import type { StepDefinition } from './step-definition.js';
 
-/** A step id a task's data names that this install does not register: the task is dead, not failed. */
+/** A named step cannot run: the task is dead, not failed. The base error names ids this
+ *  install does not register; StepNotInRunListError also covers registered ids absent
+ *  from the task's run list, and PinnedStepSupportError covers unavailable pinned support. */
 export class UnresolvedStepError extends Error {
   readonly ids: string[];
   constructor(ids: string[]) {
     super(ids.map((id) => `Step ${id} not registered`).join('; '));
     this.name = 'UnresolvedStepError';
     this.ids = ids;
+  }
+}
+
+/** Registered, but absent from this task's run list. Keep named ids for dead-task readers. */
+export class StepNotInRunListError extends UnresolvedStepError {
+  readonly code = 'step-not-in-run-list';
+  constructor(id: string) {
+    super([id]);
+    this.name = 'StepNotInRunListError';
+    this.message = `the run list does not include the requested step: ${id}`;
   }
 }
 

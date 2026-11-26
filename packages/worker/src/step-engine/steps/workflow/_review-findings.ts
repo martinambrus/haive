@@ -2,7 +2,7 @@ import { findingFingerprint } from '@haive/shared/step/review';
 export { findingFingerprint } from '@haive/shared/step/review';
 import { and, eq, inArray, lt } from 'drizzle-orm';
 import { schema } from '@haive/database';
-import type { Database } from '@haive/database';
+import type { Database, DbTx } from '@haive/database';
 import { logger } from '@haive/shared';
 import { isCredentialCwe } from '@haive/shared/review';
 import type { ReviewSeverity } from '@haive/shared/review';
@@ -248,29 +248,36 @@ export async function dispositionReviewFindings(
  *  so a refuter's `dismissed_refuted` and a gate-1.5 `dismissed_human` both keep the more
  *  specific verdict.
  *
- *  Takes a db rather than a StepContext because its caller is the queue's gate resolver,
- *  which runs outside any step. Best-effort in the same way: never throws. */
+ *  Takes a database or transaction handle rather than a StepContext because its caller is
+ *  the queue's gate resolver, outside any step. A database handle opens a transaction;
+ *  a transaction handle opens a savepoint, so acceptance commits or rolls back with the
+ *  caller's gate decision. Statement failures roll back to that savepoint and are logged,
+ *  leaving the caller's transaction usable. Best-effort: this helper never throws; a lost
+ *  connection or commit failure can still make the caller's transaction fail. */
 export async function acceptRemainingReviewFindings(
-  db: Database,
+  db: Database | DbTx,
   taskId: string,
   round: number,
   source: string,
 ): Promise<void> {
   try {
-    await db
-      .update(schema.reviewFindings)
-      .set({
-        disposition: 'accepted_risk',
-        dispositionAt: new Date(),
-        dispositionSource: source,
-      })
-      .where(
-        and(
-          eq(schema.reviewFindings.taskId, taskId),
-          eq(schema.reviewFindings.round, round),
-          eq(schema.reviewFindings.disposition, 'open'),
-        ),
-      );
+    // Isolate a failed telemetry statement so a caller's gate transaction stays usable.
+    await db.transaction(async (tx) => {
+      await tx
+        .update(schema.reviewFindings)
+        .set({
+          disposition: 'accepted_risk',
+          dispositionAt: new Date(),
+          dispositionSource: source,
+        })
+        .where(
+          and(
+            eq(schema.reviewFindings.taskId, taskId),
+            eq(schema.reviewFindings.round, round),
+            eq(schema.reviewFindings.disposition, 'open'),
+          ),
+        );
+    });
   } catch (err) {
     log.warn(
       { err, taskId, round, source },

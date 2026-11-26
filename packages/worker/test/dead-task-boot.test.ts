@@ -47,6 +47,7 @@ import {
 import { redriveStalledTasks } from '../src/queues/stalled-redrive.js';
 import { resetStepAndDownstream } from '../src/queues/_step-reset.js';
 import type { ResolvedTaskContext } from '../src/queues/run-list.js';
+import * as runLists from '../src/queues/run-list.js';
 import type { AdvanceStepResult } from '../src/step-engine/index.js';
 import { rolePlan } from './replacement-fixtures.js';
 import { assertWorkerExecutionContractSupported } from '../src/step-engine/execution-contract-support.js';
@@ -2174,6 +2175,100 @@ describe.skipIf(!url)('dead tasks at worker boot, on Postgres', () => {
       await deliver(id);
 
       expect(await skippedEvents(id, skipped.id)).toHaveLength(2);
+    });
+  });
+
+  describe('a registered handoff target absent from the run list', () => {
+    it.each(['loop_back', 'revise', 'continue'] as const)(
+      'refuses %s with its own reason code before reset',
+      async (kind) => {
+        const sourceId = kind === 'revise' ? REVISER : REVIEW;
+        const id = await make({
+          type: LOOP_TYPE,
+          currentStepId: sourceId,
+          runListSnapshot: [FIX_LOOP_TARGET_STEP_ID, sourceId],
+        });
+        const source = await row(id, sourceId, kind === 'continue' ? 'waiting_form' : 'done');
+        const target = stepRegistry.require(FIX_LOOP_TARGET_STEP_ID);
+        const def = stepRegistry.require(sourceId);
+        const ctx = ctxFor(id, [FIX_LOOP_TARGET_STEP_ID, sourceId], {
+          workflowType: LOOP_TYPE as WorkflowType,
+          currentStepId: sourceId,
+        });
+        const before = await task(id);
+        const list = vi.spyOn(runLists, 'buildRunList');
+        if (kind !== 'revise') list.mockResolvedValueOnce([target, def]);
+        list.mockResolvedValueOnce([def]);
+        try {
+          const operation =
+            kind === 'continue'
+              ? resolveFixLoopGate(db, ctx, source, 'continue', 0, '')
+              : handleResult(
+                  db,
+                  ctx,
+                  sourceId,
+                  kind === 'revise'
+                    ? {
+                        status: 'revise',
+                        row: source,
+                        targetStepId: target.metadata.id,
+                        sourceStepId: sourceId,
+                      }
+                    : {
+                        status: 'loop_back',
+                        row: source,
+                        diagnosis: 'defect',
+                        sourceStepId: sourceId,
+                      },
+                );
+          await expect(operation).rejects.toMatchObject({
+            code: 'step-not-in-run-list',
+            ids: [target.metadata.id],
+            message: `the run list does not include the requested step: ${target.metadata.id}`,
+          });
+          expect(await task(id)).toEqual(before);
+          expect(await stepRow(source.id)).toEqual(source);
+          expect(await events(id, 'step.revise')).toEqual([]);
+          expect(await events(id, 'fix_loop.started')).toEqual([]);
+          expect(await events(id, 'fix_loop.continued')).toEqual([]);
+          expect(h.adds).toEqual([]);
+        } finally {
+          list.mockRestore();
+        }
+      },
+    );
+
+    it('marks an ADVANCE dead with accurate reason copy and the same unresolved payload', async () => {
+      const id = await make({
+        repositoryId,
+        currentStepId: REVISER,
+        runListSnapshot: [REVISER],
+      });
+      await row(id, REVISER, 'done', { output: {}, endedAt: DEAD_AT });
+      await processTaskJob(
+        job(TASK_JOB_NAMES.ADVANCE_STEP, {
+          taskId: id,
+          userId,
+          stepId: REVISER,
+          round: 0,
+          epoch: 3,
+        }),
+      );
+      const reason = `the run list does not include the requested step: ${FIX_LOOP_TARGET_STEP_ID}`;
+      expect(await task(id)).toMatchObject({
+        status: 'running',
+        deadAt: expect.any(Date),
+        deadReason: reason,
+        orchestrationEpoch: 3,
+      });
+      const [dead] = await events(id, 'task.dead');
+      expect(dead?.payload).toMatchObject({
+        reason,
+        unresolved: [FIX_LOOP_TARGET_STEP_ID],
+        stepId: REVISER,
+        round: 0,
+      });
+      expect(h.adds).toEqual([]);
     });
   });
 

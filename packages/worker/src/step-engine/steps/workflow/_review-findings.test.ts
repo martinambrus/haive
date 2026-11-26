@@ -296,6 +296,7 @@ describe('acceptRemainingReviewFindings', () => {
   function captureDb(): { db: Database; sets: Record<string, unknown>[] } {
     const sets: Record<string, unknown>[] = [];
     const db = {
+      transaction: async (callback: (tx: Database) => Promise<void>) => callback(db),
       update: () => ({
         set: (values: Record<string, unknown>) => {
           sets.push(values);
@@ -317,6 +318,7 @@ describe('acceptRemainingReviewFindings', () => {
 
   it('never throws — the gate decision stands even if the write fails', async () => {
     const db = {
+      transaction: async (callback: (tx: Database) => Promise<void>) => callback(db),
       update: () => {
         throw new Error('db down');
       },

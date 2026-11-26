@@ -174,7 +174,11 @@ import {
   taskTypeRuntimeFor,
   type ResolvedTaskContext,
 } from './run-list.js';
-import { PinnedStepSupportError, UnresolvedStepError } from '../step-engine/registry.js';
+import {
+  PinnedStepSupportError,
+  StepNotInRunListError,
+  UnresolvedStepError,
+} from '../step-engine/registry.js';
 import { fixRoundTargetDef } from '../step-engine/fix-consumer.js';
 import { enqueueUsagePollTick } from './usage-poll-queue.js';
 import { USAGE_PROVIDERS } from '../usage-window/fetchers/index.js';
@@ -2820,7 +2824,7 @@ export async function handleResult(
       if (!target) return;
       const steps = await buildRunList(ctx, db);
       const targetIndex = steps.findIndex((step) => step.metadata.id === target.metadata.id);
-      if (targetIndex < 0) throw new UnresolvedStepError([target.metadata.id]);
+      if (targetIndex < 0) throw new StepNotInRunListError(target.metadata.id);
       const resetRange = steps.slice(targetIndex).map((step) => step.metadata.id);
       // Reset runs first, then all overlapping step rows (including the source) in
       // one id-ordered batch, and the task row last. Every refusal rolls back the
@@ -2980,7 +2984,7 @@ export async function handleResult(
       if (!selfLoop) {
         const steps = await buildRunList(ctx, db);
         const targetIndex = steps.findIndex((step) => step.metadata.id === result.targetStepId);
-        if (targetIndex < 0) throw new UnresolvedStepError([result.targetStepId]);
+        if (targetIndex < 0) throw new StepNotInRunListError(result.targetStepId);
         const resetRange = steps.slice(targetIndex).map((step) => step.metadata.id);
         const prior = await db.query.taskSteps.findMany({
           where: and(
@@ -2995,8 +2999,13 @@ export async function handleResult(
       // Reset runs, then the ordered step batch (including the source), then
       // the task. A refused handoff rolls back both the reset and its event.
       let entered;
+      let refusalReason = 'task_write_refused';
       try {
         entered = await db.transaction(async (tx) => {
+          const refuse = (reason: string): never => {
+            refusalReason = reason;
+            throw new StepSupersededError(result.row.id);
+          };
           const reset = await resetStepAndDownstream(
             tx,
             ctx.taskId,
@@ -3007,22 +3016,21 @@ export async function handleResult(
             [result.row.id],
             ctx.executionContract,
           );
-          if (reset === 'superseded') throw new StepSupersededError(result.row.id);
+          if (reset === 'superseded') return refuse('reset_superseded');
           // A self-revise resets its own row to pending under the reset's batch.
           // A fork keeps the source as it was and must still own it after that batch.
-          if (!selfLoop && !(await lockOwnedStep(tx, result.row.id)))
-            throw new StepSupersededError(result.row.id);
+          if (!selfLoop && !(await lockOwnedStep(tx, result.row.id))) refuse('source_not_owned');
           if (selfLoop && !reset) return { missing: true as const };
           const current = await tx.query.tasks.findFirst({
             where: eq(schema.tasks.id, ctx.taskId),
             columns: { currentStepId: true, currentRound: true },
           });
+          if (!current) return refuse('task_missing_under_lock');
           if (
-            !current ||
-            (current.currentStepId != null &&
-              (current.currentStepId !== stepId || current.currentRound !== result.row.round))
+            current.currentStepId != null &&
+            (current.currentStepId !== stepId || current.currentRound !== result.row.round)
           )
-            throw new StepSupersededError(result.row.id);
+            refuse('task_pointer_moved_under_lock');
           const epoch = reset?.newEpoch ?? ctx.orchestrationEpoch;
           const pointed = await markTaskRunningWithStep(
             tx,
@@ -3032,7 +3040,7 @@ export async function handleResult(
             targetRound,
             { epoch },
           );
-          if (!pointed) throw new StepSupersededError(result.row.id);
+          if (!pointed) refuse('task_write_refused');
           await record(tx, ctx.taskId, result.row.id, 'step.revise', {
             stepId,
             sourceStepId: result.sourceStepId,
@@ -3045,7 +3053,13 @@ export async function handleResult(
       } catch (err) {
         if (!(err instanceof StepSupersededError)) throw err;
         logger.info(
-          { taskId: ctx.taskId, stepId, targetStepId: result.targetStepId },
+          {
+            taskId: ctx.taskId,
+            stepId,
+            targetStepId: result.targetStepId,
+            round: result.row.round,
+            reason: refusalReason,
+          },
           'revise not entered: its source or task moved before the hand-off',
         );
         return;
@@ -3256,12 +3270,12 @@ export async function resolveFixLoopGate(
     if (next) {
       const landed = await reopen(next, round, async (tx) => {
         await recordFixLoopAccepted(tx, ctx.taskId, gateRow.id);
+        // A decision on this round's findings commits with the gate and pointer.
+        // The helper's savepoint keeps telemetry failure from aborting that decision.
+        await acceptRemainingReviewFindings(tx, ctx.taskId, round, 'fix-loop-gate');
         await appendEvent(tx, ctx.taskId, gateRow.id, 'fix_loop.accepted', { round });
       });
       if (!landed) return;
-      // "Unresolved" is now a decision, not a pending state: this round's findings ship as they
-      // are. Recorded on the rows so a later read cannot mistake them for work still in flight.
-      await acceptRemainingReviewFindings(db, ctx.taskId, round, 'fix-loop-gate');
       await enqueueAdvance(ctx.taskId, ctx.userId, next.metadata.id, round, ctx.orchestrationEpoch);
       return;
     }
@@ -3290,7 +3304,7 @@ export async function resolveFixLoopGate(
   }
   const steps = await buildRunList(ctx, db);
   const targetIndex = steps.findIndex((step) => step.metadata.id === target.metadata.id);
-  if (targetIndex < 0) throw new UnresolvedStepError([target.metadata.id]);
+  if (targetIndex < 0) throw new StepNotInRunListError(target.metadata.id);
   const resetRange = steps.slice(targetIndex).map((step) => step.metadata.id);
   const nextRound = round + 1;
   // A directive typed at the gate supersedes that recorded request. Written as a NEW event for
@@ -3381,7 +3395,9 @@ async function handleStartTask(
     const marked = await markTaskDead(
       db,
       ctx.taskId,
-      err instanceof PinnedStepSupportError || err instanceof ExecutionContractError
+      err instanceof PinnedStepSupportError ||
+        err instanceof StepNotInRunListError ||
+        err instanceof ExecutionContractError
         ? err.message
         : deadReasonFor(err.ids),
       {
@@ -5413,7 +5429,9 @@ async function runTaskJob(job: Job<TaskWorkerPayload>): Promise<void> {
           const dead = await markTaskDeadFromJob(
             db,
             taskId,
-            err instanceof PinnedStepSupportError || err instanceof ExecutionContractError
+            err instanceof PinnedStepSupportError ||
+              err instanceof StepNotInRunListError ||
+              err instanceof ExecutionContractError
               ? err.message
               : deadReasonFor(err.ids),
             {
