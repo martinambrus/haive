@@ -929,3 +929,71 @@ describe('describeBusy', () => {
     );
   });
 });
+
+describe('unproven lease deadline', () => {
+  it.each(['missing', 'malformed', 'incomplete', 'unreadable'])(
+    'bounds recovery for %s ownership and keeps loss sticky',
+    async (kind) => {
+      vi.useFakeTimers();
+      const events: string[] = [];
+      const lock = await held({
+        staleMs: 20,
+        now: () => Date.now(),
+        onEvent: (event) => void events.push(event),
+      });
+      const own = await readFile(path);
+      if (kind === 'missing') await rm(path);
+      if (kind === 'malformed') await writeFile(path, '{');
+      if (kind === 'incomplete') await writeFile(path, '{}');
+      const read = vi.spyOn(install.InstallDirectory.prototype, 'read');
+      if (kind === 'unreadable') read.mockRejectedValue(new Error('unreadable'));
+      await withStackLease(async () => {
+        bindStackLease(() => lock.assertOwned());
+        await vi.advanceTimersByTimeAsync(19);
+        await expect(lock.assertOwned()).rejects.toMatchObject({ refusal: 'stack-lock-unproven' });
+        await expect(withStackLeaseRecovery(assertStackLease)).resolves.toBeUndefined();
+        await vi.advanceTimersByTimeAsync(1);
+        await expect(withStackLeaseRecovery(assertStackLease)).rejects.toMatchObject({
+          refusal: 'stack-lock-lost',
+        });
+      });
+      read.mockRestore();
+      await writeFile(path, own);
+      await expect(lock.assertOwned()).rejects.toMatchObject({ refusal: 'stack-lock-lost' });
+      expect(await lock.beat()).toBe('lost');
+      await lock.release();
+      expect(await readFile(path)).toEqual(own);
+      expect(events.filter((event) => event === 'stack-lock-lost')).toHaveLength(1);
+    },
+  );
+  it.each(['proof', 'beat'])('renews the deadline on a good %s', async (kind) => {
+    vi.useFakeTimers();
+    const lock = await held({ staleMs: 20, now: () => Date.now() });
+    await vi.advanceTimersByTimeAsync(19);
+    if (kind === 'proof') await lock.assertOwned();
+    else expect(await lock.beat()).toBe('ok');
+    await rm(path);
+    await vi.advanceTimersByTimeAsync(19);
+    await expect(lock.assertOwned()).rejects.toMatchObject({ refusal: 'stack-lock-unproven' });
+    await vi.advanceTimersByTimeAsync(1);
+    await expect(lock.assertOwned()).rejects.toMatchObject({ refusal: 'stack-lock-lost' });
+    await lock.release();
+  });
+  it.each(['missing', 'unreadable'])(
+    'expires an unproven %s heartbeat before it can recreate the lease',
+    async (kind) => {
+      vi.useFakeTimers();
+      const lock = await held({ staleMs: 20, now: () => Date.now() });
+      if (kind === 'missing') await rm(path);
+      else
+        vi.spyOn(install.InstallDirectory.prototype, 'read').mockRejectedValue(
+          new Error('unreadable'),
+        );
+      await vi.advanceTimersByTimeAsync(20);
+      expect(await lock.beat()).toBe('lost');
+      expect(lock.lost).toBe(true);
+      await lock.release();
+      if (kind === 'missing') await expect(stat(path)).rejects.toMatchObject({ code: 'ENOENT' });
+    },
+  );
+});

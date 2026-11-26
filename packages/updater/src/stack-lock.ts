@@ -31,6 +31,8 @@ export interface StackLockOptions {
   releasePauseMs?: number;
   heartbeat?: boolean;
   sleep?: (ms: number) => Promise<void>;
+  /** Monotonic elapsed-time clock, independent of the informational startedAt. */
+  now?: () => number;
   onEvent?: (event: string, fields?: Record<string, unknown>) => void;
   hooks?: { beforeBreak?: () => Promise<void> };
 }
@@ -59,6 +61,7 @@ function resolve(options: StackLockOptions): Resolved {
     releasePauseMs: options.releasePauseMs ?? STACK_LOCK_RELEASE_PAUSE_MS,
     heartbeat: options.heartbeat ?? true,
     sleep: options.sleep ?? realSleep,
+    now: options.now ?? (() => performance.now()),
     onEvent: options.onEvent,
     hooks: options.hooks,
   };
@@ -97,6 +100,7 @@ export class StackLock {
   private lostFlag = false;
   private failing = false;
   private ownWriteFailed = false;
+  private lastGood: number;
   private releasing: Promise<void> | undefined;
   private inFlight: Promise<'ok' | 'lost' | 'error'> | undefined;
   private timer: NodeJS.Timeout | undefined;
@@ -108,6 +112,7 @@ export class StackLock {
     private readonly startedAt: string,
     private readonly options: Resolved,
   ) {
+    this.lastGood = options.now();
     if (options.heartbeat) {
       this.timer = setInterval(() => void this.beat(), options.beatMs);
       this.timer.unref();
@@ -163,11 +168,18 @@ export class StackLock {
         this.markLost();
         throw this.lossRefusal();
       }
+      this.lastGood = this.options.now();
       return;
     }
   }
 
+  private proofExpired(): boolean {
+    if (this.options.now() - this.lastGood >= this.options.staleMs) this.markLost();
+    return this.lostFlag;
+  }
+
   private unprovenRefusal(): UpgradeRefusal {
+    if (this.proofExpired()) return this.lossRefusal();
     return new UpgradeRefusal(
       'stack-lock-unproven',
       'install stack lease ownership could not be proved; refusing the phase',
@@ -209,6 +221,7 @@ export class StackLock {
         const current = await dir.read(STACK_LOCK_NAME, this.options.maxBytes);
         // A break-then-restore leaves the name absent for a moment: take it back; EEXIST fails the beat.
         if (!current) {
+          if (this.proofExpired()) return 'lost' as const;
           await dir.createExclusive(
             STACK_LOCK_NAME,
             encode(this.token, this.options.holder, this.startedAt, this.seq + 1),
@@ -243,6 +256,7 @@ export class StackLock {
       });
       if (outcome === 'ok' || outcome === 'created') {
         this.seq += 1;
+        this.lastGood = this.options.now();
         this.failing = false;
         this.ownWriteFailed = false;
         return 'ok';
@@ -250,6 +264,7 @@ export class StackLock {
       this.markLost();
       return 'lost';
     } catch (error) {
+      if (this.proofExpired()) return 'lost';
       if (!this.failing) {
         this.failing = true;
         this.options.onEvent?.('stack-lock-beat-failed', { code: code(error) });
