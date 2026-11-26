@@ -24,9 +24,14 @@ import {
   ensureInsightIntent,
   loadInsightBatchRecords,
 } from '../src/step-engine/steps/workflow/_insight-batch.js';
-import type { AgentMiningResult, StepContext } from '../src/step-engine/step-definition.js';
+import type {
+  AgentMiningResult,
+  StepContext,
+  StepDefinition,
+} from '../src/step-engine/step-definition.js';
 import { StepSupersededError } from '../src/step-engine/step-ownership.js';
 import * as runner from '../src/step-engine/step-runner.js';
+import * as dispatcher from '../src/orchestrator/dispatcher.js';
 import { redriveStalledTasks } from '../src/queues/stalled-redrive.js';
 import { holdReopenedForm } from '../src/step-engine/step-runner.js';
 
@@ -650,6 +655,147 @@ describe.skipIf(!url)(
       };
       const taskOf = (taskId: string) =>
         db.query.tasks.findFirst({ where: eq(schema.tasks.id, taskId) });
+
+      const continuationStep = (): StepDefinition => ({
+        metadata: {
+          id: S.stepId,
+          index: S.stepIndex,
+          title: 'Continuation fixture',
+          description: 'Real-store continuation control',
+          workflowType: 'workflow',
+          requiresCli: false,
+        },
+        attachmentContext: 'none',
+        detect: vi.fn(async () => ({ revision: 'fresh' })),
+        form: () => ({
+          title: 'Fresh decision',
+          fields: [{ id: 'approve', type: 'checkbox', label: 'Approve' }],
+        }),
+        llm: {
+          preForm: true,
+          requiredCapabilities: [],
+          buildPrompt: () => 'Review fresh inputs',
+          prepare: vi.fn(async () => {}),
+        },
+        apply: vi.fn(async () => ({ complete: true })),
+      });
+
+      it('reads the persisted opt-in event and refuses its stale generation after a Retry-order update', async () => {
+        const { ctx } = await setup();
+        await checkpoint(ctx);
+        const step = continuationStep();
+        expect(await runner.isHeldPreFormContinuation(db, step, await rowOf(S.id))).toBe(true);
+        await peer.transaction(async (tx) => {
+          await tx
+            .update(schema.cliInvocations)
+            .set({ supersededAt: AT })
+            .where(eq(schema.cliInvocations.taskStepId, S.id));
+          await tx
+            .update(schema.taskSteps)
+            .set({ rerunGeneration: sql`${schema.taskSteps.rerunGeneration} + 1` })
+            .where(eq(schema.taskSteps.id, S.id));
+        });
+        expect(await runner.isHeldPreFormContinuation(db, step, await rowOf(S.id))).toBe(false);
+      });
+
+      it('held insertion rolls its reservation back when a peer changes generation between insert and fence', async () => {
+        const { taskId, ctx } = await setup();
+        await checkpoint(ctx);
+        const id = randomUUID();
+        await expect(
+          runner.insertHeldPreFormInvocation(db, ctx, S.stepId, async (handle) => {
+            const [run] = await handle
+              .insert(schema.cliInvocations)
+              .values({
+                id,
+                taskId,
+                taskStepId: S.id,
+                mode: 'cli',
+                prompt: 'uncommitted reservation',
+              })
+              .returning();
+            await peer
+              .update(schema.taskSteps)
+              .set({ rerunGeneration: 5 })
+              .where(eq(schema.taskSteps.id, S.id));
+            return run;
+          }),
+        ).rejects.toBeInstanceOf(StepSupersededError);
+        expect(
+          await db.query.cliInvocations.findFirst({ where: eq(schema.cliInvocations.id, id) }),
+        ).toBeUndefined();
+        expect((await rowOf(S.id)).rerunGeneration).toBe(5);
+        expect((await runOf(R)).consumedAt).toBeInstanceOf(Date);
+      });
+
+      it('a boot-recovered checkpoint is re-driven through pause, Resume, dispatch and a fresh form', async () => {
+        const { taskId, ctx } = await setup();
+        await checkpoint(ctx);
+        const queue = vi.fn(async () => {});
+        await reconcileOrphanedSteps(db, {
+          enqueueAdvance: queue,
+          queuedInvocationIds: async () => new Set(),
+        });
+        expect(queue).toHaveBeenCalledOnce();
+        const task = (await taskOf(taskId))!;
+        const step = continuationStep();
+        const enqueue = vi.fn(async () => {});
+        const config = vi.spyOn(configService, 'getBoolean').mockResolvedValue(false);
+        const get = vi.spyOn(configService, 'get').mockResolvedValue(null);
+        const dispatch = vi.spyOn(dispatcher, 'resolveTaskDispatch').mockResolvedValue({
+          mode: 'cli',
+          providerId: null,
+          invocation: { kind: 'cli', spec: {} },
+        } as unknown as Awaited<ReturnType<typeof dispatcher.resolveTaskDispatch>>);
+        vi.stubEnv('HAIVE_TEST_BYPASS_LLM', '0');
+        try {
+          await db.update(schema.tasks).set({ pausedAt: AT }).where(eq(schema.tasks.id, taskId));
+          const advance = () =>
+            runner.advanceStep({
+              db,
+              taskId,
+              userId,
+              stepDef: step,
+              repoPath: NO_SUCH_DIR,
+              workspacePath: NO_SUCH_DIR,
+              cliProviderId: null,
+              epoch: task.orchestrationEpoch,
+              providers: [],
+              deps: { enqueueCliInvocation: enqueue },
+              formValues: { stale: true },
+            });
+          expect(await advance()).toMatchObject({ status: 'deferred', delayMs: 30_000 });
+          expect(step.llm!.prepare).not.toHaveBeenCalled();
+          expect(step.apply).not.toHaveBeenCalled();
+          expect(enqueue).not.toHaveBeenCalled();
+          await db.update(schema.tasks).set({ pausedAt: null }).where(eq(schema.tasks.id, taskId));
+          expect((await advance()).status).toBe('waiting_cli');
+          expect(enqueue).toHaveBeenCalledOnce();
+          expect(step.llm!.prepare).toHaveBeenCalledOnce();
+          const runs = await db.query.cliInvocations.findMany({
+            where: eq(schema.cliInvocations.taskStepId, S.id),
+          });
+          expect(runs).toHaveLength(2);
+          const fresh = runs.find((run) => run.id !== R)!;
+          await db
+            .update(schema.cliInvocations)
+            .set({ endedAt: AT, exitCode: 0, rawOutput: 'fresh result' })
+            .where(eq(schema.cliInvocations.id, fresh.id));
+          expect((await advance()).status).toBe('waiting_form');
+          expect(await rowOf(S.id)).toMatchObject({
+            pauseFormOnRetry: false,
+            formValues: null,
+            rerunGeneration: 4,
+          });
+          expect(step.apply).not.toHaveBeenCalled();
+          expect(enqueue).toHaveBeenCalledOnce();
+        } finally {
+          config.mockRestore();
+          get.mockRestore();
+          dispatch.mockRestore();
+          vi.unstubAllEnvs();
+        }
+      });
 
       it('atomically consumes the exact completed id and holds a running task without changing generation, epoch, pointer, spend or downstream', async () => {
         const { taskId, ctx } = await setup();
