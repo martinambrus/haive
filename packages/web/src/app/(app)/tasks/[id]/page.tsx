@@ -62,6 +62,7 @@ import {
   Square,
   FolderGit2,
 } from 'lucide-react';
+import { StepRagStatsToggle } from '@/components/step-rag-stats-toggle';
 import { useCliLogin } from '@/lib/use-cli-login';
 import { useActiveTime } from '@/lib/active-time/use-active-time';
 import {
@@ -80,6 +81,7 @@ import {
   moduleStopBanner,
   parkBanner,
   showsStepUsageStamp,
+  stepRagStatsState,
   type DeadStepRow,
   type TaskStopRow,
 } from '@/lib/step-banners';
@@ -3688,12 +3690,7 @@ function StepCardImpl({
   const uiPrefix = `task-ui:${taskId}:${step.id}`;
   const [showOutput, setShowOutput] = usePersistedToggle(`${uiPrefix}:output`, false);
   const [showRagStats, setShowRagStats] = usePersistedToggle(`${uiPrefix}:ragstats`, false);
-  // RAG stats are available for any step that ran an agent (rag_search only
-  // fires during a CLI invocation). Attribution is by time window server-side,
-  // so no per-step wiring is needed; the panel shows "none recorded" for the
-  // rare agent step that made no rag_search. Deterministic/form-only steps
-  // (cliInvocationCount 0) never call rag, so they get no toggle.
-  const ranAgent = step.cliInvocationCount > 0;
+  const ragStats = stepRagStatsState(step);
   const schema = step.formSchema as FormSchema | null;
   const initialValues = (step.formValues as FormValues | null) ?? undefined;
   const taskCancelled = taskStatus === 'cancelled';
@@ -4421,16 +4418,12 @@ function StepCardImpl({
         </div>
       )}
 
-      {ranAgent && step.startedAt && (
-        <button
-          type="button"
-          onClick={() => setShowRagStats((v) => !v)}
-          className="self-start text-xs text-indigo-400 underline"
-        >
-          {showRagStats ? 'Hide' : 'Show'} RAG stats
-        </button>
-      )}
-      {ranAgent && showRagStats && (
+      <StepRagStatsToggle
+        state={ragStats}
+        expanded={showRagStats}
+        onToggle={() => setShowRagStats((v) => !v)}
+      />
+      {ragStats === 'queries' && showRagStats && (
         <RagStatsPanel taskId={taskId} stepId={step.stepId} live={!taskEnded && !taskDead} />
       )}
 

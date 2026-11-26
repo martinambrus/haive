@@ -1127,6 +1127,8 @@ export interface TaskStep {
    *  whether the inline terminal toggle is rendered — 0 means the step has
    *  no terminal output to show (deterministic-only or pending steps). */
   cliInvocationCount: number;
+  /** Queries in the panel's inclusive step time window, computed with the steps response. */
+  ragQueryCount: number;
   /** Non-superseded, non-agent_mining CLI invocations = LLM run attempts. >1 on a
    *  non-loop step (iterationCount === 0) means the step auto-retried (form-aware /
    *  retry-then-degrade) because an earlier attempt's output couldn't be used. */

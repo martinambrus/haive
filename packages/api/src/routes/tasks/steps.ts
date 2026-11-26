@@ -1,3 +1,4 @@
+import { stepRagQueryWindow } from './_rag-queries.js';
 import { guardResetRows, parseExecutionContract } from '@haive/shared/modularity';
 import { projectTaskStepOutputRoles } from '../../lib/step-output-roles.js';
 import { assertExecutionContractUsable } from '../../lib/execution-contract-admission.js';
@@ -20,7 +21,6 @@ import {
   inArray,
   isNotNull,
   isNull,
-  lte,
   ne,
   notInArray,
   or,
@@ -865,8 +865,8 @@ stepRoutes.get('/:id/steps', async (c) => {
 });
 
 // RAG query telemetry for a step: the rag_search calls made during the step's
-// run window (attributed by created_at — the rag token is task-scoped, not
-// step-scoped). Drives the "Show RAG stats" panel on the discovery step card.
+// run window (historical time-window attribution, independent of invocation
+// bindings). Drives the "Show RAG stats" panel and the step DTO's query count.
 stepRoutes.get('/:id/steps/:stepId/rag-queries', async (c) => {
   const userId = c.get('userId');
   const id = c.req.param('id');
@@ -902,13 +902,7 @@ stepRoutes.get('/:id/steps/:stepId/rag-queries', async (c) => {
       createdAt: schema.ragQueryLog.createdAt,
     })
     .from(schema.ragQueryLog)
-    .where(
-      and(
-        eq(schema.ragQueryLog.taskId, id),
-        gte(schema.ragQueryLog.createdAt, step.startedAt),
-        lte(schema.ragQueryLog.createdAt, end),
-      ),
-    )
+    .where(stepRagQueryWindow(id, step.startedAt, end))
     .orderBy(asc(schema.ragQueryLog.createdAt));
 
   return c.json({ queries });

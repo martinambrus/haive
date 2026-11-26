@@ -1,3 +1,4 @@
+import { loadStepRagQueryCounts } from './_rag-queries.js';
 import {
   composedLspAllowedSet,
   resolvePreferredProvider,
@@ -908,7 +909,9 @@ function resolveSummaryFailure(run: LatestSummaryRun | null): StepSummaryFailure
  *  GROUP BY keeps it O(1) round-trips regardless of step count.
  *
  *  Counters stay on `task_step_id` ("did this step run a CLI"); the token/cost sums also
- *  fold in the step's summary pass via `summary_for_step_id` ("what did this step cost"). */
+ *  fold in the step's summary pass via `summary_for_step_id` ("what did this step cost").
+ *  RAG counts use a separate grouped read with the panel's time-window attribution,
+ *  shared by both task detail and the steps endpoint without extra browser requests. */
 export async function enrichStepsWithCliStats<T extends { id: string }>(
   db: ReturnType<typeof getDb>,
   taskId: string,
@@ -916,6 +919,7 @@ export async function enrichStepsWithCliStats<T extends { id: string }>(
 ): Promise<
   (T & {
     cliInvocationCount: number;
+    ragQueryCount: number;
     attemptCount: number;
     tokenUsage: CliTokenUsage | null;
     throughput: ThroughputSummary;
@@ -923,6 +927,7 @@ export async function enrichStepsWithCliStats<T extends { id: string }>(
   })[]
 > {
   if (steps.length === 0) return [];
+  const ragCounts = await loadStepRagQueryCounts(db, taskId);
   const tu = schema.cliInvocations.tokenUsage;
   // Counting the summary row would give a finished step a terminal toggle it has no
   // invocation for, and read as an auto-retry — so the counters below stay on task_step_id.
@@ -1016,6 +1021,7 @@ export async function enrichStepsWithCliStats<T extends { id: string }>(
     return {
       ...s,
       cliInvocationCount: stat?.count ?? 0,
+      ragQueryCount: ragCounts.get(s.id) ?? 0,
       attemptCount: stat?.attemptCount ?? 0,
       tokenUsage: stat?.tokenUsage ?? null,
       throughput: stat?.throughput ?? summarizeThroughput([]),

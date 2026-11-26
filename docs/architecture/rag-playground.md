@@ -92,3 +92,11 @@ The prompt fences agent and result text as untrusted data.
 An open RAG statistics panel polls until the task ends, then fetches once more.
 Query counts stop changing when the step ends, but usage assessments arrive at
 finalization and must still become visible.
+
+Task detail and the steps response include `ragQueryCount` per step row, loaded
+with one grouped query per task. The count and the lazy panel share
+`stepRagQueryWindow`: task id and inclusive `[started_at, ended_at ?? now]` bounds;
+a step without a start has zero queries. Finished agent steps with zero queries
+show “No RAG used” in the disclosure's place; unfinished agent steps retain the
+disclosure because queries can still arrive. Persisted expansion never opens an
+empty finished panel.
