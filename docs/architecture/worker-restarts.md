@@ -351,8 +351,7 @@ output by the one function the tail itself routes with (`finishedRoutingVerdict`
 cannot disagree on precedence. An answered fix-loop gate is finished from its answer instead
 (`resolveFixLoopGate`), so a verdict recomputed there cannot replace the person's decision with the
 step's own. An answer that reopens the task (continue, or accept with a next step) closes the gate,
-records the answer, resets any stale row at the next round (Continue) and points the task at its
-next step in one transaction, the gate row taken in the ordered step-lock batch, under the new-work fence
+records the answer, accepts the round's open review findings (Accept with a next step), resets any stale row at the next round (Continue) and points the task at its next step in one transaction, the gate row taken in the ordered step-lock batch, under the new-work fence
 and then the repository lock when the task had failed, so a refused or overtaken reopen leaves the
 gate parked with nothing recorded. The refused answer stays saved on its row. A task Retry, a settle
 and a per-step CLI switch that reset a row to `pending` drop it
@@ -380,7 +379,7 @@ failure after it was sent, such as a Stop, keeps it out. `advanceStep`'s own `do
 is left as it is: the START path that reaches it has no moved-chain check, so a verdict re-driven
 there could bump a round.
 
-The re-drive records the step's end-of-step event (`step.done`, `step.skipped`, `step.loop_back` or `step.revise`) only when the pass it repeats did not. A loop_back handoff records its `step.loop_back` inside the winning transaction, so a pass that lost the race to another pass, a Retry or a superseding reset records nothing. A revise that forks into the next round resets from the first existing row of its range with the same epoch swap, and records `step.revise` and moves the pointer in that reset's transaction, so a superseded, refused or duplicate revise leaves neither the event nor a reset. Each of those events carries the row's
+The re-drive records the step's end-of-step event (`step.done`, `step.skipped`, `step.loop_back` or `step.revise`) only when the pass it repeats did not. A loop_back handoff records its `step.loop_back` inside the winning transaction, so a pass that lost the race to another pass, a Retry or a superseding reset records nothing. A revise that does not enter logs its refusal as a code (as loop_back does), never as message text. A revise that forks into the next round resets from the first existing row of its range with the same epoch swap, and records `step.revise` and moves the pointer in that reset's transaction, so a superseded, refused or duplicate revise leaves neither the event nor a reset. Each of those events carries the row's
 `ended_at` as `endedAt`, which names the pass, since a Retry clears it and the rerun sets a new one;
 on the re-drive path the event is appended only when no event of that type for that row carries the
 same stamp (`appendEventOnce`). A first pass always appends, and a missing stamp never matches.
@@ -639,8 +638,7 @@ from the stored row (`computeFoldContribution`), so adding a stale delta in SQL 
 for a double count; the SQL folds in `cli-park-timing.ts` are single statements and need no read.
 `takeLeftOpenKept` (under the creation key and the dir lock; usually one row), `skipRemovedSteps` (one row per
 task, at boot) and the `run_seq` backfill (the rounds of one step, at boot) are single statements with no
-realistic peer and take no batch. The tiers above the step rows are taken in the same order, runs before agent
-rows: the fan-out Resume supersedes its blocking run before it marks the failed agent rows, and the reopened
+realistic peer and take no batch. `review_findings` is a leaf tier: Accept writes it after the gate's step row and before the task row, and nothing holds it while waiting for a higher tier. The tiers above the step rows are taken in the same order, runs before agent rows: the fan-out Resume supersedes its blocking run before it marks the failed agent rows, and the reopened
 step form (`holdReopenedForm`) consumes its agent rows before it writes the step row. One exception remains: a
 fan-out Resume that also resets downstream or left-active rows still writes the clicked step's agent rows before
 the sweep of THOSE rows' runs; it meets a Retry-family action only through a worker reset of the same range or
@@ -795,12 +793,9 @@ restored by reverting code.
 
 A task is **dead** when its current step requires an uninstalled integration provider, or its data
 names a step this install no longer registers: a module was removed, or a step its run list names
-went away (`UnresolvedStepError`). A third cause is a registered producer that cannot execute its
-pinned output contract or host role policy (`pinned-step-support-unavailable`). An unsupported or
-malformed execution-contract pin is another cause (`invalid-execution-contract`): a custom fix
-target, a guarded span on a derived, non-static or non-unique run list, a span predicate no
-registered step provides, or a span whose first step leads the list. Behind that fence, which
-refuses every custom fix target today, `deadTaskResolution` also asks `unsupportedPinnedFixTarget`
+went away (`UnresolvedStepError`). A registered step that the task's run list does not hold (a loop_back, Continue or revise target the list lost) is the subclass `StepNotInRunListError`, with its own reason text and the same `unresolved` payload. A third cause is a registered producer that cannot execute its
+pinned output contract or host role policy (`pinned-step-support-unavailable`). An unsupported or malformed execution-contract pin is another cause (`invalid-execution-contract`): an off-list or non-capable custom fix target, a guarded span on a derived, non-static or non-unique run list, a span predicate no
+registered step provides, or a span whose first step leads the list. Behind that fence, which admits a custom fix target only when the step is capable (see [Modules](modules.md)), `deadTaskResolution` also asks `unsupportedPinnedFixTarget`
 (`step-engine/fix-consumer.ts`) about the pinned target: a target absent from the pinned run list,
 or registered but not a module step declaring the pinned `fixConsumer` version (or fanning out),
 is a cause too; an unregistered target stays an unresolved step (a task with no run-list snapshot

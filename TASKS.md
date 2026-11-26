@@ -999,7 +999,7 @@ Follow-ups found by the #1308 driver:
 
 ### T748 · FNF[empty-typed-secret] · the api stores a secret-named env var with an empty value
 
-status: open for follow-ups 1-5; main item DONE in #1313 (7a7b0c0fd, deployed 2026-11-21: shared schema 400 naming the key, worker skips stored empties; dev has 0 stored empties) · kind: fix · found: #1306 driver 2026-11-21 · priority: P4
+status: open for follow-up 2 and the FNF below; main item DONE in #1313 (7a7b0c0fd, deployed 2026-11-21: shared schema 400 naming the key, worker skips stored empties; dev has 0 stored empties); follow-ups 1, 3, 4, 5 DONE in #1333 (ec4fc8726, deployed 2026-11-23: clone skips blanks, `keepGeneration` removed, the secrets list excludes exact-empty envelopes by shape (`isEmptyEnvelope`, no decrypt on a GET; a whitespace-only legacy row stays counted and copied, inert), blank = trimmed-empty at every writer, seed stops at the first configured candidate) · kind: fix · found: #1306 driver 2026-11-21 · priority: P4
 
 `api/src/routes/cli-providers.ts` ~:557 (create) and ~:865 (PATCH), via `shared/src/schemas/cli-providers.ts` ~:98 and `shared/src/cli-providers/provider-secret.ts` ~:25, accept a secret-named env var with an empty value and store an encrypted empty string; `worker/src/secrets/provider-secrets.ts` ~:33 then injects it as an empty env var. The web form drops empties, so this is API-only. PRE-EXISTING.
 
@@ -1010,6 +1010,11 @@ Follow-ups found by the #1313 driver:
 3. `keepGeneration` (`api/src/routes/cli-providers.ts` ~:903, `api/src/lib/cli-login-secret.ts` ~:205-269) is unreachable from PATCH now; remove it or keep it as the hook for an "empty token advances the generation" contract. Low.
 4. The secrets list (`GET /:providerId/secrets`, the form's "N secrets configured") counts a stored empty as configured. PRE-EXISTING, low.
 5. Whitespace-only secret values are accepted (`shared/src/schemas/cli-providers.ts` ~:165 `min(1)`, the new rule tests `=== ''`); a whitespace login token is truthy and spreads set-wide. The web form trims. PRE-EXISTING, low.
+
+Found in #1333 (all low, PRE-EXISTING or accepted):
+
+6. An exact-empty stored row is hidden from the list and so cannot be deleted from the form (the list drives its delete loop, `web/.../cli-provider-form.tsx` ~:581-588). Inert. Retire exact-empty rows with a numbered migration on the envelope shape after item 2 stops `copyKeys` recreating them.
+7. A quoted whitespace secret in the form (`KEY="  "`) gets a 400 from the secret POST after that save's PATCH and deletes have committed. Negligible.
 
 ### T749 · FNF[step-warning-notes] · attempt-scoped warning writes and the codex fallback's fence
 
@@ -1127,7 +1132,7 @@ UPDATE 2026-11-23: items 1-3 DONE #1331 bc029cbcb (deployed; New Task showed an 
 3. `api/test/task-type-own-providers.test.ts` ~:30-62 stubs the exact Drizzle select chain; a refactor of `readStepCatalog`/`readModuleStates` breaks it for unrelated reasons. Move the control into the real-Postgres matrix `task-type-definition.test.ts` (`TRAIT_ROWS`) as an own-providers row.
 4. DONE (translator #17 ea898f8, deployed 2026-11-23: consent projects accounted + setup + 8 x units x 381,312 B, refuses a short quota before any paid call, measured on real Postgres). OWNER QUESTION open: the reserve caps a document at about 175 units (about 175k words; was 1,000 units) and counts against the 2 GiB owner quota. Translator module (`martinambrus/haive-module-translator`), consequential: `README.md` ~:638 (M6) storage headroom. A tight consent quota can pass setup and then fail translation or render after paid work; the setup form's minimum does not reserve the headroom later passes need.
 5. Translator, low: a Retry of consent after spend counts the unspent allowance twice (#17 review 1 D5). PRE-EXISTING.
-6. Translator, PRE-EXISTING (#17 driver): storage written after consent with no lifetime bound in the projection: human review decisions and patch histories (`src/db/review-patches.ts` ~:118), rendered artifacts (`src/db/artifacts.ts` ~:108), repeated metadata rewrites and operator histories (`src/db/passes.ts` ~:348, ~:818). Each can still exhaust the quota after paid work; bound each writer or reserve for it.
+6. DONE (translator #18 bdb5f87, deployed 2026-11-23, migration 0010: every post-consent writer is bounded and reserved; render output is admitted before consent by a bound the property test checks against the real renderers, nesting included; flat ceiling 130 units, two list levels 93, five 42, ten quote levels 107). Was: translator, PRE-EXISTING (#17 driver): storage written after consent with no lifetime bound in the projection: human review decisions and patch histories (`src/db/review-patches.ts` ~:118), rendered artifacts (`src/db/artifacts.ts` ~:108), repeated metadata rewrites and operator histories (`src/db/passes.ts` ~:348, ~:818). Each can still exhaust the quota after paid work; bound each writer or reserve for it.
 7. Translator, low: the full `test:ingest` wrapper's `check:host` needs the module installed in the host worktree (`pnpm module add translator`) and api/worker dist; a driver brief should say so.
 
 ### T762 · FNF[T749]: step warning column follow-ups (+3)
