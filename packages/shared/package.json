@@ -274,6 +274,14 @@
     "./change-size": {
       "types": "./dist/change-size.d.ts",
       "import": "./dist/change-size.js"
+    },
+    "./cli-preferred-provider": {
+      "types": "./dist/cli-providers/preferred-provider.d.ts",
+      "import": "./dist/cli-providers/preferred-provider.js"
+    },
+    "./composed-image-references": {
+      "types": "./dist/cli-providers/composed-image-references.d.ts",
+      "import": "./dist/cli-providers/composed-image-references.js"
     }
   },
   "scripts": {

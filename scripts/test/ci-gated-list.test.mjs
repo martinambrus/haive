@@ -5,6 +5,7 @@ import { describe, it } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import ts from 'typescript';
 import { readWorkflow } from './workflow.mjs';
+import { readGated } from '../lib/ci-gated.mjs';
 
 const root = fileURLToPath(new URL('../..', import.meta.url));
 
@@ -89,14 +90,212 @@ const exemptions = {
     'smokes runs it inside the built worker image with its Docker opt-in set.',
 };
 
-const ci = readFileSync(join(root, '.github', 'workflows', 'ci.yml'), 'utf8');
-const rows = /<<'GATED'\n([\s\S]+?)\n[ \t]*GATED\n/.exec(ci)?.[1];
-assert.ok(rows, "ci.yml has no <<'GATED' list");
-const listedFiles = rows
-  .split('\n')
-  .map((row) => row.trim().split(/\s+/))
-  .map(([pkg, file]) => `packages/${pkg}/${file}`)
-  .sort();
+const gated = readGated();
+const listedFiles = gated.rows.map(({ pkg, file }) => `packages/${pkg}/${file}`).sort();
+
+// Inspect literals and URL pathname predicates without executing repository test code.
+function rowRequirements(source, variable, db) {
+  const ast = ts.createSourceFile('test.ts', source, ts.ScriptTarget.Latest, true);
+  const declarations = new Map();
+  const collect = (node) => {
+    if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name) && node.initializer)
+      declarations.set(node.name.text, node.initializer);
+    ts.forEachChild(node, collect);
+  };
+  collect(ast);
+  const unwrap = (node) => {
+    while (
+      ts.isParenthesizedExpression(node) ||
+      ts.isNonNullExpression(node) ||
+      ts.isAsExpression(node)
+    )
+      node = node.expression;
+    return node;
+  };
+  const readsVariable = (node, seen = new Set()) => {
+    node = unwrap(node);
+    if (seen.has(node)) return false;
+    seen.add(node);
+    if (ts.isIdentifier(node) && declarations.has(node.text))
+      return readsVariable(declarations.get(node.text), seen);
+    if (node.getText(ast) === `process.env.${variable}`) return true;
+    if (ts.isNewExpression(node) && node.expression.getText(ast) === 'URL')
+      return (node.arguments ?? []).some((child) => readsVariable(child, seen));
+    if (ts.isBinaryExpression(node))
+      return readsVariable(node.left, seen) || readsVariable(node.right, seen);
+    if (ts.isConditionalExpression(node))
+      return readsVariable(node.whenTrue, seen) || readsVariable(node.whenFalse, seen);
+    return false;
+  };
+  const pathname = (node, seen = new Set()) => {
+    node = unwrap(node);
+    if (seen.has(node)) return undefined;
+    seen.add(node);
+    if (ts.isIdentifier(node) && declarations.has(node.text))
+      return pathname(declarations.get(node.text), seen);
+    if (ts.isConditionalExpression(node)) return pathname(node.whenTrue, seen);
+    if (
+      ts.isPropertyAccessExpression(node) &&
+      node.name.text === 'pathname' &&
+      readsVariable(node.expression)
+    )
+      return `/${db}`;
+    if (
+      ts.isCallExpression(node) &&
+      ts.isPropertyAccessExpression(node.expression) &&
+      node.expression.name.text === 'slice' &&
+      node.arguments.length === 1 &&
+      ts.isNumericLiteral(node.arguments[0])
+    ) {
+      return pathname(node.expression.expression, seen)?.slice(Number(node.arguments[0].text));
+    }
+    return undefined;
+  };
+  const rules = [];
+  const visit = (node) => {
+    if (ts.isCallExpression(node) && ts.isPropertyAccessExpression(node.expression)) {
+      const receiver = unwrap(node.expression.expression);
+      const method = node.expression.name.text;
+      const [argument] = node.arguments;
+      const path = pathname(receiver);
+      if (
+        path !== undefined &&
+        ['startsWith', 'endsWith'].includes(method) &&
+        argument &&
+        ts.isStringLiteral(argument)
+      )
+        rules.push({ rule: node.getText(ast), ok: path[method](argument.text) });
+      if (
+        method === 'some' &&
+        ts.isArrayLiteralExpression(receiver) &&
+        receiver.elements.every(ts.isStringLiteral) &&
+        argument &&
+        ts.isArrowFunction(argument)
+      ) {
+        const body = unwrap(argument.body);
+        if (
+          ts.isCallExpression(body) &&
+          ts.isPropertyAccessExpression(body.expression) &&
+          body.expression.name.text === 'startsWith' &&
+          body.arguments[0]?.getText(ast) === argument.parameters[0]?.name.getText(ast)
+        ) {
+          const value = pathname(body.expression.expression);
+          if (value !== undefined)
+            rules.push({
+              rule: node.getText(ast),
+              ok: receiver.elements.some((prefix) => value.startsWith(prefix.text)),
+            });
+        }
+      }
+      if (method === 'test' && ts.isRegularExpressionLiteral(receiver) && argument) {
+        const value = pathname(argument);
+        const match = /^\/(.*)\/([a-z]*)$/.exec(receiver.text);
+        if (value !== undefined && match)
+          rules.push({ rule: node.getText(ast), ok: new RegExp(match[1], match[2]).test(value) });
+      }
+    }
+    if (
+      ts.isBinaryExpression(node) &&
+      [ts.SyntaxKind.EqualsEqualsEqualsToken, ts.SyntaxKind.ExclamationEqualsEqualsToken].includes(
+        node.operatorToken.kind,
+      )
+    ) {
+      for (const [left, right] of [
+        [node.left, node.right],
+        [node.right, node.left],
+      ]) {
+        const value = pathname(left);
+        if (value !== undefined && ts.isStringLiteral(right))
+          rules.push({ rule: node.getText(ast), ok: value === right.text });
+      }
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(ast);
+  return rules;
+}
+
+// These tests accept any admin database and create their own randomly named tables/stores.
+// No source predicate constrains the CI connection database; still require a safe SQL identifier.
+const unrestrictedDatabases = {
+  'database/test/pg-transaction-fence.test.ts': 'creates randomly named tx_fence tables',
+  'shared/test/create-database-race.test.ts': 'creates stores under a random install id',
+  'shared/test/global-kb-identifier-tsv.test.ts': 'creates SCRATCH_DB from pid and time',
+  'shared/test/global-kb-ensure-bound.test.ts': 'creates SCRATCH_DB from pid and time',
+  'worker/test/rag-schema.test.ts': 'creates SCRATCH_DB from pid and time',
+};
+
+function checkRow(row) {
+  const path = `packages/${row.pkg}/${row.file}`;
+  assert.ok(gatedFiles.includes(path), `no environment-gated test file: ${path}`);
+  const manifest = JSON.parse(
+    readFileSync(join(root, 'packages', row.pkg, 'package.json'), 'utf8'),
+  );
+  assert.equal(manifest.name, `@haive/${row.pkg}`, `${path}: package column`);
+  const source = readFileSync(join(root, path), 'utf8');
+  const env = gatedEnvironment(source);
+  assert.ok(env.includes(row.var), `${path}: ${row.var} is not a guard environment variable`);
+  for (const name of env.filter((name) => name !== row.var))
+    assert.ok(gated.stepEnv[name], `${path}: missing additional guard environment ${name}`);
+  assert.match(row.db, /^[a-z_][a-z0-9_]*$/, `${path}: unsafe database column`);
+  const rules = rowRequirements(source, row.var, row.db);
+  assert.ok(
+    rules.length || unrestrictedDatabases[`${row.pkg}/${row.file}`],
+    `${path}: no database predicate found; add a source-derived rule or reasoned exemption`,
+  );
+  for (const { rule, ok } of rules)
+    assert.ok(ok, `${path}: database ${row.db} violates source predicate ${rule}`);
+  // HAIVE_GKB's real-store suites require vector; T266 refuses the app's 5432 port.
+  // Validate that routing decision against the test's source, then the declared service image.
+  const alternatePort = /\[.*'5432'.*\]\.includes\(new URL\(url\)\.port\)/.test(source);
+  const server = env.includes('HAIVE_GKB_TEST_DB_URL') || alternatePort ? 'pgvector' : 'pg';
+  assert.equal(row.server, server, `${path}: image column disagrees with source requirements`);
+  assert.equal(
+    gated.services[server === 'pg' ? 'postgres' : server].image,
+    server === 'pg' ? 'postgres:18-alpine' : 'pgvector/pgvector:pg18',
+  );
+}
+
+// Each column is changed independently on a copy of a row that passes.
+describe('all GATED row columns', () => {
+  const row = gated.rows[0];
+  it('matches every row against its test source', () => gated.rows.forEach(checkRow));
+  it('honours the T266 prefix allowlist as well as its database regex', () => {
+    const original = gated.rows.find(({ var: name }) => name === 'T266_DATABASE_URL');
+    assert.ok(original);
+    assert.throws(
+      () => checkRow({ ...original, db: 'other_t266_ci' }),
+      /violates source predicate/,
+    );
+  });
+
+  it('rejects wrong env and image columns for every source, and wrong guarded databases', () => {
+    for (const original of gated.rows) {
+      for (const changed of [
+        { ...original, var: 'WRONG_TEST_URL' },
+        { ...original, server: original.server === 'pg' ? 'pgvector' : 'pg' },
+        { ...original, db: 'unsafe-database' },
+        ...(!unrestrictedDatabases[`${original.pkg}/${original.file}`]
+          ? [{ ...original, db: 'wrong_database' }]
+          : []),
+      ])
+        assert.throws(() => checkRow(changed), assert.AssertionError);
+    }
+  });
+
+  for (const [column, value] of [
+    ['pkg', 'missing-package'],
+    ['file', 'test/missing.test.ts'],
+    ['var', 'WRONG_TEST_URL'],
+    ['db', 'wrong_database'],
+    ['server', row.server === 'pg' ? 'pgvector' : 'pg'],
+  ]) {
+    it(`rejects an incorrect ${column} column`, () => {
+      checkRow(row);
+      assert.throws(() => checkRow({ ...row, [column]: value }), assert.AssertionError);
+    });
+  }
+});
 
 describe('environment guard discovery', () => {
   it('keeps the guard env when a test shadows its variable', () => {

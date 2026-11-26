@@ -4,6 +4,8 @@ import { and, desc, eq } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
 import {
   assertVersionToken,
+  resolveTaskCliProviderId,
+  getCliProviderMetadata,
   isVersionToken,
   ONBOARDING_ENVIRONMENT_SCHEMA_VERSION,
   ONBOARDING_TOOLING_SCHEMA_VERSION,
@@ -32,6 +34,26 @@ import {
   isComposedLspSelection,
 } from '../../../lsp/composed-adoption.js';
 import { matchYamlField, parseDdevConfig, type DdevConfigFields } from '../_ddev-config.js';
+
+/** Resolve capability from this decision's task default, including the current implicit default. */
+async function taskCliSupportsLsp(
+  db: Pick<Database, 'select'>,
+  userId: string,
+  own: string | null,
+): Promise<boolean> {
+  const providers = await db
+    .select({
+      id: schema.cliProviders.id,
+      name: schema.cliProviders.name,
+      enabled: schema.cliProviders.enabled,
+      createdAt: schema.cliProviders.createdAt,
+    })
+    .from(schema.cliProviders)
+    .where(eq(schema.cliProviders.userId, userId));
+  const providerId = resolveTaskCliProviderId(own, providers);
+  const name = providers.find((p) => p.id === providerId)?.name;
+  return name ? getCliProviderMetadata(name).supportsLsp : false;
+}
 
 // Both PHP language keys map to the single surviving env key (intelephense-extended):
 // after the PHP-LSP consolidation plain php and php-extended are the same server
@@ -803,18 +825,17 @@ export const declareDepsStep: StepDefinition<DeclareDepsDetect, DeclareDepsApply
 
   async apply(ctx, args) {
     const values = args.formValues as DeclareDepsFormValues;
-    const currentCliMeta = await loadCliProviderMetadata(ctx.db, ctx.cliProviderId);
-    const cliSupportsLsp = currentCliMeta?.supportsLsp ?? args.detected.cliSupportsLsp ?? false;
+    const task = await ctx.db.query.tasks.findFirst({
+      where: eq(schema.tasks.id, ctx.taskId),
+      columns: { repositoryId: true, cliProviderId: true },
+    });
+    const currentProviderId = task?.cliProviderId ?? null;
+    const cliSupportsLsp = await taskCliSupportsLsp(ctx.db, ctx.userId, currentProviderId);
     const baseImage = computeBaseImage(values.containerTool);
 
     const templateName = deriveEnvTemplateName(ctx.taskId);
     const existing = await getTaskEnvTemplate(ctx.db, ctx.taskId);
     assertKnownLspInstallContract(existing?.declaredDeps ?? {});
-
-    const task = await ctx.db.query.tasks.findFirst({
-      where: eq(schema.tasks.id, ctx.taskId),
-      columns: { repositoryId: true },
-    });
 
     // Repo-level component version pins (set via the tooling-upgrade / management
     // UI). Injected into declaredDeps below so renderDockerfile + the MCP launcher
@@ -905,7 +926,7 @@ export const declareDepsStep: StepDefinition<DeclareDepsDetect, DeclareDepsApply
       const decision = await decideLegacyLspReplacement(ctx.db, {
         taskId: ctx.taskId,
         userId: ctx.userId,
-        defaultProviderId: ctx.cliProviderId,
+        defaultProviderId: currentProviderId,
         rolloutOn: COMPOSED_LSP_NEW_ENVIRONMENT_ADOPTION,
         cliSupportsLsp,
         lspServers,
@@ -925,7 +946,7 @@ export const declareDepsStep: StepDefinition<DeclareDepsDetect, DeclareDepsApply
       const decision = await composedLspAdoptable(ctx.db, {
         taskId: ctx.taskId,
         userId: ctx.userId,
-        defaultProviderId: ctx.cliProviderId,
+        defaultProviderId: currentProviderId,
       });
       if (decision.ok) lspContract = 2;
       ctx.logger.info(
@@ -1032,7 +1053,7 @@ export const declareDepsStep: StepDefinition<DeclareDepsDetect, DeclareDepsApply
           userId: ctx.userId,
           defaultProviderId: locked.cliProviderId,
           rolloutOn: COMPOSED_LSP_NEW_ENVIRONMENT_ADOPTION,
-          cliSupportsLsp,
+          cliSupportsLsp: await taskCliSupportsLsp(tx, ctx.userId, locked.cliProviderId),
           lspServers,
         });
         if (!decision.ok) throw new ComposedLspReplacementRefusedError(decision.reason);

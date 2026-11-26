@@ -98,7 +98,10 @@ export async function providerDisableImpact(db: Database, userId: string, provid
       );
       const count = steps.filter(
         (s) =>
-          !s.roundCliUnavailable && (s.preferredCliProviderId ?? task.cliProviderId) === providerId,
+          !s.roundCliUnavailable &&
+          (s.effectiveCliProviderIds !== undefined
+            ? s.effectivePreferredCliProviderId
+            : (s.preferredCliProviderId ?? task.cliProviderId)) === providerId,
       ).length;
       if (count > 0) taskCount++;
       stepCount += count;

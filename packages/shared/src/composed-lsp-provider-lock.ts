@@ -2,8 +2,8 @@ import { and, eq } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
 import { resolveTaskCliProviderId } from './cli-providers/default-provider.js';
 
-/** Provider names verified to launch the composed language-server image. */
-export const COMPOSED_LSP_VERIFIED_PROVIDER_NAMES: readonly string[] = ['claude-code'];
+import { COMPOSED_LSP_VERIFIED_PROVIDER_NAMES } from './cli-providers/preferred-provider.js';
+export { COMPOSED_LSP_VERIFIED_PROVIDER_NAMES } from './cli-providers/preferred-provider.js';
 
 /** The API error code of a refused switch. */
 export const COMPOSED_LSP_PROVIDER_LOCKED = 'composed_lsp_provider_locked';

@@ -155,3 +155,15 @@ describe('stepCliProviderIds', () => {
     ).toEqual(['switched-off', 'claude']);
   });
 });
+
+it('uses the API composed-lock result, including a refusal with no candidate', () => {
+  for (const effectiveCliProviderIds of [['claude'], []]) {
+    expect(
+      stepCliProviderIds({
+        step: { preferredCliProviderId: 'codex', effectiveCliProviderIds } as StepCliProviderSource,
+        taskCliProviderId: 'gemini',
+        listedProviderIds: LISTED,
+      }),
+    ).toEqual(effectiveCliProviderIds);
+  }
+});

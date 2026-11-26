@@ -273,7 +273,8 @@ describe.each<Subject>(['replace', 'adopt'])(
         const refused =
           applyResult.status === 'rejected' &&
           (applyResult.reason as { code?: string }).code === REFUSED &&
-          (applyResult.reason as { reason?: string }).reason === 'providers';
+          (applyResult.reason as { reason?: string }).reason ===
+            (interleaving === 'default-change' ? 'cli_unsupported' : 'providers');
         if (subject === 'replace') {
           const outcomeA =
             refused &&

@@ -1,3 +1,4 @@
+import { composedLspAllowedSet } from '@haive/shared/cli-preferred-provider';
 import { ExecutionContractError } from '@haive/shared/modularity';
 import { gate3InsightCycle, gate3QaDeferred, recordGate3Check } from './insight-gate3-return.js';
 import { isConditionalInsightStep, insightStepActive } from './run-list.js';
@@ -1728,6 +1729,41 @@ async function loadProviders(
   return rows;
 }
 
+/** Provider directory used by the start-time persona check, after the composed saved-pick skip. */
+export async function personaProviderNameFor(
+  db: Database,
+  ctx: ResolvedTaskContext,
+  stepId: string,
+  providers: CliProviderRecord[],
+) {
+  const { cliProviderId, savedPreference } = await resolvePreferredCli(
+    db,
+    ctx.userId,
+    stepId,
+    ctx.cliProviderId,
+    providers,
+    'default',
+    ctx.taskId,
+    ctx.ignoreSavedStepClis,
+  );
+  const { composedProviderIds } = await lspDispatchState(db, ctx.taskId, [], false);
+  const preferred = resolvePreferredProvider({
+    providers,
+    preferredProviderId: cliProviderId,
+    savedPreference,
+    composedLspProviderIds: composedProviderIds,
+  });
+  if (preferred.kind !== 'use') return null;
+  const allowed = composedLspAllowedSet(providers, composedProviderIds);
+  const needsVision = ctx.customSteps?.[stepId]?.capabilities.includes('vision') === true;
+  const first = dispatchCandidates(
+    providers.filter((p) => !allowed || allowed.has(p.id)),
+    preferred.providerId,
+    { needsVision },
+  ).next();
+  return first.done ? null : first.value.provider.name;
+}
+
 /** The hold message for a fresh step whose resolved CLI is a listed provider that is switched
  *  off, else null. The provider is the one the dispatcher would run, so a saved pick the composed
  *  lock skips is not it. Only a step that dispatches a CLI or reads the default one is asked, and
@@ -3439,19 +3475,7 @@ async function handleStartTask(
     customSteps: ctx.customSteps,
     providerNameFor: async (stepId) => {
       startProviders ??= await loadProviders(db, ctx.userId);
-      const { cliProviderId } = await resolvePreferredCli(
-        db,
-        ctx.userId,
-        stepId,
-        ctx.cliProviderId,
-        startProviders,
-        'default',
-        ctx.taskId,
-        ctx.ignoreSavedStepClis,
-      );
-      const needsVision = ctx.customSteps?.[stepId]?.capabilities.includes('vision') === true;
-      const first = dispatchCandidates(startProviders, cliProviderId, { needsVision }).next();
-      return first.done ? null : first.value.provider.name;
+      return personaProviderNameFor(db, ctx, stepId, startProviders);
     },
     record: (unresolved) =>
       appendEvent(db, ctx.taskId, null, AGENT_PERSONA_UNRESOLVED_EVENT, { ...unresolved }),

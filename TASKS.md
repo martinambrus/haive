@@ -782,7 +782,7 @@ Related, measured 2026-11-20: `src/db/setup.ts:155-163` (`accountedStorage`) cha
 
 ### T728 · FNF[composed-lsp-provider-lock] · composed LSP provider lock and template replacement leftovers (+16)
 
-status: open; items 1 and 16 DONE in #1315 (da1f5ed69, deployed 2026-11-21 22:28Z: locked task CLI read under the lock, `resolvePreferredProvider` shared by dispatch and hold) · kind: fix · found: legacy template replacement build and review (#1288) 2026-11-20 · priority: P4
+status: open for item 21 (OWNER QUESTION: keep failing plus (a) name the disabled providers in the lock reason and (b) warn in the disable preview, recommended; or a set-wide park) and coverage items 2-14; items 15 and 17-20 DONE in #1337 (f2b591b1a, deployed 2026-11-26 with `pnpm docker libs`: shared preferred-provider and image-reference subpaths, composed substitute on step cards and task detail, preview counts the post-lock binding, persona names the substitute, step 01 capability from current rows, malformed pins isolated per task); items 1 and 16 DONE in #1315 (da1f5ed69, deployed 2026-11-21 22:28Z: locked task CLI read under the lock, `resolvePreferredProvider` shared by dispatch and hold) · kind: fix · found: legacy template replacement build and review (#1288) 2026-11-20 · priority: P4
 
 Paths are under `packages/`. NEW means introduced by #1288.
 
@@ -800,13 +800,13 @@ Paths are under `packages/`. NEW means introduced by #1288.
 12. `worker/test/step-runner-reuse.test.ts` prints "invs is not iterable" (test noise). PRE-EXISTING.
 13. The task page's CLI pickers still list every provider for a contract-2 task; the lock answers 409 `composed_lsp_provider_locked` only when a choice is written. Disable or annotate the refused providers in the pickers. Found by the replacement live check. PRE-EXISTING since #1272.
 14. A Retry of step 01 on a contract-2 task rebuilt its image in step 03 with a new id although the row's tag and Dockerfile were unchanged (live check task c858faec, step 7); a legacy row in the same check reused its image. Whether the contract-2 tag rule (#1288) or the contract-2 path causes the rebuild is unchecked.
-15. The step card's CLI mirrors still name the saved CLI on a locked task, though dispatch skips a saved pick the lock refuses (#1297): `api/src/routes/tasks/_helpers.ts` ~:524-545 and `web/src/lib/step-cli-providers.ts` ~:33-47. Show the CLI that dispatch will run. PRE-EXISTING.
+15. DONE (#1337). The step card's CLI mirrors still name the saved CLI on a locked task, though dispatch skips a saved pick the lock refuses (#1297): `api/src/routes/tasks/_helpers.ts` ~:524-545 and `web/src/lib/step-cli-providers.ts` ~:33-47. Show the CLI that dispatch will run. PRE-EXISTING.
 16. DONE (#1315). `providerHoldFor` (`worker/src/queues/task-queue.ts` ~:1720-1747) holds only on the resolver's id. With an enabled saved pick outside the lock's set and a disabled task CLI inside it, the step fails with "is disabled" instead of parking as it does with nothing saved; a disabled saved pick keeps the disabled refusal and hold although the lock would skip it. Mirror the dispatcher's skip in the hold. PRE-EXISTING (the step failed on the lock before #1297). Checked against the code 2026-11-21.
 
-17. The api's disable-impact preview (`api/src/lib/provider-disable-impact.ts` ~:101) never modelled the lock's skip of a saved pick, so on a composed task with a saved pick outside the lock it over-counts when the skipped pick is disabled and under-counts when the task CLI is. With item 15 this needs the pure `resolvePreferredProvider` decision (`worker/src/orchestrator/dispatcher.ts`) moved to a shared home. PRE-EXISTING.
-18. Step 01's `cliSupportsLsp` still derives from the pre-lock `ctx.cliProviderId` (`01-declare-deps.ts` ~:806, ~:910, ~:1035); a stale flag can only refuse, never wrongly accept. PRE-EXISTING, low.
-19. The persona pin check names the saved CLI, not the substitute the dispatcher runs (`worker/src/queues/task-queue.ts` ~:3270-3290, `providerNameFor`); advisory event only. PRE-EXISTING, low.
-20. Coverage: no hold-versus-dispatch parity test; no hold cases for a fix-round choice, ignored saved CLIs or non-default roles; step 01's locked decision has no real-Postgres control. Low.
+17. DONE (#1337). The api's disable-impact preview (`api/src/lib/provider-disable-impact.ts` ~:101) never modelled the lock's skip of a saved pick, so on a composed task with a saved pick outside the lock it over-counts when the skipped pick is disabled and under-counts when the task CLI is. With item 15 this needs the pure `resolvePreferredProvider` decision (`worker/src/orchestrator/dispatcher.ts`) moved to a shared home. PRE-EXISTING.
+18. DONE (#1337). Step 01's `cliSupportsLsp` still derives from the pre-lock `ctx.cliProviderId` (`01-declare-deps.ts` ~:806, ~:910, ~:1035); a stale flag can only refuse, never wrongly accept. PRE-EXISTING, low.
+19. DONE (#1337). The persona pin check names the saved CLI, not the substitute the dispatcher runs (`worker/src/queues/task-queue.ts` ~:3270-3290, `providerNameFor`); advisory event only. PRE-EXISTING, low.
+20. DONE (#1337). Coverage: no hold-versus-dispatch parity test; no hold cases for a fix-round choice, ignored saved CLIs or non-default roles; step 01's locked decision has no real-Postgres control. Low.
 21. Design: a composed task with nothing saved, no own CLI and no enabled provider in the lock's set fails with the lock reason (`dispatcher.ts` ~:789), while a disabled own CLI parks. Whether that should park set-wide is a choice.
 
 ### T729 · A CLI remembered on another task can be refused at dispatch for a composed LSP task
@@ -827,7 +827,7 @@ Step 01's detect still suggests `intelephense` for a PHP project that is neither
 
 ### T732 · FNF[composed-image-launch] · composed sandbox image launch lows (+1)
 
-status: open for follow-ups 2-3; item 1 DONE in #1312 (21246ebb7, deployed 2026-11-21 20:02Z: one shared base rule with the composer, tags unchanged) · kind: fix · found: legacy composed image fix (T712 build) 2026-11-20 · priority: P4
+status: parked 2026-11-26 (session triage, not owner: low, coverage-only or inputs no current path produces); follow-ups 2-3 remain; item 1 DONE in #1312 (21246ebb7, deployed 2026-11-21 20:02Z: one shared base rule with the composer, tags unchanged) · kind: fix · found: legacy composed image fix (T712 build) 2026-11-20 · priority: P4
 
 1. A launch ensures the sandbox core image even when the composition does not build on it (`worker/src/sandbox/composed-image-cache.ts` ~:247-253 calling ~:283-291; hash rule `sandbox/image-composer.ts` ~:126-128). A composition built on its environment image (contract 2, and legacy with a usable environment image) never uses the core image, so that ensure is dead work at every launch. PRE-EXISTING. Fix direction: ensure the core image only when the composition's base is the core image.
 
@@ -936,22 +936,22 @@ status: done (#1326 2b78b319d, deployed 2026-11-23: gate Continue and loop_back 
 
 ### T742 · FNF[ci-gated-row-bookkeeping] · adding a gated test row needs two hand edits
 
-status: open for follow-ups 1-6; main item DONE in #1314 (2026-11-21: derived row check, one limit formula with 25 rows of headroom, limits 50/52 min; accepted by the session, not the owner: a gated file deleted with its row is no longer flagged, a hung run is cancelled 6 min later) · kind: chore · found: custom fix recovery driver (#1303) · priority: P4
+status: done for follow-ups 2, 4, 5, 6 in #1338 (46e8ee6f1, 2026-11-26: two-leg matrix with the `Postgres-gated tests` aggregate, budget in `scripts/lib/ci-gated-budget.mjs`, every row column checked; first sharded run 722 s and 804 s); follow-ups 1 and 3 parked 2026-11-26 (session triage: low, pre-existing / board-only); main item DONE in #1314 (2026-11-21: derived row check, one limit formula with 25 rows of headroom, limits 50/52 min; accepted by the session, not the owner: a gated file deleted with its row is no longer flagged, a hung run is cancelled 6 min later) · kind: chore · found: custom fix recovery driver (#1303) · priority: P4
 
 `scripts/test/ci-gated-list.test.mjs` ~:208 hard-codes the gated file count, and the gated step and job limits in `.github/workflows/ci.yml` (~:386 and ~:489) sit at exactly 1.5x the modelled row time, so every new row fails `ci-step-independence.test.mjs` until both are raised by hand. Derive the count, or give the limits headroom with the formula in one place. PRE-EXISTING.
 
 Follow-ups found by the #1314 driver:
 
 1. `scripts/test/ci-gated-list.test.mjs` ~:12 `gatedEnvironment` misses a destructured `process.env`, a ternary `describe` choice and a guard inside a function (7 blind idioms in all, same on base). PRE-EXISTING, low.
-2. `ci-gated-list.test.mjs` ~:97-98 reads only a row's package and file; the env var, database and image columns are never checked, so a wrong value surfaces only in the 40+ minute CI run. PRE-EXISTING, low.
+2. DONE (#1338). `ci-gated-list.test.mjs` ~:97-98 reads only a row's package and file; the env var, database and image columns are never checked, so a wrong value surfaces only in the 40+ minute CI run. PRE-EXISTING, low.
 3. Board text elsewhere in this file still describes hand-bumping the count and limits (the entries that cite `ci-gated-list.test.mjs` counts). Board-only; tidy when next edited.
-4. `scripts/test/ci-step-independence.test.mjs` ~:321: the crowding failure message does not name the minutes to raise. NEW, nit.
-5. `ci-step-independence.test.mjs` ~:290-294: `rowHeadroom` has no default or guard, so a second gated budget without it prints `NaN`. No such budget exists. NEW, latent.
-6. Design: shard the postgres-gated job into a matrix. The serial list grows about 3 rows a day and every limit raise lengthens the hung-run bound.
+4. DONE (#1338). `scripts/test/ci-step-independence.test.mjs` ~:321: the crowding failure message does not name the minutes to raise. NEW, nit.
+5. DONE (#1338). `ci-step-independence.test.mjs` ~:290-294: `rowHeadroom` has no default or guard, so a second gated budget without it prints `NaN`. No such budget exists. NEW, latent.
+6. DONE (#1338). Design: shard the postgres-gated job into a matrix. The serial list grows about 3 rows a day and every limit raise lengthens the hung-run bound.
 
 ### T743 · FNF[extension-lock-recovery] · the extension's window lock has no stale recovery
 
-status: open for follow-ups 1-2; main item DONE in #1317 (2026-11-22: the window lock is a lease at the same name; a legacy folder is refused with instructions, never deleted) · kind: fix · found: #1304 driver 2026-11-21 · priority: P4
+status: parked 2026-11-26 (session triage, not owner: low, coverage-only or inputs no current path produces); follow-ups 1-2 remain; main item DONE in #1317 (2026-11-22: the window lock is a lease at the same name; a legacy folder is refused with instructions, never deleted) · kind: fix · found: #1304 driver 2026-11-21 · priority: P4
 
 The sibling `<dir>.extension-lock` (`docker/desktop-extension/bridge/main.go` ~:718, an `os.Mkdir`) stays after a crashed or closed Desktop window and needs manual removal. Reuse the lease record from `stack_lock.go`. PRE-EXISTING.
 
@@ -1032,7 +1032,7 @@ status: done 2026-11-22 #1319 (2c7ab90a9): new `docs/architecture/migrations.md`
 
 ### T751 · FNF[gated-test-local-runner] · no local runner for the CI-only database tests
 
-status: open for follow-ups 1-3; main item DONE in #1316 (2026-11-22: `pnpm test:gated <file|package|all>`, reads the CI GATED list, throwaway containers removed on every exit) · kind: chore · found: #1313 driver 2026-11-21 · priority: P4
+status: parked 2026-11-26 (session triage, not owner: low, coverage-only or inputs no current path produces); follow-ups 1-3 remain; main item DONE in #1316 (2026-11-22: `pnpm test:gated <file|package|all>`, reads the CI GATED list, throwaway containers removed on every exit) · kind: chore · found: #1313 driver 2026-11-21 · priority: P4
 
 The real-Postgres test files in the CI gated list skip without their env var, so a driver only runs them by hand-building a throwaway Postgres and the right URL per file; a change that breaks one (as #1313's first build did) is caught only by CI or by luck. Add a script that starts a throwaway Postgres 18, migrates it, and runs a named gated file (or all of them) with the env var the list declares. PRE-EXISTING.
 
@@ -1137,7 +1137,7 @@ UPDATE 2026-11-23: items 1-3 DONE #1331 bc029cbcb (deployed; New Task showed an 
 
 ### T762 · FNF[T749]: step warning column follow-ups (+3)
 
-status: open for item 3 and the two test gaps below; items 1 and 2 DONE #1327 df46d2875 (deployed 2026-11-23: the history headline no longer reads the warning column; the five RAG banner writes go through `updateOwnedStep`) · kind: fix · found: T749 driver and review 2026-11-22 · priority: P4
+status: parked 2026-11-26 (session triage, not owner: low, coverage-only or inputs no current path produces); item 3 and the two test gaps below remain; items 1 and 2 DONE #1327 df46d2875 (deployed 2026-11-23: the history headline no longer reads the warning column; the five RAG banner writes go through `updateOwnedStep`) · kind: fix · found: T749 driver and review 2026-11-22 · priority: P4
 
 All PRE-EXISTING.
 

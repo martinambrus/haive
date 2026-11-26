@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import type { Database } from '@haive/database';
+import { schema, type Database } from '@haive/database';
 import { declareDepsStep } from '../src/step-engine/steps/env-replicate/01-declare-deps.js';
 import type {
   DeclareDepsDetect,
@@ -34,16 +34,17 @@ function makeHarness(
       },
       envTemplates: { findFirst: vi.fn(async () => existing ?? undefined) },
     },
-    // Two callers land here: the repositories row (ends in .limit(1)) and
+    // Provider resolution has no configured providers in this fixture. Other callers:
+    // the repositories row (ends in .limit(1)) and
     // liveTasksSharingEnvTemplate (awaits the .where() directly).
     select: () => ({
-      from: () => ({
+      from: (table: unknown) => ({
         where: () => ({
           limit: async () => [
             { lspServerVersions: null, chromeDevtoolsMcpVersion: null, lspServers: null },
           ],
           then: (resolve: (rows: { id: string }[]) => unknown) =>
-            resolve(sharingTaskIds.map((id) => ({ id }))),
+            resolve(table === schema.cliProviders ? [] : sharingTaskIds.map((id) => ({ id }))),
         }),
       }),
     }),
