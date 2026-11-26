@@ -1224,7 +1224,7 @@ In `martinambrus/haive-module-translator`. The owner's English-to-Slovak run fai
 
 ### T775 · Step terminal runs carry a title saying what each run did
 
-status: open, design pending owner confirmation · kind: ux · found: owner task ae8fb29c 2026-11-26 · priority: P2
+status: open, design confirmed by owner 2026-11-26, starts after T773 · kind: ux · found: owner task ae8fb29c 2026-11-26 · priority: P2
 
 Runs of a single-agent step show only "Run 1", "Run 2" (`web/src/components/terminal/StepTerminal.tsx:295`). `cli_invocations.agent_title` already exists and the terminal header shows it, but only loop roles, mining agents and step summaries set it; a module's pre-form dispatch cannot.
 
@@ -1233,7 +1233,7 @@ Runs of a single-agent step show only "Run 1", "Run 2" (`web/src/components/term
 
 ### T774 · Translator review: an ignored correction stays ignored; explicit "later"
 
-status: open, design pending owner confirmation · kind: ux · found: owner task ae8fb29c 2026-11-26 · priority: P1
+status: open, design confirmed by owner 2026-11-26, starts after T773 · kind: ux · found: owner task ae8fb29c 2026-11-26 · priority: P1
 
 Unticked corrections are recorded as rejected, but every re-review of a unit stores its corrections as new proposals with no comparison to earlier decisions, so a rejected correction returns whenever its unit is reviewed again (ae8fb29c: 17 proposals, 17 distinct fingerprints; unit 1 block b3 proposed twice, b8 four times as reworded variants, so an exact-fingerprint match would not catch them).
 
