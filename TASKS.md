@@ -1211,6 +1211,7 @@ In `martinambrus/haive-module-translator`. Owner (2026-11-26): "the translator m
 Today consent reserves worst-case storage for all `8 x U` calls up front (about 3.5 MB per unit, `src/protocol/storage.ts`), and a document's quota tops out at 512 MiB, so flat prose stops at about 130 units (roughly 90,000 to 130,000 words); nesting lowers it. Over that, consent says to split the file, which makes separate tasks with separate paid glossary and calibration, so terms and style can drift. A unit is whole paragraphs up to about 1,000 words (`src/chunking/group.ts`).
 
 1. Design: one task per book with one glossary and one approved style, translated and reviewed in batches with storage reserved per batch (recommended), versus part tasks importing an earlier part's approved glossary and style. Plan in `docs/plans/` before building; review at xhigh (consent, money).
+
 - PR1 review (2026-11-26), found-not-fixed for later PRs: F8 `ownerResources` runs about 25 aggregates per owner task, several times per admission under the owner lock (scale; PR2's bounded lookups). F9 the unused render reserve and control headroom of a completed book stay counted until purge (same order as the old whole-run reservation; PR3).
 
 ### T768 · Translator: keep terms refused when the target language declines them
