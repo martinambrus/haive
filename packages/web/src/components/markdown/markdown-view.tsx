@@ -137,6 +137,10 @@ function MarkdownViewImpl({
     () => enhanced && hasCollapsibleContent(segments),
     [segments, enhanced],
   );
+  // A body that IS one JSON object or array (a CLI's structured reply in the Clean tab) gets
+  // the same tree a fenced JSON block gets, by the same rule as an unlabeled fence. Anything
+  // else, JSON followed by prose included, stays markdown.
+  const wholeJson = useMemo(() => parseJsonFence(null, body), [body]);
   const remarkPlugins = useMemo(
     () => (looksLikeMarkdown(body) ? [remarkGfm] : [remarkGfm, remarkSoftBreaks]),
     [body],
@@ -180,22 +184,26 @@ function MarkdownViewImpl({
           </button>
         </div>
       )}
-      {segments.map((segment, i) => {
-        if (segment.kind === 'quiz') return <QuizBlock key={i} quiz={segment.quiz} />;
-        if (segment.kind === 'before-after') {
-          return <BeforeAfterBlock key={i} before={segment.before} after={segment.after} />;
-        }
-        return (
-          <Markdown
-            key={i}
-            remarkPlugins={remarkPlugins}
-            rehypePlugins={[[rehypeHighlight, { ignoreMissing: true }]]}
-            components={MD_COMPONENTS}
-          >
-            {segment.text}
-          </Markdown>
-        );
-      })}
+      {wholeJson ? (
+        <JsonTreeBlock value={wholeJson.value} />
+      ) : (
+        segments.map((segment, i) => {
+          if (segment.kind === 'quiz') return <QuizBlock key={i} quiz={segment.quiz} />;
+          if (segment.kind === 'before-after') {
+            return <BeforeAfterBlock key={i} before={segment.before} after={segment.after} />;
+          }
+          return (
+            <Markdown
+              key={i}
+              remarkPlugins={remarkPlugins}
+              rehypePlugins={[[rehypeHighlight, { ignoreMissing: true }]]}
+              components={MD_COMPONENTS}
+            >
+              {segment.text}
+            </Markdown>
+          );
+        })
+      )}
     </>
   );
 
