@@ -136,6 +136,54 @@ describe('resolveDispatch with a composed LSP provider set', () => {
     },
   );
 
+  it.each([{ ids: ['retained'] }, { ids: [] }])(
+    'names disabled set members for lock $ids',
+    ({ ids }) => {
+      const off = { ...A, id: 'retained', label: 'My Claude', enabled: false };
+      const fallback = { ...A, id: 'fallback', label: '', enabled: false };
+      const plan = resolveDispatch({
+        ...base,
+        providers: [off, fallback, B],
+        composedLspProviderIds: ids,
+      });
+      expect(plan.mode).toBe('skip');
+      expect(plan.reason).toContain('disabled');
+      expect(plan.reason).toContain('"My Claude"');
+      if (ids.length === 0) expect(plan.reason).toContain('"claude-code"');
+      expect(plan.reason).toContain('re-enable');
+      expect(plan.reason).toContain('CLI providers');
+      expect(plan.reason).toContain('Retry');
+      expect(plan.reason).not.toContain('retained');
+      expect(plan.reason).not.toContain(B.id);
+    },
+  );
+
+  it('caps disabled labels at five and reports the omitted count', () => {
+    const providers = Array.from({ length: 7 }, (_, i) => ({
+      ...A,
+      id: `private-${i}`,
+      label: `Account ${i + 1}`,
+      enabled: false,
+    }));
+    const plan = resolveDispatch({
+      ...base,
+      providers,
+      composedLspProviderIds: providers.map((p) => p.id),
+    });
+    for (let i = 1; i <= 5; i++) expect(plan.reason).toContain(`"Account ${i}"`);
+    expect(plan.reason).toContain('and 2 more');
+    expect(plan.reason).not.toContain('Account 6');
+    expect(plan.reason).not.toContain('private-');
+  });
+
+  it('keeps the all-deleted lock reason unchanged', () => {
+    const plan = resolveDispatch({ ...base, composedLspProviderIds: ['deleted'] });
+    expect(plan.mode).toBe('skip');
+    expect(plan.reason).toBe(
+      "no enabled cli provider holds a verified composed image for this task's language servers; choose that provider, or start a new task that keeps the language servers in the environment image",
+    );
+  });
+
   it('before any image is effective, refuses an unverified preferred provider', () => {
     const plan = resolveDispatch({
       ...base,

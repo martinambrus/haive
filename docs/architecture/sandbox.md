@@ -1469,6 +1469,12 @@ is logged by id only and left on its pre-lock view in the listing, the task deta
 and the disable preview, so it can still be opened and stopped. Dispatch stays strict and refuses
 it.
 
+A composed task whose lock set has members but none enabled, with no saved or own CLI to hold on,
+fails rather than parks (owner decision 2026-11-26). Its reason names the disabled members by display
+label, at most five plus "and N more", and says to re-enable one in CLI providers and Retry; a set
+whose members are all deleted keeps the generic reason, since nothing is left to name. A disabled
+own or saved CLI still parks on its hold, as above.
+
 The rule and what it guards change in different transactions, so one lock orders them: the task row,
 taken `FOR NO KEY UPDATE` by `lockTaskForComposedLsp` (`@haive/shared/composed-lsp-provider-lock`).
 Every writer of a provider choice takes it, reads the task's CLI and its template's contract again

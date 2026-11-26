@@ -39,9 +39,13 @@ import { MarkdownView } from '@/components/markdown/markdown-view';
 interface ProviderDisableImpact {
   taskCount: number;
   stepCount: number;
+  composedLspFailureTaskCount?: number;
+  composedLspFailureTasks?: Array<{ id: string }>;
   incomplete?: boolean;
   invalidTasks?: Array<{ id: string; code: string }>;
 }
+
+const COMPOSED_FAILURE_TASK_ID_LIMIT = 5;
 
 interface CliProviderFormProps {
   mode: 'create' | 'edit';
@@ -533,7 +537,13 @@ export function CliProviderForm({
       const impact = await api
         .get<ProviderDisableImpact>(`/cli-providers/${provider.id}/disable-impact`)
         .catch(() => null);
-      if (impact && (impact.incomplete || impact.taskCount > 0 || impact.stepCount > 0)) {
+      if (
+        impact &&
+        (impact.incomplete ||
+          impact.taskCount > 0 ||
+          impact.stepCount > 0 ||
+          (impact.composedLspFailureTaskCount ?? 0) > 0)
+      ) {
         const confirmed = await new Promise<boolean>((resolve) => {
           disableAnswer.current = resolve;
           setDisableImpact(impact);
@@ -715,6 +725,21 @@ export function CliProviderForm({
     ? `**Counts are incomplete.** ${disableImpact.invalidTasks?.length ?? 'Some'} ${disableImpact.invalidTasks?.length === 1 ? 'task could' : 'tasks could'} not be checked. The counts below cover only tasks that could be checked.\n\n`
     : '';
 
+  const composedFailureCount = disableImpact?.composedLspFailureTaskCount ?? 0;
+  const composedFailureIds = (disableImpact?.composedLspFailureTasks ?? []).slice(
+    0,
+    COMPOSED_FAILURE_TASK_ID_LIMIT,
+  );
+  const omittedComposedFailureCount = composedFailureCount - composedFailureIds.length;
+  const composedFailureNotice =
+    composedFailureCount > 0
+      ? `**Warning:** ${composedFailureCount} ${composedFailureCount === 1 ? 'task will fail at its' : 'tasks will fail at their'} next CLI step until a provider in each task's allowed set is re-enabled in CLI providers. Affected task IDs: ${composedFailureIds.map((t) => t.id).join(', ')}${omittedComposedFailureCount > 0 ? ` and ${omittedComposedFailureCount} more` : ''}.\n\n`
+      : '';
+  const pinnedHoldNotice =
+    (disableImpact?.taskCount ?? 0) > 0
+      ? `${disableImpact?.taskCount} ${disableImpact?.taskCount === 1 ? 'task has' : 'tasks have'} ${disableImpact?.stepCount ?? 0} remaining ${disableImpact?.stepCount === 1 ? 'step' : 'steps'} pinned to this provider. These steps will be held when they next need this CLI, unless skipped by the workflow. Enable the provider again or switch the step's CLI to continue. This is a snapshot; counts can change before you save.`
+      : '';
+
   return (
     <form onSubmit={handleSubmit} className="flex flex-col gap-4">
       <Dialog
@@ -727,7 +752,7 @@ export function CliProviderForm({
         <div className="flex flex-col gap-4 p-6">
           <h2 className="text-lg font-semibold">Disable CLI provider</h2>
           <MarkdownView
-            body={`${incompleteImpactNotice}${disableImpact?.taskCount ?? 0} ${disableImpact?.taskCount === 1 ? 'task has' : 'tasks have'} ${disableImpact?.stepCount ?? 0} remaining ${disableImpact?.stepCount === 1 ? 'step' : 'steps'} pinned to this provider. These steps will be held when they next need this CLI, unless skipped by the workflow. Enable the provider again or switch the step's CLI to continue. This is a snapshot; counts can change before you save.`}
+            body={`${incompleteImpactNotice}${composedFailureNotice}${pinnedHoldNotice}`}
           />
           <div className="flex gap-2">
             <Button type="button" onClick={() => answerDisable(true)}>

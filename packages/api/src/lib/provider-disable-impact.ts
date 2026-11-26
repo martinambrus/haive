@@ -1,10 +1,14 @@
+import { composedLspAllowedSet } from '@haive/shared/cli-preferred-provider';
 import { DerivedRunPlanError, pinnedTaskStepIds } from '@haive/shared/modularity';
 import type { ExecutionPath } from '@haive/shared';
 import { builtinRunListStrategy, taskRunListIds } from '@haive/shared/run-list';
 import { and, eq, inArray, isNull } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
 import { loadTaskStepFlags } from './step-flags.js';
-import { enrichStepsWithCliPreferences } from '../routes/tasks/_helpers.js';
+import {
+  enrichStepsWithCliPreferences,
+  loadComposedProviderSets,
+} from '../routes/tasks/_helpers.js';
 
 /** Remaining fresh step bindings, not a prediction of shouldRun: the worker alone can
  * evaluate repository-dependent skips. Like providerHoldFor, inspect only the default
@@ -39,8 +43,38 @@ export async function providerDisableImpact(db: Database, userId: string, provid
         tasks.map((t) => t.id),
       ),
     );
+  // Reuse the CLI mirrors' retained-set parser and dispatch's membership rule, including
+  // the verified-provider fallback before the first image is effective. Hold counts below
+  // still use post-lock bindings; a floating task can fail even though it has no binding to hold.
+  const composedSets = await loadComposedProviderSets(
+    db,
+    tasks.map((t) => t.id),
+  );
+  const providers =
+    composedSets.size > 0
+      ? await db
+          .select({
+            id: schema.cliProviders.id,
+            name: schema.cliProviders.name,
+            label: schema.cliProviders.label,
+            enabled: schema.cliProviders.enabled,
+          })
+          .from(schema.cliProviders)
+          .where(eq(schema.cliProviders.userId, userId))
+      : [];
+  const composedLspFailureCandidates = tasks
+    .filter((task) => {
+      const allowed = composedLspAllowedSet(providers, composedSets.get(task.id));
+      return (
+        allowed?.has(providerId) &&
+        providers.some((p) => p.id === providerId && p.enabled) &&
+        !providers.some((p) => p.enabled && p.id !== providerId && allowed.has(p.id))
+      );
+    })
+    .map((task) => ({ id: task.id }));
   let taskCount = 0;
   let stepCount = 0;
+  const nextHeldTaskIds = new Set<string>();
   const invalidTasks: Array<{ id: string; code: DerivedRunPlanError['code'] }> = [];
   for (const task of tasks) {
     try {
@@ -96,23 +130,39 @@ export async function providerDisableImpact(db: Database, userId: string, provid
         task.id,
         task.ignoreSavedStepClis,
       );
-      const count = steps.filter(
+      const stepHolds = steps.map(
         (s) =>
           !s.roundCliUnavailable &&
           (s.effectiveCliProviderIds !== undefined
             ? s.effectivePreferredCliProviderId
             : (s.preferredCliProviderId ?? task.cliProviderId)) === providerId,
-      ).length;
-      if (count > 0) taskCount++;
+      );
+      const count = stepHolds.filter(Boolean).length;
+      if (count > 0) {
+        taskCount++;
+      }
+      // providerHoldFor checks only the step being advanced. A later binding cannot
+      // prevent an earlier floating step from reaching dispatch with an empty lock set.
+      if (stepHolds[0]) nextHeldTaskIds.add(task.id);
       stepCount += count;
     } catch (error) {
       if (!(error instanceof DerivedRunPlanError)) throw error;
       invalidTasks.push({ id: task.id, code: error.code });
     }
   }
+  // Only a hold on the next remaining CLI/provider-sensitive step precedes dispatch failure.
+  const composedLspFailureTasks = composedLspFailureCandidates.filter(
+    (task) => !nextHeldTaskIds.has(task.id),
+  );
   return {
     taskCount,
     stepCount,
+    ...(composedLspFailureTasks.length > 0
+      ? {
+          composedLspFailureTaskCount: composedLspFailureTasks.length,
+          composedLspFailureTasks,
+        }
+      : {}),
     ...(invalidTasks.length > 0 ? { incomplete: true, invalidTasks } : {}),
   };
 }

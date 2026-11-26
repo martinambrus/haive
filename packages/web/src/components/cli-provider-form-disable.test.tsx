@@ -253,3 +253,58 @@ it.each(['Save', 'Rebuild image'])(
     expect(h.patch).toHaveBeenCalledTimes(1);
   },
 );
+
+it('warns of composed LSP failures even with no pinned holds, without blocking disable', async () => {
+  h.get.mockImplementation(async (path: string) => {
+    if (path.endsWith('/disable-impact'))
+      return {
+        taskCount: 0,
+        stepCount: 0,
+        composedLspFailureTaskCount: 2,
+        composedLspFailureTasks: [{ id: 'task-alpha' }, { id: 'task-beta' }],
+      };
+    if (path.endsWith('/secrets')) return { secrets: [] };
+    throw new Error(`Unexpected GET ${path}`);
+  });
+  await saveDisabled();
+  const dialog = screen.getByRole('dialog');
+  const warning = dialog.querySelector('.haive-md')?.textContent;
+  expect(warning).toContain('2 tasks will fail at their next CLI step');
+  expect(warning).toContain('task-alpha');
+  expect(warning).toContain('task-beta');
+  expect(warning).toContain('re-enabled');
+  expect(warning).not.toContain('0 tasks have 0 remaining steps pinned');
+  expect(warning).not.toContain('These steps will be held');
+  expect(h.patch).not.toHaveBeenCalled();
+  await act(async () => {
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Disable provider' }));
+  });
+  expect(h.patch).toHaveBeenCalledWith(
+    '/cli-providers/provider',
+    expect.objectContaining({ enabled: false }),
+  );
+});
+
+it('caps composed failure task IDs at five while keeping the exact count', async () => {
+  h.get.mockImplementation(async (path: string) => {
+    if (path.endsWith('/disable-impact'))
+      return {
+        taskCount: 1,
+        stepCount: 2,
+        composedLspFailureTaskCount: 7,
+        composedLspFailureTasks: Array.from({ length: 7 }, (_, i) => ({
+          id: `composed-task-${i + 1}`,
+        })),
+      };
+    if (path.endsWith('/secrets')) return { secrets: [] };
+    throw new Error(`Unexpected GET ${path}`);
+  });
+  await saveDisabled();
+  const warning = screen.getByRole('dialog').querySelector('.haive-md')?.textContent;
+  expect(warning).toContain('7 tasks will fail at their next CLI step');
+  for (let i = 1; i <= 5; i++) expect(warning).toContain(`composed-task-${i}`);
+  expect(warning).not.toContain('composed-task-6');
+  expect(warning).not.toContain('composed-task-7');
+  expect(warning).toContain('and 2 more');
+  expect(warning).toContain('1 task has 2 remaining steps pinned');
+});
