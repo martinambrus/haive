@@ -144,6 +144,7 @@ and conditional phase gates.
 
 | `calm-crafting-fiddle` | Channel installation and upgrade (T335 / D2b) | **Shipped** 2026-11-05, #1007–#1009. Historical A/B/C plan now links to the as-built modules topic; independently tracked follow-ups remain. |
 | `message-threads-bandwidth` | Measure CLI incremental-request transports and any blocked egress prerequisites | **Not started.** Review corrected encrypted-tunnel observability, experimental controls, token-count expectations and dated external-contract checks. |
+| `translator-any-size` | Translator books of any size with one glossary and style (T767) | **Approved 2026-11-26**, PR1 in work. Module-repo PRs 1-4; PR5 parked. |
 
 ## Cross-plan dependencies
 
