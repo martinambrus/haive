@@ -3,7 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { readdirSync, readFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { and, eq } from 'drizzle-orm';
+import { and, eq, inArray } from 'drizzle-orm';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { createDatabase, schema, type Database } from '@haive/database';
 import { CONFIG_KEYS, configService, TASK_JOB_NAMES, type WorkflowType } from '@haive/shared';
@@ -536,7 +536,7 @@ describe.skipIf(!url)('every gate agrees on the same pin, on Postgres', () => {
         .insert(schema.stepCatalog)
         .values({
           stepId,
-          source: stepId === MODULE_TARGET ? 'module:gg' : 'core',
+          source: 'core',
           title: stepId,
           workflowType: 'gg',
           stepIndex: index + 1,
@@ -602,9 +602,16 @@ describe.skipIf(!url)('every gate agrees on the same pin, on Postgres', () => {
       await db
         .delete(schema.taskTypeDefinitions)
         .where(eq(schema.taskTypeDefinitions.source, 'admin'));
-      await db.delete(schema.stepCatalog).where(eq(schema.stepCatalog.workflowType, 'gg'));
+      await db
+        .delete(schema.stepCatalog)
+        .where(inArray(schema.stepCatalog.workflowType, ['gg', 'module.gg']));
       await db.delete(schema.modules).where(eq(schema.modules.moduleId, 'gg'));
+      const catalogLeftovers = await db
+        .select({ stepId: schema.stepCatalog.stepId })
+        .from(schema.stepCatalog)
+        .where(inArray(schema.stepCatalog.stepId, [...IDS, MODULE_TARGET, MINING_TARGET]));
       await db.$client.end({ timeout: 5 });
+      expect(catalogLeftovers).toEqual([]);
     }
     vi.restoreAllMocks();
   });
