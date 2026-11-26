@@ -121,7 +121,7 @@ it('a permissive shared admission accepts the supported guarded shape in the wor
 });
 it.each([
   [
-    'a custom fix target on a supported span',
+    'a core fix target on a supported span',
     { version: 1, guardedSpans: [span()], fixTarget: { stepId: 'skew-a', capabilityVersion: 1 } },
     {},
   ],
