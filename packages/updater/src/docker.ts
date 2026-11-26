@@ -136,7 +136,7 @@ export function oneShotSignalCleanup(): () => Promise<void> {
   if (!owner) throw new Error('one-shot ownership scope is missing');
   return () => {
     stoppingAttempts.add(owner.attempt);
-    return stopOneShots(owner.install, owner.attempt);
+    return stopOneShots(owner.install, owner.attempt, ONE_SHOT_ROLE, true);
   };
 }
 
@@ -146,6 +146,7 @@ async function stopOneShots(
   install: string,
   attempt: string,
   roleLabel = ONE_SHOT_ROLE,
+  rescan = false,
 ): Promise<void> {
   const options = {
     timeout: ONE_SHOT_CHECK_TIMEOUT_MS,
@@ -167,13 +168,17 @@ async function stopOneShots(
     return stdout.split(/\s+/).filter(Boolean);
   };
   try {
-    const ids = await list();
-    if (ids.length) {
-      try {
-        await exec('docker', ['rm', '-f', ...ids], options);
-      } catch (error) {
-        // --rm can win this race. Only a fresh listing with identical filters proves success.
-        if ((await list()).length) throw error;
+    // Signal cleanup blocks new launches, but a run already execed can still create its child
+    // during the first list/removal. Re-list once, including when the initial list was empty.
+    for (let pass = 0; pass < (rescan ? 2 : 1); pass++) {
+      const ids = await list();
+      if (ids.length) {
+        try {
+          await exec('docker', ['rm', '-f', ...ids], options);
+        } catch (error) {
+          // --rm can win this race. Only a fresh listing with identical filters proves success.
+          if ((await list()).length) throw error;
+        }
       }
     }
   } catch (error) {

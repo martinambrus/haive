@@ -51,9 +51,11 @@ describe('one-shot ownership after an updater dies', () => {
 
   it('launches no one-shot for an attempt once its signal cleanup has started', async () => {
     let releaseList!: (value: { stdout: string }) => void;
+    let firstList = true;
     builderExec.mockImplementation((_cmd: string, argv: string[]) =>
-      argv[0] === 'ps'
+      argv[0] === 'ps' && firstList
         ? new Promise((resolve) => {
+            firstList = false;
             releaseList = resolve;
           })
         : Promise.resolve({ stdout: '' }),
@@ -72,6 +74,73 @@ describe('one-shot ownership after an updater dies', () => {
     await withOneShotOwner('team_install', () => runOneShot('target', ['commit'], {}));
     expect(builderExec.mock.calls.filter((call) => call[1][0] === 'run')).toHaveLength(1);
   });
+
+  it.each([false, true])(
+    'signal cleanup re-lists once for an already execed run (initially empty=%s)',
+    async (empty) => {
+      let started!: () => void;
+      let finish!: () => void;
+      const running = new Promise<void>((resolve) => {
+        started = resolve;
+      });
+      const client = new Promise<{ stdout: string }>((resolve) => {
+        finish = () => resolve({ stdout: '' });
+      });
+      const children = new Set(empty ? [] : ['first-child']);
+      let lists = 0;
+      let owner: Record<string, string>;
+      builderExec.mockImplementation(async (_cmd: string, argv: string[]) => {
+        if (argv[0] === 'run') {
+          owner = labels(argv);
+          started();
+          return client;
+        }
+        expect(argv).toContainEqual(expect.stringMatching(/^(ps|rm)$/));
+        if (argv[0] === 'ps') {
+          expect(argv).toEqual([
+            'ps',
+            '-aq',
+            '--filter',
+            `label=${install}=team_install`,
+            '--filter',
+            `label=${attempt}=${owner[attempt]}`,
+            '--filter',
+            `label=${role}`,
+          ]);
+          lists++;
+          const stdout = [...children].join('\n');
+          // A docker run already sent to the daemon creates a child after the first listing.
+          if (lists === 1 && empty) children.add('late-child');
+          return { stdout };
+        }
+        for (const id of argv.slice(2)) children.delete(id);
+        if (argv.includes('first-child')) children.add('late-child');
+        return { stdout: '' };
+      });
+      await withOneShotOwner('team_install', async () => {
+        const launch = runOneShot('target', ['migrate'], {});
+        try {
+          await running;
+          await oneShotSignalCleanup()();
+          expect([...children]).toEqual([]);
+          expect(lists).toBe(2);
+          expect(
+            builderExec.mock.calls.filter(([, args]) => args[0] === 'rm').map(([, args]) => args),
+          ).toEqual(
+            empty
+              ? [['rm', '-f', 'late-child']]
+              : [
+                  ['rm', '-f', 'first-child'],
+                  ['rm', '-f', 'late-child'],
+                ],
+          );
+        } finally {
+          finish();
+          await launch;
+        }
+      });
+    },
+  );
 
   it('labels snapshots, restores, migrations and builders with one attempt, renewed on recovery', async () => {
     builderExec.mockResolvedValue({ stdout: '' });

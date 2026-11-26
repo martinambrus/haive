@@ -32,6 +32,7 @@ import {
 import { attemptVersion, readAttemptInstallFields } from './attempt-fields.js';
 import {
   ensureJournal,
+  formatAttemptError,
   findLiveRun,
   lastDoneChannel,
   recordRunError,
@@ -367,7 +368,28 @@ async function upgradeOwned(options: { stackLock?: StackLockOptions }): Promise<
     } finally {
       await bootSql?.end({ timeout: 5 });
     }
-    await ensureJournal(sql);
+    try {
+      await ensureJournal(sql);
+    } catch (err) {
+      // A killed snapshot can leave PostgreSQL stopped before either lock or the child check.
+      // Classify by stable codes only; key-boot and other journal diagnoses must pass through.
+      const code = (err as NodeJS.ErrnoException | null)?.code;
+      if (
+        err instanceof UpgradeRefusal ||
+        typeof code !== 'string' ||
+        !/^(?:ECONNREFUSED|ENOTFOUND|EAI_AGAIN|ETIMEDOUT|CONNECT_TIMEOUT|CONNECTION_[A-Z_]+|08[0-9A-Z]{3}|57P0[0-9])$/.test(
+          code,
+        )
+      )
+        throw err;
+      throw new UpgradeRefusal(
+        'updater-bootstrap-failed',
+        `could not bootstrap updater journal (${code}); an interrupted snapshot may have left PostgreSQL stopped; ` +
+          'check for and remove surviving updater one-shot containers for this install ' +
+          '(labels org.haive.updater.attempt / org.haive.updater.role) before starting PostgreSQL again; ' +
+          'then check PostgreSQL availability and retry',
+      );
+    }
 
     // One upgrade at a time. The lock guards concurrency; the journal's partial unique index is
     // what survives a crashed updater, and is why an interrupted run is FOUND rather than raced.
@@ -716,9 +738,7 @@ async function upgradeOwned(options: { stackLock?: StackLockOptions }): Promise<
               toVersion,
               channel: fields.channel,
               ...attempt,
-              error: fields.note
-                ? `${attempt.error}${/[.!?]\s*$/.test(attempt.error) ? '' : '.'} ${fields.note}`
-                : attempt.error,
+              error: formatAttemptError(attempt.error, fields.note),
             });
           });
         } catch (err) {
