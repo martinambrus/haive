@@ -493,6 +493,8 @@ type LlmResolved =
       llmInvocationId: string | null;
       current: TaskStepRow;
       decisionForm?: true;
+      /** Explicit prepare:false, distinct from optional degradation and test bypass. */
+      prepareRefused?: true;
     }
   | { resolved: false; result: AdvanceStepResult };
 
@@ -1123,7 +1125,13 @@ async function resolveLlmPhase(
     current = await updateRow(db, current.id, { detectOutput: detected });
     if (prepared === false) {
       ctx.logger.info({ phase: 'llm' }, 'preparation skipped an unnecessary invocation');
-      return { resolved: true, llmOutput: null, llmInvocationId: null, current };
+      return {
+        resolved: true,
+        llmOutput: null,
+        llmInvocationId: null,
+        current,
+        prepareRefused: true,
+      };
     }
   }
 
@@ -4138,7 +4146,8 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
           if (
             !stepDef.llm.allowPreFormDecisionFallback ||
             followup.llmOutput !== null ||
-            followup.llmInvocationId !== null
+            followup.llmInvocationId !== null ||
+            (!followup.prepareRefused && !followup.decisionForm)
           )
             throw new Error('Pre-form continuation did not dispatch a fresh invocation');
           current = followup.current;

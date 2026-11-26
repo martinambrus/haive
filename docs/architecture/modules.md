@@ -728,7 +728,9 @@ creating or changing a row; loop, mining, DAG, merge resolution and `needsRuntim
 When a follow-up `prepare` returns false, the host refreshes detection, calls `completePreForm`
 with null output and invocation id, and builds a fresh decision form without dispatching again.
 A completed, unconsumed follow-up with output or an invocation id retains the invariant failure;
-it is never discarded as a preparation refusal. Default consumers keep the invariant that a
+it is never discarded as a preparation refusal. Null output/id from optional-LLM
+degradation or `HAIVE_TEST_BYPASS_LLM` also retains that invariant: only an explicit
+`prepare:false` or workspace refusal qualifies for the fallback. Default consumers keep the invariant that a
 requested follow-up must dispatch.
 
 Opting in also routes plain `completePreForm` follow-ups through A1's continuation checkpoint.
@@ -747,6 +749,10 @@ It is handled only at that hook before any enqueue attempt. No module supplies a
 to release. The host ends, supersedes and consumes only its local inserted reservation, provided
 it is still unstarted, unended, unsuperseded and unconsumed. A lost fence leaves it and any newer
 winner untouched. A started run or uncertain enqueue stays with normal recovery.
+A non-fence database error rolls the checkpoint back; before propagating that error,
+the host attempts a supersede-only release of its exact still-unstarted, unended,
+unsuperseded, unconsumed reservation. If that guarded release also fails, normal
+orphan recovery remains responsible; no enqueue is attempted.
 A module must commit its exact binding and conservative accounting before signaling, rather than
 throw inside a savepoint and roll attribution back. All other prepare errors retain their behavior.
 

@@ -282,7 +282,9 @@ export interface LlmInvocationSpec {
    *  llm.preForm; ignored under HAIVE_TEST_BYPASS_LLM. */
   shouldRetryPreForm?: (llmOutput: unknown) => boolean;
   /** Finish a pre-form report before presenting it and optionally request another
-   * targeted invocation. Persist partial results in the module's durable store: Retry,
+   * targeted invocation. Default follow-ups keep detect_output and may checkpoint partial
+   * results there (as 07_7-secret-sweep does); only opted-in follow-ups use the A1
+   * checkpoint. Persist partial results in the module's durable store: Retry,
    * rerunPreForm and opted-in decision-fallback follow-ups clear detect_output. Bound
    * retries and make invocation processing idempotent across recovery/submitted forms.
    * A continuation clears the previous form and answers. With allowPreFormDecisionFallback

@@ -155,6 +155,28 @@ function conditionColumns(node: unknown, acc: string[] = []): string[] {
   return acc;
 }
 
+/** Evaluate SQL IS NULL guards, including a missing timestamp on a fresh fake row. */
+function nullPredicatesHold(node: unknown, row: Record<string, unknown>): boolean {
+  if (Array.isArray(node)) return node.every((part) => nullPredicatesHold(part, row));
+  if (!node || typeof node !== 'object') return true;
+  const chunks = (node as { queryChunks?: unknown[] }).queryChunks;
+  if (!chunks) return true;
+  for (let i = 0; i < chunks.length - 1; i++) {
+    const column = chunks[i] as { table?: unknown; name?: string };
+    const suffix = chunks[i + 1] as { value?: unknown };
+    if (
+      column?.table &&
+      column.name &&
+      Array.isArray(suffix?.value) &&
+      suffix.value.join('').trim().toLowerCase() === 'is null'
+    ) {
+      const key = column.name.replace(/_([a-z])/g, (_, char: string) => char.toUpperCase());
+      if (row[key] != null) return false;
+    }
+  }
+  return chunks.every((part) => nullPredicatesHold(part, row));
+}
+
 /** The row guards, evaluated against the mock row: a pass's write lands only while the row is not
  *  `pending` or `skipped`, and the claim that opens a pass only while it is still `pending`. */
 function refusedByRowGuard(cond: unknown, status: unknown): boolean {
@@ -314,7 +336,8 @@ function makeMockDb(state: MockState): Database {
               if (
                 tableName === 'cli_invocations' &&
                 state.invocation &&
-                !conditionValues(cond).includes(state.invocation.id)
+                (!conditionValues(cond).includes(state.invocation.id) ||
+                  !nullPredicatesHold(cond, state.invocation))
               )
                 return [];
               if (tableName === 'tasks' && state.taskRow) {
@@ -3209,27 +3232,71 @@ describe('approved apply pre-form continuation', () => {
     expect(h.def.llm!.prepare).not.toHaveBeenCalled();
   });
 
-  it('decision fallback never discards a completed unconsumed follow-up', async () => {
+  it.each(['output and id', 'id only'] as const)(
+    'decision fallback never discards a completed unconsumed follow-up: %s',
+    async (shape) => {
+      const h = decisionFixture();
+      h.def.llm!.optional = shape === 'id only';
+      const completed = {
+        ...h.state.invocation!,
+        id: 'completed-followup',
+        rawOutput: shape === 'id only' ? null : 'keep this output',
+        // An optional failed follow-up returns null output with its persisted id.
+        exitCode: shape === 'id only' ? 1 : 0,
+        consumedAt: null,
+      };
+      h.state.beforeWrite = (table, patch) => {
+        if (table === 'task_steps' && patch.pauseFormOnRetry === true) {
+          h.state.invocation = completed;
+          h.state.invocations!.push(completed);
+        }
+      };
+      const result = await h.advance();
+      expect(result.status).toBe('failed');
+      expect(result.status === 'failed' && result.error).toContain(
+        'Pre-form continuation did not dispatch a fresh invocation',
+      );
+      expect(completed.consumedAt).toBeNull();
+      expect(h.def.llm!.completePreForm).toHaveBeenCalledOnce();
+      expect(h.enqueue).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([
+    'optional missing deps',
+    'optional unavailable',
+    'optional prompt budget',
+    'bypass',
+  ] as const)('decision fallback keeps the invariant on a null/null %s follow-up', async (kind) => {
     const h = decisionFixture();
-    const completed = {
-      ...h.state.invocation!,
-      id: 'completed-followup',
-      rawOutput: 'keep this output',
-      consumedAt: null,
-    };
-    h.state.beforeWrite = (table, patch) => {
-      if (table === 'task_steps' && patch.pauseFormOnRetry === true) {
-        h.state.invocation = completed;
-        h.state.invocations!.push(completed);
+    if (kind === 'bypass') {
+      // Bypass begins on the follow-up, after the first completion requested it.
+      const complete = h.def.llm!.completePreForm!;
+      h.def.llm!.completePreForm = vi.fn(async (args) => {
+        const result = await complete(args);
+        vi.stubEnv('HAIVE_TEST_BYPASS_LLM', '1');
+        return result;
+      });
+    } else {
+      h.def.llm!.optional = true;
+      const dispatch = vi.mocked(dispatcher.resolveTaskDispatch);
+      if (kind === 'optional prompt budget') {
+        const { PromptBudgetExceededError } = await import('@haive/shared/step');
+        dispatch.mockRejectedValue(new PromptBudgetExceededError('budget exhausted'));
+      } else {
+        dispatch.mockResolvedValue({ mode: 'skip', reason: 'no provider' } as never);
       }
-    };
-    const result = await h.advance();
+    }
+    const result =
+      kind === 'optional missing deps'
+        ? await run(h.state, h.def, undefined, { epoch: 7 })
+        : await h.advance();
     expect(result.status).toBe('failed');
     expect(result.status === 'failed' && result.error).toContain(
       'Pre-form continuation did not dispatch a fresh invocation',
     );
-    expect(completed.consumedAt).toBeNull();
     expect(h.def.llm!.completePreForm).toHaveBeenCalledOnce();
+    expect(h.state.invocations).toHaveLength(1);
     expect(h.enqueue).not.toHaveBeenCalled();
   });
 
@@ -3288,7 +3355,7 @@ describe('approved apply pre-form continuation', () => {
     expect(h.enqueue).not.toHaveBeenCalled();
   });
 
-  it('decision fallback apply retry parks successfully and keeps the submitted decision', async () => {
+  it('decision fallback apply retry clears earlier answers and accepts the fresh decision once', async () => {
     const h = decisionFixture();
     h.def.llm!.retry = { maxAttempts: 3 };
     h.def.llm!.prepare = vi.fn(async () => {});
@@ -3296,10 +3363,10 @@ describe('approved apply pre-form continuation', () => {
       llmOutput,
       continueRequested: false,
     }));
-    h.def.llm!.prepareWorkspace = async () => {
+    h.def.llm!.prepareWorkspace = vi.fn(async () => {
       const { StepPrepareFormError } = await import('@haive/shared/step');
       throw new StepPrepareFormError();
-    };
+    });
     h.def.form = () => ({
       title: 'Owner decision',
       fields: [{ id: 'approve', type: 'checkbox', label: 'Approve' }],
@@ -3314,6 +3381,11 @@ describe('approved apply pre-form continuation', () => {
       });
     expect((await h.advance()).status).toBe('waiting_form');
     expect(h.state.taskStepRow.errorMessage).toBeNull();
+    // The checkpoint deliberately discards the answer to the earlier schema.
+    expect(h.state.taskStepRow.formValues).toBeNull();
+    expect(h.state.invocations).toHaveLength(2);
+    expect(h.def.llm!.prepare).toHaveBeenCalledOnce();
+    expect(h.def.llm!.prepareWorkspace).toHaveBeenCalledOnce();
     h.def.llm!.prepare = vi.fn(async () => false as const);
     h.state.taskStepRow.formValues = { approve: true };
     expect((await h.advance()).status).toBe('done');
@@ -3338,6 +3410,37 @@ describe('approved apply pre-form continuation', () => {
     expect(h.state.invocation!.consumedAt).toBeUndefined();
     expect(h.enqueue).not.toHaveBeenCalled();
   });
+
+  it.each(['startedAt', 'endedAt', 'supersededAt', 'consumedAt'] as const)(
+    'decision fallback DB-error release respects the %s predicate',
+    async (field) => {
+      const h = decisionFixture();
+      holdDecision(h, false);
+      h.def.llm!.prepareWorkspace = async ({ ctx }) => {
+        const original = ctx.db.transaction.bind(ctx.db);
+        ctx.db.transaction = (async (fn) => {
+          try {
+            return await original(fn);
+          } catch (err) {
+            // A peer moves R1 after rollback, before the non-fence release catch.
+            h.state.invocation![field] = new Date('2026-01-01T00:00:00.000Z');
+            throw err;
+          }
+        }) as typeof ctx.db.transaction;
+        const { StepPrepareFormError } = await import('@haive/shared/step');
+        throw new StepPrepareFormError();
+      };
+      h.state.beforeWrite = (table, patch) => {
+        if (table === 'cli_invocations' && patch.endedAt && patch.consumedAt)
+          throw new Error('cleanup DB unavailable');
+      };
+      expect((await h.advance()).status).toBe('failed');
+      expect(h.state.invocation![field]).toBeInstanceOf(Date);
+      if (field !== 'supersededAt') expect(h.state.invocation!.supersededAt).toBeUndefined();
+      else expect(h.state.invocation!.supersededAt).toEqual(new Date('2026-01-01T00:00:00.000Z'));
+      expect(h.enqueue).not.toHaveBeenCalled();
+    },
+  );
 
   it.each(['truncation', 'capability'] as const)(
     'decision fallback from a %s retry reaches the form',

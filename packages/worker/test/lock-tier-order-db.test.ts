@@ -785,6 +785,96 @@ describe.skipIf(!url)(
           expect(f.step.apply).not.toHaveBeenCalled();
         });
 
+        it.each(['fresh', 'startedAt', 'endedAt', 'supersededAt', 'consumedAt'] as const)(
+          'non-fence checkpoint DB error releases only the eligible reservation: %s',
+          async (moved) => {
+            const f = await decisionHarness();
+            const paid = await runOf(R);
+            // A separate live reservation must never be selected by the release.
+            const otherTask = await seedTask('running');
+            await seedStep(otherTask, A, 'running');
+            const otherId = randomUUID();
+            await seedRun(otherTask, { id: otherId, taskStepId: A.id });
+            const other = await runOf(otherId);
+            const fault = new Error('injected checkpoint database error');
+            let injected = false;
+            let beforeRelease: Awaited<ReturnType<typeof runOf>> | undefined;
+            const handle = new Proxy(db, {
+              get(target, prop) {
+                if (prop !== 'transaction') return Reflect.get(target, prop);
+                return async (fn: (tx: Tx) => Promise<unknown>) => {
+                  let releasing = false;
+                  try {
+                    return await target.transaction(async (tx) =>
+                      fn(
+                        new Proxy(tx, {
+                          get(transaction, method) {
+                            if (method === 'update')
+                              return (table: unknown) => {
+                                const update = transaction.update(
+                                  table as typeof schema.cliInvocations,
+                                );
+                                if (table !== schema.cliInvocations) return update;
+                                return new Proxy(update, {
+                                  get(builder, key) {
+                                    if (key !== 'set') return Reflect.get(builder, key);
+                                    return (patch: RunInsert) => {
+                                      if (patch.endedAt && patch.consumedAt) releasing = true;
+                                      return builder.set(patch);
+                                    };
+                                  },
+                                });
+                              };
+                            if (method === 'select' && releasing && !injected)
+                              return () => {
+                                // The exact-id UPDATE really ran. Fail the next statement
+                                // before its step lock; Postgres must roll the UPDATE back.
+                                injected = true;
+                                throw fault;
+                              };
+                            return Reflect.get(transaction, method);
+                          },
+                        }),
+                      ),
+                    );
+                  } catch (err) {
+                    if (err !== fault) throw err;
+                    const rolledBack = await runOf(f.reservation());
+                    expect(rolledBack).toMatchObject({
+                      startedAt: null,
+                      endedAt: null,
+                      supersededAt: null,
+                      consumedAt: null,
+                    });
+                    // Model a peer's committed move between rollback and the guarded
+                    // supersede-only release. Each null predicate must stand alone.
+                    if (moved !== 'fresh')
+                      await db
+                        .update(schema.cliInvocations)
+                        .set({ [moved]: AT })
+                        .where(eq(schema.cliInvocations.id, f.reservation()));
+                    beforeRelease = await runOf(f.reservation());
+                    throw err;
+                  }
+                };
+              },
+            });
+            const result = await f.advance(handle);
+            expect(injected).toBe(true);
+            expect(result.status).toBe('failed');
+            expect(result.status === 'failed' && result.error).toContain(fault.message);
+            const after = await runOf(f.reservation());
+            if (moved === 'fresh') {
+              expect(after.supersededAt).toBeInstanceOf(Date);
+              expect({ ...after, supersededAt: null }).toEqual(beforeRelease);
+            } else expect(after).toEqual(beforeRelease);
+            expect(await runOf(R)).toEqual(paid);
+            expect(await runOf(otherId)).toEqual(other);
+            expect(f.enqueue).not.toHaveBeenCalled();
+            expect(f.step.apply).not.toHaveBeenCalled();
+          },
+        );
+
         it.each(['Stop', 'Retry'] as const)(
           'real API %s overtakes workspace refusal without a stale checkpoint',
           async (action) => {
