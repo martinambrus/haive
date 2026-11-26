@@ -249,7 +249,7 @@ describe.skipIf(!url)('durable guard decisions on Postgres', () => {
     return { ...ctx, round, taskStepId: current!.id, rerunGeneration: current!.rerunGeneration };
   }
   it.each(['stamped', 'legacy'])(
-    'ignores a previous START request on a revise round and keeps that revise as the fix baseline (%s)',
+    'scopes stamped START requests and preserves the unscoped legacy fallback (%s)',
     async (kind) => {
       await pinFixTarget();
       await db.insert(schema.taskEvents).values({ taskId, eventType: 'task.running' });
@@ -267,11 +267,12 @@ describe.skipIf(!url)('durable guard decisions on Postgres', () => {
       await db.insert(schema.taskEvents).values({ taskId, eventType: 'task.running' });
       await evaluateGuardDecision(ctx, 'work', predicates);
       const revise = await enterRound(1, false);
-      expect(await isFixRound(revise)).toBe(false);
+      expect(await isFixRound(revise)).toBe(kind === 'legacy');
       evaluate.mockResolvedValue(false);
       const baseline = await evaluateGuardDecision(revise, 'work', predicates);
-      expect(baseline!.run).toBe(false);
-      expect(evaluate).toHaveBeenCalledTimes(2);
+      expect(baseline!.run).toBe(kind === 'legacy');
+      const evaluations = kind === 'legacy' ? 1 : 2;
+      expect(evaluate).toHaveBeenCalledTimes(evaluations);
       const fix = await enterRound(2, false);
       await recordFixLoopRequest(db, taskId, rows.plan!.id, {
         round: 2,
@@ -285,7 +286,7 @@ describe.skipIf(!url)('durable guard decisions on Postgres', () => {
         round: 2,
         generation: 4,
       });
-      expect(evaluate).toHaveBeenCalledTimes(2);
+      expect(evaluate).toHaveBeenCalledTimes(evaluations);
       await db
         .update(schema.tasks)
         .set({ orchestrationEpoch: 1 })
@@ -296,7 +297,7 @@ describe.skipIf(!url)('durable guard decisions on Postgres', () => {
         round: 2,
         generation: 4,
       });
-      expect(evaluate).toHaveBeenCalledTimes(2);
+      expect(evaluate).toHaveBeenCalledTimes(evaluations);
     },
   );
   it('reuses the revise decision when spec-gate revise preceded the first span entry', async () => {

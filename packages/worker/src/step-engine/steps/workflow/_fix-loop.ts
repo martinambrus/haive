@@ -764,18 +764,14 @@ export function repeatedFlagLines(
   ];
 }
 
-/** Match the current START identity, including unambiguous legacy requests from a task with at most one START.
+/** Match the current START identity; legacy unstamped requests keep their unscoped fallback.
  * This is shared by 07 and the guard baseline reader inside its held transaction. */
 export function currentStartFixRequest(taskId: string) {
   return sql`(${schema.taskEvents.payload}->>'startEventId' IS NOT DISTINCT FROM (
     SELECT start.id::text FROM ${schema.taskEvents} AS start
     WHERE start.task_id = ${taskId} AND start.event_type = 'task.running'
     ORDER BY start.created_at DESC, start.id DESC LIMIT 1
-  ) OR (${schema.taskEvents.payload}->>'startEventId' IS NULL AND NOT EXISTS (
-    SELECT 1 FROM ${schema.taskEvents} AS start
-    WHERE start.task_id = ${taskId} AND start.event_type = 'task.running'
-    OFFSET 1 LIMIT 1
-  )))`;
+  ) OR ${schema.taskEvents.payload}->>'startEventId' IS NULL)`;
 }
 
 /** Was THIS round entered by the fix loop?
