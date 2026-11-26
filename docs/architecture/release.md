@@ -465,10 +465,12 @@ file-sharing layer. Only exclusive create and rename are relied on.
 
 The file is a lease. Its single line is JSON in this field order: `v` (1), `token` (32 lowercase hex),
 `holder` (`updater` or `extension`), `startedAt` (informational, never compared with a clock) and `seq`. It is
-created exclusively at mode 0644 and rewritten in place by its holder every 5 s with `seq` plus one, after a
+created exclusively at mode 0644 and rewritten in place by its holder every 5 s with a new `seq` (each write attempt takes the next number before it writes and keeps it
+when the write fails, so a write that lands always changes the bytes, and `seq` may skip numbers), after a
 check that the file still carries the holder's own token; a file that is gone is created again with the holder's
-own record, since a contender's break and restore leaves the name absent for a moment. While a failed write
-leaves a streak open, an empty or partial record of its own is rewritten instead of reported as a loss. A contender that finds the file reads its
+own record, since a contender's break and restore leaves the name absent for a moment. After the holder's own overwrite failed having truncated the file, an empty or partial record is taken as its own torn
+write and rewritten instead of reported as a loss, until the deadline below; an overwrite that failed before
+truncating (at `open`) excuses nothing. A contender that finds the file reads its
 bytes, then polls every 1 s: a missing file is free, changed bytes mean a live holder (busy), and bytes
 unchanged across 60 s of polls mean the holder is gone. It counts the sleeps it requested and never reads a
 wall or monotonic clock, so host sleep and clock skew between host, VM and container cannot age a live lock;
@@ -492,11 +494,16 @@ for the new holder to recover. Anything that proves nothing (a read that fails `
 or it succeeds, 6 when it fails; in the commit phase the run stays at `commit`) but marks nothing lost: failure recovery (the snapshot's database restart, rollback, a reverse resume of an interrupted run from its
 entry proof on, the attempt row, release) still runs, re-proving before each action and stopping only at a proven loss, since leaving the database
 stopped turns a recoverable failure into an outage; the forward commit stays strict and refuses at an
-unproven proof. That tolerance is bounded in time: once the stale window (60 s, the
-same one a contender waits before breaking the lock) has passed since this holder's last good proof or successful beat, an
-unproven proof, and the own-torn-write excuse, count as a proven loss (`stack-lock-lost`, sticky), so recovery stops before a
-contender can have broken the lock and taken over. The clock is monotonic (`performance.now()`), never the record's
-`startedAt`. The torn-write excuse does not renew that deadline. A remaining race (T765 item 5): the heartbeat reads its own
+unproven proof. That tolerance is bounded in time. A contender breaks only after
+the record's bytes stayed the same for the stale window (60 s), and only this holder's writes change them, so the holder's
+deadline runs from its last successful record write (acquisition or beat), stamped before that write's I/O: once the stale
+window has passed since then, an unproven proof and the own-torn-write excuse count as a proven loss. Proofs never renew it,
+since a proof leaves the bytes, and so the contender's clock, unchanged; a failed write never renews it either. Expiry is the same
+sticky `stack-lock-lost` as a takeover, with the same consequences: the run stays half-way (maintenance on, PostgreSQL possibly
+stopped) for the next `haive upgrade` to recover, even when no other holder exists. A Docker or database action already under
+way when the deadline passes is not interrupted; the next fence check refuses. The updater's clock is `performance.now()`, the
+bridge's Go's monotonic `time.Now()`, never the record's `startedAt`; a clock that counts a suspended machine only expires early.
+The bridge's heartbeat stops for good at expiry or loss; the operation it guards continues without it, as after a lapse. A remaining race (T765 item 5): the heartbeat reads its own
 record and then overwrites it, so a contender that broke the lock and created its own in between is overwritten; closing it
 needs a descriptor-held compare before the truncating open, in both implementations. A result already decided (done or rolled back) is not replaced when the beat notices a loss afterwards; a
 loss during the pruning after a commit stops the pruning and keeps `done` and exit 0. Release removes the file only when it carries the holder's token, is shared by
@@ -543,8 +550,8 @@ before the bundle check and the port repick, and holds it through the Compose ca
 installer refuses a non-empty directory) and Status is read-only. The launchers take nothing: they return
 before the dangerous phase and are older-release code for the very upgrade that matters. Both implementations
 share the file name, record, beat (5 s), stale window (60 s), poll (1 s), rounds (3) and size cap (4096 bytes),
-and the rule that only the holder's own overwrite that failed after truncating excuses a torn record, and only within the stale
-window since its last good beat
+and the rules that only the holder's own overwrite that failed after truncating excuses a torn record, that the deadline runs
+from the last successful record write, stamped before its I/O, and that every write attempt takes a new `seq`
 (`packages/updater/src/stack-lock.ts`, `docker/desktop-extension/bridge/stack_lock.go`); a script test pins
 them equal. Every count, size and time limit is an optional parameter defaulting to a named constant.
 
