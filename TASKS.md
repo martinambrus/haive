@@ -1180,13 +1180,19 @@ status: open · kind: design · found: T759 review 2 2026-11-23 · priority: P4
 
 ### T766 · FNF[T757]: fix-loop handoff follow-ups (+5)
 
-status: open · kind: fix · found: T757 reviews 2026-11-23 · priority: P4
+status: open for items C1-C3 below; items 1-5 DONE #1332 (eebe8e039, deployed 2026-11-26: pinned-target leg of the recovery controls, structured revise refusal codes, guarded-revise controls, `StepNotInRunListError` with its own dead reason, Accept with a next step accepts findings in the gate transaction) · kind: fix · found: T757 reviews 2026-11-23 · priority: P4
 
 1. T757 item 2 and the pinned half of item 9 (deferred until PR7b): apply the T757 controls to a pinned custom fix target (the `atomic revise` block in `custom-fix-recovery-db.test.ts` runs only `if (!leg.pin)`).
 2. A lost revise logs one bare `revise not entered` line with no reason (`worker/src/queues/task-queue.ts` ~:3047-3052); add the refusal reason as loop_back's `logRefusal` does.
 3. No revise control with a non-empty `guardedSpans` pin (guarded reset branch, source held at another round).
 4. The `findIndex` guards reuse `UnresolvedStepError`, so the dead-task reason says the install does not register a step that is registered but absent from the run list (`task-queue.ts` ~:908-913 `deadReasonFor`).
 5. Continue's Accept branch accepts remaining findings outside the transaction; a crash between leaves a window (PRE-EXISTING, informational).
+
+Found in #1332 (PRE-EXISTING, Connected):
+
+C1. Boot can revive a dead task whose registered revise target is still off the run list, so it dies again on the next pass.
+C2. The api and web missing-step wording ignores the stored dead reason, so an off-list step still reads as not registered in the UI.
+C3. Accept with no next step still writes the findings in a separate statement after the gate closes; a crash between leaves them open on a finished gate.
 
 ### T721 · The Claude usage grant reaches sandbox environments
 
