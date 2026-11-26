@@ -2217,8 +2217,8 @@ stepRoutes.get('/:id/steps/:stepId/cli-invocations', async (c) => {
     providerLabel: schema.cliProviders.label,
     providerName: schema.cliProviders.name,
     // The agent running this terminal: the mining persona (e.g.
-    // "accessibility-specialist"), or — for multi-CLI loop steps — the role of this
-    // pass (Validator / Fixer) stored on the invocation itself. Coalesce the two.
+    // "accessibility-specialist"), a step's llm.runTitle, or the role of this
+    // loop pass (Validator / Fixer). Prefer the title stored on the invocation.
     agentTitle: sql<
       string | null
     >`coalesce(${schema.cliInvocations.agentTitle}, ${schema.taskStepAgentMinings.agentTitle})`,

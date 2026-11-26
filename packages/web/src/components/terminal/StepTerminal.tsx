@@ -436,12 +436,17 @@ function InvocationPanel({
         <span className="text-neutral-500">{expanded ? '▼' : '▶'}</span>
         {label && <span className="font-medium text-neutral-200">{label}</span>}
         <AgentPersonaBadges ids={invocation.assignedAgentIds} />
-        {/* Fan-out titles name the specific finding an agent works ("Refuter 2/4
+        {/* Titles already have their own header span; keep the run number separate
+            for main, mining and loop-role runs alike, without repeating the title.
+            Fan-out titles name the specific finding an agent works ("Refuter 2/4
             [reachability] — high installer/actions_step_4.php:36 · <issue>"), long enough to
             push the badges and the runtime onto their own line. Capped and ellipsized; the
             full string stays readable on hover. */}
         {agentTitle && (
-          <span className="max-w-[24rem] truncate font-medium text-indigo-300" title={agentTitle}>
+          <span
+            className="max-w-full truncate font-medium text-indigo-300 sm:max-w-[24rem]"
+            title={agentTitle}
+          >
             {agentTitle}
           </span>
         )}

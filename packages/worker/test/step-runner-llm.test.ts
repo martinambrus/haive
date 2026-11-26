@@ -392,6 +392,154 @@ function makeProvider(): CliProviderRecord {
   } as CliProviderRecord;
 }
 
+describe('step run titles through the real runner', () => {
+  async function dispatch(
+    mode: string,
+    runTitle?: (args: import('@haive/shared/step').LlmBuildArgs) => string | null,
+  ) {
+    const state = freshState();
+    const step = baseStep();
+    const prompt = vi.fn(step.llm!.buildPrompt);
+    Object.assign(step.llm!, { runTitle, buildPrompt: prompt });
+    if (mode === 'pre-form' || mode === 'reroll' || mode === 'continuation')
+      step.llm!.preForm = true;
+    if (mode === 'apply-retry' || mode === 'reroll') step.llm!.retry = { maxAttempts: 3 };
+    if (mode === 'apply-retry')
+      step.apply = async () => {
+        throw new Error('shape rejected');
+      };
+    if (mode === 'reroll') step.llm!.shouldRetryPreForm = () => true;
+    if (mode === 'continuation')
+      step.llm!.completePreForm = async () => ({ llmOutput: {}, continueRequested: true });
+    if (mode === 'prepared')
+      step.llm!.prepare = async ({ detected }) => {
+        (detected as { foo: string }).foo = 'prepared';
+      };
+    if (mode === 'repack') {
+      step.llm!.buildPrompt = () => 'x'.repeat(2000);
+      step.llm!.promptBudget = { maxChars: 1500, outputReserveChars: 100, buildPrompt: prompt };
+    }
+    if (mode === 'loop-role' || mode === 'loop-pass') {
+      step.loop = {
+        maxIterations: 3,
+        shouldContinue: () => false,
+        ...(mode === 'loop-role'
+          ? { resolveRole: () => 'validator' }
+          : { passLabel: () => 'Existing pass' }),
+      };
+      step.metadata.cliRoles = [{ id: 'validator', label: 'Validator' }];
+    }
+    if (
+      ['apply-retry', 'reroll', 'continuation', 'orphan', 'truncation', 'capability'].includes(mode)
+    ) {
+      Object.assign(state.taskStepRow, { status: 'waiting_cli', detectOutput: { foo: 'bar' } });
+      state.cliInvocationRow = {
+        id: 'prior',
+        cliProviderId: 'prov-1',
+        taskStepId: 'ts-1',
+        createdAt: new Date(),
+        endedAt: new Date(),
+        consumedAt: null,
+        exitCode: mode === 'orphan' ? null : mode === 'truncation' || mode === 'capability' ? 1 : 0,
+        errorMessage:
+          mode === 'truncation'
+            ? OUTPUT_TRUNCATION_HEADLINE
+            : mode === 'capability'
+              ? MODEL_CAPABILITY_HEADLINES.no_image_support
+              : null,
+        parsedOutput: {},
+        rawOutput: '{}',
+        mode: 'cli',
+      };
+      state.cliInvocationHistory = [{ ...state.cliInvocationRow }];
+    }
+    const enqueue = vi.fn();
+    const provider = makeProvider();
+    if (mode === 'capability')
+      provider.modelLimits = {
+        model: '',
+        vision: false,
+        maxOutputTokens: 131072,
+        learnedAt: new Date().toISOString(),
+      };
+    const params = {
+      db: makeMockDb(state),
+      taskId: 'task-1',
+      userId: 'user-1',
+      repoPath: '/tmp',
+      workspacePath: '/tmp',
+      cliProviderId: 'prov-1',
+      stepDef: step,
+      providers: [provider],
+      deps: { enqueueCliInvocation: enqueue },
+    };
+    const result = await advanceStep(params);
+    return { state, result, prompt, enqueue, params };
+  }
+
+  it.each([
+    'ordinary',
+    'pre-form',
+    'prepared',
+    'repack',
+    'apply-retry',
+    'reroll',
+    'continuation',
+    'orphan',
+    'truncation',
+    'capability',
+  ])('stores a title on a fresh %s invocation', async (mode) => {
+    const runTitle = vi.fn(() => '  Review, part 3 of 12  ');
+    const { state, result, prompt, enqueue, params } = await dispatch(mode, runTitle);
+    expect(result.status).toBe('waiting_cli');
+    expect(enqueue).toHaveBeenCalledTimes(1);
+    expect(state.cliInvocationRow?.agentTitle).toBe('Review, part 3 of 12');
+    expect(runTitle).toHaveBeenCalledTimes(1);
+    expect(runTitle).toHaveBeenCalledWith(prompt.mock.calls[0]?.[0]);
+    // Re-delivery reuses the stored title rather than recomputing it.
+    await advanceStep(params);
+    expect(runTitle).toHaveBeenCalledTimes(1);
+  });
+
+  it('leaves untitled steps null', async () => {
+    const { state, result } = await dispatch('ordinary');
+    expect(result.status).toBe('waiting_cli');
+    expect(state.cliInvocationRow?.agentTitle).toBeNull();
+  });
+
+  it.each([
+    () => null,
+    () => ' \n\t\u0000 ',
+    () => {
+      throw new Error('secret payload');
+    },
+  ])('ignores a missing, empty or throwing title without failing dispatch', async (runTitle) => {
+    const { state, result, enqueue } = await dispatch('ordinary', runTitle);
+    expect(result.status).toBe('waiting_cli');
+    expect(enqueue).toHaveBeenCalledTimes(1);
+    expect(state.cliInvocationRow?.agentTitle).toBeNull();
+  });
+
+  it('cleans and bounds titles before storing them', async () => {
+    const { state } = await dispatch(
+      'pre-form',
+      () => ' \u0000Review\n\t\u007f\u0085\u202e' + 'x'.repeat(260),
+    );
+    expect(state.cliInvocationRow?.agentTitle).toBe('Review ' + 'x'.repeat(249));
+  });
+
+  it.each([
+    ['loop-role', 'Validator'],
+    ['loop-pass', 'Existing pass'],
+  ])('preserves the existing %s title', async (mode, expected) => {
+    const runTitle = vi.fn(() => 'Replacement');
+    const { state, result } = await dispatch(mode, runTitle);
+    expect(result.status).toBe('waiting_cli');
+    expect(state.cliInvocationRow?.agentTitle).toBe(expected);
+    expect(runTitle).not.toHaveBeenCalled();
+  });
+});
+
 describe('attempt-scoped retry warnings', () => {
   it.each(['apply', 'pre-form', 'truncation'] as const)(
     'keeps the fallback and merge notes when %s retries, without repeating the retry note',

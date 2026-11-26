@@ -1461,7 +1461,7 @@ export interface CliInvocationSummary {
    *  rows / deleted providers). Shown on the terminal badge. */
   providerLabel: string | null;
   providerName: string | null;
-  /** Mining/work-item title or the role of this pass (Validator / Fixer). */
+  /** Step run title, mining/work-item title or loop role (Validator / Fixer). */
   agentTitle: string | null;
   /** Persona names assigned at dispatch, including queued/running runs. Optional for
    *  older APIs; null means unrecorded. Distinct from the run's work-item/role title. */

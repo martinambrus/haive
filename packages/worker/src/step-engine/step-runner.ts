@@ -1,3 +1,4 @@
+import { resolveRunTitle } from './run-title.js';
 import { finalizeCanonicalCheckResult } from './check-result-output.js';
 import { parseExecutionContract } from '@haive/shared/modularity';
 import { reconcileReopenedGuardGeneration } from './guard-reopen.js';
@@ -1152,6 +1153,7 @@ async function resolveLlmPhase(
     stamp.requirements,
     stamp.bindings,
   );
+  const buildArgs = { detected, formValues: formValues ?? {}, integrationAccounts };
   let prompt =
     (upcomingIteration > 0 ||
       (truncationRetries > 0 && stepDef.loop?.iterationPromptCoversFirstPass)) &&
@@ -1163,7 +1165,7 @@ async function resolveLlmPhase(
           previousIterations,
           truncationRetries,
         })
-      : llmSpec.buildPrompt({ detected, formValues: formValues ?? {}, integrationAccounts });
+      : llmSpec.buildPrompt(buildArgs);
 
   const basePrompt = prompt;
   if (stepDef.metadata.id === '07b-phase-4-validate') {
@@ -1251,10 +1253,7 @@ async function resolveLlmPhase(
                   'Cannot locate the plan chat prompt within its dispatch additions.',
                 );
               const additions = prompt.length - basePrompt.length;
-              const packed = llmSpec.promptBudget!.buildPrompt(
-                { detected, formValues: formValues ?? {}, integrationAccounts },
-                maxChars - additions,
-              );
+              const packed = llmSpec.promptBudget!.buildPrompt(buildArgs, maxChars - additions);
               return prompt.slice(0, at) + packed + prompt.slice(at + basePrompt.length);
             },
           },
@@ -1365,6 +1364,7 @@ async function resolveLlmPhase(
     const deferred = await deferPreFormContinuation(db, ctx, current);
     if (deferred) return { resolved: false, result: deferred };
   }
+  const agentTitle = roleLabel ?? resolveRunTitle(llmSpec, buildArgs, ctx.logger);
   const insertFresh = (handle: Database) =>
     insertDispatchRun(handle, params.taskId, current.id, stamp, {
       taskId: params.taskId,
@@ -1376,7 +1376,7 @@ async function resolveLlmPhase(
       mode,
       prompt: plan.effectivePrompt ?? prompt,
       truncationRetry: trailingTruncations > 0,
-      agentTitle: roleLabel,
+      agentTitle,
       steerable,
     });
   const invRow = await insertInvocationOrNull(() =>
