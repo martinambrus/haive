@@ -780,8 +780,11 @@ export function currentStartFixRequest(taskId: string) {
  *
  *  `ctx.round` alone cannot answer it: the counter is shared with the revise loop, which forks a
  *  round forward on a human gate-1 spec reject (task-queue.ts, case 'revise') without any fix
- *  having been requested. The presence of a recorded request is the invariant — every path that
- *  re-enters the implementation step records one at the target round first: the normal loop_back,
+ *  having been requested. A recorded request for this round must belong to the current START:
+ *  its startEventId matches the latest task.running id. Legacy requests without that stamp
+ *  (missing or null) keep the old unscoped fallback, even with multiple START markers, so a
+ *  deploy cannot strand an in-flight fix round. Every path that re-enters implementation
+ *  records a request at the target round first: the normal loop_back,
  *  the oscillation gate, the round-cap escalation (recorded up front so Continue can re-enter),
  *  and restartLoop, which returns loop_back too. The round-cap counter already keys on the events
  *  rather than the number for the same reason.
