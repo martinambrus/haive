@@ -1224,7 +1224,7 @@ In `martinambrus/haive-module-translator`. The owner's English-to-Slovak run fai
 
 ### T773 · Translator review: finish without more calls, keeping the current text
 
-status: open, plan approved 2026-11-26 (`docs/plans/translator-review-continuation.md` PR E, after T772's PR D) · kind: feature · found: owner decision 2026-11-26 · priority: P2
+status: open, in work (module branch `feat/review-finish-waiver` on T772's PR D); plan approved 2026-11-26 (`docs/plans/translator-review-continuation.md` PR E, after T772's PR D) · kind: feature · found: owner decision 2026-11-26 · priority: P2
 
 The owner wants this built, not optional. On the T772 budget form, review gets a third choice: finish without more calls, keeping all accepted text and already applied corrections. Remaining units stay unreviewed and outstanding proposals stay unapplied; an explicit, unticked acknowledgment records a waiver bound to that exact text snapshot (T772 design section 5).
 
@@ -1234,7 +1234,7 @@ The owner wants this built, not optional. On the T772 budget form, review gets a
 
 ### T772 · Translator: an exhausted call budget parks with a decision form instead of failing
 
-status: open, host A2 merged #1349 7a6b32df5 and live; module PR D in work; plan approved 2026-11-26 (`docs/plans/translator-review-continuation.md` PRs A2, D; owner: grant bounds min(1000, 8U) per grant and at most +8U over the task's life, one extra attempt per decision and at most two per pass, no in-form Stop) · kind: ux · found: owner task ae8fb29c 2026-11-26 · priority: P1 (owner: showstopper)
+status: done 2026-11-26, host A2 merged #1349 7a6b32df5; module PR D merged #23 597cae4 and live (0012 applied 18:23Z); plan approved 2026-11-26 (`docs/plans/translator-review-continuation.md` PRs A2, D; owner: grant bounds min(1000, 8U) per grant and at most +8U over the task's life, one extra attempt per decision and at most two per pass, no in-form Stop) · kind: ux · found: owner task ae8fb29c 2026-11-26 · priority: P1 (owner: showstopper)
 
 `tr-review` (and `tr-translate`) fail the step with the generic `Translation attempt allowance exhausted` (`src/db/passes.ts` ~:240, ~:246, ~:306) when the approved ceiling (`8 x U` plus extensions) or a pass key's two-attempt cap is spent. On ae8fb29c four cascading review rounds of a 2-unit sample spent 16 of 16 calls. The only way on is the admin-only operator `extend` route, which has no UI.
 
@@ -1244,7 +1244,7 @@ status: open, host A2 merged #1349 7a6b32df5 and live; module PR D in work; plan
 
 ### T771 · Translator review: ticked corrections continue without a Retry stop
 
-status: open, plan approved 2026-11-26 (`docs/plans/translator-review-continuation.md` PRs A1, C); host A1 merged #1348 f8f350fe1 and live (a crash between saving a held pre-form schema and its park re-prepares; fixed in #1349 b045dde91); module PR C merged #22 dc496da, deployed together with T772's PR D · kind: ux · found: owner task ae8fb29c 2026-11-26 · priority: P2
+status: done 2026-11-26, plan `docs/plans/translator-review-continuation.md` PRs A1, C; host A1 merged #1348 f8f350fe1 and live (a crash between saving a held pre-form schema and its park re-prepares; fixed in #1349 b045dde91); module PR C merged #22 dc496da, live with T772's PR D (597cae4) · kind: ux · found: owner task ae8fb29c 2026-11-26 · priority: P2
 
 OWNER DECISION 2026-11-26: submitting the correction form continues on its own. When applied corrections change text around other units, `tr-review` reopens with a form whose only action is Retry (`buildRetry`, `submitAction: 'retry'`), and Retry is the button a failed step shows. The ticks are the consent to the re-review cost; Retry stays for failures. Nothing ticked already finishes the step.
 
