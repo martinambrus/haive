@@ -1196,3 +1196,125 @@ func TestStackLockGoodBeatRenewsDeadline(t *testing.T) {
 		t.Fatalf("renewed deadline did not expire: %s", got)
 	}
 }
+
+// Observe the new bytes before the holder returns from I/O, then let the contender's
+// single stale-window poll finish. The holder must expire by that earliest break.
+func TestStackLockDeadlinePrecedesContenderBreak(t *testing.T) {
+	for _, kind := range []string{"acquire", "beat", "recreate"} {
+		t.Run(kind, func(t *testing.T) {
+			b := fixture(t)
+			b.lockCfg.beat = time.Hour
+			b.lockCfg.stale = 20 * time.Millisecond
+			now := time.Now()
+			b.lockCfg.now = func() time.Time { return now }
+			armed := kind == "acquire"
+			observed := make(chan struct{})
+			finishPoll := make(chan struct{})
+			type result struct {
+				lock       *stackLock
+				err        error
+				holderBeat string
+			}
+			done := make(chan result, 1)
+			var l *stackLock
+			b.lockCfg.write = func(f *os.File, data []byte) error {
+				if _, err := f.Write(data); err != nil {
+					return err
+				}
+				if !armed {
+					return nil
+				}
+				armed = false
+				contender := b
+				contender.lockCfg.write = nil
+				contender.lockCfg.poll = contender.lockCfg.stale
+				verdict := ""
+				contender.lockCfg.beforeBreak = func() { verdict = l.beat() }
+				contender.sleep = func(time.Duration) {
+					close(observed)
+					<-finishPoll
+					now = now.Add(10 * time.Millisecond)
+				}
+				go func() {
+					next, err := contender.acquireStackLock(context.Background())
+					done <- result{next, err, verdict}
+				}()
+				<-observed
+				now = now.Add(10 * time.Millisecond)
+				return nil
+			}
+			var err error
+			l, err = b.acquireStackLock(context.Background())
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer l.releaseLock()
+			if kind != "acquire" {
+				if kind == "recreate" {
+					if err := os.Remove(l.path); err != nil {
+						t.Fatal(err)
+					}
+				}
+				now = now.Add(5 * time.Millisecond)
+				armed = true
+				if got := l.beat(); got != "ok" {
+					t.Fatalf("write: %s", got)
+				}
+			}
+			// Only this holder's reads fail; the contender still sees the unchanged record.
+			l.path = b.dir
+			close(finishPoll)
+			next := <-done
+			if next.lock != nil {
+				defer next.lock.releaseLock()
+			}
+			if next.err != nil {
+				t.Fatal(next.err)
+			}
+			if next.holderBeat != "lost" || !l.isLost() {
+				t.Fatalf("holder at contender's earliest break: %s lost=%v", next.holderBeat, l.isLost())
+			}
+		})
+	}
+}
+
+func TestStackLockWriteThenErrorDoesNotRenewDeadline(t *testing.T) {
+	b := fixture(t)
+	b.lockCfg.beat = time.Hour
+	b.lockCfg.stale = 20 * time.Millisecond
+	now := time.Now()
+	b.lockCfg.now = func() time.Time { return now }
+	fail := false
+	b.lockCfg.write = func(f *os.File, data []byte) error {
+		if _, err := f.Write(data); err != nil {
+			return err
+		}
+		if fail {
+			return errors.New("write landed but close failed")
+		}
+		return nil
+	}
+	l, err := b.acquireStackLock(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.releaseLock()
+	now = now.Add(19 * time.Millisecond)
+	fail = true
+	if got := l.beat(); got != "error" {
+		t.Fatalf("failed beat: %s", got)
+	}
+	data, err := os.ReadFile(l.path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var record lockRecord
+	if json.Unmarshal(data, &record) != nil || record.Seq != 2 {
+		t.Fatalf("write did not land: %q", data)
+	}
+	now = now.Add(time.Millisecond)
+	l.path = b.dir
+	if got := l.beat(); got != "lost" {
+		t.Fatalf("failed write renewed the deadline: %s", got)
+	}
+}

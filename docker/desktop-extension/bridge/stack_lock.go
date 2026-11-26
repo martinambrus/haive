@@ -193,6 +193,7 @@ func (l *stackLock) beat() string {
 	if l.lost || l.released {
 		return "lost"
 	}
+	started := l.cfg.now()
 	current, err := readLockFile(l.path, l.cfg.maxBytes)
 	if errors.Is(err, fs.ErrNotExist) {
 		if l.proofExpired() {
@@ -205,7 +206,7 @@ func (l *stackLock) beat() string {
 		}
 		l.seq++
 		l.ownWriteFailed = false
-		l.lastGood = l.cfg.now()
+		l.lastGood = started
 		return "ok"
 	}
 	if err != nil {
@@ -232,7 +233,7 @@ func (l *stackLock) beat() string {
 	}
 	l.seq++
 	l.ownWriteFailed = false
-	l.lastGood = l.cfg.now()
+	l.lastGood = started
 	return "ok"
 }
 
@@ -370,9 +371,10 @@ func (b bridge) acquireLease(ctx context.Context, path string) (*stackLock, erro
 	busy := lockUnavailable(path)
 
 	for round := 0; round < cfg.rounds; round++ {
+		started := cfg.now()
 		err := createLockFile(path, encodeLockRecord(token, startedAt, 1), cfg.write)
 		if err == nil {
-			l := &stackLock{path: path, token: token, startedAt: startedAt, cfg: cfg, b: b, seq: 1, lastGood: cfg.now(),
+			l := &stackLock{path: path, token: token, startedAt: startedAt, cfg: cfg, b: b, seq: 1, lastGood: started,
 				stop: make(chan struct{}), done: make(chan struct{})}
 			go l.heartbeat()
 			return l, nil

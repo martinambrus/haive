@@ -100,7 +100,6 @@ export class StackLock {
   private lostFlag = false;
   private failing = false;
   private ownWriteFailed = false;
-  private lastGood: number;
   private releasing: Promise<void> | undefined;
   private inFlight: Promise<'ok' | 'lost' | 'error'> | undefined;
   private timer: NodeJS.Timeout | undefined;
@@ -111,8 +110,8 @@ export class StackLock {
     readonly token: string,
     private readonly startedAt: string,
     private readonly options: Resolved,
+    private lastGood: number,
   ) {
-    this.lastGood = options.now();
     if (options.heartbeat) {
       this.timer = setInterval(() => void this.beat(), options.beatMs);
       this.timer.unref();
@@ -168,7 +167,6 @@ export class StackLock {
         this.markLost();
         throw this.lossRefusal();
       }
-      this.lastGood = this.options.now();
       return;
     }
   }
@@ -216,6 +214,7 @@ export class StackLock {
   }
 
   private async beatOnce(): Promise<'ok' | 'lost' | 'error'> {
+    const started = this.options.now();
     try {
       const outcome = await inInstall(this.installDir, async (dir) => {
         const current = await dir.read(STACK_LOCK_NAME, this.options.maxBytes);
@@ -260,7 +259,7 @@ export class StackLock {
       });
       if (outcome === 'ok' || outcome === 'created') {
         this.seq += 1;
-        this.lastGood = this.options.now();
+        this.lastGood = started;
         this.failing = false;
         this.ownWriteFailed = false;
         return 'ok';
@@ -328,12 +327,13 @@ export async function acquireStackLock(
   let waiting = false;
 
   for (let round = 0; round < opts.rounds; round++) {
+    const started = opts.now();
     try {
       await op((dir) =>
         dir.createExclusive(STACK_LOCK_NAME, encode(token, opts.holder, startedAt, 1)),
       );
       opts.onEvent?.('stack-lock-acquired', { holder: opts.holder });
-      return { status: 'held', lock: new StackLock(installDir, token, startedAt, opts) };
+      return { status: 'held', lock: new StackLock(installDir, token, startedAt, opts, started) };
     } catch (error) {
       // Only the directory open can report ENOENT: the create itself is inside an open directory.
       if (code(error) === 'ENOENT') {

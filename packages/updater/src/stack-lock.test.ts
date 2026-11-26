@@ -421,7 +421,7 @@ describe('phase ownership proofs', () => {
         await rm(path);
         const create = install.InstallDirectory.prototype.createExclusive;
         vi.spyOn(install.InstallDirectory.prototype, 'createExclusive').mockImplementationOnce(
-          async function (this: install.InstallDirectory, name, bytes) {
+          async function (this: install.InstallDirectory, name: string, bytes: Buffer) {
             await writeFile(path, partial);
             return create.call(this, name, bytes);
           },
@@ -491,7 +491,7 @@ describe('phase ownership proofs', () => {
       entered = resolve;
     });
     vi.spyOn(install.InstallDirectory.prototype, 'overwrite').mockImplementationOnce(
-      async function (this: install.InstallDirectory, name, bytes) {
+      async function (this: install.InstallDirectory, name: string, bytes: Buffer) {
         await real.call(this, name, Buffer.alloc(0));
         entered();
         await gate;
@@ -972,17 +972,124 @@ describe('unproven lease deadline', () => {
       expect(events.filter((event) => event === 'stack-lock-lost')).toHaveLength(1);
     },
   );
-  it.each(['proof', 'beat'])('renews the deadline on a good %s', async (kind) => {
+  it('renews the deadline on a good beat', async () => {
     vi.useFakeTimers();
     const lock = await held({ staleMs: 20, now: () => Date.now() });
     await vi.advanceTimersByTimeAsync(19);
-    if (kind === 'proof') await lock.assertOwned();
-    else expect(await lock.beat()).toBe('ok');
+    expect(await lock.beat()).toBe('ok');
     await rm(path);
     await vi.advanceTimersByTimeAsync(19);
     await expect(lock.assertOwned()).rejects.toMatchObject({ refusal: 'stack-lock-unproven' });
     await vi.advanceTimersByTimeAsync(1);
     await expect(lock.assertOwned()).rejects.toMatchObject({ refusal: 'stack-lock-lost' });
+    await lock.release();
+  });
+  it('does not renew the deadline on a good proof while beats fail', async () => {
+    vi.useFakeTimers();
+    const lock = await held({ staleMs: 20, now: () => Date.now() });
+    const overwrite = vi.spyOn(install.InstallDirectory.prototype, 'overwrite');
+    overwrite.mockRejectedValue(new Error('write refused before truncation'));
+    const contender = await acquireStackLock(dir, {
+      ...base,
+      staleMs: 20,
+      pollMs: 20,
+      sleep: async () => {
+        await vi.advanceTimersByTimeAsync(19);
+        expect(await lock.beat()).toBe('error');
+        await expect(lock.assertOwned()).resolves.toBeUndefined();
+        await vi.advanceTimersByTimeAsync(1);
+      },
+      hooks: {
+        beforeBreak: async () => {
+          const read = vi.spyOn(install.InstallDirectory.prototype, 'read');
+          read.mockRejectedValue(new Error('holder cannot read'));
+          await expect(lock.assertOwned()).rejects.toMatchObject({ refusal: 'stack-lock-lost' });
+          read.mockRestore();
+        },
+      },
+    });
+    expect(contender.status).toBe('held');
+    overwrite.mockRestore();
+    await lock.release();
+    if (contender.status === 'held') await contender.lock.release();
+  });
+  it.each(['acquire', 'beat', 'recreate'] as const)(
+    'expires no later than a contender can break after a delayed %s write',
+    async (kind) => {
+      vi.useFakeTimers();
+      let lock: StackLock;
+      let contender: ReturnType<typeof acquireStackLock> | undefined;
+      let firstPoll!: () => void;
+      const observed = new Promise<void>((resolve) => {
+        firstPoll = resolve;
+      });
+      let finishPoll!: () => void;
+      const poll = new Promise<void>((resolve) => {
+        finishPoll = resolve;
+      });
+      const method = kind === 'beat' ? 'overwrite' : 'createExclusive';
+      const original = install.InstallDirectory.prototype[method];
+      const write = vi.spyOn(install.InstallDirectory.prototype, method);
+      if (kind !== 'acquire') {
+        lock = await held({ staleMs: 20, now: () => Date.now() });
+        if (kind === 'recreate') await rm(path);
+        await vi.advanceTimersByTimeAsync(5);
+      }
+      write.mockImplementationOnce(async function (
+        this: install.InstallDirectory,
+        name: string,
+        bytes: Buffer,
+      ) {
+        await original.call(this, name, bytes);
+        // The contender observes the changed bytes while the holder is still inside I/O.
+        contender = acquireStackLock(dir, {
+          ...base,
+          staleMs: 20,
+          pollMs: 20,
+          sleep: async () => {
+            firstPoll();
+            await poll;
+            await vi.advanceTimersByTimeAsync(10);
+          },
+          hooks: {
+            beforeBreak: async () => {
+              const read = vi.spyOn(install.InstallDirectory.prototype, 'read');
+              read.mockRejectedValue(new Error('holder cannot read'));
+              expect(await lock.beat()).toBe('lost');
+              read.mockRestore();
+            },
+          },
+        });
+        await observed;
+        await vi.advanceTimersByTimeAsync(10);
+      });
+      if (kind === 'acquire') lock = await held({ staleMs: 20, now: () => Date.now() });
+      else expect(await lock!.beat()).toBe('ok');
+      finishPoll();
+      const next = await contender!;
+      expect(next.status).toBe('held');
+      expect(lock!.lost).toBe(true);
+      write.mockRestore();
+      await lock!.release();
+      if (next.status === 'held') await next.lock.release();
+    },
+  );
+  it('does not renew when a beat writes the record but then throws', async () => {
+    vi.useFakeTimers();
+    const lock = await held({ staleMs: 20, now: () => Date.now() });
+    await vi.advanceTimersByTimeAsync(19);
+    const original = install.InstallDirectory.prototype.overwrite;
+    vi.spyOn(install.InstallDirectory.prototype, 'overwrite').mockImplementationOnce(
+      async function (this: install.InstallDirectory, ...args) {
+        await original.call(this, ...args);
+        throw new Error('close failed after the write');
+      },
+    );
+    expect(await lock.beat()).toBe('error');
+    expect((await parse()).seq).toBe(2);
+    await vi.advanceTimersByTimeAsync(1);
+    vi.spyOn(install.InstallDirectory.prototype, 'read').mockRejectedValue(new Error('unreadable'));
+    expect(await lock.beat()).toBe('lost');
     await lock.release();
   });
   it.each(['missing', 'unreadable'])(
