@@ -460,6 +460,40 @@ describe.skipIf(!url)('durable guard decisions on Postgres', () => {
       expect((await row('cleanup'))!.guardState).toEqual(original);
     },
   );
+  it.each([true, false])(
+    'refuses a reset named requiresSpan dependency without writes (%s)',
+    async (run) => {
+      await pinFixTarget(true);
+      evaluate.mockResolvedValue(run);
+      await evaluateGuardDecision(ctx, 'work', predicates);
+      await db
+        .update(schema.tasks)
+        .set({ currentStepId: 'cleanup' })
+        .where(eq(schema.tasks.id, taskId));
+      const baseline = await evaluateGuardDecision(
+        { ...ctx, taskStepId: rows.cleanup!.id },
+        'cleanup',
+        predicates,
+      );
+      expect(baseline!.required!.stepRowId).toBe(rows.work!.id);
+      // Explicit reset invalidates the exact row the dependent's saved decision names.
+      await db
+        .update(schema.taskSteps)
+        .set({ guardState: null, rerunGeneration: 1 })
+        .where(eq(schema.taskSteps.id, rows.work!.id));
+      const fix = await enterRound(1, true, 'cleanup');
+      evaluate.mockClear();
+      const before = await snapshot();
+      await expect(evaluateGuardDecision(fix, 'cleanup', predicates)).rejects.toMatchObject({
+        name: 'GuardDecisionError',
+        code: 'guard-decision-invalid',
+        reason: 'fix-round-decision-unavailable',
+      });
+      expect(evaluate).not.toHaveBeenCalled();
+      expect(await snapshot()).toEqual(before);
+      await assertLocksReleased();
+    },
+  );
   it('serializes duplicate advances and replays after an acknowledgement loss or epoch recovery', async () => {
     const decisions = await Promise.all(
       Array.from({ length: 4 }, () => evaluateGuardDecision(ctx, 'work', predicates)),
