@@ -483,8 +483,8 @@ jobs:
   postgres-gated:
     name: Postgres-gated tests (shard ${{ matrix.shard }})
     runs-on: ubuntu-latest
-    # Limits and shard count are pinned against scripts/lib/ci-gated-budget.mjs.
-    # 88 rows/shard + 13 rows of headroom: 26 min step, 29 min including setup/margin.
+    # Limits and shard count are pinned against scripts/lib/ci-gated-budget.mjs, which holds the
+    # model and the headroom; the tests in scripts/test/ name the minutes to raise.
     timeout-minutes: 29
     strategy:
       fail-fast: false

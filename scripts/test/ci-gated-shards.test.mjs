@@ -50,9 +50,12 @@ describe('gated CI shards', () => {
   it('derives the shard count from modelled row time and keeps per-shard headroom', () => {
     const rows = readGated().rows.length;
     // Do not force a matrix edit while consuming the headroom bought by the last raise.
+    const needed = suggestedShards(
+      Math.max(1, rows - GATED_BUDGET.rowHeadroom * GATED_BUDGET.shards),
+    );
     assert.ok(
-      GATED_BUDGET.shards >=
-        suggestedShards(Math.max(1, rows - GATED_BUDGET.rowHeadroom * GATED_BUDGET.shards)),
+      GATED_BUDGET.shards >= needed,
+      `${rows} gated rows need ${needed} shards: add matrix legs to postgres-gated in ci.yml and raise GATED_BUDGET.shards to ${needed}`,
     );
     const largest = Math.ceil(rows / GATED_BUDGET.shards);
     const current = minimumLimits(largest, GATED_BUDGET);
