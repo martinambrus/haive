@@ -11,15 +11,23 @@ export function resolveRunTitle(
   maxChars = MAX_RUN_TITLE_CHARS,
 ): string | null {
   try {
-    const raw = llm.runTitle?.(args);
+    const raw: unknown = llm.runTitle?.(args);
     if (raw == null) return null;
     if (typeof raw !== 'string') {
+      // JS modules can bypass the synchronous SDK type. Ignore async results,
+      // but observe their rejection so display metadata cannot crash the worker.
+      void Promise.resolve(raw).catch(() => {});
       logger.warn({ reason: 'invalid' }, 'ignoring llm run title');
       return null;
     }
-    // Remove controls, including terminal escapes and bidi/formatting controls,
-    // and Unicode line separators so a title stays a single plain-text line.
-    const clean = raw.replace(/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/gu, '').trim();
+    // Preserve word boundaries across control whitespace and line separators.
+    // Strip other controls (including bidi), retaining the ZWNJ/ZWJ joiners
+    // needed for written languages and joined emoji.
+    const clean = raw
+      .replace(/[\u0009-\u000d\u0085\p{Zl}\p{Zp}]/gu, ' ')
+      .replace(/(?![\u200c\u200d])[\p{Cc}\p{Cf}]/gu, '')
+      .replace(/\s+/gu, ' ')
+      .trim();
     const title = Array.from(clean).slice(0, maxChars).join('').trimEnd();
     if (title) return title;
     logger.warn({ reason: 'empty' }, 'ignoring llm run title');

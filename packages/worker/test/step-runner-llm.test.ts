@@ -525,7 +525,7 @@ describe('step run titles through the real runner', () => {
       'pre-form',
       () => ' \u0000Review\n\t\u007f\u0085\u202e' + 'x'.repeat(260),
     );
-    expect(state.cliInvocationRow?.agentTitle).toBe('Review' + 'x'.repeat(250));
+    expect(state.cliInvocationRow?.agentTitle).toBe('Review ' + 'x'.repeat(249));
   });
 
   it.each([

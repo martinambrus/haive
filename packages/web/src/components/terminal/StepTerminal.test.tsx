@@ -19,10 +19,15 @@ beforeEach(() => {
 });
 afterEach(cleanup);
 
-async function show(agentTitle: string | null, assignedAgentIds: string[] = [], totalCount = 2) {
+async function show(
+  agentTitle: string | null,
+  assignedAgentIds: string[] = [],
+  totalCount = 2,
+  mode: CliInvocationSummary['mode'] = 'cli',
+) {
   const invocation: CliInvocationSummary = {
     id: 'run',
-    mode: 'cli',
+    mode,
     runNumber: 2,
     agentTitle,
     assignedAgentIds,
@@ -48,11 +53,31 @@ async function show(agentTitle: string | null, assignedAgentIds: string[] = [], 
 }
 
 describe('step terminal run labels', () => {
-  it('combines the stable run number and title once', async () => {
+  it('shows the stable run number and the existing header title once', async () => {
     await show('Review, part 3 of 12');
-    const label = screen.getByText('Run 2 · Review, part 3 of 12');
-    expect(label.getAttribute('title')).toBe('Run 2 · Review, part 3 of 12');
-    expect(screen.queryByText('Review, part 3 of 12')).toBeNull();
+    expect(screen.getByText('Run 2')).toBeTruthy();
+    const title = screen.getByText('Review, part 3 of 12');
+    expect(title.getAttribute('title')).toBe('Review, part 3 of 12');
+    expect(screen.queryByText('Run 2 · Review, part 3 of 12')).toBeNull();
+  });
+
+  it.each([
+    { mode: 'agent_mining' as const, title: 'Refuter 2/4 [reachability] · issue' },
+    { mode: 'cli' as const, title: 'Validator' },
+    { mode: 'cli' as const, title: 'Fixer' },
+    { mode: 'cli' as const, title: 'Review pass 3' },
+  ])('preserves the separate $title header after the persona badge', async ({ mode, title }) => {
+    await show(title, ['security-reviewer'], 2, mode);
+    expect(screen.getByText('Run 2')).toBeTruthy();
+    const headerTitle = screen.getByText(title);
+    expect(headerTitle.classList.contains('text-indigo-300')).toBe(true);
+    expect(headerTitle.getAttribute('title')).toBe(title);
+    expect(
+      screen
+        .getByLabelText('Agent personality: security-reviewer')
+        .compareDocumentPosition(headerTitle) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+    expect(screen.queryByText(`Run 2 · ${title}`)).toBeNull();
   });
 
   it('keeps untitled run labels unchanged', async () => {
@@ -76,14 +101,14 @@ describe('step terminal run labels', () => {
   it('truncates a long title with the full text available on hover', async () => {
     const title = 'Review '.repeat(35).trim();
     await show(title);
-    const label = screen.getByTitle(`Run 2 · ${title}`);
+    const label = screen.getByTitle(title);
     expect(label.classList.contains('truncate')).toBe(true);
     expect(label.classList.contains('max-w-full')).toBe(true);
   });
 
   it('renders a title as literal text', async () => {
     await show('<b>Review</b> **part 3**');
-    const label = screen.getByText('Run 2 · <b>Review</b> **part 3**');
+    const label = screen.getByText('<b>Review</b> **part 3**');
     expect(label.querySelector('b, strong')).toBeNull();
   });
 });

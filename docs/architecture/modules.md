@@ -550,14 +550,20 @@ calls it for each fresh LLM dispatch after `prepare`, with the same `LlmBuildArg
 the result in `cli_invocations.agent_title`, including pre-form and apply-time dispatches,
 continuations, retries and re-rolls. Existing loop role/pass titles take precedence;
 mining and step-summary titles keep their separate contracts. A reused invocation keeps
-its recorded title. The terminal combines a distinct title with its run number, truncates
-long labels and exposes the full text on hover; titles repeating assigned personas are hidden.
+its recorded title. The terminal shows a distinct title once in its existing header span,
+separate from the run number and after the persona badges, preserving mining and loop-role
+headers. Long titles are truncated with the full text on hover; titles repeating assigned
+personas are hidden. A combined `Run N · title` label is needed only where no title is
+already shown in the header.
 
 Titles are display metadata: choose plain text, with no secrets or user content beyond
-what the step deliberately decides to expose. The host removes control/format characters
-and line separators, trims whitespace and bounds the result to `MAX_RUN_TITLE_CHARS`
+what the step deliberately decides to expose. The host replaces control whitespace and
+line/paragraph separators with spaces, strips other control/format characters except
+ZWNJ/ZWJ (U+200C/U+200D), collapses whitespace, trims and bounds the result to `MAX_RUN_TITLE_CHARS`
 (256 Unicode characters, the column limit). Null leaves the title unset; empty, invalid
 or throwing callbacks are ignored with payload-free warnings and cannot fail dispatch.
+The hook remains synchronous; a Promise returned by an untyped module is invalid, and
+the host observes and discards any rejection.
 Steps without the hook keep their existing null title. No migration is required.
 
 A module step may declare `attachmentContext: 'none'` directly on `StepDefinition`, including
