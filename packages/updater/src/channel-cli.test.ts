@@ -1115,6 +1115,56 @@ describe('early refusal install fields', () => {
     expect(await readFile(join(dir, '.env'), 'utf8')).toBe(env);
   });
 
+  it.each([
+    ['failed', 'failed. '],
+    ['failed.', 'failed. '],
+    ['failed!', 'failed! '],
+    ['failed?', 'failed? '],
+    ['failed!  ', 'failed!   '],
+  ])('joins a display note after %j without duplicate punctuation', async (message, prefix) => {
+    await writeFile(join(dir, '.env'), 'HAIVE_CHANNEL=acme\n');
+    vi.mocked(images.readImageSettings).mockRejectedValueOnce(new Error(message));
+    await expect(main()).rejects.toThrow(message);
+    expect(vi.mocked(journal.recordAttempt).mock.calls[0]![1].error).toBe(
+      prefix + 'Current version could not be resolved from literal .env settings.',
+    );
+  });
+
+  it('records the literal channel when the requested channel disagrees with a resolved value', async () => {
+    // The display read must not reuse the resolved setting or the partly assigned local channel.
+    await writeFile(join(dir, '.env'), 'HAIVE_CHANNEL=literal\nHAIVE_VERSION=1.2.3\n');
+    vi.mocked(images.readImageSettings).mockResolvedValueOnce({
+      ...settings,
+      HAIVE_CHANNEL: 'resolved',
+    });
+    await expect(main()).rejects.toThrow('disagrees');
+    expect(journal.recordAttempt).toHaveBeenCalledWith(
+      h.sql,
+      expect.objectContaining({
+        channel: 'literal',
+        fromVersion: '1.2.3',
+      }),
+    );
+  });
+
+  it('records the resolved channel once install settings were successfully read', async () => {
+    await writeFile(join(dir, '.env'), 'HAIVE_CHANNEL=literal\nHAIVE_VERSION=1.2.3\n');
+    vi.mocked(images.readImageSettings).mockResolvedValueOnce({
+      ...settings,
+      DOCKER_CONFIG: join(dir, '.docker'),
+    });
+    vi.mocked(journal.lastDoneChannel).mockResolvedValueOnce('public');
+    expect(await main()).toBe(3);
+    expect(journal.recordAttempt).toHaveBeenCalledWith(
+      h.sql,
+      expect.objectContaining({
+        channel: 'acme',
+        fromVersion: '1.0.0',
+        metadata: { refusal: 'channel-changed' },
+      }),
+    );
+  });
+
   it('records channel validation failures after acquiring the lock', async () => {
     process.argv[process.argv.indexOf('--channel') + 1] = 'other';
     await expect(main()).rejects.toThrow('disagrees');
