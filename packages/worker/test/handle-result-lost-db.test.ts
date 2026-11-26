@@ -13,7 +13,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { and, eq, sql } from 'drizzle-orm';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
-import { createDatabase, schema, type Database } from '@haive/database';
+import { createDatabase, hasPgCode, schema, type Database } from '@haive/database';
 import { logger, TASK_JOB_NAMES, type WorkflowType } from '@haive/shared';
 import { promptStepEntrySchema } from '@haive/shared/modularity';
 import {
@@ -474,6 +474,86 @@ describe.skipIf(!url)('a hand-off write that loses its row or task says so, on P
     await db.delete(schema.users).where(eq(schema.users.emailBlindIndex, EMAIL_INDEX));
     await db.$client.end({ timeout: 5 });
   });
+
+  it.each(['insert', 'commit'])(
+    'rolls back the START claim when its generation marker fails at %s',
+    async (cut) => {
+      await db
+        .insert(schema.taskTypeDefinitions)
+        .values({
+          slug: TYPE,
+          displayName: TYPE,
+          source: 'admin',
+          runListStrategy: 'static',
+          stepIds: [S],
+        })
+        .onConflictDoNothing();
+      const [repo] = await db
+        .insert(schema.repositories)
+        .values({
+          userId,
+          name: 'start-claim',
+          source: 'local_path',
+          localPath: '/tmp',
+        })
+        .returning();
+      const taskId = await makeTask({
+        repositoryId: repo!.id,
+        status: 'queued',
+        currentStepId: 'before-start',
+        currentStepIndex: 9,
+        currentRound: 7,
+        runListSnapshot: [S],
+      });
+      await db.execute(sql`CREATE FUNCTION hrl_refuse_start_marker() RETURNS trigger
+        LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'start marker refused'; END $$`);
+      try {
+        await db.execute(
+          sql.raw(
+            cut === 'insert'
+              ? `CREATE TRIGGER hrl_refuse_start_marker BEFORE INSERT ON task_events
+             FOR EACH ROW WHEN (NEW.event_type = 'task.running')
+             EXECUTE FUNCTION hrl_refuse_start_marker()`
+              : `CREATE CONSTRAINT TRIGGER hrl_refuse_start_marker AFTER INSERT ON task_events
+             DEFERRABLE INITIALLY DEFERRED FOR EACH ROW WHEN (NEW.event_type = 'task.running')
+             EXECUTE FUNCTION hrl_refuse_start_marker()`,
+          ),
+        );
+        await expect(
+          processTaskJob({
+            name: TASK_JOB_NAMES.START,
+            data: { taskId, userId },
+            opts: {},
+            attemptsMade: 0,
+          } as unknown as Parameters<typeof processTaskJob>[0]),
+        ).rejects.toSatisfy((error: unknown) => hasPgCode(error, 'P0001'));
+        // The job catch may fail the still-queued task, but no part of START's claim survives.
+        expect(
+          await db.query.tasks.findFirst({ where: eq(schema.tasks.id, taskId) }),
+        ).toMatchObject({
+          status: 'failed',
+          currentStepId: 'before-start',
+          currentStepIndex: 9,
+          currentRound: 7,
+          startedAt: null,
+          orchestrationEpoch: E,
+        });
+        expect(await eventTypes(taskId)).not.toContain('task.running');
+        expect(
+          await db.select().from(schema.taskSteps).where(eq(schema.taskSteps.taskId, taskId)),
+        ).toEqual([]);
+        expect(h.adds).toEqual([]);
+      } finally {
+        await db.execute(sql`DROP TRIGGER IF EXISTS hrl_refuse_start_marker ON task_events`);
+        await db.execute(sql`DROP FUNCTION hrl_refuse_start_marker()`);
+        await db.delete(schema.tasks).where(eq(schema.tasks.id, taskId));
+        await db.delete(schema.repositories).where(eq(schema.repositories.id, repo!.id));
+        await db
+          .delete(schema.taskTypeDefinitions)
+          .where(eq(schema.taskTypeDefinitions.slug, TYPE));
+      }
+    },
+  );
 
   const lateFixerDirs: string[] = [];
   afterEach(async () => {

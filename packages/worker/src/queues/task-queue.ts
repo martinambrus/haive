@@ -399,7 +399,8 @@ async function appendEventOnce(
 const STARTABLE_TASK_STATUSES = ['queued'] as const satisfies readonly TaskStatus[];
 
 /** START's claim: the task goes running, pointed at its first step, only while it is still
- *  startable at the epoch START read; false when anything else holds it and nothing was written. */
+ *  startable at the epoch START read. The generation marker commits with the claim; false
+ *  when anything else holds it and nothing was written. */
 async function claimTaskStart(
   db: Database,
   ctx: ResolvedTaskContext,
@@ -412,35 +413,39 @@ async function claimTaskStart(
     0,
     computeGlobalStepIndex(first.metadata.workflowType, first.metadata.index),
   );
-  const [claimed] = await db
-    .update(schema.tasks)
-    .set({
-      status: 'running',
-      // Stamp the FIRST start and never overwrite it, so wall clock accumulates the way work
-      // and idle do (the step rows' carried_* survive every reset). handleStartTask runs again
-      // on a task-level retry, and re-stamping here restarted the wall clock while work/idle
-      // kept every prior run — a task read `wall 44m` against `idle 193h`, and the two could
-      // never reconcile.
-      startedAt: sql`coalesce(${schema.tasks.startedAt}, now())`,
-      // A retry starts from a failed task, whose completedAt markTaskFailed stamped. Preserving
-      // started_at makes that stale value load-bearing: wall would freeze at
-      // completedAt - startedAt (the api and the task page both end the span at
-      // `completedAt ?? now`) instead of ticking. Same clear markTaskRunningWithStep documents.
-      completedAt: null,
-      currentStepId: first.metadata.id,
-      currentStepIndex,
-      currentRound: 0,
-      updatedAt: new Date(),
-    })
-    .where(
-      and(
-        eq(schema.tasks.id, ctx.taskId),
-        inArray(schema.tasks.status, [...STARTABLE_TASK_STATUSES]),
-        eq(schema.tasks.orchestrationEpoch, ctx.orchestrationEpoch),
-      ),
-    )
-    .returning({ id: schema.tasks.id });
-  return claimed !== undefined;
+  return db.transaction(async (tx) => {
+    const [claimed] = await tx
+      .update(schema.tasks)
+      .set({
+        status: 'running',
+        // Stamp the FIRST start and never overwrite it, so wall clock accumulates the way work
+        // and idle do (the step rows' carried_* survive every reset). handleStartTask runs again
+        // on a task-level retry, and re-stamping here restarted the wall clock while work/idle
+        // kept every prior run — a task read `wall 44m` against `idle 193h`, and the two could
+        // never reconcile.
+        startedAt: sql`coalesce(${schema.tasks.startedAt}, now())`,
+        // A retry starts from a failed task, whose completedAt markTaskFailed stamped. Preserving
+        // started_at makes that stale value load-bearing: wall would freeze at
+        // completedAt - startedAt (the api and the task page both end the span at
+        // `completedAt ?? now`) instead of ticking. Same clear markTaskRunningWithStep documents.
+        completedAt: null,
+        currentStepId: first.metadata.id,
+        currentStepIndex,
+        currentRound: 0,
+        updatedAt: new Date(),
+      })
+      .where(
+        and(
+          eq(schema.tasks.id, ctx.taskId),
+          inArray(schema.tasks.status, [...STARTABLE_TASK_STATUSES]),
+          eq(schema.tasks.orchestrationEpoch, ctx.orchestrationEpoch),
+        ),
+      )
+      .returning({ id: schema.tasks.id });
+    if (claimed === undefined) return false;
+    await appendEvent(tx, ctx.taskId, null, 'task.running', {});
+    return true;
+  });
 }
 
 /** current_step_index mirrors the current step's run_seq (buildRunList position — the
@@ -3466,7 +3471,6 @@ async function handleStartTask(
     return;
   }
   if (held) held.claimed = true;
-  await appendEvent(db, ctx.taskId, null, 'task.running', {});
   let startProviders: CliProviderRecord[] | undefined;
   await checkPinnedStepPersonas({
     db,
