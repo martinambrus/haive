@@ -935,6 +935,7 @@ describe('SIGTERM while a one-shot is running', () => {
         finish = () => resolve({ stdout: '' });
       });
       const checks: Array<string | null> = [];
+      let removed = false;
       h.dockerExec.mockImplementation(async (_cmd, args) => {
         if (args[0] === 'run') {
           started();
@@ -942,11 +943,12 @@ describe('SIGTERM while a one-shot is running', () => {
         }
         if (args[0] === 'ps' && args[1] === '-aq') {
           checks.push(await heldBy());
-          return { stdout: 'abc123\n' };
+          return { stdout: removed ? '' : 'abc123\n' };
         }
         if (args[0] === 'rm') {
           checks.push(await heldBy());
           if (fails) throw Object.assign(new Error('secret stderr'), { code: 'EACCES' });
+          removed = true;
         }
         return { stdout: '' };
       });
@@ -966,7 +968,7 @@ describe('SIGTERM while a one-shot is running', () => {
         await running;
         process.emit('SIGTERM');
         expect(await exited).toBe(143);
-        expect(checks).toEqual(fails ? ['updater', 'updater', 'updater'] : ['updater', 'updater']);
+        expect(checks).toEqual(['updater', 'updater', 'updater']);
         expect(await heldBy()).toBeNull();
         const launch = h.dockerExec.mock.calls.find(
           ([, args]) => args[0] === 'run',
