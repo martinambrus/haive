@@ -32,4 +32,41 @@ E. Translator T773: "Finish review without more calls, keep the current text" wi
 Default-off host seams; module consumers removed before host symbols revert. T772's module migration is roll-forward only. No history, spend or consent is rewritten.
 
 ## Verification
-Controls per design section 6/7 (both), red on the parent first. Host: re-entry, exact-id consumption, crash cuts, pause, default reopen unchanged. Module: sweep bound, owner authority (non-admin owner yes, admin non-owner no), arithmetic, stale forms, legacy failed task fixture. Live: the owner resumes ae8fb29c.
+
+Every control fails on its parent commit first. Small injectable limits and fake clocks; real PostgreSQL only for locking,
+transactional cuts and recovery. The translator module's own CI runs its suite; root tests do not.
+
+A1 (host):
+- A notice-only reopen dispatches nothing (unchanged). `rerunPreForm` re-enters detect, prepare and completePreForm before a form,
+  and dispatches. `newAttempt`, loop, mining, DAG and merge combinations are refused with no mutation and no dispatch.
+- Only the exact completed invocation apply received is consumed; a newer live invocation is untouched. A lost generation, owner,
+  pointer or epoch rolls the consumption back.
+- Crash before and after the checkpoint, from a task that was `waiting_user`: boot and stalled recovery re-drive it; one live
+  invocation; no repeated acceptance. Old job-carried answers are ignored before and after the new park.
+- Pause defers each fresh dispatch on this path; Resume continues once.
+- Unchanged: pre-form report continuations, `prepare` false, prepare-park losers, ordinary reopen and `newAttempt`, plan
+  clarification, plain post-form steps, Retry fences.
+
+A2 (host): a follow-up `prepare` returning false falls through to a form with null output (opt-in only; default consumers keep
+the invariant). `StepPrepareFormError` after insert releases only this pass's unqueued invocation, keeps its charge, and parks a form
+without dispatching again.
+
+C (T771):
+- One edge-changing patch invalidates the expected units; submitting the decision dispatches their review without Retry, epoch or
+  generation reset.
+- A sweep that proposes again ends on a fresh, unticked form; no second sweep without new ticks.
+- Nothing ticked advances with no new call. A clean review finishes without the confirm form. More than ten proposals, partial
+  pages, replays and stale tokens behave as today.
+
+D (T772):
+- Each reserve branch in both steps (unbound intent at the ceiling, key-only, task-only, both) parks before any intent or
+  invocation; the form carries no source or reply text.
+- Exhaustion inside completePreForm and inside a T771 sweep keeps the acceptance and parks; a grant resumes only unfinished work.
+- A non-admin owner can grant; an admin non-owner cannot; stale or changed forms refuse. Grant bounds hold, and historical operator
+  grants count once.
+- Spend survives Retry. A legacy failed task (like ae8fb29c) parks on Retry without a new invocation and resumes after a grant.
+
+E (T773): finish records a waiver with no call. Render accepts only a matching waiver and refuses ordinary incomplete review. A
+new result, patch, decision or Retry invalidates the waiver. The output says "review ended by owner; X/Y reviewed".
+
+Live: the owner resumes ae8fb29c (Retry on the failed review parks on the budget form; the owner decides).
