@@ -12,6 +12,8 @@ import { configService, FIX_LOOP_ACTION_FIELD, type FormSchema } from '@haive/sh
 import { restoreDatabaseStep } from '../src/step-engine/steps/workflow/01c1-restore-database.js';
 import { insightsTriageStep } from '../src/step-engine/steps/workflow/08e-insights-triage.js';
 import { runConfigStep } from '../src/step-engine/steps/workflow/06-run-config.js';
+import { staleSubmitAction } from '../src/queues/_advance-guards.js';
+import * as activation from '../src/modules/activation.js';
 import * as dispatcher from '../src/orchestrator/dispatcher.js';
 import { advanceStep } from '../src/step-engine/step-runner.js';
 import { recordLedgerEntry } from '../src/step-engine/task-ledger.js';
@@ -33,6 +35,7 @@ interface MockState {
   invocations?: Record<string, unknown>[];
   beforeWrite?: (table: string, patch: Record<string, unknown>) => void;
   gate?: GateWorld;
+  continuationEvent?: { payload: { version: number; rerunGeneration: number } };
 }
 
 /** What the insight-gate predicates read: events and the task's other step rows. */
@@ -160,12 +163,14 @@ function makeMockDb(state: MockState): Database {
       const row = { ...state.taskStepRow };
       const writes = state.updates.length;
       const task = state.taskRow && { ...state.taskRow };
+      const event = state.continuationEvent;
       const invocation = state.invocation && { ...state.invocation };
       try {
         return await fn(db);
       } catch (err) {
         state.taskStepRow = row;
         state.taskRow = task;
+        state.continuationEvent = event;
         if (invocation && state.invocation) Object.assign(state.invocation, invocation);
         state.updates.length = writes;
         throw err;
@@ -214,8 +219,10 @@ function makeMockDb(state: MockState): Database {
                 return refusedByRowGuard(cond, state.taskStepRow.status) ||
                   state.taskStepRow.status === 'failed'
                   ? []
-                  : [{ id: state.taskStepRow.id }];
+                  : [persistedRow(state)];
               }
+              if (tableName === 'cli_invocations')
+                return state.invocation ? [state.invocation] : [];
               return tableName === 'tasks' && taskFenceHolds(cond, state.taskRow)
                 ? [{ id: state.taskRow!.id }]
                 : [];
@@ -228,6 +235,13 @@ function makeMockDb(state: MockState): Database {
       const tableName = tableNameOf(table);
       return {
         values: (v: Record<string, unknown>) => ({
+          then: (resolve: (value: unknown) => unknown) => {
+            if (tableName === 'task_events' && v.eventType === 'step.pre_form_continuation')
+              state.continuationEvent = {
+                payload: v.payload as { version: number; rerunGeneration: number },
+              };
+            return Promise.resolve().then(resolve);
+          },
           returning: async () => {
             const row = {
               id: `mock-${state.invocations ? state.invocations.length + 1 : nextId++}`,
@@ -273,8 +287,10 @@ function makeMockDb(state: MockState): Database {
                 return [state.taskRow];
               }
               state.updates.push({ table: tableName, patch: v });
-              if (tableName === 'cli_invocations' && state.invocation)
+              if (tableName === 'cli_invocations' && state.invocation) {
                 Object.assign(state.invocation, v);
+                return [state.invocation];
+              }
               if (tableName === 'task_steps') {
                 state.taskStepRow = {
                   ...state.taskStepRow,
@@ -315,6 +331,7 @@ function makeMockDb(state: MockState): Database {
         findMany: async () => state.gate?.continuations ?? [],
         findFirst: async ({ where }: { where: unknown }) => {
           const values = conditionValues(where);
+          if (values.includes('step.pre_form_continuation')) return state.continuationEvent;
           if (values.includes('step.form_submitted')) return state.gate?.submission;
           return state.gate?.checks.at(-1);
         },
@@ -3061,7 +3078,7 @@ describe('approved apply pre-form continuation', () => {
     };
     state.invocations = [state.invocation];
     let applied = false;
-    const def = makeStep({ form: () => ZERO_FIELD_FORM });
+    const def = makeStep({ form: () => ({ ...ZERO_FIELD_FORM, fields: [] }) });
     def.detect = vi.fn(async () => ({ revision: applied ? 'new' : 'old' }));
     def.prepareForm = vi.fn(async () => {});
     def.llm = {
@@ -3078,7 +3095,10 @@ describe('approved apply pre-form continuation', () => {
         expect(args.llmOutput).toBe('old-output');
         applied = true;
         // Cast keeps the new behavior test runnable on the parent SDK.
-        throw new ReopenStepFormError('Continue approved work', { rerunPreForm } as never);
+        throw new ReopenStepFormError('Continue approved work', {
+          notice: true,
+          rerunPreForm,
+        } as never);
       }
       expect(args.formValues).toEqual({});
       expect(args.llmOutput).not.toBe('old-output');
@@ -3128,6 +3148,89 @@ describe('approved apply pre-form continuation', () => {
     expect((await h.advance({ stale: true })).status).toBe('waiting_form');
     expect(h.def.apply).toHaveBeenCalledOnce();
     expect(h.state.taskStepRow).toMatchObject({ formValues: null, pauseFormOnRetry: false });
+  });
+
+  it('the new park rejects the old job timestamp after the durable hold has cleared', async () => {
+    const h = fixture();
+    const oldTimestamp = Date.now();
+    await h.advance({ stale: true });
+    await vi.advanceTimersByTimeAsync(1);
+    Object.assign(h.state.invocation!, {
+      endedAt: new Date(),
+      exitCode: 0,
+      rawOutput: 'new-output',
+    });
+    const parked = await h.advance({ stale: true });
+    expect(parked.status).toBe('waiting_form');
+    expect(h.state.taskStepRow.pauseFormOnRetry).toBe(false);
+    expect(staleSubmitAction(parked.row, true, oldTimestamp, 'waiting_user')).toBe('drop');
+    expect(staleSubmitAction(parked.row, true, oldTimestamp, 'running')).toBe('repark');
+    expect(h.def.apply).toHaveBeenCalledOnce();
+  });
+
+  it.each(['schema', 'resolved-guard'] as const)(
+    'the %s answer guard refuses before approved publication or fresh dispatch',
+    async (guard) => {
+      const h = fixture();
+      const values = { approve: 'invalid' };
+      h.state.taskStepRow.formSchema = {
+        title: 'Approve',
+        fields: [{ type: 'checkbox', id: 'approve', label: 'Approve', required: true }],
+      };
+      h.state.taskStepRow.formValues = null;
+      const result = await advanceStep({
+        db: makeMockDb(h.state),
+        taskId: 'task-1',
+        userId: 'user-1',
+        repoPath: '/tmp',
+        workspacePath: '/tmp',
+        stepDef: h.def,
+        cliProviderId: null,
+        formValues: guard === 'schema' ? values : { approve: true },
+        epoch: 7,
+        providers: [],
+        deps: { enqueueCliInvocation: h.enqueue },
+        ...(guard === 'resolved-guard'
+          ? {
+              validateResolvedForm() {
+                throw new Error('recorded approval missing');
+              },
+            }
+          : {}),
+      });
+      expect(result.status).toBe('failed');
+      expect(h.def.apply).not.toHaveBeenCalled();
+      expect(h.enqueue).not.toHaveBeenCalled();
+      expect(h.state.invocation!.consumedAt).toBeNull();
+    },
+  );
+
+  it('module disable after reservation releases this pass without enqueue', async () => {
+    const h = fixture();
+    h.def.llm!.prepareWorkspace = async () => {
+      vi.spyOn(activation, 'moduleDeactivationMessage').mockResolvedValue(
+        'Module fixture is deactivated',
+      );
+    };
+    const result = await h.advance({});
+    expect(result.status).toBe('failed');
+    expect(h.state.invocation!.supersededAt).toBeInstanceOf(Date);
+    expect(h.enqueue).not.toHaveBeenCalled();
+  });
+
+  it('module disable after approved publication refuses the fresh dispatch', async () => {
+    const h = fixture();
+    const apply = h.def.apply;
+    h.def.apply = async (ctx, args) => {
+      vi.spyOn(activation, 'moduleDeactivationMessage').mockResolvedValue(
+        'Module fixture is deactivated',
+      );
+      return apply(ctx, args);
+    };
+    const result = await h.advance({});
+    expect(result.status).toBe('failed');
+    expect(result.status === 'failed' && result.error).toContain('deactivated');
+    expect(h.enqueue).not.toHaveBeenCalled();
   });
 
   it.each([true, false])('prepare false continues normally with a form=%s', async (form) => {
@@ -3224,6 +3327,136 @@ describe('approved apply pre-form continuation', () => {
     expect(h.enqueue).toHaveBeenCalledOnce();
     expect(h.state.invocation!.consumedAt).toBeInstanceOf(Date);
   });
+
+  it.each(['prepare', 'prepareWorkspace'] as const)(
+    'deferral signal without a current pause in %s is a configuration failure',
+    async (hook) => {
+      const h = fixture();
+      h.def.llm![hook] = async () => {
+        const sdk = await import('@haive/shared/step');
+        throw new sdk.StepPrepareDeferredError();
+      };
+      const result = await h.advance({});
+      expect(result.status).toBe('failed');
+      expect(result.status === 'failed' && result.error).toMatch(/StepPrepareDeferredError.*pause/);
+      expect(h.enqueue).not.toHaveBeenCalled();
+    },
+  );
+
+  it('an ordinary Retry hold cannot use continuation-only pause deferral', async () => {
+    const h = fixture();
+    h.state.invocation = undefined;
+    Object.assign(h.state.taskStepRow, {
+      status: 'waiting_cli',
+      pauseFormOnRetry: true,
+      formSchema: null,
+      formValues: null,
+    });
+    h.state.taskRow!.status = 'running';
+    h.state.taskRow!.pausedAt = new Date();
+    h.def.llm!.prepare = async () => {
+      const sdk = await import('@haive/shared/step');
+      throw new sdk.StepPrepareDeferredError();
+    };
+    const result = await h.advance();
+    expect(result.status).toBe('failed');
+    expect(result.status === 'failed' && result.error).toMatch(/StepPrepareDeferredError.*held/);
+    expect(h.enqueue).not.toHaveBeenCalled();
+  });
+
+  it.each(['prepare', 'prepareWorkspace'] as const)(
+    'ordinary pre-form %s cannot use the pause signal',
+    async (hook) => {
+      const h = fixture();
+      h.state.invocation = undefined;
+      h.state.taskStepRow.formValues = null;
+      h.state.taskStepRow.formSchema = null;
+      h.state.taskStepRow.status = 'running';
+      h.state.taskRow!.pausedAt = new Date();
+      h.def.llm![hook] = async () => {
+        const sdk = await import('@haive/shared/step');
+        throw new sdk.StepPrepareDeferredError();
+      };
+      const result = await h.advance();
+      expect(result.status).toBe('failed');
+      expect(result.status === 'failed' && result.error).toMatch(/StepPrepareDeferredError.*held/);
+      expect(h.enqueue).not.toHaveBeenCalled();
+    },
+  );
+
+  it('a late pause after prepareWorkspace releases only the unqueued reservation even without a signal', async () => {
+    const h = fixture();
+    h.def.llm!.prepareWorkspace = async () => {
+      h.state.taskRow!.pausedAt = new Date();
+    };
+    expect((await h.advance({})).status).toBe('deferred');
+    expect(h.enqueue).not.toHaveBeenCalled();
+    expect(h.state.invocations![0]!.supersededAt).toBeUndefined();
+    expect(h.state.invocation!.supersededAt).toBeInstanceOf(Date);
+  });
+
+  it.each(['inserted', 'bound', 'enqueue-ack', 'checkpoint-ack'] as const)(
+    'redelivery after lost %s never creates a second live invocation or repeats approved publication',
+    async (cut) => {
+      const h = fixture();
+      let snapshot:
+        | {
+            row: Record<string, unknown>;
+            task: Record<string, unknown>;
+            invocation: Record<string, unknown>;
+            invocations: Record<string, unknown>[];
+          }
+        | undefined;
+      const capture = () => {
+        snapshot = {
+          row: persistedRow(h.state),
+          task: { ...h.state.taskRow! },
+          invocation: { ...h.state.invocation! },
+          invocations: h.state.invocations!.map((r) => ({ ...r })),
+        };
+      };
+      if (cut === 'checkpoint-ack')
+        h.state.beforeWrite = (table, patch) => {
+          if (
+            table === 'task_steps' &&
+            patch.detectOutput &&
+            h.state.taskStepRow.pauseFormOnRetry
+          ) {
+            capture();
+            throw new Error('process death after checkpoint');
+          }
+        };
+      else if (cut === 'inserted' || cut === 'bound')
+        h.def.llm!.prepareWorkspace = async () => {
+          capture();
+          throw new Error('process death before enqueue');
+        };
+      else
+        h.enqueue.mockImplementation(async () => {
+          capture();
+          throw new Error('lost enqueue acknowledgement');
+        });
+      await h.advance({});
+      expect(snapshot).toBeDefined();
+      // Restore the durable cut; the dying process's catch writes did not happen.
+      h.state.taskStepRow = snapshot!.row;
+      h.state.taskRow = snapshot!.task;
+      h.state.invocation = snapshot!.invocation;
+      h.state.invocations = snapshot!.invocations;
+      delete h.state.beforeWrite;
+      delete h.def.llm!.prepareWorkspace;
+      h.enqueue.mockImplementation(async () => {});
+      expect((await h.advance({ stale: true })).status).toBe('waiting_cli');
+      expect(h.def.apply).toHaveBeenCalledOnce();
+      expect(
+        h.state.invocations!.filter((r) => r.endedAt === null && !r.supersededAt),
+      ).toHaveLength(1);
+      expect(h.enqueue).toHaveBeenCalledTimes(
+        cut === 'enqueue-ack' ? 1 : cut === 'checkpoint-ack' ? 1 : 0,
+      );
+      expect(h.state.taskStepRow.formValues).toBeNull();
+    },
+  );
 
   it.each(['prepare', 'prepareWorkspace'] as const)(
     'canonical pause race from %s yields and releases only its unqueued reservation',

@@ -8,6 +8,7 @@ export {
   ReopenStepFormError,
   PromptBudgetExceededError,
   StepPrepareParkError,
+  StepPrepareDeferredError,
 } from '@haive/shared/step';
 export type {
   StepContext,

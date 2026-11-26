@@ -30,7 +30,7 @@ import { lockStepRows, schema, type Database, type DbTx } from '@haive/database'
  *  invocation running. Guarded (status, null-marker, and no-running-invocation) so it is a
  *  no-op while the CLI is active or the marker is already set. Call at the waiting_cli
  *  transition (initial/queue wait) and after an invocation ends (post-wave park). */
-export async function markCliParkBegin(db: Database, stepId: string): Promise<void> {
+export async function markCliParkBegin(db: Database | DbTx, stepId: string): Promise<void> {
   await db
     .update(schema.taskSteps)
     .set({ waitingStartedAt: sql`now()`, updatedAt: sql`now()` })
@@ -54,7 +54,7 @@ export async function markCliParkBegin(db: Database, stepId: string): Promise<vo
  *  when an invocation begins running (agent park) and at the pending -> running flip
  *  (runtime-slot park, step-runner.ts). Status-agnostic by design — the marker alone says a
  *  park is open, so both parks close through this one statement. */
-export async function foldCliParkOnResume(db: Database, stepId: string): Promise<void> {
+export async function foldCliParkOnResume(db: Database | DbTx, stepId: string): Promise<void> {
   await foldPark(db, eq(schema.taskSteps.id, stepId));
 }
 

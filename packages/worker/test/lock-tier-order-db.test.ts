@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import os from 'node:os';
 import path from 'node:path';
-import { asc, eq, inArray, sql } from 'drizzle-orm';
+import { and, asc, eq, inArray, sql } from 'drizzle-orm';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   createDatabase,
@@ -10,7 +10,7 @@ import {
   schema,
   type Database,
 } from '@haive/database';
-import { TASK_JOB_NAMES } from '@haive/shared';
+import { TASK_JOB_NAMES, configService } from '@haive/shared';
 import {
   processTaskJob,
   recoverParkedStep,
@@ -632,7 +632,11 @@ describe.skipIf(!url)(
           rerunGeneration: 4,
           pauseFormOnRetry: false,
         });
-        await seedRun(taskId, { endedAt: T0, exitCode: 0, costUsd: '0.100000' });
+        await seedRun(taskId, {
+          endedAt: T0,
+          exitCode: 0,
+          tokenUsage: { costUsd: 0.1, inputTokens: 1, outputTokens: 1, totalTokens: 2 },
+        });
         const ctx = {
           db,
           taskId,
@@ -654,6 +658,10 @@ describe.skipIf(!url)(
         await db
           .insert(schema.cliInvocations)
           .values({ id: newer, taskId, taskStepId: S.id, mode: 'cli', prompt: 'newer live' });
+        await db
+          .update(schema.taskSteps)
+          .set({ waitingStartedAt: new Date(Date.now() - 2_000), idleMs: 7 })
+          .where(eq(schema.taskSteps.id, S.id));
         const downstream = await rowOf(A.id);
         const live = await runOf(newer);
         await checkpoint(ctx);
@@ -673,10 +681,19 @@ describe.skipIf(!url)(
           currentStepId: S.stepId,
           currentRound: 0,
         });
+        expect((await rowOf(S.id)).idleMs).toBeGreaterThanOrEqual(2_007);
         expect((await runOf(R)).consumedAt).toBeInstanceOf(Date);
-        expect((await runOf(R)).costUsd).toBe('0.100000');
+        expect((await runOf(R)).tokenUsage).toMatchObject({ costUsd: 0.1 });
         expect(await runOf(newer)).toEqual(live);
         expect(await rowOf(A.id)).toEqual(downstream);
+        expect(
+          await db.query.taskEvents.findMany({
+            where: and(
+              eq(schema.taskEvents.taskStepId, S.id),
+              eq(schema.taskEvents.eventType, 'step.pre_form_continuation'),
+            ),
+          }),
+        ).toMatchObject([{ payload: { version: 1, rerunGeneration: 4 } }]);
       });
 
       it.each([
@@ -772,6 +789,141 @@ describe.skipIf(!url)(
           expect((await rowOf(S.id)).formValues).toEqual(OPEN_FORM.formValues);
         },
         TEST_TIMEOUT,
+      );
+
+      it.each([
+        'none',
+        'generation',
+        'epoch',
+        'owner',
+        'pointer',
+        'round',
+        'dead',
+        'failed',
+        'cancelled',
+        'completed',
+        'hold',
+        'started',
+        'superseded',
+      ])('pause reservation release is fenced on %s and retains all paid history', async (lost) => {
+        const { taskId, ctx } = await setup();
+        await checkpoint(ctx);
+        const current = await rowOf(S.id);
+        const reservationId = randomUUID();
+        await db.insert(schema.cliInvocations).values({
+          id: reservationId,
+          taskId,
+          taskStepId: S.id,
+          mode: 'cli',
+          prompt: 'unqueued reservation',
+        });
+        if (lost === 'generation')
+          await db
+            .update(schema.taskSteps)
+            .set({ rerunGeneration: 5 })
+            .where(eq(schema.taskSteps.id, S.id));
+        else if (lost === 'hold')
+          await db
+            .update(schema.taskSteps)
+            .set({ pauseFormOnRetry: false })
+            .where(eq(schema.taskSteps.id, S.id));
+        else if (lost === 'epoch') ctx.epoch = EPOCH - 1;
+        else if (lost === 'owner') ctx.userId = randomUUID();
+        else if (lost === 'pointer')
+          await db
+            .update(schema.tasks)
+            .set({ currentStepId: MOVED_ON })
+            .where(eq(schema.tasks.id, taskId));
+        else if (lost === 'round')
+          await db.update(schema.tasks).set({ currentRound: 1 }).where(eq(schema.tasks.id, taskId));
+        else if (lost === 'dead')
+          await db.update(schema.tasks).set({ deadAt: AT }).where(eq(schema.tasks.id, taskId));
+        else if (lost === 'started')
+          await db
+            .update(schema.cliInvocations)
+            .set({ startedAt: AT })
+            .where(eq(schema.cliInvocations.id, reservationId));
+        else if (lost === 'superseded')
+          await db
+            .update(schema.cliInvocations)
+            .set({ supersededAt: AT })
+            .where(eq(schema.cliInvocations.id, reservationId));
+        else if (lost !== 'none')
+          await db
+            .update(schema.tasks)
+            .set({ status: lost as 'failed' | 'cancelled' | 'completed' })
+            .where(eq(schema.tasks.id, taskId));
+        const before = {
+          run: await runOf(reservationId),
+          paid: await runOf(R),
+          step: await rowOf(S.id),
+          task: await taskOf(taskId),
+        };
+        const pause = vi.spyOn(configService, 'getBoolean').mockResolvedValue(true);
+        try {
+          const release = (
+            runner as unknown as {
+              deferPreFormContinuation: (
+                db: Database,
+                ctx: StepContext,
+                current: Awaited<ReturnType<typeof rowOf>>,
+                id: string,
+              ) => Promise<unknown>;
+            }
+          ).deferPreFormContinuation(db, ctx, current, reservationId);
+          if (lost === 'none') {
+            await expect(release).resolves.toMatchObject({ status: 'deferred', delayMs: 30_000 });
+            expect((await runOf(reservationId)).supersededAt).toBeInstanceOf(Date);
+            expect((await rowOf(S.id)).waitingStartedAt).toBeInstanceOf(Date);
+          } else {
+            await expect(release).rejects.toBeInstanceOf(StepSupersededError);
+            expect(await runOf(reservationId)).toEqual(before.run);
+            expect(await rowOf(S.id)).toEqual(before.step);
+            expect(await taskOf(taskId)).toEqual(before.task);
+          }
+          expect(await runOf(R)).toEqual(before.paid);
+        } finally {
+          pause.mockRestore();
+        }
+      });
+
+      it.each(['boot', 'stalled'] as const)(
+        'crash before pickup/checkpoint from waiting_user preserves the approved answer through %s recovery',
+        async (reader) => {
+          const { taskId } = await setup();
+          await db
+            .update(schema.taskSteps)
+            .set({ status: 'waiting_form', waitingStartedAt: null })
+            .where(eq(schema.taskSteps.id, S.id));
+          const before = await rowOf(S.id);
+          const enqueue = vi.fn(async () => {});
+          if (reader === 'boot')
+            await reconcileOrphanedSteps(db, {
+              enqueueAdvance: enqueue,
+              queuedInvocationIds: async () => new Set(),
+            });
+          // Boot calls the stalled sweep after orphan reconciliation.
+          await redriveStalledTasks(
+            db,
+            {
+              queuedTaskJobs: async () => ({ steps: new Set(), starts: new Set() }),
+              enqueueAdvance: enqueue,
+              enqueueStart: async () => {},
+              failTask: async () => false,
+              queuedInvocationIds: async () => new Set(),
+            },
+            { staleMs: 0 },
+          );
+          expect(enqueue).toHaveBeenCalledOnce();
+          expect(await rowOf(S.id)).toMatchObject({
+            status: 'waiting_form',
+            detectOutput: before.detectOutput,
+            formValues: before.formValues,
+            rerunGeneration: 4,
+          });
+          expect((await runOf(R)).consumedAt).toBeNull();
+          expect((await taskOf(taskId))!.orchestrationEpoch).toBe(EPOCH + 1);
+        },
       );
 
       it.each(['boot', 'stalled'] as const)(

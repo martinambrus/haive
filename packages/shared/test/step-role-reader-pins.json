@@ -441,7 +441,7 @@
   },
   {
     "file": "packages/worker/src/step-engine/step-runner.ts",
-    "symbol": "advanceStep.replacedRole",
+    "symbol": "advanceStep.runPipeline.replacedRole",
     "context": "Object.values",
     "value": "@roles",
     "count": 1,
@@ -3508,7 +3508,15 @@
     "symbol": "advanceStep",
     "context": "EqualsEqualsEqualsToken",
     "value": "08-phase-5-verify",
-    "count": 4,
+    "count": 2,
+    "reason": "Retained physical host execution/control or historical provenance identity in advanceStep; result-role bindings cannot retarget it."
+  },
+  {
+    "file": "packages/worker/src/step-engine/step-runner.ts",
+    "symbol": "advanceStep.runPipeline",
+    "context": "EqualsEqualsEqualsToken",
+    "value": "08-phase-5-verify",
+    "count": 2,
     "reason": "Retained physical host execution/control or historical provenance identity in advanceStep; result-role bindings cannot retarget it."
   },
   {
