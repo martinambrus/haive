@@ -500,9 +500,11 @@ deadline runs from its last successful record write (acquisition or beat), stamp
 window has passed since then, an unproven proof and the own-torn-write excuse count as a proven loss. Proofs never renew it,
 since a proof leaves the bytes, and so the contender's clock, unchanged; a failed write never renews it either. Expiry is the same
 sticky `stack-lock-lost` as a takeover, with the same consequences: the run stays half-way (maintenance on, PostgreSQL possibly
-stopped) for the next `haive upgrade` to recover, even when no other holder exists. A Docker or database action already under
+stopped) for the next `haive upgrade` to recover, even when no other holder exists; release is then a no-op, so an intact own
+record stays and that next start waits out the stale window before it breaks it. A Docker or database action already under
 way when the deadline passes is not interrupted; the next fence check refuses. The updater's clock is `performance.now()`, the
-bridge's Go's monotonic `time.Now()`, never the record's `startedAt`; a clock that counts a suspended machine only expires early.
+bridge's Go's monotonic `time.Now()`, never the record's `startedAt`; a clock that counts a suspended machine only expires early, but the bound cannot see a pause its own clock does not count (a
+paused VM).
 The bridge's heartbeat stops for good at expiry or loss; the operation it guards continues without it, as after a lapse. A remaining race (T765 item 5): the heartbeat reads its own
 record and then overwrites it, so a contender that broke the lock and created its own in between is overwritten; closing it
 needs a descriptor-held compare before the truncating open, in both implementations. A result already decided (done or rolled back) is not replaced when the beat notices a loss afterwards; a
@@ -553,7 +555,7 @@ share the file name, record, beat (5 s), stale window (60 s), poll (1 s), rounds
 and the rules that only the holder's own overwrite that failed after truncating excuses a torn record, that the deadline runs
 from the last successful record write, stamped before its I/O, and that every write attempt takes a new `seq`
 (`packages/updater/src/stack-lock.ts`, `docker/desktop-extension/bridge/stack_lock.go`); a script test pins
-them equal. Every count, size and time limit is an optional parameter defaulting to a named constant.
+the name, the constants and the record's field order equal, and the two test suites pin the rules. Every count, size and time limit is an optional parameter defaulting to a named constant.
 
 No release floor is needed. An updater that predates the lock never takes it: the extension's container-identity
 check, kept as it was (both checks), is then the only protection, with the window it always had. An extension
