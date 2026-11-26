@@ -488,14 +488,17 @@ a proven loss and sticks: the phase is refused with `stack-lock-lost`, exit 3, a
 no journal or attempt write and no release, and removes only its own attempt's labelled children; the run stays
 for the new holder to recover. Anything that proves nothing (a read that fails `STACK_LOCK_PROOF_TRIES` times,
 100 ms apart; an absent name, which breaking a stale lock briefly leaves; a record that lacks a token, holder or
-`startedAt`; an empty or partial record, unless this holder's own overwrite of its record failed, when it counts as its own torn
-write; a failed read or proof never enables that) refuses the forward phase with `stack-lock-unproven` (exit 3 when no rollback is needed
+`startedAt`; an empty or partial record, unless this holder's own overwrite of its record failed after truncating it, when it counts as its own torn write; a failed read or proof never enables that) refuses the forward phase with `stack-lock-unproven` (exit 3 when no rollback is needed
 or it succeeds, 6 when it fails; in the commit phase the run stays at `commit`) but marks nothing lost: failure recovery (the snapshot's database restart, rollback, a reverse resume of an interrupted run from its
 entry proof on, the attempt row, release) still runs, re-proving before each action and stopping only at a proven loss, since leaving the database
 stopped turns a recoverable failure into an outage; the forward commit stays strict and refuses at an
-unproven proof. The residual: recovery is not fenced against a takeover whose record this holder cannot read (a
-lock unreadable or absent to it for 60 s or more while another holder took over), which a time bound on the last
-good proof or beat would close (T765). A result already decided (done or rolled back) is not replaced when the beat notices a loss afterwards; a
+unproven proof. That tolerance is bounded in time: once the stale window (60 s, the
+same one a contender waits before breaking the lock) has passed since this holder's last good proof or successful beat, an
+unproven proof, and the own-torn-write excuse, count as a proven loss (`stack-lock-lost`, sticky), so recovery stops before a
+contender can have broken the lock and taken over. The clock is monotonic (`performance.now()`), never the record's
+`startedAt`. The torn-write excuse does not renew that deadline. A remaining race (T765 item 5): the heartbeat reads its own
+record and then overwrites it, so a contender that broke the lock and created its own in between is overwritten; closing it
+needs a descriptor-held compare before the truncating open, in both implementations. A result already decided (done or rolled back) is not replaced when the beat notices a loss afterwards; a
 loss during the pruning after a commit stops the pruning and keeps `done` and exit 0. Release removes the file only when it carries the holder's token, is shared by
 every
 caller, never throws, and a failed removal leaves a lock that the stale rule clears. A non-regular entry at the
@@ -539,7 +542,9 @@ The extension takes it for Start and Stop, after reading the install settings an
 before the bundle check and the port repick, and holds it through the Compose call. Install never takes it (the
 installer refuses a non-empty directory) and Status is read-only. The launchers take nothing: they return
 before the dangerous phase and are older-release code for the very upgrade that matters. Both implementations
-share the file name, record, beat (5 s), stale window (60 s), poll (1 s), rounds (3) and size cap (4096 bytes)
+share the file name, record, beat (5 s), stale window (60 s), poll (1 s), rounds (3) and size cap (4096 bytes),
+and the rule that only the holder's own overwrite that failed after truncating excuses a torn record, and only within the stale
+window since its last good beat
 (`packages/updater/src/stack-lock.ts`, `docker/desktop-extension/bridge/stack_lock.go`); a script test pins
 them equal. Every count, size and time limit is an optional parameter defaulting to a named constant.
 
