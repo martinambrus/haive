@@ -494,6 +494,39 @@ describe('disabling the last enabled composed LSP member', () => {
   );
 
   it.each([true, false])(
+    'lists a floating next CLI even with a later pinned step, pinned next=%s',
+    async (pinnedNext) => {
+      fake.patch(schema.cliProviders, providerId, { name: 'claude-code' });
+      fake.insert(schema.stepCatalog, {
+        stepId: 'pinned-cli',
+        title: 'Pinned CLI',
+        workflowType: 'test',
+        stepIndex: -1, // Run order comes from the snapshot, not the catalog.
+        dispatchesStepCli: true,
+        providerSensitive: false,
+        composable: false,
+      });
+      const id = composedTask([providerId], {
+        currentStepId: 'plain',
+        runListSnapshot: ['plain', ...(pinnedNext ? ['pinned-cli', 'cli'] : ['cli', 'pinned-cli'])],
+      });
+      fake.insert(schema.taskStepCliChoices, {
+        taskId: id,
+        stepId: 'pinned-cli',
+        role: 'default',
+        cliProviderId: providerId,
+      });
+      expect(await (await read()).json()).toEqual({
+        taskCount: 1,
+        stepCount: 1,
+        ...(!pinnedNext
+          ? { composedLspFailureTaskCount: 1, composedLspFailureTasks: [{ id }] }
+          : {}),
+      });
+    },
+  );
+
+  it.each([true, false])(
     'reports the last member, retained image=%s, including floating bindings',
     async (retained) => {
       fake.patch(schema.cliProviders, providerId, { name: 'claude-code', label: 'Claude' });

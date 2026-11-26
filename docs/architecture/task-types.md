@@ -302,8 +302,11 @@ lock set would have no enabled member once this provider is disabled, including 
 step binding to hold yet; the dialog warns that they fail at their next CLI step until a member
 is re-enabled, and still allows the disable. It reuses the dispatcher's membership rule
 (`composedLspAllowedSet`) and the CLI mirrors' retained-set reader.
-A task the preview already counts as held through its post-lock binding is not listed again. The api
-returns every affected id and the exact count; the dialog shows at most five ids plus "and N more",
+A task is excluded from this failure list only when its first remaining CLI-consuming or
+provider-sensitive step, in the hold scan's run order, has a post-lock binding to this provider
+(including the task-level CLI fallback). A floating next step followed by a pinned step remains
+listed and still contributes to the hold counts. The api returns every affected id and the exact
+count; the dialog shows at most five ids plus "and N more",
 and omits the hold paragraph when nothing is held.
 
 **A missing step is never filtered out.** `resolveRunList` returns the steps and the unresolved ids, and

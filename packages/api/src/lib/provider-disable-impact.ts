@@ -74,7 +74,7 @@ export async function providerDisableImpact(db: Database, userId: string, provid
     .map((task) => ({ id: task.id }));
   let taskCount = 0;
   let stepCount = 0;
-  const heldTaskIds = new Set<string>();
+  const nextHeldTaskIds = new Set<string>();
   const invalidTasks: Array<{ id: string; code: DerivedRunPlanError['code'] }> = [];
   for (const task of tasks) {
     try {
@@ -130,26 +130,29 @@ export async function providerDisableImpact(db: Database, userId: string, provid
         task.id,
         task.ignoreSavedStepClis,
       );
-      const count = steps.filter(
+      const stepHolds = steps.map(
         (s) =>
           !s.roundCliUnavailable &&
           (s.effectiveCliProviderIds !== undefined
             ? s.effectivePreferredCliProviderId
             : (s.preferredCliProviderId ?? task.cliProviderId)) === providerId,
-      ).length;
+      );
+      const count = stepHolds.filter(Boolean).length;
       if (count > 0) {
         taskCount++;
-        heldTaskIds.add(task.id);
       }
+      // providerHoldFor checks only the step being advanced. A later binding cannot
+      // prevent an earlier floating step from reaching dispatch with an empty lock set.
+      if (stepHolds[0]) nextHeldTaskIds.add(task.id);
       stepCount += count;
     } catch (error) {
       if (!(error instanceof DerivedRunPlanError)) throw error;
       invalidTasks.push({ id: task.id, code: error.code });
     }
   }
-  // A post-lock binding that contributes a hold parks the task instead of failing it.
+  // Only a hold on the next remaining CLI/provider-sensitive step precedes dispatch failure.
   const composedLspFailureTasks = composedLspFailureCandidates.filter(
-    (task) => !heldTaskIds.has(task.id),
+    (task) => !nextHeldTaskIds.has(task.id),
   );
   return {
     taskCount,
