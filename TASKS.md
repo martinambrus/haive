@@ -1159,26 +1159,31 @@ status: done 2026-11-26 (#1340, 7c1fa45d0: the e2e clears through the editor key
 
 ### T764 · FNF[T689-PR7b] · custom fix target follow-ups (+10)
 
-status: open · kind: fix · found: PR7b reviews 1-4 and bots 2026-11-23 · priority: P4
+status: open for items 3, 9 and 11-13 (lows); items 1, 2, 4, 5, 6, 7, 8, 10 DONE in #1341 (764e60442, worker reloaded 2026-11-26: fix-round requests carry the START marker id, claim and marker in one transaction, legacy unstamped requests count as before, one predicate for every fix-round reader; module fix target house rules need `file_write`; fan-out refusals named, withheld steps warned at boot) · kind: fix · found: PR7b reviews 1-4 and bots 2026-11-23 · priority: P4
 
 All low unless noted; PRE-EXISTING means older than #1328.
 
-1. `fix_loop.requested` is not scoped to a START generation (`task-queue.ts` ~:427 resets the round, events persist), so a stale event can make a revise round look like a fix round and skip it as a guard baseline. PRE-EXISTING, same exposure as 07's `shouldRun`.
-2. House rules on the module path are not capability-gated (`worker/src/orchestrator/house-rules.ts` ~:48 returns `write` for a pinned module consumer on every round).
+1. DONE (#1341). `fix_loop.requested` is not scoped to a START generation (`task-queue.ts` ~:427 resets the round, events persist), so a stale event can make a revise round look like a fix round and skip it as a guard baseline. PRE-EXISTING, same exposure as 07's `shouldRun`.
+2. DONE (#1341). House rules on the module path are not capability-gated (`worker/src/orchestrator/house-rules.ts` ~:48 returns `write` for a pinned module consumer on every round).
 3. A fix round may pair a dependency span's own latest decision with a dependent's older one after a revise flipped it (accepted and documented in `task-types.md`); optional control that pins the pairing.
-4. No real-Postgres control for a reset named dependency row (`guard-decisions-db.test.ts`; only unit fakes prove the refusal).
-5. `isFixRound`'s single read still selects whole `fix_loop.requested` payloads (diagnoses included) inside the held transaction; select only the round.
-6. Stale comment `worker/src/step-engine/fix-consumer.ts` ~:58-62 (says an unregistered target is left to the unresolved-step check; the fence refuses first).
-7. Two leftover "custom fix target" test labels (`execution-contract-skew.test.ts` ~:124, `dead-task-boot.test.ts` ~:962).
-8. Refusal text for a mining step with `fixConsumer` does not say "fan-out" (`fix-consumer.ts` ~:81, `run-list.ts` ~:353, `execution-contract-support.ts` ~:47); the loader withholds the capability silently, so log a boot warning per withheld step.
+4. DONE (#1341). No real-Postgres control for a reset named dependency row (`guard-decisions-db.test.ts`; only unit fakes prove the refusal).
+5. DONE (#1341). `isFixRound`'s single read still selects whole `fix_loop.requested` payloads (diagnoses included) inside the held transaction; select only the round.
+6. DONE (#1341). Stale comment `worker/src/step-engine/fix-consumer.ts` ~:58-62 (says an unregistered target is left to the unresolved-step check; the fence refuses first).
+7. DONE (#1341). Two leftover "custom fix target" test labels (`execution-contract-skew.test.ts` ~:124, `dead-task-boot.test.ts` ~:962).
+8. DONE (#1341). Refusal text for a mining step with `fixConsumer` does not say "fan-out" (`fix-consumer.ts` ~:81, `run-list.ts` ~:353, `execution-contract-support.ts` ~:47); the loader withholds the capability silently, so log a boot warning per withheld step.
 9. Rolling-deploy window: the catalog is synced at worker boot, so availability and create admit a mining target until a capable worker booted (the task dies at START by name). Optional release note.
-10. `guard-gate-agreement-db.test.ts` ~:605 leaves `module.gg.*` catalog rows (deletes `workflowType = 'gg'`, the loader stamps `module.gg`); the `source:` ternary at ~:539 is dead.
+10. DONE (#1341). `guard-gate-agreement-db.test.ts` ~:605 leaves `module.gg.*` catalog rows (deletes `workflowType = 'gg'`, the loader stamps `module.gg`); the `source:` ternary at ~:539 is dead.
+11. Low (#1341 review 2 F3-a): no assertion that a lost START claim writes no `task.running` marker (`task-job-epoch.test.ts` ~:2353).
+12. Nit (#1341 review 2 F1-a): the 07 DAG legacy control's START assertion is conditional, so it is vacuous if the predicate leaves `isFixRound`.
+13. Nit (#1341 review 2 F5): code comments still describe an unscoped read (`_fix-loop.ts` ~:475, ~:769, ~:1036; `shared/src/step/index.ts` ~:54).
 
 ### T765 · Updater: recovery under an unproven lease proof is not time-bounded
 
-status: open · kind: design · found: T759 review 2 2026-11-23 · priority: P4
+status: open for item 5 below; the time bound DONE in #1342 (f3092472f, 2026-11-26: unproven tolerance ends one stale window after the last successful record write, stamped before its I/O; proofs and failed writes never renew; torn-write excuse only after a truncating own overwrite; every write attempt takes a new `seq`; same rules in the Go bridge; reverse-resume, commit and full-disk CLI controls) · kind: design · found: T759 review 2 2026-11-23 · priority: P4
 
 `packages/updater/src/lease-fence.ts` ~:30-36, `stack-lock.ts` ~:141-153 (after #1330): failure recovery tolerates `stack-lock-unproven`, so a takeover whose record this holder cannot read (lock unreadable or absent to it for 60 s or more while another holder took over) is not fenced during rollback, restore or the postgres restart. Narrower than before #1330. Fix direction: bound the tolerance by time since the last good proof or beat (refuse as lost past the stale window). The same holds for the own-write torn-record tolerance after #1330 fix 2 (`stack-lock.ts` ~:153, :220, :236-241: no time bound, and set when `overwrite` fails at `open` before truncating anything). Cross-code (PRE-EXISTING): the Go bridge's beat (`docker/desktop-extension/bridge/stack_lock.go` ~:176-206) sets `failing` on a read error or failed create too and then accepts a non-JSON record as its own and overwrites it, the pattern #1330 fixed in the updater. Also from the same review (D4, low): no control for an unproven proof in the reverse-resume path or the commit phase (`cli.ts` ~:453-463, ~:670), and no CLI-level control for the full-disk trace (torn own record, failing snapshot, postgres restarted); the heartbeat's read-then-overwrite can truncate a lock a contender created between the two (`stack-lock.ts` ~:180-196, PRE-EXISTING); the fence defaults open when no lease scope is bound and docker fencing is an allow-list (`lease-fence.ts` ~:17-19, `docker.ts` ~:194).
+
+5. OPEN (#1342 driver, reproducer `.claude/tmp/codex-run/T765-S/codex-1/stack-lock-race-repro.test.ts`): the heartbeat reads its own record, then opens it with `O_TRUNC`, so a contender that broke the lock and created its own in between is truncated and overwritten (`stack-lock.ts` ~:221, `stack_lock.go` ~:196-219). Fix direction: open `O_RDWR|O_NOFOLLOW` without truncation, compare through that descriptor, then ftruncate and write on it; the Go twin needs a Windows sharing check (FILE_SHARE_DELETE). Estimated 1-2 days for both implementations. Very low real-world frequency (a 60 s stall between read and open).
 
 ### T766 · FNF[T757]: fix-loop handoff follow-ups (+5)
 
