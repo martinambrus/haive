@@ -722,8 +722,9 @@ describe('the gated runner', () => {
     ]);
     assert.equal(args[6], '--reporter=default');
     assert.equal(args[7], '--reporter=json');
-    assert.match(args[8], new RegExp(`^--outputFile\\.json=.+${db}\\.json$`));
-    assert.equal(args.length, 9);
+    assert.equal(args[8], '--maxWorkers=2');
+    assert.match(args[9], new RegExp(`^--outputFile\\.json=.+${db}\\.json$`));
+    assert.equal(args.length, 10);
     assert.equal(vitest[0].env[variable], migrations[1].env.DATABASE_URL);
     if (portVar(variable) !== variable) assert.equal(vitest[0].env[portVar(variable)], '54001');
     assert.equal(urlOf(vitest[0].env.DATABASE_URL).pathname, '/haive');

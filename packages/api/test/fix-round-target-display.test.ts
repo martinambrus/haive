@@ -273,8 +273,8 @@ describe('current-step provider listing without a pin, parity', () => {
 });
 
 describe('the pin is read lazily', () => {
-  it('works with no tasks table when no round row exists', async () => {
-    const s = setup(undefined, false);
+  it('keeps ordinary choices independent of the fix-target pin when no round row exists', async () => {
+    const s = setup({ version: 999 });
     s.save(LEGACY);
     s.choose(LEGACY, PICKED_CLI, 'default');
     expect((await card(s, LEGACY)).preferredCliProviderId).toBe(PICKED_CLI);

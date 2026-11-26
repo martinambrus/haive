@@ -461,3 +461,10 @@ it('does not show a fallback meter for a pending implementation round card', asy
   );
   expect(usageTitles(view)).toEqual([]);
 });
+
+it('does not restore a task CLI that the composed dispatch mirror explicitly refuses', async () => {
+  const view = await mount({ cliProviderId: 'p-codex', effectiveCliProviderId: null });
+  expect(usageTitles(view)).toEqual([]);
+  await cliTab(view);
+  expect(upcomingPickerNone(view)).toContain(NONE_PLAIN);
+});

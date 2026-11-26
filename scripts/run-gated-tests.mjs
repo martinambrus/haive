@@ -290,6 +290,7 @@ async function runRow(row, servers, baseEnv) {
       row.file,
       '--reporter=default',
       '--reporter=json',
+      '--maxWorkers=2',
       `--outputFile.json=${report}`,
     ],
     { env: rowEnv, limitS: limits.rowS },

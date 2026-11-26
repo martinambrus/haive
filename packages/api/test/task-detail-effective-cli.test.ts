@@ -87,6 +87,7 @@ function routeDb(db: FakeDbHandle) {
 function setup(cliProviderId: string | null, providers: Rows[] | null, task: Rows = {}) {
   const fake = createFakeDb({
     tasks: schema.tasks,
+    envTemplates: schema.envTemplates,
     taskSteps: schema.taskSteps,
     taskCheckRuns: schema.taskCheckRuns,
     taskEvents: schema.taskEvents,
@@ -193,4 +194,69 @@ describe('both owner-scoped role DTO surfaces', () => {
     expect(res.status).toBe(409);
     expect(JSON.stringify(await res.json())).toContain('invalid-derived-run-plan');
   });
+});
+
+const TEMPLATE = '00000000-0000-4000-8000-0000000000e1';
+function composed(cli: string | null, rows: Rows[], refs?: string[]) {
+  const fake = setup(cli, rows, { envTemplateId: TEMPLATE });
+  fake.insert(schema.envTemplates, {
+    id: TEMPLATE,
+    declaredDeps: { lspInstallContractVersion: 2 },
+  });
+  if (refs)
+    fake.patch(schema.tasks, TASK, {
+      metadata: {
+        composedLspImageRefs: {
+          schemaVersion: 1,
+          entries: refs.map((providerId) => ({
+            providerId,
+            effective: {
+              tag: 'img:1',
+              imageId: 'sha256:1',
+              identityHash: 'h',
+              inputs: { rtkVersion: '1', baseImageId: null, rtkPin: null, requestedHash: 'r' },
+            },
+          })),
+        },
+      },
+    });
+  return fake;
+}
+
+it('confines a composed task default to verified providers before the first image', async () => {
+  composed(null, [provider(OLDEST, 1), { ...provider(OWN, 2), name: 'claude-code' }]);
+  expect(await effective()).toBe(OWN);
+});
+
+it('confines a composed task default to retained effective references', async () => {
+  composed(
+    null,
+    [
+      { ...provider(OLDEST, 1), name: 'claude-code' },
+      { ...provider(OWN, 2), name: 'claude-code' },
+    ],
+    [OWN],
+  );
+  expect(await effective()).toBe(OWN);
+});
+
+it('reports no composed default when every allowed provider is disabled', async () => {
+  composed(null, [provider(OLDEST, 1), { ...provider(OWN, 2, false), name: 'claude-code' }], [OWN]);
+  expect(await effective()).toBeNull();
+});
+
+it('reports no provider for a composed task whose own CLI is refused by the lock', async () => {
+  composed(OLDEST, [provider(OLDEST, 1), { ...provider(OWN, 2), name: 'claude-code' }], [OWN]);
+  expect(await effective()).toBeNull();
+});
+
+it('keeps the disabled own CLI visible when dispatch would hold it', async () => {
+  composed(OWN, [{ ...provider(OWN, 2, false), name: 'claude-code' }], [OWN]);
+  expect(await effective()).toBe(OWN);
+});
+
+it('uses the pre-lock task view for a malformed composed pin', async () => {
+  const fake = composed(null, [provider(OLDEST, 1), { ...provider(OWN, 2), name: 'claude-code' }]);
+  fake.patch(schema.tasks, TASK, { metadata: { composedLspImageRefs: { schemaVersion: 999 } } });
+  expect(await effective()).toBe(OLDEST);
 });

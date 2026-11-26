@@ -1744,7 +1744,10 @@ export default function TaskDetailPage() {
   // spending three subscriptions at once. Reading only `preferredCliProviderId` (the
   // 'default' row) named a CLI that none of its agents were running on, and its reconnect
   // prompt covered only that one, so a dead token on a seat CLI failed the step in silence.
-  const taskEffectiveCliProviderId = task.effectiveCliProviderId ?? task.cliProviderId ?? null;
+  const taskEffectiveCliProviderId =
+    task.effectiveCliProviderId !== undefined
+      ? task.effectiveCliProviderId
+      : (task.cliProviderId ?? null);
   const usageProviderIds = stepCliProviderIds({
     step:
       currentStep ??
