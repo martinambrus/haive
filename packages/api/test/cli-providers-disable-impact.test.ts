@@ -429,5 +429,95 @@ it.each([true, false])('composed impact skips outside saved CLI, enabled=%s', as
     taskCount: 0,
     stepCount: 0,
   });
-  expect(await providerDisableImpact(db, h.userId, own)).toEqual({ taskCount: 1, stepCount: 1 });
+  expect(await providerDisableImpact(db, h.userId, own)).toMatchObject({
+    taskCount: 1,
+    stepCount: 1,
+    composedLspFailureTaskCount: 1,
+  });
+});
+
+describe('disabling the last enabled composed LSP member', () => {
+  function composedTask(ids: string[], over: Record<string, unknown> = {}) {
+    const envTemplateId = randomUUID();
+    fake.insert(schema.envTemplates, {
+      id: envTemplateId,
+      declaredDeps: { lspInstallContractVersion: 2 },
+    });
+    const ref = {
+      tag: 'image:a',
+      imageId: 'sha256:a',
+      identityHash: 'a',
+      inputs: { rtkVersion: '1', baseImageId: null, rtkPin: null, requestedHash: 'a' },
+    };
+    return task({
+      cliProviderId: null,
+      envTemplateId,
+      metadata: {
+        composedLspImageRefs: {
+          schemaVersion: 1,
+          entries: ids.map((providerId) => ({ providerId, effective: ref })),
+        },
+      },
+      ...over,
+    });
+  }
+
+  it.each([true, false])(
+    'reports the last member, retained image=%s, including floating bindings',
+    async (retained) => {
+      fake.patch(schema.cliProviders, providerId, { name: 'claude-code', label: 'Claude' });
+      const other = randomUUID();
+      fake.insert(schema.cliProviders, {
+        id: other,
+        userId: h.userId,
+        name: 'codex',
+        enabled: true,
+      });
+      fake.insert(schema.userStepCliPreferences, {
+        userId: h.userId,
+        stepId: 'cli',
+        cliProviderId: other,
+        explicit: true,
+      }); // The saved outside pick is skipped; the task floats inside its lock.
+      const id = composedTask(retained ? [providerId] : []);
+      const response = await read();
+      expect(response.status).toBe(200);
+      expect(await response.json()).toMatchObject({
+        taskCount: 0,
+        stepCount: 0,
+        composedLspFailureTaskCount: 1,
+        composedLspFailureTasks: [{ id }],
+      });
+      expect(fake.rows(schema.cliProviders)[0]?.enabled).toBe(true);
+    },
+  );
+
+  it('does not report a set with another enabled member', async () => {
+    const other = randomUUID();
+    fake.insert(schema.cliProviders, {
+      id: other,
+      userId: h.userId,
+      name: 'claude-code',
+      enabled: true,
+    });
+    composedTask([providerId, other]);
+    expect(await (await read()).json()).not.toHaveProperty('composedLspFailureTasks');
+  });
+
+  it('ignores terminal, dead and foreign tasks, and legacy contracts', async () => {
+    for (const status of ['completed', 'failed', 'cancelled'])
+      composedTask([providerId], { status });
+    composedTask([providerId], { deadAt: new Date() });
+    composedTask([providerId], { userId: randomUUID() });
+    task({ cliProviderId: null });
+    expect(await (await read()).json()).not.toHaveProperty('composedLspFailureTasks');
+  });
+
+  it('does not blame a non-member or a provider already disabled', async () => {
+    composedTask([randomUUID()]);
+    expect(await (await read()).json()).not.toHaveProperty('composedLspFailureTasks');
+    composedTask([providerId]);
+    fake.patch(schema.cliProviders, providerId, { enabled: false });
+    expect(await (await read()).json()).not.toHaveProperty('composedLspFailureTasks');
+  });
 });

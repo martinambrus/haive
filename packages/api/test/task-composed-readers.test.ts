@@ -194,6 +194,8 @@ it('keeps the disable preview available and counts the malformed task using its 
     stepCount: 1,
   });
   expect(await providerDisableImpact(fake.db as never, USER, CLAUDE)).toEqual({
+    composedLspFailureTaskCount: 1,
+    composedLspFailureTasks: [{ id: TASK }],
     taskCount: 1,
     stepCount: 1,
   });

@@ -253,3 +253,32 @@ it.each(['Save', 'Rebuild image'])(
     expect(h.patch).toHaveBeenCalledTimes(1);
   },
 );
+
+it('warns of composed LSP failures even with no pinned holds, without blocking disable', async () => {
+  h.get.mockImplementation(async (path: string) => {
+    if (path.endsWith('/disable-impact'))
+      return {
+        taskCount: 0,
+        stepCount: 0,
+        composedLspFailureTaskCount: 2,
+        composedLspFailureTasks: [{ id: 'task-alpha' }, { id: 'task-beta' }],
+      };
+    if (path.endsWith('/secrets')) return { secrets: [] };
+    throw new Error(`Unexpected GET ${path}`);
+  });
+  await saveDisabled();
+  const dialog = screen.getByRole('dialog');
+  const warning = dialog.querySelector('.haive-md')?.textContent;
+  expect(warning).toContain('2 tasks will fail at their next CLI step');
+  expect(warning).toContain('task-alpha');
+  expect(warning).toContain('task-beta');
+  expect(warning).toContain('re-enabled');
+  expect(h.patch).not.toHaveBeenCalled();
+  await act(async () => {
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Disable provider' }));
+  });
+  expect(h.patch).toHaveBeenCalledWith(
+    '/cli-providers/provider',
+    expect.objectContaining({ enabled: false }),
+  );
+});
