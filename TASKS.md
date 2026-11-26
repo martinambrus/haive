@@ -1220,9 +1220,19 @@ In `martinambrus/haive-module-translator`. The owner's English-to-Slovak run fai
 
 1. Accept a declined form (same stem, up to 2 trailing letters changed on words of 5+ letters) at every keep-term check; a translated name still fails; codes and short words stay exact. Then the owner Retries the step.
 
+### T773 · Translator review: finish without more calls, keeping the current text
+
+status: open, plan approved 2026-11-26 (`docs/plans/translator-review-continuation.md` PR E, after T772's PR D) · kind: feature · found: owner decision 2026-11-26 · priority: P2
+
+The owner wants this built, not optional. On the T772 budget form, review gets a third choice: finish without more calls, keeping all accepted text and already applied corrections. Remaining units stay unreviewed and outstanding proposals stay unapplied; an explicit, unticked acknowledgment records a waiver bound to that exact text snapshot (T772 design section 5).
+
+1. Record the waiver (owner, event, snapshot digest, unreviewed units, waived proposals) without a call; the review step completes with `complete:false` and a factual summary.
+2. Render accepts `owner-waived` coverage only for a matching waiver; ordinary incomplete review still refuses. Render form, summary and manifest say "review ended by owner; X/Y reviewed".
+3. The choice appears on the budget form only in the release where render accepts it.
+
 ### T772 · Translator: an exhausted call budget parks with a decision form instead of failing
 
-status: open, design with T771 · kind: ux · found: owner task ae8fb29c 2026-11-26 · priority: P1 (owner: showstopper)
+status: open, plan approved 2026-11-26 (`docs/plans/translator-review-continuation.md` PRs A2, D; owner: grant bounds min(1000, 8U) per grant and at most +8U over the task's life, one extra attempt per decision and at most two per pass, no in-form Stop) · kind: ux · found: owner task ae8fb29c 2026-11-26 · priority: P1 (owner: showstopper)
 
 `tr-review` (and `tr-translate`) fail the step with the generic `Translation attempt allowance exhausted` (`src/db/passes.ts` ~:240, ~:246, ~:306) when the approved ceiling (`8 x U` plus extensions) or a pass key's two-attempt cap is spent. On ae8fb29c four cascading review rounds of a 2-unit sample spent 16 of 16 calls. The only way on is the admin-only operator `extend` route, which has no UI.
 
@@ -1232,7 +1242,7 @@ status: open, design with T771 · kind: ux · found: owner task ae8fb29c 2026-11
 
 ### T771 · Translator review: ticked corrections continue without a Retry stop
 
-status: open, design in work 2026-11-26 · kind: ux · found: owner task ae8fb29c 2026-11-26 · priority: P2
+status: open, plan approved 2026-11-26 (`docs/plans/translator-review-continuation.md` PRs A1, C; host PR A1 in work) · kind: ux · found: owner task ae8fb29c 2026-11-26 · priority: P2
 
 OWNER DECISION 2026-11-26: submitting the correction form continues on its own. When applied corrections change text around other units, `tr-review` reopens with a form whose only action is Retry (`buildRetry`, `submitAction: 'retry'`), and Retry is the button a failed step shows. The ticks are the consent to the re-review cost; Retry stays for failures. Nothing ticked already finishes the step.
 
