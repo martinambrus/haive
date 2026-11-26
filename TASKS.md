@@ -1220,6 +1220,15 @@ In `martinambrus/haive-module-translator`. The owner's English-to-Slovak run fai
 
 1. Accept a declined form (same stem, up to 2 trailing letters changed on words of 5+ letters) at every keep-term check; a translated name still fails; codes and short words stay exact. Then the owner Retries the step.
 
+### T771 · Translator review: ticked corrections continue without a Retry stop
+
+status: open, design in work 2026-11-26 · kind: ux · found: owner task ae8fb29c 2026-11-26 · priority: P2
+
+OWNER DECISION 2026-11-26: submitting the correction form continues on its own. When applied corrections change text around other units, `tr-review` reopens with a form whose only action is Retry (`buildRetry`, `submitAction: 'retry'`), and Retry is the button a failed step shows. The ticks are the consent to the re-review cost; Retry stays for failures. Nothing ticked already finishes the step.
+
+1. Re-review the changed units automatically after a submit, with a bound on cascading rounds that ends in a form, not a failure. May need a host seam: the reopen re-runs detect and the form but not the pre-form agent loop.
+2. Drop the "I have read the outcome" confirm form when the review proposed nothing (recommended to the owner).
+
 ### T769 · Task page: no "Show RAG stats" link on a step that made no RAG query
 
 status: open · kind: ux · found: owner request 2026-11-26 · priority: P3
