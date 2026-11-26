@@ -356,18 +356,29 @@ async function upgradeOwned(options: { stackLock?: StackLockOptions }): Promise<
   };
   const sql = postgres(databaseUrl!, { max: 1, max_lifetime: 0 });
   try {
-    // Drizzle rewires postgres.js codecs; keep boot's client separate from the journal's.
-    let bootSql: ReturnType<typeof postgres> | undefined;
     try {
-      await configService.initialize(redisUrl!, () =>
-        encryptionKeyBootDatabase(
-          (bootSql ??= postgres(databaseUrl!, { max: 1, max_lifetime: 0 })),
-        ),
+      // Drizzle rewires postgres.js codecs; keep boot's client separate from the journal's.
+      let bootSql: ReturnType<typeof postgres> | undefined;
+      try {
+        await configService.initialize(redisUrl!, () =>
+          encryptionKeyBootDatabase(
+            (bootSql ??= postgres(databaseUrl!, { max: 1, max_lifetime: 0 })),
+          ),
+        );
+      } finally {
+        await bootSql?.end({ timeout: 5 });
+      }
+      await ensureJournal(sql);
+    } catch (err) {
+      // A killed snapshot can leave PostgreSQL stopped before either lock or the child check.
+      // Keep that ordering and its lease guarantees, but make this pre-lock failure actionable.
+      if (err instanceof UpgradeRefusal) throw err;
+      throw new UpgradeRefusal(
+        'updater-bootstrap-failed',
+        'could not bootstrap updater configuration or journal; check PostgreSQL and Redis availability ' +
+          '(an interrupted snapshot may have left PostgreSQL stopped), then retry',
       );
-    } finally {
-      await bootSql?.end({ timeout: 5 });
     }
-    await ensureJournal(sql);
 
     // One upgrade at a time. The lock guards concurrency; the journal's partial unique index is
     // what survives a crashed updater, and is why an interrupted run is FOUND rather than raced.

@@ -1392,3 +1392,44 @@ describe('lease loss fences the attempt', () => {
     expect(await readFile(lock, 'utf8')).toBe(record(ext.token, 'updater', 7));
   });
 });
+
+describe('takeover after a snapshot stopped PostgreSQL', () => {
+  it.each(['bootstrap', 'journal'] as const)(
+    'names the refusal when the stopped database fails at %s before either lock',
+    async (stage) => {
+      // Use the real snapshot stop wrapper at the Docker seam. SIGKILL leaves this stop in
+      // effect and the lease unchanged; no real Docker daemon or development stack is used.
+      await dk.composeStop({ dir, files: ['docker-compose.yml'] }, {}, ['postgres']);
+      expect(h.dockerExec).toHaveBeenCalledWith(
+        'docker',
+        expect.arrayContaining(['stop', 'postgres']),
+        expect.anything(),
+      );
+      const dead = record(ext.token, 'updater', ext.seq);
+      await writeFile(lock, dead);
+      const offline = Object.assign(new Error(randomBytes(24).toString('hex')), {
+        code: 'ECONNREFUSED',
+      });
+      if (stage === 'bootstrap') h.initialize.mockRejectedValueOnce(offline);
+      else vi.mocked(journal.ensureJournal).mockRejectedValueOnce(offline);
+
+      expect(await main({ stackLock: { ...quick, sleep: idleSleep } })).toBe(3);
+      expect(
+        vi.mocked(console.log).mock.calls.map(([line]) => JSON.parse(String(line))),
+      ).toContainEqual(
+        expect.objectContaining({
+          event: 'refused',
+          refusal: 'updater-bootstrap-failed',
+          message: expect.stringContaining('PostgreSQL'),
+        }),
+      );
+      expect(JSON.stringify(vi.mocked(console.log).mock.calls)).not.toContain(offline.message);
+      expect(journal.tryLock).not.toHaveBeenCalled();
+      expect(journal.findLiveRun).not.toHaveBeenCalled();
+      expect(run.resume).not.toHaveBeenCalled();
+      expect(journal.recordAttempt).not.toHaveBeenCalled();
+      expect(await readFile(lock, 'utf8')).toBe(dead);
+      expect(h.sql.end).toHaveBeenCalledWith({ timeout: 5 });
+    },
+  );
+});
