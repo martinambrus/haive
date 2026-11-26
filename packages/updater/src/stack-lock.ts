@@ -96,6 +96,7 @@ const parses = (bytes: Buffer): boolean => {
 };
 
 export class StackLock {
+  // Consume each attempted sequence even on failure: the bytes may already have landed.
   private seq = 1;
   private lostFlag = false;
   private failing = false;
@@ -221,9 +222,10 @@ export class StackLock {
         // A break-then-restore leaves the name absent for a moment: take it back; EEXIST fails the beat.
         if (!current) {
           if (this.proofExpired()) return 'lost' as const;
+          this.seq += 1;
           await dir.createExclusive(
             STACK_LOCK_NAME,
-            encode(this.token, this.options.holder, this.startedAt, this.seq + 1),
+            encode(this.token, this.options.holder, this.startedAt, this.seq),
           );
           return 'created' as const;
         }
@@ -241,10 +243,11 @@ export class StackLock {
         )
           return 'lost' as const;
         let truncated = false;
+        this.seq += 1;
         try {
           await dir.overwrite(
             STACK_LOCK_NAME,
-            encode(this.token, this.options.holder, this.startedAt, this.seq + 1),
+            encode(this.token, this.options.holder, this.startedAt, this.seq),
             () => {
               truncated = true;
             },
@@ -258,7 +261,6 @@ export class StackLock {
         return 'ok' as const;
       });
       if (outcome === 'ok' || outcome === 'created') {
-        this.seq += 1;
         this.lastGood = started;
         this.failing = false;
         this.ownWriteFailed = false;

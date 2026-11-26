@@ -609,6 +609,50 @@ describe('release', () => {
 });
 
 describe('heartbeat', () => {
+  it.each(['overwrite', 'createExclusive'] as const)(
+    'changes bytes on retry after a landed %s reports failure, keeping the contender busy',
+    async (method) => {
+      vi.useFakeTimers();
+      const options = { ...base, staleMs: 20, pollMs: 20, now: () => Date.now() };
+      const lock = await held(options);
+      try {
+        await vi.advanceTimersByTimeAsync(1);
+        if (method === 'createExclusive') await rm(path);
+        const original = install.InstallDirectory.prototype[method];
+        vi.spyOn(install.InstallDirectory.prototype, method).mockImplementationOnce(async function (
+          this: install.InstallDirectory,
+          name: string,
+          bytes: Buffer,
+        ) {
+          await original.call(this, name, bytes);
+          throw new Error('write landed but close failed');
+        });
+        expect(await lock.beat()).toBe('error');
+        const first = await readFile(path);
+        expect(await parse()).toMatchObject({ seq: 2 });
+        const beforeBreak = vi.fn();
+        const contender = await acquireStackLock(dir, {
+          ...options,
+          sleep: async () => {
+            await vi.advanceTimersByTimeAsync(5);
+            expect(await lock.beat()).toBe('ok');
+            await expect(lock.assertOwned()).resolves.toBeUndefined();
+            await vi.advanceTimersByTimeAsync(15);
+          },
+          hooks: { beforeBreak },
+        });
+        // Clean up even on the old implementation, which incorrectly takes over.
+        if (contender.status === 'held') await contender.lock.release();
+        expect(contender.status).toBe('busy');
+        expect(beforeBreak).not.toHaveBeenCalled();
+        expect(await readFile(path)).not.toEqual(first);
+        expect(await parse()).toMatchObject({ seq: 3, token: lock.token });
+        expect(lock.lost).toBe(false);
+      } finally {
+        await lock.release();
+      }
+    },
+  );
   it('beat bumps seq and changes the bytes', async () => {
     const lock = await held();
     const before = await readFile(path, 'utf8');
@@ -683,7 +727,7 @@ describe('heartbeat', () => {
     expect(await lock.beat()).toBe('error');
     expect(await lock.beat()).toBe('ok');
     expect(lock.lost).toBe(false);
-    expect(await parse()).toMatchObject({ token: lock.token, seq: 2 });
+    expect(await parse()).toMatchObject({ token: lock.token, seq: 3 });
     await lock.release();
     expect(await readdir(dir)).toEqual([]);
   });
@@ -720,7 +764,7 @@ describe('heartbeat', () => {
     expect(await lock.beat()).toBe('error');
     expect(await readFile(path, 'utf8')).toBe('');
     expect(await lock.beat()).toBe('ok');
-    expect(await parse()).toMatchObject({ token: lock.token, seq: 2 });
+    expect(await parse()).toMatchObject({ token: lock.token, seq: 3 });
     expect(lock.lost).toBe(false);
     expect(events).not.toContain('stack-lock-lost');
     await lock.release();

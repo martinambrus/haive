@@ -207,10 +207,10 @@ func (l *stackLock) beat() string {
 		}
 		// A break-then-restore leaves the name absent for a moment: take it back. A failed create
 		// (the name was taken meanwhile) is a failed beat; the next read decides.
-		if createLockFile(l.path, encodeLockRecord(l.token, l.startedAt, l.seq+1), l.cfg.write) != nil {
+		l.seq++ // Consume the attempt even on failure: the bytes may already have landed.
+		if createLockFile(l.path, encodeLockRecord(l.token, l.startedAt, l.seq), l.cfg.write) != nil {
 			return l.beatFailed()
 		}
-		l.seq++
 		l.ownWriteFailed = false
 		l.lastGood = started
 		return "ok"
@@ -223,9 +223,10 @@ func (l *stackLock) beat() string {
 		l.lost = true
 		return "lost"
 	}
+	l.seq++ // A landed write that reports failure must not make the retry repeat its bytes.
 	f, err := l.cfg.openOverwrite(l.path)
 	if err == nil {
-		err = l.cfg.write(f, encodeLockRecord(l.token, l.startedAt, l.seq+1))
+		err = l.cfg.write(f, encodeLockRecord(l.token, l.startedAt, l.seq))
 		if closeErr := f.Close(); err == nil {
 			err = closeErr
 		}
@@ -237,7 +238,6 @@ func (l *stackLock) beat() string {
 	if err != nil {
 		return l.beatFailed()
 	}
-	l.seq++
 	l.ownWriteFailed = false
 	l.lastGood = started
 	return "ok"

@@ -1319,6 +1319,103 @@ func TestStackLockWriteThenErrorDoesNotRenewDeadline(t *testing.T) {
 	}
 }
 
+func TestStackLockRetryChangesBytesKeepsContenderBusy(t *testing.T) {
+	b := fixture(t)
+	b.lockCfg.beat = time.Hour
+	b.lockCfg.stale = 20 * time.Millisecond
+	b.lockCfg.poll = b.lockCfg.stale
+	now := time.Now()
+	b.lockCfg.now = func() time.Time { return now }
+	fail := false
+	b.lockCfg.write = func(f *os.File, data []byte) error {
+		if _, err := f.Write(data); err != nil {
+			return err
+		}
+		if fail {
+			return errors.New("write landed but close failed")
+		}
+		return nil
+	}
+	l, err := b.acquireStackLock(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.releaseLock()
+	now = now.Add(time.Millisecond)
+	fail = true
+	if got := l.beat(); got != "error" {
+		t.Fatalf("landed failed beat: %s", got)
+	}
+	first, err := os.ReadFile(l.path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := recordSeq(t, l.path); got != 2 {
+		t.Fatalf("landed failed sequence: %d, want 2", got)
+	}
+	fail = false
+	contender := b
+	contender.lockCfg.write = nil
+	breaks := 0
+	contender.lockCfg.beforeBreak = func() { breaks++ }
+	contender.sleep = func(time.Duration) {
+		now = now.Add(5 * time.Millisecond)
+		if got := l.beat(); got != "ok" {
+			t.Fatalf("retry: %s", got)
+		}
+		now = now.Add(15 * time.Millisecond)
+	}
+	next, err := contender.acquireStackLock(context.Background())
+	if next != nil {
+		next.releaseLock()
+	}
+	if err == nil || err.Error() != extensionBusyMessage || breaks != 0 {
+		t.Fatalf("contender should stay busy without breaking: %v, breaks=%d", err, breaks)
+	}
+	data, err := os.ReadFile(l.path)
+	if err != nil || bytes.Equal(data, first) || recordSeq(t, l.path) != 3 || l.isLost() {
+		t.Fatalf("retry failed to advance live record: %q, %v, lost=%v", data, err, l.isLost())
+	}
+}
+
+func TestStackLockFailedRecreateConsumesSequence(t *testing.T) {
+	b := fixture(t)
+	b.lockCfg.beat = time.Hour
+	b.lockCfg.now = func() time.Time { return time.Unix(0, 0) }
+	l, err := b.acquireStackLock(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.releaseLock()
+	if err := os.Remove(l.path); err != nil {
+		t.Fatal(err)
+	}
+	var attempted []int
+	write := l.cfg.write
+	l.cfg.write = func(f *os.File, data []byte) error {
+		var record lockRecord
+		if err := json.Unmarshal(data, &record); err != nil {
+			t.Fatal(err)
+		}
+		attempted = append(attempted, record.Seq)
+		if err := write(f, data); err != nil {
+			return err
+		}
+		if len(attempted) <= 2 {
+			return errors.New("write landed but close failed")
+		}
+		return nil
+	}
+	for _, want := range []string{"error", "error", "ok"} {
+		if got := l.beat(); got != want {
+			t.Fatalf("beat: %s, want %s", got, want)
+		}
+	}
+	if !reflect.DeepEqual(attempted, []int{2, 3, 4}) || recordSeq(t, l.path) != 4 {
+		t.Fatalf("recreated sequence reused after failed writes: %v", attempted)
+	}
+}
+
 func TestStackLockOverwriteOpenFailureGrantsNoTornExcuse(t *testing.T) {
 	b := fixture(t)
 	b.lockCfg.beat = time.Hour
