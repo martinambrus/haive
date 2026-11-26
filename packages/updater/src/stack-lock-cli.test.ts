@@ -1397,42 +1397,89 @@ describe('lease loss fences the attempt', () => {
 });
 
 describe('takeover after a snapshot stopped PostgreSQL', () => {
-  it.each(['bootstrap', 'journal'] as const)(
-    'names the refusal when the stopped database fails at %s before either lock',
-    async (stage) => {
-      // Use the real snapshot stop wrapper at the Docker seam. SIGKILL leaves this stop in
-      // effect and the lease unchanged; no real Docker daemon or development stack is used.
-      await dk.composeStop({ dir, files: ['docker-compose.yml'] }, {}, ['postgres']);
-      expect(h.dockerExec).toHaveBeenCalledWith(
-        'docker',
-        expect.arrayContaining(['stop', 'postgres']),
-        expect.anything(),
-      );
-      const dead = record(ext.token, 'updater', ext.seq);
-      await writeFile(lock, dead);
-      const offline = Object.assign(new Error(randomBytes(24).toString('hex')), {
-        code: 'ECONNREFUSED',
-      });
-      if (stage === 'bootstrap') h.initialize.mockRejectedValueOnce(offline);
-      else vi.mocked(journal.ensureJournal).mockRejectedValueOnce(offline);
+  it.each([
+    'ECONNREFUSED',
+    'ENOTFOUND',
+    'EAI_AGAIN',
+    'ETIMEDOUT',
+    'CONNECT_TIMEOUT',
+    'CONNECTION_CLOSED',
+    'CONNECTION_DESTROYED',
+    '08006',
+    '57P01',
+    '57P02',
+    '57P03',
+  ])('names the journal connection refusal with code %s before either lock', async (code) => {
+    // Use the real snapshot stop wrapper at the Docker seam. SIGKILL leaves this stop in
+    // effect and the lease unchanged; no real Docker daemon or development stack is used.
+    await dk.composeStop({ dir, files: ['docker-compose.yml'] }, {}, ['postgres']);
+    expect(h.dockerExec).toHaveBeenCalledWith(
+      'docker',
+      expect.arrayContaining(['stop', 'postgres']),
+      expect.anything(),
+    );
+    const dead = record(ext.token, 'updater', ext.seq);
+    await writeFile(lock, dead);
+    const offline = Object.assign(new Error(randomBytes(24).toString('hex')), {
+      code,
+    });
+    vi.mocked(journal.ensureJournal).mockRejectedValueOnce(offline);
 
-      expect(await main({ stackLock: { ...quick, sleep: idleSleep } })).toBe(3);
-      expect(
-        vi.mocked(console.log).mock.calls.map(([line]) => JSON.parse(String(line))),
-      ).toContainEqual(
-        expect.objectContaining({
-          event: 'refused',
-          refusal: 'updater-bootstrap-failed',
-          message: expect.stringContaining('PostgreSQL'),
-        }),
-      );
-      expect(JSON.stringify(vi.mocked(console.log).mock.calls)).not.toContain(offline.message);
+    expect(await main({ stackLock: { ...quick, sleep: idleSleep } })).toBe(3);
+    expect(
+      vi.mocked(console.log).mock.calls.map(([line]) => JSON.parse(String(line))),
+    ).toContainEqual(
+      expect.objectContaining({
+        event: 'refused',
+        refusal: 'updater-bootstrap-failed',
+        message: expect.stringContaining(`(${code})`),
+      }),
+    );
+    expect(JSON.stringify(vi.mocked(console.log).mock.calls)).not.toContain(offline.message);
+    expect(journal.tryLock).not.toHaveBeenCalled();
+    expect(journal.findLiveRun).not.toHaveBeenCalled();
+    expect(run.resume).not.toHaveBeenCalled();
+    expect(journal.recordAttempt).not.toHaveBeenCalled();
+    expect(await readFile(lock, 'utf8')).toBe(dead);
+    expect(h.sql.end).toHaveBeenCalledWith({ timeout: 5 });
+  });
+});
+
+describe('bootstrap errors that must retain their diagnosis', () => {
+  it.each(['bootstrap', 'journal'] as const)(
+    'passes through non-connection errors from %s by identity',
+    async (stage) => {
+      const error = Object.assign(new Error(randomBytes(24).toString('hex')), {
+        code: stage === 'bootstrap' ? 'ECONNREFUSED' : '42501',
+      });
+      if (stage === 'bootstrap') h.initialize.mockRejectedValueOnce(error);
+      else vi.mocked(journal.ensureJournal).mockRejectedValueOnce(error);
+      await expect(main()).rejects.toBe(error);
+      expect(events()).not.toContain('refused');
       expect(journal.tryLock).not.toHaveBeenCalled();
-      expect(journal.findLiveRun).not.toHaveBeenCalled();
-      expect(run.resume).not.toHaveBeenCalled();
       expect(journal.recordAttempt).not.toHaveBeenCalled();
-      expect(await readFile(lock, 'utf8')).toBe(dead);
       expect(h.sql.end).toHaveBeenCalledWith({ timeout: 5 });
     },
   );
+
+  it.each([undefined, '28P01', '42601', '57P10', '0800', 'NOT_ECONNREFUSED'])(
+    'does not classify journal errors by message or unrelated code %s',
+    async (code) => {
+      const error = Object.assign(new Error('ECONNREFUSED CONNECT_TIMEOUT 08006'), { code });
+      vi.mocked(journal.ensureJournal).mockRejectedValueOnce(error);
+      await expect(main()).rejects.toBe(error);
+      expect(events()).not.toContain('refused');
+    },
+  );
+
+  it('passes through an existing journal refusal by identity', async () => {
+    const refusal = new UpgradeRefusal('stack-lock-lost', 'lease lost');
+    vi.mocked(journal.ensureJournal).mockRejectedValueOnce(refusal);
+    expect(await main()).toBe(3);
+    expect(
+      vi.mocked(console.log).mock.calls.map(([line]) => JSON.parse(String(line))),
+    ).toContainEqual(
+      expect.objectContaining({ refusal: refusal.refusal, message: refusal.message }),
+    );
+  });
 });

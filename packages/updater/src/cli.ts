@@ -357,26 +357,34 @@ async function upgradeOwned(options: { stackLock?: StackLockOptions }): Promise<
   };
   const sql = postgres(databaseUrl!, { max: 1, max_lifetime: 0 });
   try {
+    // Drizzle rewires postgres.js codecs; keep boot's client separate from the journal's.
+    let bootSql: ReturnType<typeof postgres> | undefined;
     try {
-      // Drizzle rewires postgres.js codecs; keep boot's client separate from the journal's.
-      let bootSql: ReturnType<typeof postgres> | undefined;
-      try {
-        await configService.initialize(redisUrl!, () =>
-          encryptionKeyBootDatabase(
-            (bootSql ??= postgres(databaseUrl!, { max: 1, max_lifetime: 0 })),
-          ),
-        );
-      } finally {
-        await bootSql?.end({ timeout: 5 });
-      }
+      await configService.initialize(redisUrl!, () =>
+        encryptionKeyBootDatabase(
+          (bootSql ??= postgres(databaseUrl!, { max: 1, max_lifetime: 0 })),
+        ),
+      );
+    } finally {
+      await bootSql?.end({ timeout: 5 });
+    }
+    try {
       await ensureJournal(sql);
     } catch (err) {
       // A killed snapshot can leave PostgreSQL stopped before either lock or the child check.
-      // Keep that ordering and its lease guarantees, but make this pre-lock failure actionable.
-      if (err instanceof UpgradeRefusal) throw err;
+      // Classify by stable codes only; key-boot and other journal diagnoses must pass through.
+      const code = (err as NodeJS.ErrnoException | null)?.code;
+      if (
+        err instanceof UpgradeRefusal ||
+        typeof code !== 'string' ||
+        !/^(?:ECONNREFUSED|ENOTFOUND|EAI_AGAIN|ETIMEDOUT|CONNECT_TIMEOUT|CONNECTION_[A-Z_]+|08[0-9A-Z]{3}|57P0[0-9])$/.test(
+          code,
+        )
+      )
+        throw err;
       throw new UpgradeRefusal(
         'updater-bootstrap-failed',
-        'could not bootstrap updater configuration or journal; check PostgreSQL and Redis availability ' +
+        `could not bootstrap updater journal (${code}); check PostgreSQL availability ` +
           '(an interrupted snapshot may have left PostgreSQL stopped), then retry',
       );
     }

@@ -512,7 +512,7 @@ it.each([false, true])(
       if (fail) throw new Error('boot refused');
     });
     try {
-      if (fail) expect(await main()).toBe(3);
+      if (fail) await expect(main()).rejects.toThrow('boot refused');
       else expect(await main()).toBe(0);
       expect(journalSql.options.serializers['3802']).toBe(jsonSerializer);
       expect(journalSql.options.parsers['1184']).toBe(timestampParser);
