@@ -1,6 +1,6 @@
 import { readStepRole, STEP_ROLES } from '@haive/shared/step-outputs';
 import { loadRoleTaskPin } from '../../role-task-pin.js';
-import { and, desc, eq } from 'drizzle-orm';
+import { and, desc, eq, sql } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
 import { FIX_LOOP_ACTION_FIELD, type FormSchema } from '@haive/shared';
 import { fenceOpener, scanFences } from '@haive/shared/markdown-fences';
@@ -425,6 +425,15 @@ export async function recordFixLoopRequest(
   sourceTaskStepId: string,
   req: FixLoopRequest,
 ): Promise<void> {
+  // task.running is stamped once per claimed START. Recovery changes epochs, not this identity.
+  const start = await db.query.taskEvents.findFirst({
+    where: and(
+      eq(schema.taskEvents.taskId, taskId),
+      eq(schema.taskEvents.eventType, 'task.running'),
+    ),
+    columns: { id: true },
+    orderBy: [desc(schema.taskEvents.createdAt), desc(schema.taskEvents.id)],
+  });
   const { guidance, unfencedLegacy, ...rest } = req;
   await db.insert(schema.taskEvents).values({
     taskId,
@@ -432,6 +441,7 @@ export async function recordFixLoopRequest(
     eventType: FIX_LOOP_REQUESTED,
     payload: {
       ...rest,
+      startEventId: start?.id ?? null,
       ...(guidance?.trim() ? { guidance } : {}),
       ...(HUMAN_REJECT_SOURCES.has(req.sourceStepId) && !unfencedLegacy
         ? { machineFenced: true }
@@ -754,6 +764,20 @@ export function repeatedFlagLines(
   ];
 }
 
+/** Match the current START identity, including unambiguous legacy requests from a task with at most one START.
+ * This is shared by 07 and the guard baseline reader inside its held transaction. */
+export function currentStartFixRequest(taskId: string) {
+  return sql`(${schema.taskEvents.payload}->>'startEventId' IS NOT DISTINCT FROM (
+    SELECT start.id::text FROM ${schema.taskEvents} AS start
+    WHERE start.task_id = ${taskId} AND start.event_type = 'task.running'
+    ORDER BY start.created_at DESC, start.id DESC LIMIT 1
+  ) OR (${schema.taskEvents.payload}->>'startEventId' IS NULL AND NOT EXISTS (
+    SELECT 1 FROM ${schema.taskEvents} AS start
+    WHERE start.task_id = ${taskId} AND start.event_type = 'task.running'
+    OFFSET 1 LIMIT 1
+  )))`;
+}
+
 /** Was THIS round entered by the fix loop?
  *
  *  `ctx.round` alone cannot answer it: the counter is shared with the revise loop, which forks a
@@ -775,6 +799,7 @@ export async function isFixRound(ctx: StepContext): Promise<boolean> {
       and(
         eq(schema.taskEvents.taskId, ctx.taskId),
         eq(schema.taskEvents.eventType, FIX_LOOP_REQUESTED),
+        currentStartFixRequest(ctx.taskId),
       ),
     );
   return rows.some((r) => (r.payload as { round?: number } | null)?.round === ctx.round);

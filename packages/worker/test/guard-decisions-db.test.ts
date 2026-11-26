@@ -7,7 +7,11 @@ import { TaskCancelledError, type StepContext, type StepDefinition } from '@haiv
 import { z } from 'zod';
 import { evaluateGuardDecision } from '../src/step-engine/guard-decisions.js';
 import { skipGuardSpan } from '../src/step-engine/guard-span-skip.js';
-import { FIX_LOOP_REQUESTED } from '../src/step-engine/steps/workflow/_fix-loop.js';
+import {
+  FIX_LOOP_REQUESTED,
+  isFixRound,
+  recordFixLoopRequest,
+} from '../src/step-engine/steps/workflow/_fix-loop.js';
 
 const url = process.env.GUARD_DECISIONS_TEST_URL;
 if (url && !new URL(url).pathname.startsWith('/guard_decisions_test'))
@@ -244,6 +248,57 @@ describe.skipIf(!url)('durable guard decisions on Postgres', () => {
       });
     return { ...ctx, round, taskStepId: current!.id, rerunGeneration: current!.rerunGeneration };
   }
+  it.each(['stamped', 'legacy'])(
+    'ignores a previous START request on a revise round and keeps that revise as the fix baseline (%s)',
+    async (kind) => {
+      await pinFixTarget();
+      await db.insert(schema.taskEvents).values({ taskId, eventType: 'task.running' });
+      if (kind === 'stamped')
+        await recordFixLoopRequest(db, taskId, rows.plan!.id, {
+          round: 1,
+          sourceStepId: 'check',
+          diagnosis: 'Old generation defect',
+        });
+      else
+        await db
+          .insert(schema.taskEvents)
+          .values({ taskId, eventType: FIX_LOOP_REQUESTED, payload: { round: 1 } });
+      expect(await isFixRound({ ...ctx, round: 1 })).toBe(true);
+      await db.insert(schema.taskEvents).values({ taskId, eventType: 'task.running' });
+      await evaluateGuardDecision(ctx, 'work', predicates);
+      const revise = await enterRound(1, false);
+      expect(await isFixRound(revise)).toBe(false);
+      evaluate.mockResolvedValue(false);
+      const baseline = await evaluateGuardDecision(revise, 'work', predicates);
+      expect(baseline!.run).toBe(false);
+      expect(evaluate).toHaveBeenCalledTimes(2);
+      const fix = await enterRound(2, false);
+      await recordFixLoopRequest(db, taskId, rows.plan!.id, {
+        round: 2,
+        sourceStepId: 'check',
+        diagnosis: '',
+      });
+      expect(await isFixRound(fix)).toBe(true);
+      evaluate.mockRejectedValue(new Error('fix must reuse current START revise'));
+      expect(await evaluateGuardDecision(fix, 'work', predicates)).toEqual({
+        ...baseline,
+        round: 2,
+        generation: 4,
+      });
+      expect(evaluate).toHaveBeenCalledTimes(2);
+      await db
+        .update(schema.tasks)
+        .set({ orchestrationEpoch: 1 })
+        .where(eq(schema.tasks.id, taskId));
+      expect(await isFixRound({ ...fix, epoch: 1 })).toBe(true);
+      expect(await evaluateGuardDecision({ ...fix, epoch: 1 }, 'work', predicates)).toEqual({
+        ...baseline,
+        round: 2,
+        generation: 4,
+      });
+      expect(evaluate).toHaveBeenCalledTimes(2);
+    },
+  );
   it('reuses the revise decision when spec-gate revise preceded the first span entry', async () => {
     await pinFixTarget();
     const revise = await enterRound(1, false);

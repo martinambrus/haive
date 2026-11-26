@@ -8,7 +8,7 @@ import {
 } from '@haive/shared/modularity';
 import { TaskCancelledError, type StepContext, type StepDefinition } from '@haive/shared/step';
 import { z } from 'zod';
-import { FIX_LOOP_REQUESTED } from './steps/workflow/_fix-loop.js';
+import { FIX_LOOP_REQUESTED, currentStartFixRequest } from './steps/workflow/_fix-loop.js';
 
 const generation = z.number().int().nonnegative();
 const reference = z.strictObject({
@@ -193,6 +193,7 @@ export async function decideLoadedGuardDecision(
               and(
                 eq(schema.taskEvents.taskId, ctx.taskId),
                 eq(schema.taskEvents.eventType, FIX_LOOP_REQUESTED),
+                currentStartFixRequest(ctx.taskId),
               ),
             )
         ).map((r) => (r.payload as { round?: number } | null)?.round)

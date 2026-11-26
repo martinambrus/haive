@@ -191,7 +191,7 @@ const db = {
     // The root merge fence a reopen checks: no setup row, no merge claim, no merge left open.
     taskSteps: { findFirst: async () => undefined, findMany: async () => [] },
     mergeDirClaims: { findFirst: async () => undefined },
-    taskEvents: { findMany: async () => [] },
+    taskEvents: { findFirst: async () => undefined, findMany: async () => [] },
     taskTypeDefinitions: {
       findFirst: async () =>
         h.state.taskType === 'workflow' ? undefined : { runListStrategy: 'static' },

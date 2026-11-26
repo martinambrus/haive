@@ -352,7 +352,11 @@ describe('guard decisions from loaded rows', () => {
       const original = await save();
       nextRound();
       const events = createFakeDb({ taskEvents: schema.taskEvents });
-      tx = events.db as unknown as StepContext['db'];
+      tx = {
+        ...events.db,
+        // The real Postgres control covers the START subquery; this unit seam supplies its rows.
+        select: () => ({ from: () => ({ where: async () => events.rows(schema.taskEvents) }) }),
+      } as unknown as StepContext['db'];
       if (kind === 'restart') {
         // restartLoop returns loop_back, whose handler records this durable request.
         await recordFixLoopRequest(tx, task.id, rows.plan!.id, {
