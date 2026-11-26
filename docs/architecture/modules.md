@@ -764,14 +764,17 @@ refreshes detect/admission after cleanup so the refused id is included in accoun
 `completePreForm` with null output/id and parks a real form. A continuation request there or a
 null form is a configuration failure; a generic manual Continue cannot substitute for that form.
 Pause defers this held fallback; Resume and boot/stalled recovery retain the decision-form marker
-and build the form without another prepare or dispatch. A follow-up `prepare:false` records the
-same barrier. Retry advances generation and cannot inherit it.
+and build the form without another prepare or dispatch. A saved unanswered schema under that
+same checkpoint and hold is ready even if the park write was lost: pickup parks the saved form
+without repeating pre-form work. This also covers plain `rerunPreForm` continuations. The checkpoint's
+version and generation remain required, and its atomic clearing binds the saved schema to this continuation.
+A follow-up `prepare:false` records the same barrier. Retry advances generation and cannot inherit it.
 
 Rollback first stops new fallback work while retaining a capable worker AND each module's
 opt-in until all held decision checkpoints have parked real forms or settled. Drain by letting
 current advances finish and boot/stalled recovery re-drive interrupted checkpoints; Resume paused
 tasks as appropriate. Inspect current `waiting_cli` steps with `pause_form_on_retry`, null
-form/answers and a latest same-generation `step.pre_form_continuation` event whose
+answers (with or without a saved schema) and a latest same-generation `step.pre_form_continuation` event whose
 `decisionForm` is true. None may remain before removing the opt-in: even a capable worker fails
 pickup loudly if the flag is removed. Keep compatible module decision handlers for every parked
 form until owners settle it; disable importing consumers before reverting host symbols. An older

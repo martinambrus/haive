@@ -2421,7 +2421,6 @@ async function heldPreFormContinuation(
     !step.mergeResolve &&
     row.status === 'waiting_cli' &&
     row.pauseFormOnRetry &&
-    row.formSchema == null &&
     row.formValues == null
   ))
     return null;
@@ -3958,7 +3957,12 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
     let reenteredPreForm = false;
     let reopenNotice = heldAtStart?.notice;
     const runPipeline = async (): Promise<AdvanceStepResult> => {
-      let detected = heldAtStart?.decisionForm ? null : current.detectOutput;
+      // The checkpoint atomically cleared the old schema. An unanswered schema
+      // saved while its generation-bound hold remains is this pass's completed
+      // form, even if the worker died before the separate waiting_form write.
+      // Resume form handling without preparing, accepting or dispatching again.
+      const heldFormReady = heldAtStart !== null && current.formSchema != null;
+      let detected = heldAtStart?.decisionForm && !heldFormReady ? null : current.detectOutput;
       if (detected === null || detected === undefined) {
         detected = stepDef.detect ? await stepDef.detect(ctx) : null;
         current = await updateRow(db, current.id, {
@@ -4025,11 +4029,11 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
         llmInvocationId = null;
         return null;
       };
-      if (decisionFormRequired) {
+      if (decisionFormRequired && !heldFormReady) {
         const deferred = await deferPreFormContinuation(db, ctx, current);
         if (deferred) return deferred;
       }
-      if (stepDef.llm?.preForm && !decisionFormRequired) {
+      if (stepDef.llm?.preForm && !decisionFormRequired && !heldFormReady) {
         const skip =
           stepDef.llm.skipIf?.({
             detected,
@@ -4117,7 +4121,7 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
       // safely or dispatches from the saved checkpoint. Every enqueue uses the existing
       // ownership/reservation path; no CLI is spawned directly from this hook.
       // Include submitted forms: a legacy form can predate this completion checkpoint.
-      if (stepDef.llm?.preForm && stepDef.llm.completePreForm) {
+      if (stepDef.llm?.preForm && stepDef.llm.completePreForm && !heldFormReady) {
         const completion = await stepDef.llm.completePreForm({
           ctx,
           detected,

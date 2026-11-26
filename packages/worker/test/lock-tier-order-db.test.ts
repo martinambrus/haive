@@ -1175,6 +1175,135 @@ describe.skipIf(!url)(
           TEST_TIMEOUT,
         );
 
+        describe.each(['boot', 'stalled'] as const)('%s schema-save crash recovery', (reader) => {
+          it.each([
+            'workspace decision',
+            'prepare false decision',
+            'A1 completed',
+            'A1 prepare false',
+          ] as const)('parks the saved %s form without repeating pre-form work', async (entry) => {
+            const f = await decisionHarness();
+            if (entry === 'prepare false decision') {
+              await db
+                .update(schema.cliInvocations)
+                .set({ consumedAt: null, rawOutput: 'completed report' })
+                .where(eq(schema.cliInvocations.id, R));
+              f.step.llm!.completePreForm = vi.fn(async ({ llmOutput }) => ({
+                llmOutput,
+                continueRequested: llmOutput != null,
+              }));
+              f.step.llm!.prepare = vi.fn(async () => false as const);
+            } else if (entry.startsWith('A1')) {
+              delete f.step.llm!.allowPreFormDecisionFallback;
+              if (entry === 'A1 completed')
+                await seedRun(f.taskId, {
+                  id: randomUUID(),
+                  endedAt: AT,
+                  exitCode: 0,
+                  rawOutput: 'fresh completed pass',
+                });
+              else f.step.llm!.prepare = vi.fn(async () => false as const);
+            }
+            let injected = false;
+            const handle = new Proxy(db, {
+              get(target, prop) {
+                if (prop !== 'update') return Reflect.get(target, prop);
+                return (table: typeof schema.taskSteps) => {
+                  const update = target.update(table);
+                  if (table !== schema.taskSteps) return update;
+                  return new Proxy(update, {
+                    get(builder, key) {
+                      if (key !== 'set') return Reflect.get(builder, key);
+                      return (patch: StepInsert) => {
+                        // Kill the pass before its park UPDATE, after the separate
+                        // schema write has committed to the real database.
+                        if (patch.status === 'waiting_form' && !injected) {
+                          injected = true;
+                          throw new StepSupersededError(S.id);
+                        }
+                        return builder.set(patch);
+                      };
+                    },
+                  });
+                };
+              },
+            });
+            expect((await f.advance(handle)).status).toBe('superseded');
+            expect(injected).toBe(true);
+            const saved = await rowOf(S.id);
+            expect(saved).toMatchObject({
+              status: 'waiting_cli',
+              pauseFormOnRetry: true,
+              formSchema: { title: 'Fresh decision' },
+              formValues: null,
+              errorMessage: null,
+              rerunGeneration: 4,
+            });
+            const queue = vi.fn(async () => {});
+            if (reader === 'boot')
+              await reconcileOrphanedSteps(db, {
+                enqueueAdvance: queue,
+                queuedInvocationIds: async () => new Set(),
+              });
+            else {
+              await db
+                .update(schema.tasks)
+                .set({ updatedAt: T0 })
+                .where(eq(schema.tasks.id, f.taskId));
+              await redriveStalledTasks(
+                db,
+                {
+                  queuedTaskJobs: async () => ({ steps: new Set(), starts: new Set() }),
+                  enqueueAdvance: queue,
+                  enqueueStart: async () => {},
+                  failTask: async () => false,
+                  queuedInvocationIds: async () => new Set(),
+                },
+                { staleMs: 0 },
+              );
+            }
+            expect(queue).toHaveBeenCalledOnce();
+            expect((await taskOf(f.taskId))!.orchestrationEpoch).toBe(EPOCH + 1);
+            const runsBefore = await db.query.cliInvocations.findMany({
+              where: eq(schema.cliInvocations.taskStepId, S.id),
+              orderBy: asc(schema.cliInvocations.id),
+            });
+            f.step.llm!.prepare = vi.fn(async () => {
+              throw new Error('must not prepare after schema save');
+            });
+            f.step.llm!.prepareWorkspace = vi.fn(async () => {
+              throw new Error('must not reserve after schema save');
+            });
+            vi.mocked(f.step.llm!.completePreForm!).mockClear();
+            const dispatch = vi.mocked(dispatcher.resolveTaskDispatch).mockClear();
+            const result = await f.advance();
+            expect(result.status).toBe('waiting_form');
+            expect(result.status === 'waiting_form' && result.formSchema).toEqual(saved.formSchema);
+            expect(await rowOf(S.id)).toMatchObject({
+              status: 'waiting_form',
+              waitingStartedAt: expect.any(Date),
+              pauseFormOnRetry: false,
+              formSchema: saved.formSchema,
+              formValues: null,
+              errorMessage: null,
+              rerunGeneration: 4,
+            });
+            expect(f.step.llm!.prepare).not.toHaveBeenCalled();
+            expect(f.step.llm!.prepareWorkspace).not.toHaveBeenCalled();
+            expect(f.step.llm!.completePreForm).not.toHaveBeenCalled();
+            expect(dispatch).not.toHaveBeenCalled();
+            expect(f.enqueue).not.toHaveBeenCalled();
+            expect(f.step.apply).not.toHaveBeenCalled();
+            expect(
+              await db.query.cliInvocations.findMany({
+                where: eq(schema.cliInvocations.taskStepId, S.id),
+                orderBy: asc(schema.cliInvocations.id),
+              }),
+            ).toEqual(runsBefore);
+            expect((await taskOf(f.taskId))!.status).toBe('running');
+          });
+        });
+
         describe.each(['boot', 'stalled'] as const)('%s refusal recovery', (reader) => {
           it.each([
             ['workspace', 'before'],
@@ -1290,6 +1419,51 @@ describe.skipIf(!url)(
             .set({ rerunGeneration: sql`${schema.taskSteps.rerunGeneration} + 1` })
             .where(eq(schema.taskSteps.id, S.id));
         });
+        expect(await runner.isHeldPreFormContinuation(db, step, await rowOf(S.id))).toBe(false);
+      });
+
+      it.each([
+        'missing event',
+        'version',
+        'generation',
+        'answer',
+        'hold',
+        'latest checkpoint',
+      ] as const)('a saved schema cannot bypass checkpoint binding: %s', async (lost) => {
+        const { taskId, ctx } = await setup();
+        await checkpoint(ctx);
+        await db
+          .update(schema.taskSteps)
+          .set({
+            formSchema: { title: 'Saved fresh form', fields: [] },
+            ...(lost === 'answer' ? { formValues: {} } : {}),
+            ...(lost === 'hold' ? { pauseFormOnRetry: false } : {}),
+          })
+          .where(eq(schema.taskSteps.id, S.id));
+        const step = continuationStep();
+        expect(await runner.isHeldPreFormContinuation(db, step, await rowOf(S.id))).toBe(
+          lost !== 'answer' && lost !== 'hold',
+        );
+        if (lost === 'missing event')
+          await db.delete(schema.taskEvents).where(eq(schema.taskEvents.taskId, taskId));
+        else if (lost === 'version' || lost === 'generation')
+          await db
+            .update(schema.taskEvents)
+            .set({
+              payload: {
+                version: lost === 'version' ? 2 : 1,
+                rerunGeneration: lost === 'generation' ? 3 : 4,
+              },
+            })
+            .where(eq(schema.taskEvents.taskId, taskId));
+        else if (lost === 'latest checkpoint')
+          await db.insert(schema.taskEvents).values({
+            taskId,
+            taskStepId: S.id,
+            eventType: 'step.pre_form_continuation',
+            payload: { version: 2, rerunGeneration: 4 },
+            createdAt: new Date(Date.now() + 1_000),
+          });
         expect(await runner.isHeldPreFormContinuation(db, step, await rowOf(S.id))).toBe(false);
       });
 

@@ -114,6 +114,12 @@ The current advance immediately re-enters the shared detect/pre-form/prepareForm
 pipeline, with all local old inputs discarded. It permits only one synchronous re-entry; a second
 request without an invocation park returns a boundary form. The hold ignores old job payloads
 before the fresh park, then the ordinary stale-submit timestamp guard protects that park.
+If the worker dies after saving the refreshed schema but before parking it, the same
+versioned, generation-bound checkpoint and unanswered hold identify that saved schema as
+ready. Pickup resumes form handling and parks it without repeating prepare, result acceptance,
+reservation or dispatch. The checkpoint cleared the old schema atomically, so this cannot
+adopt the previous form. The hold and checkpoint binding remain required until the park;
+a saved answer, a Retry generation or an unreadable latest checkpoint cannot qualify.
 A null form after prepare returns false is allowed; manual Continue policy still applies.
 A synchronous opt-in re-entry or boot/sweep-recovered held continuation that finishes with a null
 form clears the old-answer hold only in the owned done write after apply succeeds. The hold remains through apply and any crash before it.
@@ -162,8 +168,8 @@ guard protects it. Unanswered forms remain ordinary durable decision barriers.
 Rollback first stops new fallback work. Retain a capable worker AND the module opt-in until
 all held decision checkpoints park real forms or settle. Let queued advances finish and boot/stalled
 recovery re-drive interrupted checkpoints; Resume paused tasks when appropriate. Check for current
-`waiting_cli` steps with `pause_form_on_retry`, null form/answers and a latest same-generation
-`step.pre_form_continuation` event carrying `decisionForm: true`: none may remain before removing
+`waiting_cli` steps with `pause_form_on_retry`, null answers (with or without a saved schema)
+and a latest same-generation `step.pre_form_continuation` event carrying `decisionForm: true`: none may remain before removing
 the opt-in. Pickup without it fails loudly even on a capable worker. Retain compatible decision
 handlers for parked forms until owners settle them, then remove importing consumers before
 reverting host symbols. An older A1 worker cannot interpret the marker. No migration is added or
