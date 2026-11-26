@@ -62,7 +62,7 @@ export async function providerDisableImpact(db: Database, userId: string, provid
           .from(schema.cliProviders)
           .where(eq(schema.cliProviders.userId, userId))
       : [];
-  const composedLspFailureTasks = tasks
+  const composedLspFailureCandidates = tasks
     .filter((task) => {
       const allowed = composedLspAllowedSet(providers, composedSets.get(task.id));
       return (
@@ -74,6 +74,7 @@ export async function providerDisableImpact(db: Database, userId: string, provid
     .map((task) => ({ id: task.id }));
   let taskCount = 0;
   let stepCount = 0;
+  const heldTaskIds = new Set<string>();
   const invalidTasks: Array<{ id: string; code: DerivedRunPlanError['code'] }> = [];
   for (const task of tasks) {
     try {
@@ -136,13 +137,20 @@ export async function providerDisableImpact(db: Database, userId: string, provid
             ? s.effectivePreferredCliProviderId
             : (s.preferredCliProviderId ?? task.cliProviderId)) === providerId,
       ).length;
-      if (count > 0) taskCount++;
+      if (count > 0) {
+        taskCount++;
+        heldTaskIds.add(task.id);
+      }
       stepCount += count;
     } catch (error) {
       if (!(error instanceof DerivedRunPlanError)) throw error;
       invalidTasks.push({ id: task.id, code: error.code });
     }
   }
+  // A post-lock binding that contributes a hold parks the task instead of failing it.
+  const composedLspFailureTasks = composedLspFailureCandidates.filter(
+    (task) => !heldTaskIds.has(task.id),
+  );
   return {
     taskCount,
     stepCount,

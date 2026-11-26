@@ -429,10 +429,9 @@ it.each([true, false])('composed impact skips outside saved CLI, enabled=%s', as
     taskCount: 0,
     stepCount: 0,
   });
-  expect(await providerDisableImpact(db, h.userId, own)).toMatchObject({
+  expect(await providerDisableImpact(db, h.userId, own)).toEqual({
     taskCount: 1,
     stepCount: 1,
-    composedLspFailureTaskCount: 1,
   });
 });
 
@@ -461,6 +460,38 @@ describe('disabling the last enabled composed LSP member', () => {
       ...over,
     });
   }
+
+  it.each(['task', 'step', 'saved'])(
+    'excludes a held %s binding while still reporting a floating task',
+    async (binding) => {
+      fake.patch(schema.cliProviders, providerId, { name: 'claude-code' });
+      const held = composedTask([providerId], {
+        cliProviderId: binding === 'task' ? providerId : null,
+        runListSnapshot: ['cli'],
+      });
+      if (binding === 'step')
+        fake.insert(schema.taskStepCliChoices, {
+          taskId: held,
+          stepId: 'cli',
+          role: 'default',
+          cliProviderId: providerId,
+        });
+      if (binding === 'saved')
+        fake.insert(schema.userStepCliPreferences, {
+          userId: h.userId,
+          stepId: 'cli',
+          cliProviderId: providerId,
+          explicit: true,
+        });
+      const floating = composedTask([providerId], { ignoreSavedStepClis: true });
+      expect(await (await read()).json()).toEqual({
+        taskCount: 1,
+        stepCount: 1,
+        composedLspFailureTaskCount: 1,
+        composedLspFailureTasks: [{ id: floating }],
+      });
+    },
+  );
 
   it.each([true, false])(
     'reports the last member, retained image=%s, including floating bindings',

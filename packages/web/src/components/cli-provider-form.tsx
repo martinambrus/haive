@@ -45,6 +45,8 @@ interface ProviderDisableImpact {
   invalidTasks?: Array<{ id: string; code: string }>;
 }
 
+const COMPOSED_FAILURE_TASK_ID_LIMIT = 5;
+
 interface CliProviderFormProps {
   mode: 'create' | 'edit';
   provider?: CliProvider;
@@ -724,9 +726,18 @@ export function CliProviderForm({
     : '';
 
   const composedFailureCount = disableImpact?.composedLspFailureTaskCount ?? 0;
+  const composedFailureIds = (disableImpact?.composedLspFailureTasks ?? []).slice(
+    0,
+    COMPOSED_FAILURE_TASK_ID_LIMIT,
+  );
+  const omittedComposedFailureCount = composedFailureCount - composedFailureIds.length;
   const composedFailureNotice =
     composedFailureCount > 0
-      ? `**Warning:** ${composedFailureCount} ${composedFailureCount === 1 ? 'task will fail at its' : 'tasks will fail at their'} next CLI step until a provider in each task's allowed set is re-enabled in CLI providers. Affected task IDs: ${disableImpact?.composedLspFailureTasks?.map((t) => t.id).join(', ')}.\n\n`
+      ? `**Warning:** ${composedFailureCount} ${composedFailureCount === 1 ? 'task will fail at its' : 'tasks will fail at their'} next CLI step until a provider in each task's allowed set is re-enabled in CLI providers. Affected task IDs: ${composedFailureIds.map((t) => t.id).join(', ')}${omittedComposedFailureCount > 0 ? ` and ${omittedComposedFailureCount} more` : ''}.\n\n`
+      : '';
+  const pinnedHoldNotice =
+    (disableImpact?.taskCount ?? 0) > 0
+      ? `${disableImpact?.taskCount} ${disableImpact?.taskCount === 1 ? 'task has' : 'tasks have'} ${disableImpact?.stepCount ?? 0} remaining ${disableImpact?.stepCount === 1 ? 'step' : 'steps'} pinned to this provider. These steps will be held when they next need this CLI, unless skipped by the workflow. Enable the provider again or switch the step's CLI to continue. This is a snapshot; counts can change before you save.`
       : '';
 
   return (
@@ -741,7 +752,7 @@ export function CliProviderForm({
         <div className="flex flex-col gap-4 p-6">
           <h2 className="text-lg font-semibold">Disable CLI provider</h2>
           <MarkdownView
-            body={`${incompleteImpactNotice}${composedFailureNotice}${disableImpact?.taskCount ?? 0} ${disableImpact?.taskCount === 1 ? 'task has' : 'tasks have'} ${disableImpact?.stepCount ?? 0} remaining ${disableImpact?.stepCount === 1 ? 'step' : 'steps'} pinned to this provider. These steps will be held when they next need this CLI, unless skipped by the workflow. Enable the provider again or switch the step's CLI to continue. This is a snapshot; counts can change before you save.`}
+            body={`${incompleteImpactNotice}${composedFailureNotice}${pinnedHoldNotice}`}
           />
           <div className="flex gap-2">
             <Button type="button" onClick={() => answerDisable(true)}>
