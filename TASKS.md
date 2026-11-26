@@ -1220,6 +1220,16 @@ In `martinambrus/haive-module-translator`. The owner's English-to-Slovak run fai
 
 1. Accept a declined form (same stem, up to 2 trailing letters changed on words of 5+ letters) at every keep-term check; a translated name still fails; codes and short words stay exact. Then the owner Retries the step.
 
+### T772 · Translator: an exhausted call budget parks with a decision form instead of failing
+
+status: open, design with T771 · kind: ux · found: owner task ae8fb29c 2026-11-26 · priority: P1 (owner: showstopper)
+
+`tr-review` (and `tr-translate`) fail the step with the generic `Translation attempt allowance exhausted` (`src/db/passes.ts` ~:240, ~:246, ~:306) when the approved ceiling (`8 x U` plus extensions) or a pass key's two-attempt cap is spent. On ae8fb29c four cascading review rounds of a 2-unit sample spent 16 of 16 calls. The only way on is the admin-only operator `extend` route, which has no UI.
+
+1. Park instead of failing, through the same seams as the T767 PR1 storage wait: a payload-free form naming the case (`TRANSLATOR_CALL_BUDGET_REACHED` for the task ceiling, `TRANSLATOR_PASS_ATTEMPTS_REACHED` for one key's attempts, with the refusal reason), the pass, unit and review round, spent against approved calls, and what the current round still needs.
+2. Choices: add calls (prefilled with what the round needs; the task owner decides, audited like `extend`), for review also "finish without more calls" keeping the current text, or stop. Resume continues from cached accepted results.
+3. A distinct, specific message everywhere the step reports it.
+
 ### T771 · Translator review: ticked corrections continue without a Retry stop
 
 status: open, design in work 2026-11-26 · kind: ux · found: owner task ae8fb29c 2026-11-26 · priority: P2
