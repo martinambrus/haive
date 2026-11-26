@@ -1318,3 +1318,51 @@ func TestStackLockWriteThenErrorDoesNotRenewDeadline(t *testing.T) {
 		t.Fatalf("failed write renewed the deadline: %s", got)
 	}
 }
+
+func TestStackLockOverwriteOpenFailureGrantsNoTornExcuse(t *testing.T) {
+	b := fixture(t)
+	b.lockCfg.beat = time.Hour
+	b.lockCfg.now = func() time.Time { return time.Unix(0, 0) }
+	opens, writes := 0, 0
+	b.lockCfg.openOverwrite = func(path string) (*os.File, error) {
+		opens++
+		return nil, &os.PathError{Op: "open", Path: path, Err: os.ErrPermission}
+	}
+	b.lockCfg.write = func(f *os.File, data []byte) error {
+		writes++
+		_, err := f.Write(data)
+		return err
+	}
+	l, err := b.acquireStackLock(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.releaseLock()
+	own, err := os.ReadFile(l.path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := l.beat(); got != "error" || l.isLost() {
+		t.Fatalf("failed open: %s lost=%v", got, l.isLost())
+	}
+	if opens != 1 || writes != 1 {
+		t.Fatalf("open/write calls: %d/%d", opens, writes)
+	}
+	if data, err := os.ReadFile(l.path); err != nil || !bytes.Equal(data, own) {
+		t.Fatalf("open failure touched the record: %q, %v", data, err)
+	}
+	partial := []byte(`{"v":1,"tok`)
+	if err := os.WriteFile(l.path, partial, 0644); err != nil {
+		t.Fatal(err)
+	}
+	if got := l.beat(); got != "lost" || !l.isLost() {
+		t.Fatalf("open failure excused a foreign torn record: %s lost=%v", got, l.isLost())
+	}
+	if opens != 1 || writes != 1 {
+		t.Fatalf("torn record reached open/write: %d/%d", opens, writes)
+	}
+	l.releaseLock()
+	if data, err := os.ReadFile(l.path); err != nil || !bytes.Equal(data, partial) {
+		t.Fatalf("foreign torn record changed or removed: %q, %v", data, err)
+	}
+}

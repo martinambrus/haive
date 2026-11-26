@@ -47,6 +47,7 @@ type lockConfig struct {
 	remove            func(string) error
 	beforeBreak       func()
 	write             func(*os.File, []byte) error
+	openOverwrite     func(string) (*os.File, error)
 	newTicker         func(time.Duration) (<-chan time.Time, func())
 }
 
@@ -101,6 +102,11 @@ func (c lockConfig) resolved() lockConfig {
 	}
 	if c.remove == nil {
 		c.remove = os.Remove
+	}
+	if c.openOverwrite == nil {
+		c.openOverwrite = func(path string) (*os.File, error) {
+			return os.OpenFile(path, os.O_WRONLY|os.O_TRUNC|noFollow, 0)
+		}
 	}
 	if c.write == nil {
 		c.write = func(f *os.File, data []byte) error { _, err := f.Write(data); return err }
@@ -217,7 +223,7 @@ func (l *stackLock) beat() string {
 		l.lost = true
 		return "lost"
 	}
-	f, err := os.OpenFile(l.path, os.O_WRONLY|os.O_TRUNC|noFollow, 0)
+	f, err := l.cfg.openOverwrite(l.path)
 	if err == nil {
 		err = l.cfg.write(f, encodeLockRecord(l.token, l.startedAt, l.seq+1))
 		if closeErr := f.Close(); err == nil {
