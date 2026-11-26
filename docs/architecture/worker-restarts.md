@@ -95,6 +95,11 @@ resets no downstream row, and retains spend and accepted history. The same trans
 both the held row and this opt-in event for its current generation: an ordinary Retry can produce
 the same row shape before its first pre-form invocation. Recovery's epoch takeover preserves the
 event's authority; Retry advances generation and cannot inherit that policy.
+The guarded-row Resume reset is an accepted exception: `preserveGuards` keeps a guarded row's
+generation and hold, so its existing opt-in event still qualifies once the fresh pass returns to
+`waiting_cli`. This retains continuation-only pause deferral and fenced insertion for a step that
+already opted in; it grants no new approval, extra dispatch or module work allowance. The module
+must still derive authority and its finite work bound from durable state.
 
 A crash after commit but before preparation, reservation or enqueue leaves `running` +
 `waiting_cli`, no live invocation, cleared answers and the hold. Boot's waiting-cli reader and
@@ -110,6 +115,8 @@ pipeline, with all local old inputs discarded. It permits only one synchronous r
 request without an invocation park returns a boundary form. The hold ignores old job payloads
 before the fresh park, then the ordinary stale-submit timestamp guard protects that park.
 A null form after prepare returns false is allowed; manual Continue policy still applies.
+A synchronous opt-in re-entry that finishes with a null form clears the old-answer hold only in
+the owned done write after apply succeeds. The hold remains through apply and any crash before it.
 
 On this held continuation only, each fresh pre-form dispatch rechecks pause, including follow-ups
 requested by `completePreForm`. Completed results may still be accepted idempotently. A pause
@@ -117,8 +124,11 @@ or unreadable state returns `deferred` with the pause poll delay, preserving the
 recording CLI idle time; the queue only adds a normal same-step advance. Resume runs once without
 Retry. The canonical `StepPrepareDeferredError` handles a pause race in prepare/prepareWorkspace:
 the host verifies pause and, under the same lock order and ownership/generation/task fences,
-releases only this pass's unqueued, unstarted reservation. Outside this hold, or without a current
-pause, the signal is a configuration failure. `StepPrepareParkError` keeps its separate live-winner
+releases only this pass's unqueued, unstarted reservation. Outside this hold the signal is a
+configuration failure. Resume between the module's read and the host recheck re-invokes `prepare`
+once; a repeated signal without pause fails loudly. For `prepareWorkspace`, the released
+reservation requires a fresh pass: defer one second, recording the allowance on the generation's
+`step.pre_form_workspace_resume_deferred` event so another workspace refusal without pause fails rather than polling forever. `StepPrepareParkError` keeps its separate live-winner
 contract. Ordinary module-schema deferrals retain their original delay.
 
 Rollback removes module opt-ins and imports of the new signal first. Keep capable workers until

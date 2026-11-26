@@ -718,8 +718,12 @@ a repeated request without an invocation park offers the decision/boundary form.
 
 `StepPrepareDeferredError` is the canonical pause-race signal from `prepare` or `prepareWorkspace`
 on an opted-in held pre-form continuation. The host rechecks pause and yields without failure or
-enqueue only while pause admission refuses dispatch (an unreadable pause holds too). Without
-that continuation hold or without a current pause, this is an ordinary configuration failure.
+enqueue while pause admission refuses dispatch (an unreadable pause holds too). Without
+that continuation hold this is an ordinary configuration failure. If Resume lands between the
+module's pause read and the host recheck, `prepare` is re-invoked once; a repeated signal with no
+pause fails as a configuration error. In `prepareWorkspace` the host releases the reservation and
+defers for one second to prepare a fresh pass. This allowance is recorded on the generation's
+`step.pre_form_workspace_resume_deferred` event; a repeated workspace signal with no pause fails rather than polling forever.
 If this pass already inserted a reservation, the host releases only its own unqueued, unstarted
 invocation under run → step → task fencing. It preserves spend/history and the continuation
 checkpoint. It never converts owner/epoch/Stop/consent failures into a pause. The ordinary

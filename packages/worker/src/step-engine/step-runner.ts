@@ -1069,39 +1069,45 @@ async function resolveLlmPhase(
     if (await hasLiveInvocation(db, current.id)) {
       return { resolved: false, result: { status: 'waiting_cli', row: current } };
     }
-    let prepared: void | false;
-    try {
-      prepared = await llmSpec.prepare({ ctx, detected, formValues: formValues ?? {} });
-    } catch (err) {
-      if (err instanceof StepPrepareDeferredError) {
-        if (!heldContinuation)
+    let prepared: void | false = undefined;
+    for (let attempt = 0; ; attempt++) {
+      try {
+        prepared = await llmSpec.prepare({ ctx, detected, formValues: formValues ?? {} });
+        break;
+      } catch (err) {
+        if (err instanceof StepPrepareDeferredError) {
+          if (!heldContinuation)
+            throw new Error(
+              'StepPrepareDeferredError requires an opted-in held pre-form continuation',
+              { cause: err },
+            );
+          const deferred = await deferPreFormContinuation(db, ctx, current);
+          if (deferred) return { resolved: false, result: deferred };
+          // Resume can land between the module's pause read and ours. Retry once;
+          // a repeated refusal without a pause is a module contract violation.
+          if (attempt === 0) continue;
           throw new Error(
-            'StepPrepareDeferredError requires an opted-in held pre-form continuation',
+            'StepPrepareDeferredError requires current pause admission to refuse dispatch',
             { cause: err },
           );
-        const deferred = await deferPreFormContinuation(db, ctx, current);
-        if (deferred) return { resolved: false, result: deferred };
+        }
+        if (!(err instanceof StepPrepareParkError)) throw err;
+        // A module's ledger can see a winner bound after the cheap guard above.
+        // Verify the same singleton invariant as the insert backstop. No checkpoint,
+        // output, reservation or handoff belongs to this losing pass: waiting_cli
+        // would make the queue handler write a park over the winner's running row.
+        if (await hasLiveInvocation(db, current.id)) {
+          ctx.logger.info(
+            { taskStepId: current.id },
+            'preparation yielded to a concurrent live invocation; nothing to hand off',
+          );
+          return { resolved: false, result: { status: 'superseded', row: current } };
+        }
         throw new Error(
-          'StepPrepareDeferredError requires current pause admission to refuse dispatch',
+          'StepPrepareParkError from llm.prepare requires a live invocation for this step, but none exists',
           { cause: err },
         );
       }
-      if (!(err instanceof StepPrepareParkError)) throw err;
-      // A module's ledger can see a winner bound after the cheap guard above.
-      // Verify the same singleton invariant as the insert backstop. No checkpoint,
-      // output, reservation or handoff belongs to this losing pass: waiting_cli
-      // would make the queue handler write a park over the winner's running row.
-      if (await hasLiveInvocation(db, current.id)) {
-        ctx.logger.info(
-          { taskStepId: current.id },
-          'preparation yielded to a concurrent live invocation; nothing to hand off',
-        );
-        return { resolved: false, result: { status: 'superseded', row: current } };
-      }
-      throw new Error(
-        'StepPrepareParkError from llm.prepare requires a live invocation for this step, but none exists',
-        { cause: err },
-      );
     }
     // Preparation may hydrate a saved detection from before versioned plan reads.
     // Checkpoint it through the same owned write as detect, before dispatch: a
@@ -1360,12 +1366,7 @@ async function resolveLlmPhase(
     });
   const invRow = await insertInvocationOrNull(() =>
     heldContinuation
-      ? db.transaction(async (tx) => {
-          const run = await insertFresh(tx as unknown as Database);
-          await lockContinuationStep(tx, ctx);
-          await lockContinuationTask(tx, ctx, current.stepId);
-          return run;
-        })
+      ? insertHeldPreFormInvocation(db, ctx, current.stepId, insertFresh)
       : insertFresh(db),
   );
   if (!invRow) {
@@ -1419,7 +1420,7 @@ async function resolveLlmPhase(
       });
   } catch (err) {
     if (err instanceof StepPrepareDeferredError && heldContinuation) {
-      const deferred = await deferPreFormContinuation(db, ctx, current, invRow.id);
+      const deferred = await deferPreFormContinuation(db, ctx, current, invRow.id, true);
       if (deferred) return { resolved: false, result: deferred };
     }
     await db
@@ -2329,11 +2330,12 @@ export async function consumeFoldedMiningRows(
 }
 
 const PRE_FORM_CONTINUATION_EVENT = 'step.pre_form_continuation';
+const PRE_FORM_WORKSPACE_RESUME_EVENT = 'step.pre_form_workspace_resume_deferred';
 
 /** Retry can produce the same held row before its first pre-form invocation.
  * Require the checkpoint's generation-bound opt-in too. Epoch takeover preserves
  * it; Retry advances generation and therefore cannot inherit this dispatch policy. */
-async function isHeldPreFormContinuation(
+export async function isHeldPreFormContinuation(
   db: Database,
   step: StepDefinition,
   row: TaskStepRow,
@@ -2420,6 +2422,22 @@ async function lockContinuationTask(tx: DbTx, ctx: StepContext, stepId: string):
   if (!rows.length) throw new StepSupersededError(ctx.taskStepId);
 }
 
+/** Keep reservation insertion and both continuation fences in one transaction.
+ * Exported so real-Postgres controls exercise the same composition as dispatch. */
+export async function insertHeldPreFormInvocation<T>(
+  db: Database,
+  ctx: StepContext,
+  stepId: string,
+  insert: (handle: Database) => Promise<T>,
+): Promise<T> {
+  return db.transaction(async (tx) => {
+    const run = await insert(tx as unknown as Database);
+    await lockContinuationStep(tx, ctx);
+    await lockContinuationTask(tx, ctx, stepId);
+    return run;
+  });
+}
+
 /** One short run -> step -> task transaction. A failed fence takes exact-id
  * consumption back with the checkpoint; no reset, generation or epoch change.
  * Exported for the real lock-order and crash-cut controls. */
@@ -2486,14 +2504,16 @@ export async function deferPreFormContinuation(
   ctx: StepContext,
   current: TaskStepRow,
   reservationId?: string,
+  resumeRace = false,
 ): Promise<AdvanceStepResult | null> {
   const pause = await resolvePause(db, ctx.taskId);
   const blocked = pause
     ? null
     : ((await moduleDeactivationMessage(db, current.stepId)) ??
       moduleSchemaFailedMessage(current.stepId));
+  let repeatedResumeRace = false;
   const row = await db.transaction(async (tx) => {
-    if (reservationId && !pause && !blocked) {
+    if (reservationId && !pause && !blocked && !resumeRace) {
       const live = await tx
         .select({ id: schema.cliInvocations.id })
         .from(schema.cliInvocations)
@@ -2510,7 +2530,7 @@ export async function deferPreFormContinuation(
         .for('no key update');
       if (!live.length) throw new StepSupersededError(ctx.taskStepId);
     }
-    if (reservationId && (pause || blocked)) {
+    if (reservationId && (pause || blocked || resumeRace)) {
       const released = await tx
         .update(schema.cliInvocations)
         .set({ supersededAt: new Date() })
@@ -2536,7 +2556,38 @@ export async function deferPreFormContinuation(
     )
       throw new StepSupersededError(ctx.taskStepId);
     await lockContinuationTask(tx, ctx, current.stepId);
-    if (!pause) return null;
+    if (!pause) {
+      if (!resumeRace || blocked) return null;
+      const event = await tx.query.taskEvents.findFirst({
+        where: and(
+          eq(schema.taskEvents.taskId, ctx.taskId),
+          eq(schema.taskEvents.taskStepId, ctx.taskStepId),
+          eq(schema.taskEvents.eventType, PRE_FORM_WORKSPACE_RESUME_EVENT),
+        ),
+        orderBy: desc(schema.taskEvents.createdAt),
+      });
+      const payload = event?.payload as { rerunGeneration?: number } | undefined;
+      if (payload?.rerunGeneration === ctx.rerunGeneration) {
+        repeatedResumeRace = true;
+        return durable;
+      }
+      // Persist the one-race allowance so redelivery/recovery cannot spin forever.
+      await tx.insert(schema.taskEvents).values({
+        taskId: ctx.taskId,
+        taskStepId: ctx.taskStepId,
+        eventType: PRE_FORM_WORKSPACE_RESUME_EVENT,
+        payload: {
+          version: 1,
+          rerunGeneration: ctx.rerunGeneration,
+        },
+      });
+      await markCliParkBegin(tx, current.id);
+      ctx.logger.warn(
+        { taskStepId: current.id },
+        'pause ended during workspace preparation; deferring once',
+      );
+      return durable;
+    }
     const held = await updateOwnedStep(
       tx,
       current.id,
@@ -2547,7 +2598,9 @@ export async function deferPreFormContinuation(
     return held;
   });
   if (blocked) throw new Error(blocked);
-  return row ? { status: 'deferred', row, delayMs: PAUSE_POLL_MS } : null;
+  if (repeatedResumeRace)
+    throw new Error('StepPrepareDeferredError repeated without current pause admission refusal');
+  return row ? { status: 'deferred', row, delayMs: pause ? PAUSE_POLL_MS : 1_000 } : null;
 }
 
 /** The reopened form's consumed agent rows and its hold, in one transaction. The agent rows go
@@ -4813,6 +4866,7 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
         output,
         summary: curatedSummary,
         degradedNote,
+        ...(reenteredPreForm && persistedSchema === null ? { pauseFormOnRetry: false } : {}),
         statusMessage: null,
         // A row that ends successfully carries no error. The step may have failed on an earlier
         // attempt (an orphaned CLI, a transient dispatch failure) and error_message survived the

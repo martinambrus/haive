@@ -35,7 +35,13 @@ interface MockState {
   invocations?: Record<string, unknown>[];
   beforeWrite?: (table: string, patch: Record<string, unknown>) => void;
   gate?: GateWorld;
-  continuationEvent?: { payload: { version: number; rerunGeneration: number } };
+  continuationEvent?: {
+    taskId: string;
+    taskStepId: string;
+    eventType: string;
+    payload: { version: number; rerunGeneration: number; workspaceResumeDeferred?: boolean };
+  };
+  workspaceResumeEvent?: MockState['continuationEvent'];
 }
 
 /** What the insight-gate predicates read: events and the task's other step rows. */
@@ -129,6 +135,17 @@ function conditionValues(node: unknown, acc: unknown[] = []): unknown[] {
   return acc;
 }
 
+/** Column references let an omitted SQL filter mean unrestricted, as it does in Postgres. */
+function conditionColumns(node: unknown, acc: string[] = []): string[] {
+  if (Array.isArray(node)) for (const item of node) conditionColumns(item, acc);
+  else if (node && typeof node === 'object') {
+    const obj = node as Record<string, unknown>;
+    if ('table' in obj && typeof obj.name === 'string') acc.push(obj.name);
+    conditionColumns(obj.queryChunks, acc);
+  }
+  return acc;
+}
+
 /** The row guards, evaluated against the mock row: a pass's write lands only while the row is not
  *  `pending` or `skipped`, and the claim that opens a pass only while it is still `pending`. */
 function refusedByRowGuard(cond: unknown, status: unknown): boolean {
@@ -164,6 +181,7 @@ function makeMockDb(state: MockState): Database {
       const writes = state.updates.length;
       const task = state.taskRow && { ...state.taskRow };
       const event = state.continuationEvent;
+      const resumeEvent = state.workspaceResumeEvent;
       const invocation = state.invocation && { ...state.invocation };
       try {
         return await fn(db);
@@ -171,6 +189,7 @@ function makeMockDb(state: MockState): Database {
         state.taskStepRow = row;
         state.taskRow = task;
         state.continuationEvent = event;
+        state.workspaceResumeEvent = resumeEvent;
         if (invocation && state.invocation) Object.assign(state.invocation, invocation);
         state.updates.length = writes;
         throw err;
@@ -236,10 +255,17 @@ function makeMockDb(state: MockState): Database {
       return {
         values: (v: Record<string, unknown>) => ({
           then: (resolve: (value: unknown) => unknown) => {
-            if (tableName === 'task_events' && v.eventType === 'step.pre_form_continuation')
-              state.continuationEvent = {
+            if (tableName === 'task_events') {
+              const event = {
+                taskId: v.taskId as string,
+                taskStepId: v.taskStepId as string,
+                eventType: v.eventType as string,
                 payload: v.payload as { version: number; rerunGeneration: number },
               };
+              if (v.eventType === 'step.pre_form_continuation') state.continuationEvent = event;
+              if (v.eventType === 'step.pre_form_workspace_resume_deferred')
+                state.workspaceResumeEvent = event;
+            }
             return Promise.resolve().then(resolve);
           },
           returning: async () => {
@@ -331,7 +357,18 @@ function makeMockDb(state: MockState): Database {
         findMany: async () => state.gate?.continuations ?? [],
         findFirst: async ({ where }: { where: unknown }) => {
           const values = conditionValues(where);
-          if (values.includes('step.pre_form_continuation')) return state.continuationEvent;
+          if (values.includes('step.pre_form_workspace_resume_deferred'))
+            return state.workspaceResumeEvent;
+          const columns = conditionColumns(where);
+          if (values.includes('step.pre_form_continuation') || !columns.includes('event_type')) {
+            const event = state.continuationEvent;
+            return event &&
+              (!columns.includes('task_id') || values.includes(event.taskId)) &&
+              (!columns.includes('task_step_id') || values.includes(event.taskStepId)) &&
+              (!columns.includes('event_type') || values.includes(event.eventType))
+              ? event
+              : undefined;
+          }
           if (values.includes('step.form_submitted')) return state.gate?.submission;
           return state.gate?.checks.at(-1);
         },
@@ -3242,6 +3279,29 @@ describe('approved apply pre-form continuation', () => {
     expect(h.def.apply).toHaveBeenCalledTimes(form ? 1 : 2);
   });
 
+  it('null-form completion clears the continuation hold only in the done write after apply', async () => {
+    const h = fixture();
+    h.def.llm!.prepare = async () => false;
+    h.def.form = () => null;
+    const apply = h.def.apply;
+    let applies = 0;
+    h.def.apply = vi.fn(async (ctx, args) => {
+      if (++applies === 2) {
+        expect(h.state.taskStepRow.status).not.toBe('done');
+        expect(h.state.taskStepRow.pauseFormOnRetry).toBe(true);
+      }
+      return apply(ctx, args);
+    });
+    h.state.beforeWrite = (table, patch) => {
+      if (table === 'task_steps' && patch.pauseFormOnRetry === false)
+        expect(patch.status).toBe('done');
+    };
+    expect((await h.advance({ stale: true })).status).toBe('done');
+    expect(h.state.taskStepRow.pauseFormOnRetry).toBe(false);
+    expect(h.def.apply).toHaveBeenCalledTimes(2);
+    expect(h.enqueue).not.toHaveBeenCalled();
+  });
+
   it('bounds synchronous re-entry and parks a repeated request on the decision form', async () => {
     const h = fixture();
     h.def.llm!.prepare = async () => false;
@@ -3328,18 +3388,94 @@ describe('approved apply pre-form continuation', () => {
     expect(h.state.invocation!.consumedAt).toBeInstanceOf(Date);
   });
 
-  it.each(['prepare', 'prepareWorkspace'] as const)(
-    'deferral signal without a current pause in %s is a configuration failure',
-    async (hook) => {
-      const h = fixture();
-      h.def.llm![hook] = async () => {
-        const sdk = await import('@haive/shared/step');
-        throw new sdk.StepPrepareDeferredError();
+  it('Resume between prepare signal and host recheck retries preparation once and dispatches', async () => {
+    const h = fixture();
+    h.def.llm!.prepare = vi
+      .fn()
+      .mockRejectedValueOnce(new (await import('@haive/shared/step')).StepPrepareDeferredError())
+      .mockResolvedValue(undefined);
+    expect((await h.advance({})).status).toBe('waiting_cli');
+    expect(h.def.llm!.prepare).toHaveBeenCalledTimes(2);
+    expect(h.enqueue).toHaveBeenCalledOnce();
+  });
+
+  it('a repeated prepare signal with no pause fails loudly after one retry', async () => {
+    const h = fixture();
+    h.def.llm!.prepare = vi.fn(async () => {
+      throw new (await import('@haive/shared/step')).StepPrepareDeferredError();
+    });
+    const result = await h.advance({});
+    expect(result.status).toBe('failed');
+    expect(result.status === 'failed' && result.error).toMatch(/StepPrepareDeferredError.*pause/);
+    expect(h.def.llm!.prepare).toHaveBeenCalledTimes(2);
+    expect(h.enqueue).not.toHaveBeenCalled();
+  });
+
+  it('Resume between workspace signal and recheck releases the reservation and defers briefly', async () => {
+    const h = fixture();
+    h.def.llm!.prepareWorkspace = vi
+      .fn()
+      .mockRejectedValueOnce(new (await import('@haive/shared/step')).StepPrepareDeferredError())
+      .mockResolvedValue(undefined);
+    expect(await h.advance({})).toMatchObject({ status: 'deferred', delayMs: 1_000 });
+    expect(h.state.invocation!.supersededAt).toBeInstanceOf(Date);
+    expect(h.state.taskStepRow.pauseFormOnRetry).toBe(true);
+    expect(h.enqueue).not.toHaveBeenCalled();
+    expect((await h.advance({ stale: true })).status).toBe('waiting_cli');
+    expect(h.enqueue).toHaveBeenCalledOnce();
+  });
+
+  it('a repeated workspace signal with no pause fails loudly on redelivery', async () => {
+    const h = fixture();
+    h.def.llm!.prepareWorkspace = async () => {
+      throw new (await import('@haive/shared/step')).StepPrepareDeferredError();
+    };
+    expect((await h.advance({})).status).toBe('deferred');
+    const result = await h.advance();
+    expect(result.status).toBe('failed');
+    expect(result.status === 'failed' && result.error).toMatch(/StepPrepareDeferredError.*pause/);
+    expect(h.enqueue).not.toHaveBeenCalled();
+  });
+
+  it.each(['generation', 'version', 'other-step', 'other-task', 'event-type'] as const)(
+    'rejects a %s continuation event and cannot inherit a stale generation',
+    async (invalid) => {
+      const check = async (kind: typeof invalid) => {
+        const h = fixture();
+        h.def.llm!.prepare = async () => false;
+        h.def.form = () => null;
+        // Commit the real checkpoint through apply before simulating a new delivery.
+        h.def.apply = vi
+          .fn(h.def.apply)
+          .mockImplementationOnce(async () => {
+            throw new ReopenStepFormError('hold', { rerunPreForm: true });
+          })
+          .mockImplementation(async () => {
+            throw new Error('cut after checkpoint');
+          });
+        // Pause halts re-entry before prepare and leaves the checkpoint intact.
+        h.state.taskRow!.pausedAt = new Date();
+        expect((await h.advance({})).status).toBe('deferred');
+        const event = h.state.continuationEvent!;
+        expect(event.payload).toMatchObject({ version: 1, rerunGeneration: 3 });
+        if (kind === 'generation') h.state.taskStepRow.rerunGeneration = 4;
+        if (kind === 'version') event.payload.version = 2;
+        if (kind === 'other-step') event.taskStepId = 'other-step';
+        if (kind === 'other-task') event.taskId = 'other-task';
+        if (kind === 'event-type') event.eventType = 'step.form_submitted';
+        h.def.llm!.prepare = async () => {
+          throw new (await import('@haive/shared/step')).StepPrepareDeferredError();
+        };
+        const result = await h.advance();
+        expect(result.status).toBe('failed');
+        expect(result.status === 'failed' && result.error).toMatch(
+          /StepPrepareDeferredError.*held/,
+        );
+        expect(h.enqueue).not.toHaveBeenCalled();
       };
-      const result = await h.advance({});
-      expect(result.status).toBe('failed');
-      expect(result.status === 'failed' && result.error).toMatch(/StepPrepareDeferredError.*pause/);
-      expect(h.enqueue).not.toHaveBeenCalled();
+      await check(invalid);
+      // Every variant also proves the generation boundary with a genuine version-1 event.
+      if (invalid !== 'generation') await check('generation');
     },
   );
 
