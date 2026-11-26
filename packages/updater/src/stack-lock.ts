@@ -155,7 +155,7 @@ export class StackLock {
       // takeover from absence, or recreate the record as a side effect of a phase proof.
       if (!current) throw this.unprovenRefusal();
       if (!parses(current.bytes)) {
-        if (this.ownWriteFailed) return;
+        if (this.ownWriteFailed && !this.proofExpired()) return;
         throw this.unprovenRefusal();
       }
       const owner = decode(current.bytes);
@@ -230,7 +230,7 @@ export class StackLock {
         }
         // A write that failed after truncating leaves our own record empty or partial: not a loss.
         const parsed = parses(current.bytes);
-        if (!parsed && !this.ownWriteFailed) throw this.unprovenRefusal();
+        if (!parsed && (!this.ownWriteFailed || this.proofExpired())) throw this.unprovenRefusal();
         const owner = decode(current.bytes);
         if (parsed && (!owner.token || !owner.holder || !owner.startedAt))
           throw this.unprovenRefusal();
@@ -241,15 +241,19 @@ export class StackLock {
             owner.startedAt !== this.startedAt)
         )
           return 'lost' as const;
+        let truncated = false;
         try {
           await dir.overwrite(
             STACK_LOCK_NAME,
             encode(this.token, this.options.holder, this.startedAt, this.seq + 1),
+            () => {
+              truncated = true;
+            },
           );
         } catch (error) {
           // Only our own failed rewrite can explain torn bytes. A read or proof failure
           // may have observed another holder's unfinished write and grants no tolerance.
-          this.ownWriteFailed = true;
+          this.ownWriteFailed ||= truncated;
           throw error;
         }
         return 'ok' as const;

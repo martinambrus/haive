@@ -56,7 +56,13 @@ const record = (token: string, holder: string, seq: number): string =>
 const token = () => randomBytes(16).toString('hex');
 const parse = async () => JSON.parse(await readFile(path, 'utf8')) as Record<string, unknown>;
 const idle = async () => {};
-const base: StackLockOptions = { heartbeat: false, sleep: idle, staleMs: 5, pollMs: 1 };
+const base: StackLockOptions = {
+  heartbeat: false,
+  sleep: idle,
+  staleMs: 5,
+  pollMs: 1,
+  now: () => 0,
+};
 const held = async (options: StackLockOptions = {}): Promise<StackLock> => {
   const outcome = await acquireStackLock(dir, { ...base, ...options });
   if (outcome.status !== 'held') throw new Error(`expected held, got ${outcome.status}`);
@@ -389,8 +395,8 @@ describe('phase ownership proofs', () => {
     const lock = await held();
     const overwrite = install.InstallDirectory.prototype.overwrite;
     vi.spyOn(install.InstallDirectory.prototype, 'overwrite').mockImplementationOnce(
-      async function (this: install.InstallDirectory, name) {
-        await overwrite.call(this, name, Buffer.from('{'));
+      async function (this: install.InstallDirectory, name, _bytes, onTruncated) {
+        await overwrite.call(this, name, Buffer.from('{'), onTruncated);
         throw Object.assign(new Error('full'), { code: 'ENOSPC' });
       },
     );
@@ -706,8 +712,8 @@ describe('heartbeat', () => {
     const lock = await held({ onEvent: (event) => void events.push(event) });
     const real = install.InstallDirectory.prototype.overwrite;
     vi.spyOn(install.InstallDirectory.prototype, 'overwrite').mockImplementationOnce(
-      async function (this: install.InstallDirectory, name: string) {
-        await real.call(this, name, Buffer.alloc(0));
+      async function (this: install.InstallDirectory, name: string, _bytes, onTruncated) {
+        await real.call(this, name, Buffer.alloc(0), onTruncated);
         throw new Error('io');
       },
     );
@@ -996,4 +1002,58 @@ describe('unproven lease deadline', () => {
       if (kind === 'missing') await expect(stat(path)).rejects.toMatchObject({ code: 'ENOENT' });
     },
   );
+});
+
+describe('own torn-record deadline', () => {
+  it.each(['proof', 'beat'])(
+    'expires own torn bytes before the next %s without renewing on tolerance',
+    async (kind) => {
+      vi.useFakeTimers();
+      const lock = await held({ staleMs: 20, now: () => Date.now() });
+      const probe = await open(join(dir, 'probe'), 'w');
+      const proto = Object.getPrototypeOf(probe) as { writeFile: () => Promise<void> };
+      await probe.close();
+      vi.spyOn(proto, 'writeFile').mockRejectedValueOnce(
+        Object.assign(new Error('full'), { code: 'ENOSPC' }),
+      );
+      expect(await lock.beat()).toBe('error');
+      expect(await readFile(path, 'utf8')).toBe('');
+      await vi.advanceTimersByTimeAsync(19);
+      await expect(lock.assertOwned()).resolves.toBeUndefined();
+      await vi.advanceTimersByTimeAsync(1);
+      if (kind === 'proof')
+        await expect(lock.assertOwned()).rejects.toMatchObject({ refusal: 'stack-lock-lost' });
+      else expect(await lock.beat()).toBe('lost');
+      expect(lock.lost).toBe(true);
+      expect(await readFile(path, 'utf8')).toBe('');
+      await lock.release();
+    },
+  );
+  it('does not excuse torn bytes after overwrite failed at open', async () => {
+    vi.useFakeTimers();
+    const lock = await held({ staleMs: 20, now: () => Date.now() });
+    const own = await readFile(path, 'utf8');
+    const target = join(dir, 'untouched');
+    await writeFile(target, 'keep');
+    const read = install.InstallDirectory.prototype.read;
+    vi.spyOn(install.InstallDirectory.prototype, 'read').mockImplementationOnce(async function (
+      this: install.InstallDirectory,
+      ...args
+    ) {
+      const current = await read.call(this, ...args);
+      await rm(path);
+      await symlink(target, path);
+      return current;
+    });
+    // The real O_NOFOLLOW open fails before O_TRUNC can touch the link target.
+    expect(await lock.beat()).toBe('error');
+    expect(await readFile(target, 'utf8')).toBe('keep');
+    await rm(path);
+    await writeFile(path, own);
+    await writeFile(path, '{');
+    await expect(lock.assertOwned()).rejects.toMatchObject({ refusal: 'stack-lock-unproven' });
+    expect(await lock.beat()).toBe('error');
+    expect(await readFile(path, 'utf8')).toBe('{');
+    await lock.release();
+  });
 });

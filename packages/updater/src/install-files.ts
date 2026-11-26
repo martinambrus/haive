@@ -224,12 +224,15 @@ export class InstallDirectory {
   }
 
   /** Rewrite an existing file in place; never creates it, never follows a link. */
-  async overwrite(name: string, bytes: Buffer): Promise<void> {
+  async overwrite(name: string, bytes: Buffer, onTruncated?: () => void): Promise<void> {
     const file = await open(
       this.path(name),
       constants.O_WRONLY | constants.O_TRUNC | constants.O_NOFOLLOW | constants.O_NONBLOCK,
     );
     try {
+      // O_TRUNC has taken effect only after open succeeds. Callers may tolerate a torn
+      // record after a later failure, never after a refused open.
+      onTruncated?.();
       if (!(await file.stat()).isFile())
         throw new Error(`refusing non-regular install file: ${name}`);
       await file.writeFile(bytes);
