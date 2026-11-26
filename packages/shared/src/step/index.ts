@@ -577,14 +577,16 @@ export class MiningWaveError extends Error {
  * checkpoints the continuation, consumes only the completed invocation supplied to that apply pass,
  * discards the old form and answer, and re-enters detect and the normal pre-form pipeline before
  * deciding whether another form is needed. The option requires detect, form, and `llm.preForm`, and
- * is incompatible with `newAttempt`, a step loop, mining, DAG execution, or merge resolution. It
- * preserves the physical step, round, generation, accepted results, and spend history. The step must
+ * is incompatible with `newAttempt`, `needsRuntime`, a step loop, mining, DAG execution, or merge
+ * resolution. It preserves the physical step, round, generation, accepted results, and spend history. The step must
  * derive continuation authority and a finite work bound from durable state. New decisions must still
  * park; this option does not approve future proposals or guarantee a new invocation when refreshed
  * preparation returns false.
  */
 export class ReopenStepFormError extends Error {
   /** True when `message` is written for the user: the refreshed form then shows it as a note.
+   *  At most 2,000 characters are shown. With rerunPreForm the checkpoint retains
+   *  the text through dispatch/recovery for its eventual non-null form only.
    *  Plan steps reopen with internal control text, which stays out of the form. */
   readonly notice: boolean;
   /** Start a new durable batch after consuming the previous attempt's agent results.
@@ -592,8 +594,8 @@ export class ReopenStepFormError extends Error {
    *  currently 08e. */
   readonly newAttempt: boolean;
   /** Re-enter detect and the normal pre-form pipeline under recorded approval.
-   * Requires detect, form and llm.preForm; excludes newAttempt, loop, mining, DAG
-   * and merge resolution. Preserves step/round/generation and spend. The step
+   * Requires detect, form and llm.preForm; excludes newAttempt, needsRuntime, loop,
+   * mining, DAG and merge resolution. Preserves step/round/generation and spend. The step
    * derives authority and a finite work bound from durable state. New decisions
    * still park; prepare returning false need not create an invocation or form. */
   readonly rerunPreForm: boolean;

@@ -42,7 +42,12 @@ interface MockState {
     taskId: string;
     taskStepId: string;
     eventType: string;
-    payload: { version: number; rerunGeneration: number; checkpointEventId?: string };
+    payload: {
+      version: number;
+      rerunGeneration: number;
+      checkpointEventId?: string;
+      notice?: string;
+    };
   };
   workspaceResumeEvent?: MockState['continuationEvent'];
 }
@@ -3191,6 +3196,74 @@ describe('approved apply pre-form continuation', () => {
     expect(h.state.taskStepRow).toMatchObject({ formValues: null, pauseFormOnRetry: false });
   });
 
+  it('shows the continuation notice after dispatch, follow-up and completion', async () => {
+    const h = fixture();
+    expect((await h.advance({})).status).toBe('waiting_cli');
+    Object.assign(h.state.invocation!, { endedAt: new Date(), exitCode: 0, rawOutput: 'first' });
+    h.def.llm!.completePreForm = vi.fn(async () => ({
+      llmOutput: 'first',
+      continueRequested: true,
+    }));
+    expect((await h.advance()).status).toBe('waiting_cli');
+    Object.assign(h.state.invocation!, { endedAt: new Date(), exitCode: 0, rawOutput: 'last' });
+    h.def.llm!.completePreForm = vi.fn(async () => ({
+      llmOutput: 'last',
+      continueRequested: false,
+    }));
+    const result = await h.advance();
+    expect(result.status).toBe('waiting_form');
+    if (result.status !== 'waiting_form') throw new Error('expected fresh form');
+    expect(result.formSchema.fields).toContainEqual({
+      type: 'note',
+      id: 'reopenedFormNotice',
+      label: 'Review before continuing',
+      body: 'Continue approved work',
+      variant: 'warning',
+    });
+  });
+
+  it.each(['newer checkpoint', 'Retry'] as const)(
+    'does not resurrect a notice after a %s',
+    async (cut) => {
+      const h = fixture();
+      await h.advance({});
+      // Supply the persisted payload on the parent too, so this control tests reading, not writing.
+      h.state.continuationEvent!.payload.notice = 'Old notice';
+      Object.assign(h.state.invocation!, { endedAt: new Date(), exitCode: 0, rawOutput: 'fresh' });
+      if (cut === 'newer checkpoint') {
+        h.state.taskRow!.pausedAt = new Date();
+        h.def.apply = vi.fn(async () => {
+          throw new ReopenStepFormError('internal', { rerunPreForm: true });
+        });
+        // Finish the first held pass, answer its form, and start a later checkpoint without notice.
+        expect((await h.advance()).status).toBe('waiting_form');
+        expect((await h.advance({})).status).toBe('deferred');
+        expect(h.state.continuationEvent!.payload).not.toHaveProperty('notice');
+        h.state.taskRow!.pausedAt = null;
+        h.def.llm!.prepare = vi.fn(async () => false as const);
+      } else {
+        Object.assign(h.state.taskStepRow, {
+          status: 'waiting_cli',
+          rerunGeneration: 4,
+          detectOutput: null,
+        });
+      }
+      const result = await h.advance();
+      expect(result.status).toBe('waiting_form');
+      if (result.status !== 'waiting_form') throw new Error('expected fresh form');
+      expect(result.formSchema.fields.some((f) => f.id === 'reopenedFormNotice')).toBe(false);
+    },
+  );
+
+  it('bounds persisted continuation notice text', async () => {
+    const h = fixture();
+    h.def.apply = vi.fn(async () => {
+      throw new ReopenStepFormError('x'.repeat(2001), { rerunPreForm: true, notice: true });
+    });
+    expect((await h.advance({})).status).toBe('waiting_cli');
+    expect(h.state.continuationEvent!.payload.notice).toBe('x'.repeat(2000));
+  });
+
   it('the new park rejects the old job timestamp after the durable hold has cleared', async () => {
     const h = fixture();
     const oldTimestamp = Date.now();
@@ -3327,6 +3400,7 @@ describe('approved apply pre-form continuation', () => {
     'agentMining',
     'dagExecute',
     'mergeResolve',
+    'needsRuntime',
   ])('refuses incompatible %s before continuation writes or dispatch', async (bad) => {
     const h = fixture();
     if (bad === 'preForm') h.def.llm!.preForm = false;
@@ -3337,7 +3411,9 @@ describe('approved apply pre-form continuation', () => {
     else
       (h.def as unknown as Record<string, unknown>)[bad] = ['detect', 'form'].includes(bad)
         ? undefined
-        : {};
+        : bad === 'needsRuntime'
+          ? 'app'
+          : {};
     // Remove fan-out execution itself: request the invalid config from apply after the earlier phases.
     if (['loop', 'agentMining', 'dagExecute', 'mergeResolve'].includes(bad)) {
       delete (h.def as unknown as Record<string, unknown>)[bad];

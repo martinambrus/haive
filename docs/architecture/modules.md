@@ -701,11 +701,12 @@ By default, `ReopenStepFormError` refreshes detection and parks another form. Wi
 checkpoints the continuation, consumes only the completed invocation supplied to that apply pass,
 discards the old form and answer, and re-enters detect and the normal pre-form pipeline before
 deciding whether another form is needed. The option requires detect, form, and `llm.preForm`, and
-is incompatible with `newAttempt`, a step loop, mining, DAG execution, or merge resolution. It
-preserves the physical step, round, generation, accepted results, and spend history. The step must
+is incompatible with `newAttempt`, `needsRuntime`, a step loop, mining, DAG execution, or merge
+resolution. It preserves the physical step, round, generation, accepted results, and spend history. The step must
 derive continuation authority and a finite work bound from durable state. New decisions must still
 park; this option does not approve future proposals or guarantee a new invocation when refreshed
-preparation returns false.
+preparation returns false. Runtime-dependent steps are excluded because runtime admission can
+park their row as `pending`, which does not retain this held continuation shape.
 
 The default is false. Ordinary notice-only and `newAttempt` reopens retain their behavior.
 The checkpoint records a versioned, generation-bound `step.pre_form_continuation` event in the
@@ -714,7 +715,11 @@ An epoch takeover retains this policy; a new Retry generation must opt in again.
 An opted-in continuation can finish without a form when preparation returns false and the refreshed
 form is null. Synchronous and recovered continuations clear the old-answer hold only in the
 owned done write after apply succeeds; manual mode retains the host's generic Continue policy.
-A notice may decorate a non-null form but never forces one. Only one synchronous re-entry is permitted per advance;
+A `notice: true` message is stored as plain text (at most 2,000 characters, as on ordinary reopens)
+in that checkpoint event and decorates the eventual non-null refreshed form, including after
+dispatch or recovery. Only the latest checkpoint in the current generation supplies a notice;
+a later checkpoint without one or a Retry cannot resurrect it. A notice never forces a form.
+Only one synchronous re-entry is permitted per advance;
 a repeated request without an invocation park offers the decision/boundary form.
 
 `StepPrepareDeferredError` is the canonical pause-race signal from `prepare` or `prepareWorkspace`

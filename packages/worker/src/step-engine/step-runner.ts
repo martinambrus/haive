@@ -2329,6 +2329,12 @@ export async function consumeFoldedMiningRows(
     );
 }
 
+const REOPEN_FORM_NOTICE_MAX_LENGTH = 2_000;
+
+function reopenFormNotice(err: ReopenStepFormError): string | undefined {
+  return err.notice ? err.message.slice(0, REOPEN_FORM_NOTICE_MAX_LENGTH) : undefined;
+}
+
 const PRE_FORM_CONTINUATION_EVENT = 'step.pre_form_continuation';
 const PRE_FORM_WORKSPACE_RESUME_EVENT = 'step.pre_form_workspace_resume_deferred';
 const PRE_FORM_WORKSPACE_RESUME_DELAY_MS = 1_000;
@@ -2336,15 +2342,16 @@ const PRE_FORM_WORKSPACE_RESUME_DELAY_MS = 1_000;
 /** Retry can produce the same held row before its first pre-form invocation.
  * Require the checkpoint's generation-bound opt-in too. Epoch takeover preserves
  * it; Retry advances generation and therefore cannot inherit this dispatch policy. */
-export async function isHeldPreFormContinuation(
+async function heldPreFormContinuation(
   db: Database,
   step: StepDefinition,
   row: TaskStepRow,
-): Promise<boolean> {
+): Promise<{ notice?: string } | null> {
   if (!(
     step.detect &&
     step.form &&
     step.llm?.preForm &&
+    !step.needsRuntime &&
     !step.loop &&
     !step.agentMining &&
     !step.dagExecute &&
@@ -2354,7 +2361,7 @@ export async function isHeldPreFormContinuation(
     row.formSchema == null &&
     row.formValues == null
   ))
-    return false;
+    return null;
   const event = await db.query.taskEvents.findFirst({
     where: and(
       eq(schema.taskEvents.taskId, row.taskId),
@@ -2364,8 +2371,23 @@ export async function isHeldPreFormContinuation(
     orderBy: desc(schema.taskEvents.createdAt),
     columns: { payload: true },
   });
-  const optIn = event?.payload as { version?: unknown; rerunGeneration?: unknown } | undefined;
-  return optIn?.version === 1 && optIn.rerunGeneration === row.rerunGeneration;
+  const optIn = event?.payload as
+    { version?: unknown; rerunGeneration?: unknown; notice?: unknown } | undefined;
+  if (optIn?.version !== 1 || optIn.rerunGeneration !== row.rerunGeneration) return null;
+  return {
+    notice:
+      typeof optIn.notice === 'string'
+        ? optIn.notice.slice(0, REOPEN_FORM_NOTICE_MAX_LENGTH)
+        : undefined,
+  };
+}
+
+export async function isHeldPreFormContinuation(
+  db: Database,
+  step: StepDefinition,
+  row: TaskStepRow,
+): Promise<boolean> {
+  return (await heldPreFormContinuation(db, step, row)) !== null;
 }
 
 function validatePreFormReopen(step: StepDefinition, err: ReopenStepFormError): void {
@@ -2374,13 +2396,14 @@ function validatePreFormReopen(step: StepDefinition, err: ReopenStepFormError): 
     !step.form ||
     !step.llm?.preForm ||
     err.newAttempt ||
+    step.needsRuntime ||
     step.loop ||
     step.agentMining ||
     step.dagExecute ||
     step.mergeResolve
   )
     throw new Error(
-      'ReopenStepFormError.rerunPreForm requires detect, form and llm.preForm and excludes newAttempt, loop, mining, DAG and merge resolution',
+      'ReopenStepFormError.rerunPreForm requires detect, form and llm.preForm and excludes newAttempt, needsRuntime, loop, mining, DAG and merge resolution',
     );
 }
 
@@ -2446,6 +2469,7 @@ export async function checkpointPreFormContinuation(
   db: Database,
   ctx: StepContext,
   invocationId: string | null,
+  notice?: string,
 ): Promise<TaskStepRow> {
   return db.transaction(async (tx) => {
     if (invocationId) {
@@ -2492,7 +2516,11 @@ export async function checkpointPreFormContinuation(
       taskId: ctx.taskId,
       taskStepId: ctx.taskStepId,
       eventType: PRE_FORM_CONTINUATION_EVENT,
-      payload: { version: 1, rerunGeneration: ctx.rerunGeneration },
+      payload: {
+        version: 1,
+        rerunGeneration: ctx.rerunGeneration,
+        ...(notice ? { notice: notice.slice(0, REOPEN_FORM_NOTICE_MAX_LENGTH) } : {}),
+      },
     });
     return step;
   });
@@ -3796,9 +3824,9 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
       redetected = true;
     }
 
-    const heldAtStart = await isHeldPreFormContinuation(db, stepDef, current);
+    const heldAtStart = await heldPreFormContinuation(db, stepDef, current);
     let reenteredPreForm = false;
-    let reopenNotice: string | undefined;
+    let reopenNotice = heldAtStart?.notice;
     const runPipeline = async (): Promise<AdvanceStepResult> => {
       let detected = current.detectOutput;
       if (detected === null || detected === undefined) {
@@ -4406,9 +4434,10 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
                 db,
                 ctx,
                 applyArgs.llmInvocationId ?? null,
+                reopenFormNotice(applyErr),
               );
               reenteredPreForm = true;
-              reopenNotice = applyErr.notice ? applyErr.message : undefined;
+              reopenNotice = reopenFormNotice(applyErr);
               return runPipeline();
             }
             // No invocation or decision park ended this synchronous pass. Offer a
@@ -4471,12 +4500,13 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
                 `${meta.id} requested another form, but refreshed detection produced no form`,
               );
             }
-            if (applyErr.notice) {
+            const notice = reopenFormNotice(applyErr);
+            if (notice !== undefined) {
               refreshedSchema.fields.unshift({
                 type: 'note',
                 id: 'reopenedFormNotice',
                 label: 'Review before continuing',
-                body: applyErr.message,
+                body: notice,
                 variant: 'warning',
               });
             }

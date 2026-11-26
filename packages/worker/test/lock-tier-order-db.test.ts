@@ -840,9 +840,20 @@ describe.skipIf(!url)(
         expect((await runOf(R)).consumedAt).toBeInstanceOf(Date);
       });
 
-      it('a boot-recovered checkpoint is re-driven through pause, Resume, dispatch and a fresh form', async () => {
+      it('a boot-recovered checkpoint retains its notice through pause, Resume, dispatch and a fresh form', async () => {
         const { taskId, ctx } = await setup();
-        await checkpoint(ctx);
+        await runner.checkpointPreFormContinuation(db, ctx, R, 'Approved work continued');
+        const event = await db.query.taskEvents.findFirst({
+          where: and(
+            eq(schema.taskEvents.taskStepId, S.id),
+            eq(schema.taskEvents.eventType, 'step.pre_form_continuation'),
+          ),
+        });
+        expect(event!.payload).toMatchObject({
+          version: 1,
+          rerunGeneration: 4,
+          notice: 'Approved work continued',
+        });
         const queue = vi.fn(async () => {});
         await reconcileOrphanedSteps(db, {
           enqueueAdvance: queue,
@@ -893,7 +904,12 @@ describe.skipIf(!url)(
             .update(schema.cliInvocations)
             .set({ endedAt: AT, exitCode: 0, rawOutput: 'fresh result' })
             .where(eq(schema.cliInvocations.id, fresh.id));
-          expect((await advance()).status).toBe('waiting_form');
+          const result = await advance();
+          expect(result.status).toBe('waiting_form');
+          if (result.status !== 'waiting_form') throw new Error('expected fresh form');
+          expect(result.formSchema.fields).toContainEqual(
+            expect.objectContaining({ id: 'reopenedFormNotice', body: 'Approved work continued' }),
+          );
           expect(await rowOf(S.id)).toMatchObject({
             pauseFormOnRetry: false,
             formValues: null,
