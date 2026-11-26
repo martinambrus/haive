@@ -45,6 +45,10 @@ function processField(
   // `required` flag rejects a submission they had no way to complete. Treated as
   // optional rather than dropped: a hidden field still contributes its default, which
   // is what hidden-and-optional fields already did.
+  // Display-only fields carry no value, submitted or not. coerceField's absent branch defaulted
+  // them to null, so every answer gained a key per note (and per reopen notice): a step that
+  // accepts an exact key set (translator tr-review) refused every submission.
+  if (field.type === 'note' || field.type === 'global-kb-status') return;
   const visible = isFieldVisible(field, input);
   const raw = input[field.id];
   const coerced = coerceField(field, raw, issues, visible);
