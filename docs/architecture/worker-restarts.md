@@ -115,8 +115,8 @@ pipeline, with all local old inputs discarded. It permits only one synchronous r
 request without an invocation park returns a boundary form. The hold ignores old job payloads
 before the fresh park, then the ordinary stale-submit timestamp guard protects that park.
 A null form after prepare returns false is allowed; manual Continue policy still applies.
-A synchronous opt-in re-entry that finishes with a null form clears the old-answer hold only in
-the owned done write after apply succeeds. The hold remains through apply and any crash before it.
+A synchronous opt-in re-entry or boot/sweep-recovered held continuation that finishes with a null
+form clears the old-answer hold only in the owned done write after apply succeeds. The hold remains through apply and any crash before it.
 
 On this held continuation only, each fresh pre-form dispatch rechecks pause, including follow-ups
 requested by `completePreForm`. Completed results may still be accepted idempotently. A pause
@@ -127,8 +127,10 @@ the host verifies pause and, under the same lock order and ownership/generation/
 releases only this pass's unqueued, unstarted reservation. Outside this hold the signal is a
 configuration failure. Resume between the module's read and the host recheck re-invokes `prepare`
 once; a repeated signal without pause fails loudly. For `prepareWorkspace`, the released
-reservation requires a fresh pass: defer one second, recording the allowance on the generation's
-`step.pre_form_workspace_resume_deferred` event so another workspace refusal without pause fails rather than polling forever. `StepPrepareParkError` keeps its separate live-winner
+reservation requires a fresh pass: defer one second, recording the latest
+`step.pre_form_continuation` event id and generation in `step.pre_form_workspace_resume_deferred`.
+Each later checkpoint gets its own allowance; another workspace refusal for the same checkpoint
+without pause fails rather than polling forever. `StepPrepareParkError` keeps its separate live-winner
 contract. Ordinary module-schema deferrals retain their original delay.
 
 Rollback removes module opt-ins and imports of the new signal first. Keep capable workers until

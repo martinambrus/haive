@@ -15,7 +15,9 @@ import { runConfigStep } from '../src/step-engine/steps/workflow/06-run-config.j
 import { staleSubmitAction } from '../src/queues/_advance-guards.js';
 import * as activation from '../src/modules/activation.js';
 import * as dispatcher from '../src/orchestrator/dispatcher.js';
-import { advanceStep } from '../src/step-engine/step-runner.js';
+import { advanceStep, checkpointPreFormContinuation } from '../src/step-engine/step-runner.js';
+import { randomUUID } from 'node:crypto';
+import type { StepContext } from '../src/step-engine/step-definition.js';
 import { recordLedgerEntry } from '../src/step-engine/task-ledger.js';
 import { ReopenStepFormError, type StepDefinition } from '../src/step-engine/step-definition.js';
 import { preRagSourceSelectionStep } from '../src/step-engine/steps/workflow/01g-rag-source-selection.js';
@@ -36,10 +38,11 @@ interface MockState {
   beforeWrite?: (table: string, patch: Record<string, unknown>) => void;
   gate?: GateWorld;
   continuationEvent?: {
+    id: string;
     taskId: string;
     taskStepId: string;
     eventType: string;
-    payload: { version: number; rerunGeneration: number; workspaceResumeDeferred?: boolean };
+    payload: { version: number; rerunGeneration: number; checkpointEventId?: string };
   };
   workspaceResumeEvent?: MockState['continuationEvent'];
 }
@@ -257,6 +260,7 @@ function makeMockDb(state: MockState): Database {
           then: (resolve: (value: unknown) => unknown) => {
             if (tableName === 'task_events') {
               const event = {
+                id: randomUUID(),
                 taskId: v.taskId as string,
                 taskStepId: v.taskStepId as string,
                 eventType: v.eventType as string,
@@ -3425,6 +3429,82 @@ describe('approved apply pre-form continuation', () => {
     expect(h.enqueue).toHaveBeenCalledOnce();
   });
 
+  it('workspace races in two later checkpoints of one generation each defer', async () => {
+    const h = fixture();
+    h.def.llm!.prepareWorkspace = async () => {
+      throw new (await import('@haive/shared/step')).StepPrepareDeferredError();
+    };
+    expect(await h.advance({})).toMatchObject({ status: 'deferred', delayMs: 1_000 });
+    const first = h.state.continuationEvent!.id;
+    await checkpointPreFormContinuation(
+      makeMockDb(h.state),
+      {
+        taskId: 'task-1',
+        taskStepId: 'ts-1',
+        userId: 'user-1',
+        round: 0,
+        epoch: 7,
+        rerunGeneration: 3,
+      } as StepContext,
+      null,
+    );
+    expect(h.state.continuationEvent!.id).not.toBe(first);
+    expect(await h.advance()).toMatchObject({ status: 'deferred', delayMs: 1_000 });
+    expect(h.state.workspaceResumeEvent!.payload.checkpointEventId).toBe(
+      h.state.continuationEvent!.id,
+    );
+    expect(h.enqueue).not.toHaveBeenCalled();
+  });
+
+  it.each(['generation', 'checkpoint'] as const)(
+    'a stale workspace allowance from an older %s does not spend the current allowance',
+    async (stale) => {
+      const h = fixture();
+      h.state.taskRow!.pausedAt = new Date();
+      expect((await h.advance({})).status).toBe('deferred');
+      h.state.workspaceResumeEvent = {
+        ...h.state.continuationEvent!,
+        id: randomUUID(),
+        eventType: 'step.pre_form_workspace_resume_deferred',
+        payload: {
+          version: 1,
+          rerunGeneration: stale === 'generation' ? 2 : 3,
+          checkpointEventId:
+            stale === 'checkpoint' ? 'older-checkpoint' : h.state.continuationEvent!.id,
+        },
+      };
+      h.state.taskRow!.pausedAt = null;
+      h.def.llm!.prepareWorkspace = async () => {
+        throw new (await import('@haive/shared/step')).StepPrepareDeferredError();
+      };
+      expect(await h.advance()).toMatchObject({ status: 'deferred', delayMs: 1_000 });
+      expect(h.state.invocation!.supersededAt).toBeInstanceOf(Date);
+      expect(h.enqueue).not.toHaveBeenCalled();
+    },
+  );
+
+  it('a recovered null-form continuation clears the hold only after apply succeeds', async () => {
+    const h = fixture();
+    h.state.taskRow!.pausedAt = new Date();
+    expect((await h.advance({})).status).toBe('deferred');
+    h.state.taskRow!.pausedAt = null;
+    h.def.llm!.prepare = async () => false;
+    h.def.form = () => null;
+    h.def.apply = vi.fn(async () => {
+      expect(h.state.taskStepRow.status).not.toBe('done');
+      expect(h.state.taskStepRow.pauseFormOnRetry).toBe(true);
+      return { complete: true };
+    });
+    h.state.beforeWrite = (table, patch) => {
+      if (table === 'task_steps' && patch.pauseFormOnRetry === false)
+        expect(patch.status).toBe('done');
+    };
+    expect((await h.advance({ stale: true })).status).toBe('done');
+    expect(h.state.taskStepRow.pauseFormOnRetry).toBe(false);
+    expect(h.def.apply).toHaveBeenCalledOnce();
+    expect(h.enqueue).not.toHaveBeenCalled();
+  });
+
   it('a repeated workspace signal with no pause fails loudly on redelivery', async () => {
     const h = fixture();
     h.def.llm!.prepareWorkspace = async () => {
@@ -3434,6 +3514,8 @@ describe('approved apply pre-form continuation', () => {
     const result = await h.advance();
     expect(result.status).toBe('failed');
     expect(result.status === 'failed' && result.error).toMatch(/StepPrepareDeferredError.*pause/);
+    expect(h.state.invocations).toHaveLength(3);
+    expect(h.state.invocations![2]!.supersededAt).toBeInstanceOf(Date);
     expect(h.enqueue).not.toHaveBeenCalled();
   });
 

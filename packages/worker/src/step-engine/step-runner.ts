@@ -2331,6 +2331,7 @@ export async function consumeFoldedMiningRows(
 
 const PRE_FORM_CONTINUATION_EVENT = 'step.pre_form_continuation';
 const PRE_FORM_WORKSPACE_RESUME_EVENT = 'step.pre_form_workspace_resume_deferred';
+const PRE_FORM_WORKSPACE_RESUME_DELAY_MS = 1_000;
 
 /** Retry can produce the same held row before its first pre-form invocation.
  * Require the checkpoint's generation-bound opt-in too. Epoch takeover preserves
@@ -2566,12 +2567,26 @@ export async function deferPreFormContinuation(
         ),
         orderBy: desc(schema.taskEvents.createdAt),
       });
-      const payload = event?.payload as { rerunGeneration?: number } | undefined;
-      if (payload?.rerunGeneration === ctx.rerunGeneration) {
+      const checkpoint = await tx.query.taskEvents.findFirst({
+        where: and(
+          eq(schema.taskEvents.taskId, ctx.taskId),
+          eq(schema.taskEvents.taskStepId, ctx.taskStepId),
+          eq(schema.taskEvents.eventType, PRE_FORM_CONTINUATION_EVENT),
+        ),
+        orderBy: desc(schema.taskEvents.createdAt),
+        columns: { id: true },
+      });
+      if (!checkpoint) throw new StepSupersededError(ctx.taskStepId);
+      const payload = event?.payload as
+        { rerunGeneration?: number; checkpointEventId?: string } | undefined;
+      if (
+        payload?.rerunGeneration === ctx.rerunGeneration &&
+        payload?.checkpointEventId === checkpoint.id
+      ) {
         repeatedResumeRace = true;
         return durable;
       }
-      // Persist the one-race allowance so redelivery/recovery cannot spin forever.
+      // Persist the allowance for the latest checkpoint, including across recovery.
       await tx.insert(schema.taskEvents).values({
         taskId: ctx.taskId,
         taskStepId: ctx.taskStepId,
@@ -2579,6 +2594,7 @@ export async function deferPreFormContinuation(
         payload: {
           version: 1,
           rerunGeneration: ctx.rerunGeneration,
+          checkpointEventId: checkpoint.id,
         },
       });
       await markCliParkBegin(tx, current.id);
@@ -2600,7 +2616,13 @@ export async function deferPreFormContinuation(
   if (blocked) throw new Error(blocked);
   if (repeatedResumeRace)
     throw new Error('StepPrepareDeferredError repeated without current pause admission refusal');
-  return row ? { status: 'deferred', row, delayMs: pause ? PAUSE_POLL_MS : 1_000 } : null;
+  return row
+    ? {
+        status: 'deferred',
+        row,
+        delayMs: pause ? PAUSE_POLL_MS : PRE_FORM_WORKSPACE_RESUME_DELAY_MS,
+      }
+    : null;
 }
 
 /** The reopened form's consumed agent rows and its hold, in one transaction. The agent rows go
@@ -3774,6 +3796,7 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
       redetected = true;
     }
 
+    const heldAtStart = await isHeldPreFormContinuation(db, stepDef, current);
     let reenteredPreForm = false;
     let reopenNotice: string | undefined;
     const runPipeline = async (): Promise<AdvanceStepResult> => {
@@ -4793,12 +4816,15 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
 
       // The row is still done; handleResult turns loop_back into a new round at implement and
       // revise into a reset of its target.
-      const finalize = (patch: UpdatePatch) =>
-        (meta.id === INSIGHT_STEP || meta.id === '10-gate-3-commit') &&
-        ((output as { continuation?: unknown } | null)?.continuation ||
-          (output as { insightCheckpoint?: unknown } | null)?.insightCheckpoint)
+      const finalize = (patch: UpdatePatch) => {
+        if ((reenteredPreForm || heldAtStart) && persistedSchema === null)
+          patch = { ...patch, pauseFormOnRetry: false };
+        return (meta.id === INSIGHT_STEP || meta.id === '10-gate-3-commit') &&
+          ((output as { continuation?: unknown } | null)?.continuation ||
+            (output as { insightCheckpoint?: unknown } | null)?.insightCheckpoint)
           ? publishInsightStep(ctx, patch)
           : updateRow(db, current.id, patch);
+      };
       if (
         (meta.id === '08-phase-5-verify' &&
           (output as { passed?: boolean } | null)?.passed === false) ||
@@ -4866,7 +4892,6 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
         output,
         summary: curatedSummary,
         degradedNote,
-        ...(reenteredPreForm && persistedSchema === null ? { pauseFormOnRetry: false } : {}),
         statusMessage: null,
         // A row that ends successfully carries no error. The step may have failed on an earlier
         // attempt (an orphaned CLI, a transient dispatch failure) and error_message survived the

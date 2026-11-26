@@ -106,7 +106,9 @@ export class StepPrepareParkError extends Error {
 
 /** From prepare or prepareWorkspace on an opted-in held pre-form continuation,
  * yield this pass when current pause admission refuses dispatch. The host rechecks
- * pause; without a hold this is a configuration failure. Only this pass's unqueued
+ * pause; if Resume wins the race, prepare may run once more, or prepareWorkspace
+ * may run on a fresh pass after a one-second deferral (once per checkpoint).
+ * A repeat without pause or a signal without a hold fails. Only this pass's unqueued
  * reservation is released, under run -> step -> task fencing. History is retained. */
 export class StepPrepareDeferredError extends Error {
   constructor(message = 'pre-form continuation dispatch is paused') {
@@ -229,8 +231,9 @@ export interface LlmInvocationSpec {
    *  `prepare` cannot carry that work — it runs before the prompt is built (08a resolves
    *  the app login there and buildPrompt renders it), so it is a check-before-act and two
    *  concurrent advances can both pass its guard. A throw releases the reservation and
-   *  then fails the step, except StepPrepareDeferredError on a paused, opted-in
-   *  held pre-form continuation. */
+   *  then fails the step, except StepPrepareDeferredError on an opted-in held
+   *  pre-form continuation: the host rechecks pause and defers. If Resume wins
+   *  the race, it defers one second and prepares a fresh pass, once per checkpoint. */
   prepareWorkspace?: (args: LlmBuildArgs & { ctx: StepContext }) => Promise<void>;
   /** Retry the LLM phase when apply() throws — for steps whose output is a strict
    *  JSON contract a flaky model intermittently misses (emits prose, an empty turn,

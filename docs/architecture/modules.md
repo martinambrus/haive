@@ -712,8 +712,9 @@ The checkpoint records a versioned, generation-bound `step.pre_form_continuation
 same transaction. The hold alone does not opt in: ordinary Retry can produce the same row shape.
 An epoch takeover retains this policy; a new Retry generation must opt in again.
 An opted-in continuation can finish without a form when preparation returns false and the refreshed
-form is null; manual mode retains the host's generic Continue policy. A notice may decorate a
-non-null form but never forces one. Only one synchronous re-entry is permitted per advance;
+form is null. Synchronous and recovered continuations clear the old-answer hold only in the
+owned done write after apply succeeds; manual mode retains the host's generic Continue policy.
+A notice may decorate a non-null form but never forces one. Only one synchronous re-entry is permitted per advance;
 a repeated request without an invocation park offers the decision/boundary form.
 
 `StepPrepareDeferredError` is the canonical pause-race signal from `prepare` or `prepareWorkspace`
@@ -722,8 +723,10 @@ enqueue while pause admission refuses dispatch (an unreadable pause holds too). 
 that continuation hold this is an ordinary configuration failure. If Resume lands between the
 module's pause read and the host recheck, `prepare` is re-invoked once; a repeated signal with no
 pause fails as a configuration error. In `prepareWorkspace` the host releases the reservation and
-defers for one second to prepare a fresh pass. This allowance is recorded on the generation's
-`step.pre_form_workspace_resume_deferred` event; a repeated workspace signal with no pause fails rather than polling forever.
+defers for one second to prepare a fresh pass. The `step.pre_form_workspace_resume_deferred`
+event binds this allowance to the latest `step.pre_form_continuation` event id in the current
+generation. A later checkpoint gets its own allowance; a repeated workspace signal for the same
+checkpoint with no pause fails rather than polling forever.
 If this pass already inserted a reservation, the host releases only its own unqueued, unstarted
 invocation under run → step → task fencing. It preserves spend/history and the continuation
 checkpoint. It never converts owner/epoch/Stop/consent failures into a pause. The ordinary

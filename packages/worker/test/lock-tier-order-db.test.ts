@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import os from 'node:os';
 import path from 'node:path';
-import { and, asc, eq, inArray, sql } from 'drizzle-orm';
+import { and, asc, eq, inArray, isNull, sql } from 'drizzle-orm';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   createDatabase,
@@ -650,7 +650,8 @@ describe.skipIf(!url)(
           epoch: EPOCH,
           round: 0,
           rerunGeneration: 4,
-        } as StepContext;
+          logger: { warn: vi.fn() },
+        } as unknown as StepContext;
         return { taskId, ctx };
       };
       const taskOf = (taskId: string) =>
@@ -697,6 +698,117 @@ describe.skipIf(!url)(
         });
         expect(await runner.isHeldPreFormContinuation(db, step, await rowOf(S.id))).toBe(false);
       });
+
+      it('the latest of several same-generation checkpoints gets its own workspace race allowance', async () => {
+        const { taskId, ctx } = await setup();
+        const pause = vi.spyOn(configService, 'getBoolean').mockResolvedValue(false);
+        try {
+          for (let pass = 0; pass < 3; pass++) {
+            await checkpoint(ctx, pass === 0 ? R : null);
+            const id = randomUUID();
+            await db
+              .insert(schema.cliInvocations)
+              .values({ id, taskId, taskStepId: S.id, mode: 'cli', prompt: 'workspace race' });
+            expect(
+              await runner.deferPreFormContinuation(db, ctx, await rowOf(S.id), id, true),
+            ).toMatchObject({ status: 'deferred', delayMs: 1_000 });
+            expect((await runOf(id)).supersededAt).toBeInstanceOf(Date);
+          }
+          const checkpoints = await db.query.taskEvents.findMany({
+            where: and(
+              eq(schema.taskEvents.taskStepId, S.id),
+              eq(schema.taskEvents.eventType, 'step.pre_form_continuation'),
+            ),
+          });
+          const races = await db.query.taskEvents.findMany({
+            where: and(
+              eq(schema.taskEvents.taskStepId, S.id),
+              eq(schema.taskEvents.eventType, 'step.pre_form_workspace_resume_deferred'),
+            ),
+          });
+          expect(checkpoints).toHaveLength(3);
+          expect(races).toHaveLength(3);
+          expect(new Set(races.map((event) => event.payload!.checkpointEventId))).toEqual(
+            new Set(checkpoints.map((event) => event.id)),
+          );
+          expect((await rowOf(S.id)).rerunGeneration).toBe(4);
+          expect((await runOf(R)).tokenUsage).toMatchObject({ costUsd: 0.1 });
+        } finally {
+          pause.mockRestore();
+        }
+      });
+
+      it.each(['boot', 'stalled'] as const)(
+        'a %s-recovered null-form continuation clears the hold only in its owned done write',
+        async (reader) => {
+          const { taskId, ctx } = await setup();
+          await checkpoint(ctx);
+          const queue = vi.fn(async () => {});
+          if (reader === 'boot')
+            await reconcileOrphanedSteps(db, {
+              enqueueAdvance: queue,
+              queuedInvocationIds: async () => new Set(),
+            });
+          else
+            await redriveStalledTasks(
+              db,
+              {
+                queuedTaskJobs: async () => ({ steps: new Set(), starts: new Set() }),
+                enqueueAdvance: queue,
+                enqueueStart: async () => {},
+                failTask: async () => false,
+                queuedInvocationIds: async () => new Set(),
+              },
+              { staleMs: 0 },
+            );
+          expect(queue).toHaveBeenCalledOnce();
+          const task = (await taskOf(taskId))!;
+          const step = continuationStep();
+          step.llm!.prepare = async () => false;
+          step.form = () => null;
+          step.apply = vi.fn(async () => {
+            expect(await rowOf(S.id)).toMatchObject({
+              status: 'waiting_cli',
+              pauseFormOnRetry: true,
+            });
+            return { complete: true };
+          });
+          const config = vi.spyOn(configService, 'getBoolean').mockResolvedValue(false);
+          const get = vi.spyOn(configService, 'get').mockResolvedValue(null);
+          const enqueue = vi.fn(async () => {});
+          vi.stubEnv('HAIVE_TEST_BYPASS_LLM', '0');
+          try {
+            expect(
+              (
+                await runner.advanceStep({
+                  db,
+                  taskId,
+                  userId,
+                  stepDef: step,
+                  repoPath: NO_SUCH_DIR,
+                  workspacePath: NO_SUCH_DIR,
+                  cliProviderId: null,
+                  epoch: task.orchestrationEpoch,
+                  providers: [],
+                  deps: { enqueueCliInvocation: enqueue },
+                  formValues: { stale: true },
+                })
+              ).status,
+            ).toBe('done');
+            expect(await rowOf(S.id)).toMatchObject({
+              status: 'done',
+              pauseFormOnRetry: false,
+              rerunGeneration: 4,
+            });
+            expect(step.apply).toHaveBeenCalledOnce();
+            expect(enqueue).not.toHaveBeenCalled();
+          } finally {
+            config.mockRestore();
+            get.mockRestore();
+            vi.unstubAllEnvs();
+          }
+        },
+      );
 
       it('held insertion rolls its reservation back when a peer changes generation between insert and fence', async () => {
         const { taskId, ctx } = await setup();
@@ -937,100 +1049,218 @@ describe.skipIf(!url)(
         TEST_TIMEOUT,
       );
 
-      it.each([
-        'none',
-        'generation',
-        'epoch',
-        'owner',
-        'pointer',
-        'round',
-        'dead',
-        'failed',
-        'cancelled',
-        'completed',
-        'hold',
-        'started',
-        'superseded',
-      ])('pause reservation release is fenced on %s and retains all paid history', async (lost) => {
-        const { taskId, ctx } = await setup();
-        await checkpoint(ctx);
-        const current = await rowOf(S.id);
-        const reservationId = randomUUID();
-        await db.insert(schema.cliInvocations).values({
-          id: reservationId,
-          taskId,
-          taskStepId: S.id,
-          mode: 'cli',
-          prompt: 'unqueued reservation',
-        });
-        if (lost === 'generation')
+      it.each(['Stop', 'Cancel', 'Retry'] as const)(
+        'a %s overtaking a no-pause workspace release wins',
+        async (action) => {
+          const { taskId, ctx } = await setup();
+          await checkpoint(ctx);
+          const current = await rowOf(S.id);
+          const id = randomUUID();
           await db
-            .update(schema.taskSteps)
-            .set({ rerunGeneration: 5 })
-            .where(eq(schema.taskSteps.id, S.id));
-        else if (lost === 'hold')
-          await db
-            .update(schema.taskSteps)
-            .set({ pauseFormOnRetry: false })
-            .where(eq(schema.taskSteps.id, S.id));
-        else if (lost === 'epoch') ctx.epoch = EPOCH - 1;
-        else if (lost === 'owner') ctx.userId = randomUUID();
-        else if (lost === 'pointer')
-          await db
-            .update(schema.tasks)
-            .set({ currentStepId: MOVED_ON })
-            .where(eq(schema.tasks.id, taskId));
-        else if (lost === 'round')
-          await db.update(schema.tasks).set({ currentRound: 1 }).where(eq(schema.tasks.id, taskId));
-        else if (lost === 'dead')
-          await db.update(schema.tasks).set({ deadAt: AT }).where(eq(schema.tasks.id, taskId));
-        else if (lost === 'started')
-          await db
-            .update(schema.cliInvocations)
-            .set({ startedAt: AT })
-            .where(eq(schema.cliInvocations.id, reservationId));
-        else if (lost === 'superseded')
-          await db
-            .update(schema.cliInvocations)
-            .set({ supersededAt: AT })
-            .where(eq(schema.cliInvocations.id, reservationId));
-        else if (lost !== 'none')
-          await db
-            .update(schema.tasks)
-            .set({ status: lost as 'failed' | 'cancelled' | 'completed' })
-            .where(eq(schema.tasks.id, taskId));
-        const before = {
-          run: await runOf(reservationId),
-          paid: await runOf(R),
-          step: await rowOf(S.id),
-          task: await taskOf(taskId),
-        };
-        const pause = vi.spyOn(configService, 'getBoolean').mockResolvedValue(true);
-        try {
-          const release = (
-            runner as unknown as {
-              deferPreFormContinuation: (
-                db: Database,
-                ctx: StepContext,
-                current: Awaited<ReturnType<typeof rowOf>>,
-                id: string,
-              ) => Promise<unknown>;
-            }
-          ).deferPreFormContinuation(db, ctx, current, reservationId);
-          if (lost === 'none') {
-            await expect(release).resolves.toMatchObject({ status: 'deferred', delayMs: 30_000 });
-            expect((await runOf(reservationId)).supersededAt).toBeInstanceOf(Date);
-            expect((await rowOf(S.id)).waitingStartedAt).toBeInstanceOf(Date);
-          } else {
-            await expect(release).rejects.toBeInstanceOf(StepSupersededError);
-            expect(await runOf(reservationId)).toEqual(before.run);
-            expect(await rowOf(S.id)).toEqual(before.step);
-            expect(await taskOf(taskId)).toEqual(before.task);
+            .insert(schema.cliInvocations)
+            .values({ id, taskId, taskStepId: S.id, mode: 'cli', prompt: 'blocked reservation' });
+          const before = {
+            step: await rowOf(S.id),
+            paid: await runOf(R),
+            run: await runOf(id),
+            task: await taskOf(taskId),
+          };
+          const pause = vi.spyOn(configService, 'getBoolean').mockResolvedValue(false);
+          try {
+            const race = await interleave(
+              () => settle(runner.deferPreFormContinuation(db, ctx, current, id, true)),
+              {
+                first: lockRun(id),
+                second: async (tx) => {
+                  if (action === 'Retry')
+                    await tx
+                      .update(schema.taskSteps)
+                      .set({ rerunGeneration: 5 })
+                      .where(eq(schema.taskSteps.id, S.id));
+                  else
+                    await tx
+                      .update(schema.tasks)
+                      .set({ status: action === 'Stop' ? 'failed' : 'cancelled' })
+                      .where(eq(schema.tasks.id, taskId));
+                },
+              },
+              [S.id],
+            );
+            expectClean(race);
+            expect(race.result?.ok).toBe(false);
+            if (race.result && !race.result.ok)
+              expect(race.result.error).toBeInstanceOf(StepSupersededError);
+            expect(await runOf(id)).toEqual(before.run);
+            expect(await runOf(R)).toEqual(before.paid);
+            expect(await rowOf(S.id)).toEqual(
+              action === 'Retry' ? { ...before.step, rerunGeneration: 5 } : before.step,
+            );
+            expect(await taskOf(taskId)).toEqual(
+              action === 'Retry'
+                ? before.task
+                : { ...before.task, status: action === 'Stop' ? 'failed' : 'cancelled' },
+            );
+            expect(
+              await db.query.taskEvents.findMany({
+                where: and(
+                  eq(schema.taskEvents.taskStepId, S.id),
+                  eq(schema.taskEvents.eventType, 'step.pre_form_workspace_resume_deferred'),
+                ),
+              }),
+            ).toHaveLength(0);
+          } finally {
+            pause.mockRestore();
           }
-          expect(await runOf(R)).toEqual(before.paid);
-        } finally {
-          pause.mockRestore();
-        }
+        },
+        TEST_TIMEOUT,
+      );
+
+      describe.each([false, true])('reservation release with resumeRace=%s', (resumeRace) => {
+        it.each([
+          'none',
+          'generation',
+          'epoch',
+          'owner',
+          'pointer',
+          'round',
+          'dead',
+          'failed',
+          'cancelled',
+          'completed',
+          'hold',
+          'started',
+          'superseded',
+        ])('reservation release is fenced on %s and retains all paid history', async (lost) => {
+          const { taskId, ctx } = await setup();
+          await checkpoint(ctx);
+          const current = await rowOf(S.id);
+          const reservationId = randomUUID();
+          await db.insert(schema.cliInvocations).values({
+            id: reservationId,
+            taskId,
+            taskStepId: S.id,
+            mode: 'cli',
+            prompt: 'unqueued reservation',
+          });
+          if (lost === 'generation')
+            await db
+              .update(schema.taskSteps)
+              .set({ rerunGeneration: 5 })
+              .where(eq(schema.taskSteps.id, S.id));
+          else if (lost === 'hold')
+            await db
+              .update(schema.taskSteps)
+              .set({ pauseFormOnRetry: false })
+              .where(eq(schema.taskSteps.id, S.id));
+          else if (lost === 'epoch') ctx.epoch = EPOCH - 1;
+          else if (lost === 'owner') ctx.userId = randomUUID();
+          else if (lost === 'pointer')
+            await db
+              .update(schema.tasks)
+              .set({ currentStepId: MOVED_ON })
+              .where(eq(schema.tasks.id, taskId));
+          else if (lost === 'round')
+            await db
+              .update(schema.tasks)
+              .set({ currentRound: 1 })
+              .where(eq(schema.tasks.id, taskId));
+          else if (lost === 'dead')
+            await db.update(schema.tasks).set({ deadAt: AT }).where(eq(schema.tasks.id, taskId));
+          else if (lost === 'started')
+            await db
+              .update(schema.cliInvocations)
+              .set({ startedAt: AT })
+              .where(eq(schema.cliInvocations.id, reservationId));
+          else if (lost === 'superseded')
+            await db
+              .update(schema.cliInvocations)
+              .set({ supersededAt: AT })
+              .where(eq(schema.cliInvocations.id, reservationId));
+          else if (lost !== 'none')
+            await db
+              .update(schema.tasks)
+              .set({ status: lost as 'failed' | 'cancelled' | 'completed' })
+              .where(eq(schema.tasks.id, taskId));
+          const before = {
+            run: await runOf(reservationId),
+            paid: await runOf(R),
+            step: await rowOf(S.id),
+            task: await taskOf(taskId),
+          };
+          const pause = vi.spyOn(configService, 'getBoolean').mockResolvedValue(!resumeRace);
+          try {
+            const release = runner.deferPreFormContinuation(
+              db,
+              ctx,
+              current,
+              reservationId,
+              resumeRace,
+            );
+            if (lost === 'none') {
+              await expect(release).resolves.toMatchObject({
+                status: 'deferred',
+                delayMs: resumeRace ? 1_000 : 30_000,
+              });
+              expect((await runOf(reservationId)).supersededAt).toBeInstanceOf(Date);
+              expect((await rowOf(S.id)).waitingStartedAt).toBeInstanceOf(Date);
+              if (resumeRace) {
+                const events = await db.query.taskEvents.findMany({
+                  where: and(
+                    eq(schema.taskEvents.taskStepId, S.id),
+                    eq(schema.taskEvents.eventType, 'step.pre_form_workspace_resume_deferred'),
+                  ),
+                });
+                expect(events).toHaveLength(1);
+                const checkpointEvent = await db.query.taskEvents.findFirst({
+                  where: and(
+                    eq(schema.taskEvents.taskStepId, S.id),
+                    eq(schema.taskEvents.eventType, 'step.pre_form_continuation'),
+                  ),
+                });
+                expect(events[0]!.payload).toMatchObject({
+                  checkpointEventId: checkpointEvent!.id,
+                });
+                const second = randomUUID();
+                await db.insert(schema.cliInvocations).values({
+                  id: second,
+                  taskId,
+                  taskStepId: S.id,
+                  mode: 'cli',
+                  prompt: 'second reservation',
+                });
+                await expect(
+                  runner.deferPreFormContinuation(db, ctx, await rowOf(S.id), second, true),
+                ).rejects.toThrow(/repeated.*pause/);
+                expect((await runOf(second)).supersededAt).toBeInstanceOf(Date);
+                expect(
+                  await db.query.cliInvocations.findMany({
+                    where: and(
+                      eq(schema.cliInvocations.taskStepId, S.id),
+                      isNull(schema.cliInvocations.endedAt),
+                      isNull(schema.cliInvocations.supersededAt),
+                    ),
+                  }),
+                ).toHaveLength(0);
+              }
+            } else {
+              await expect(release).rejects.toBeInstanceOf(StepSupersededError);
+              expect(await runOf(reservationId)).toEqual(before.run);
+              expect(await rowOf(S.id)).toEqual(before.step);
+              expect(await taskOf(taskId)).toEqual(before.task);
+              expect(
+                await db.query.taskEvents.findMany({
+                  where: and(
+                    eq(schema.taskEvents.taskStepId, S.id),
+                    eq(schema.taskEvents.eventType, 'step.pre_form_workspace_resume_deferred'),
+                  ),
+                }),
+              ).toHaveLength(0);
+            }
+            expect(await runOf(R)).toEqual(before.paid);
+          } finally {
+            pause.mockRestore();
+          }
+        });
       });
 
       it.each(['boot', 'stalled'] as const)(
