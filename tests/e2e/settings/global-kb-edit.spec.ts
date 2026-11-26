@@ -222,7 +222,11 @@ test.describe('global KB authoring and editing', () => {
     const dialog = page.locator('[data-haive-dialog]');
     await dialog.getByRole('button', { name: 'Edit body' }).click();
     const editor = dialog.locator('[contenteditable="true"]');
+    // TipTap's deferred startup focus can replace fill's native select-all before its Delete.
+    // Wait for that focus to finish, then prove the body is empty before testing validation.
+    await expect(editor).toBeFocused();
     await editor.fill('');
+    await expect(editor).toBeEmpty();
     await dialog.getByRole('button', { name: 'Save body' }).click();
     await expect(dialog.getByText('The article body cannot be empty.')).toBeVisible();
     expect(mock.patches).toHaveLength(0);
