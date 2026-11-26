@@ -1,7 +1,11 @@
 import { describe, expect, it, vi } from 'vitest';
 import { schema, type Database } from '@haive/database';
 import { createFakeDb } from '@haive/database/testing';
+import { resolvePreferredProvider } from '@haive/shared/cli-preferred-provider';
 import { providerHoldFor } from '../src/queues/task-queue.js';
+import { resolveDispatch } from '../src/orchestrator/dispatcher.js';
+import { FixRoundCliUnavailable } from '../src/step-engine/steps/workflow/_fix-round-cli.js';
+import { resolvePreferredCli } from '../src/step-engine/step-runner.js';
 import { lspDispatchState } from '../src/lsp/configured-lsp.js';
 import type { StepDefinition } from '../src/step-engine/step-definition.js';
 import type { ResolvedTaskContext } from '../src/queues/run-list.js';
@@ -29,7 +33,7 @@ const TASK = '00000000-0000-4000-8000-000000000001';
 const TEMPLATE = '00000000-0000-4000-8000-0000000000e1';
 const CLAUDE = '00000000-0000-4000-8000-0000000000b1';
 const CODEX = '00000000-0000-4000-8000-0000000000b2';
-const STEP = 'hold-composed-llm';
+const STEP = '07-phase-2-implement';
 const IMAGE = {
   tag: 'img:1',
   imageId: 'sha256:1',
@@ -59,6 +63,11 @@ interface Setup {
   chosen?: string;
   /** Providers holding an effective retained composed image: the lock's set. */
   refs?: string[];
+  ignore?: boolean;
+  roleSaved?: string;
+  roundChoice?: string;
+  round?: number;
+  check?: (db: Database, ctx: ResolvedTaskContext) => Promise<void>;
 }
 
 async function hold(o: Setup) {
@@ -68,6 +77,7 @@ async function hold(o: Setup) {
     cliProviders: schema.cliProviders,
     taskStepCliChoices: schema.taskStepCliChoices,
     userStepCliPreferences: schema.userStepCliPreferences,
+    userStepCliRolePreferences: schema.userStepCliRolePreferences,
     taskSteps: schema.taskSteps,
   });
   fake.insert(schema.tasks, {
@@ -122,13 +132,30 @@ async function hold(o: Setup) {
       cliProviderId: o.chosen,
       effortLevel: null,
     });
+  if (o.roleSaved)
+    fake.insert(schema.userStepCliRolePreferences, {
+      userId: USER,
+      stepId: STEP,
+      role: 'reviewer',
+      cliProviderId: o.roleSaved,
+      explicit: true,
+    });
+  if (o.roundChoice)
+    fake.insert(schema.taskStepCliChoices, {
+      taskId: TASK,
+      stepId: STEP,
+      role: 'fix:2:default',
+      cliProviderId: o.roundChoice,
+      updatedAt: new Date(2),
+    });
   const ctx = {
     userId: USER,
     taskId: TASK,
     cliProviderId: o.own,
-    ignoreSavedStepClis: false,
+    ignoreSavedStepClis: o.ignore ?? false,
   } as unknown as ResolvedTaskContext;
-  return providerHoldFor(fake.db as unknown as Database, ctx, stepDef, 0, 0);
+  await o.check?.(fake.db as unknown as Database, ctx);
+  return providerHoldFor(fake.db as unknown as Database, ctx, stepDef, o.round ?? 0, 0);
 }
 
 describe('the provider hold of a composed task resolves the provider as the dispatcher does', () => {
@@ -183,5 +210,167 @@ describe('the provider hold of a composed task resolves the provider as the disp
     expect(read).not.toHaveBeenCalled();
     await hold({ composed: true, own: CLAUDE, off: [], saved: CODEX });
     expect(read).toHaveBeenCalledTimes(1);
+  });
+});
+
+it.each([
+  { own: CLAUDE, off: [CLAUDE], saved: CODEX },
+  { own: CLAUDE, off: [CODEX], saved: CODEX },
+  { own: null, off: [CODEX], saved: CODEX },
+  { own: CLAUDE, off: [CLAUDE], saved: CODEX, ignore: true },
+  { own: CLAUDE, off: [CODEX], roleSaved: CODEX },
+  { own: CLAUDE, off: [CLAUDE], roleSaved: CODEX },
+])('hold and dispatch agree: %j', async (setup) => {
+  let disabled = false;
+  let refusedProviderId: string | null = null;
+  const held = await hold({
+    ...setup,
+    composed: true,
+    check: async (db, ctx) => {
+      const providers = await db.select().from(schema.cliProviders);
+      const resolved = await resolvePreferredCli(
+        db,
+        USER,
+        STEP,
+        ctx.cliProviderId,
+        providers,
+        'default',
+        TASK,
+        ctx.ignoreSavedStepClis,
+      );
+      const lock = await lspDispatchState(db, TASK, [], false);
+      const plan = resolveDispatch({
+        providers,
+        preferredProviderId: resolved.cliProviderId,
+        savedPreference: resolved.savedPreference,
+        composedLspProviderIds: lock.composedProviderIds,
+        input: { kind: 'prompt', prompt: 'work', capabilities: [] },
+        invokeOpts: {},
+      });
+      const preferred = resolvePreferredProvider({
+        providers,
+        preferredProviderId: resolved.cliProviderId,
+        savedPreference: resolved.savedPreference,
+        composedLspProviderIds: lock.composedProviderIds,
+      });
+      disabled = preferred.kind === 'disabled';
+      if (preferred.kind === 'disabled') {
+        expect(preferred.provider.enabled).toBe(false);
+        refusedProviderId = preferred.provider.id;
+        expect(plan.mode).toBe('skip');
+        expect(plan.providerId).toBeNull();
+      } else {
+        expect(preferred.kind).toBe('use');
+        expect(plan.mode).not.toBe('skip');
+        expect(plan.providerId).toBe(CLAUDE);
+      }
+    },
+  });
+  expect(held !== null).toBe(disabled);
+  expect(held?.providerId ?? null).toBe(refusedProviderId);
+});
+
+it('a fix-round task choice remains explicit for both hold and dispatch', async () => {
+  let selected: string | null = null;
+  const result = await hold({
+    composed: true,
+    own: CLAUDE,
+    off: [],
+    saved: CODEX,
+    round: 2,
+    roundChoice: CLAUDE,
+    check: async (db, ctx) => {
+      const providers = await db.select().from(schema.cliProviders);
+      const resolved = await resolvePreferredCli(
+        db,
+        USER,
+        STEP,
+        ctx.cliProviderId,
+        providers,
+        'default',
+        TASK,
+        false,
+        2,
+      );
+      expect(resolved.savedPreference).toBeUndefined();
+      const plan = resolveDispatch({
+        providers,
+        preferredProviderId: resolved.cliProviderId,
+        composedLspProviderIds: [],
+        input: { kind: 'prompt', prompt: 'work', capabilities: [] },
+        invokeOpts: {},
+      });
+      selected = plan.providerId;
+    },
+  });
+  expect(selected).toBe(CLAUDE);
+  expect(result).toBeNull();
+});
+
+it('an unavailable fix-round CLI refuses both the hold and dispatch resolution', async () => {
+  await expect(
+    hold({
+      composed: true,
+      own: CLAUDE,
+      off: [CLAUDE],
+      saved: CODEX,
+      round: 2,
+      roundChoice: CLAUDE,
+    }),
+  ).rejects.toBeInstanceOf(FixRoundCliUnavailable);
+  await hold({
+    composed: true,
+    own: CLAUDE,
+    off: [CLAUDE],
+    roundChoice: CLAUDE,
+    check: async (db, ctx) => {
+      const providers = await db.select().from(schema.cliProviders);
+      await expect(
+        resolvePreferredCli(
+          db,
+          USER,
+          STEP,
+          ctx.cliProviderId,
+          providers,
+          'default',
+          TASK,
+          false,
+          2,
+        ),
+      ).rejects.toBeInstanceOf(FixRoundCliUnavailable);
+    },
+  });
+});
+
+it('named roles skip their own saved pick to the task CLI rather than an ordinary step choice', async () => {
+  await hold({
+    composed: true,
+    own: CLAUDE,
+    off: [CODEX],
+    chosen: CODEX,
+    roleSaved: CODEX,
+    check: async (db, ctx) => {
+      const providers = await db.select().from(schema.cliProviders);
+      const resolved = await resolvePreferredCli(
+        db,
+        USER,
+        STEP,
+        ctx.cliProviderId,
+        providers,
+        'reviewer',
+        TASK,
+        false,
+      );
+      const plan = resolveDispatch({
+        providers,
+        preferredProviderId: resolved.cliProviderId,
+        savedPreference: resolved.savedPreference,
+        composedLspProviderIds: [],
+        input: { kind: 'prompt', prompt: 'work', capabilities: [] },
+        invokeOpts: {},
+      });
+      expect(plan.providerId).toBe(CLAUDE);
+      expect(plan.skippedSavedPreference?.providerId).toBe(CODEX);
+    },
   });
 });

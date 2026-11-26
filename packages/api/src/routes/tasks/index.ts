@@ -73,6 +73,10 @@ import {
 } from '@haive/shared';
 import { clampVoteScore } from '@haive/shared/fair-priority';
 import {
+  composedLspAllowedSet,
+  resolvePreferredProvider,
+} from '@haive/shared/cli-preferred-provider';
+import {
   blockersOutsideSet,
   computePlanSequence,
   loadPlanEdges,
@@ -145,6 +149,7 @@ import {
   findAdminPausedTaskIds,
   findQueuedInvocationStepIds,
   loadFinishedRunsRevision,
+  loadComposedProviderSets,
   clearCancelledTaskPause,
   liftReadPause,
   loadTaskTypeLabels,
@@ -1288,20 +1293,40 @@ taskRoutes.get('/:id', async (c) => {
     executionContract: _execution,
     ...taskFields
   } = task;
+  const composedIds = task.envTemplateId
+    ? (await loadComposedProviderSets(db, [id])).get(id)
+    : undefined;
   const providerRows =
-    task.cliProviderId === null
+    task.cliProviderId === null || composedIds !== undefined
       ? await db
           .select({
             id: schema.cliProviders.id,
+            name: schema.cliProviders.name,
+            label: schema.cliProviders.label,
             enabled: schema.cliProviders.enabled,
             createdAt: schema.cliProviders.createdAt,
           })
           .from(schema.cliProviders)
           .where(eq(schema.cliProviders.userId, userId))
       : [];
+  const preferred = resolvePreferredProvider({
+    providers: providerRows,
+    preferredProviderId: task.cliProviderId,
+    composedLspProviderIds: composedIds,
+  });
+  const allowed = composedLspAllowedSet(providerRows, composedIds);
+  const effectiveCliProviderId =
+    preferred.kind === 'locked'
+      ? null
+      : preferred.kind === 'disabled'
+        ? preferred.provider.id
+        : resolveTaskCliProviderId(
+            preferred.providerId,
+            allowed ? providerRows.filter((p) => allowed.has(p.id)) : providerRows,
+          );
   const taskWithActive = {
     ...taskFields,
-    effectiveCliProviderId: resolveTaskCliProviderId(task.cliProviderId, providerRows),
+    effectiveCliProviderId,
     typeLabel: typeLabels.get(task.type) ?? null,
     pausedByAdmin: adminPausedIds.has(id),
     pauseLocked: adminPauseLocks(adminPausedIds.has(id), c.get('userRole')),

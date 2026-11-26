@@ -12,6 +12,7 @@ function setup(pins: Record<string, unknown>, deps: Record<string, unknown> = {}
     tasks: schema.tasks,
     repositories: schema.repositories,
     envTemplates: schema.envTemplates,
+    cliProviders: schema.cliProviders,
   });
   fake.insert(schema.tasks, {
     id: '00000000-0000-4000-8000-000000000001',

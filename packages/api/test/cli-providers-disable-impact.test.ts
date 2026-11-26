@@ -401,3 +401,33 @@ describe('provider disable impact', () => {
     expect(await response.json()).toEqual({ taskCount: 5, stepCount: 10 });
   });
 });
+
+it.each([true, false])('composed impact skips outside saved CLI, enabled=%s', async (enabled) => {
+  const own = randomUUID();
+  const template = randomUUID();
+  fake.patch(schema.cliProviders, providerId, { name: 'codex', enabled });
+  fake.insert(schema.cliProviders, {
+    id: own,
+    userId: h.userId,
+    name: 'claude-code',
+    label: 'Claude',
+    enabled: true,
+  });
+  fake.insert(schema.envTemplates, {
+    id: template,
+    declaredDeps: { lspInstallContractVersion: 2 },
+  });
+  task({ cliProviderId: own, envTemplateId: template, runListSnapshot: ['cli'] });
+  fake.insert(schema.userStepCliPreferences, {
+    userId: h.userId,
+    stepId: 'cli',
+    cliProviderId: providerId,
+    explicit: true,
+  });
+  const db = fake.db as unknown as Database;
+  expect(await providerDisableImpact(db, h.userId, providerId)).toEqual({
+    taskCount: 0,
+    stepCount: 0,
+  });
+  expect(await providerDisableImpact(db, h.userId, own)).toEqual({ taskCount: 1, stepCount: 1 });
+});
