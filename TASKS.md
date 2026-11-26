@@ -1231,7 +1231,7 @@ The step card shows `Show RAG stats` for every step that ran an agent (`ranAgent
 
 ### T770 · A form note defaulted to null broke the translator review form
 
-status: in review #1346 · kind: fix · found: owner task ae8fb29c 2026-11-26 · priority: P1
+status: done 2026-11-26, #1346 (e8a0fa2d4, deployed with `pnpm docker libs`); owner to resubmit the parked review form · kind: fix · found: owner task ae8fb29c 2026-11-26 · priority: P1
 
 `validateFormValues` (`shared/src/step-engine/schemas.ts`) gave every note the page did not send a `null` value, so saved answers gained a key per note and per reopen notice. `parseApproval` in the translator's `tr-review` accepts an exact key set, so every submission came back as "Submit the form as shown". Nothing was recorded, no paid call was spent.
 
