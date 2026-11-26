@@ -738,10 +738,15 @@ export function resolveDispatch(req: DispatchRequest): DispatchPlan {
   if (preferred.kind === 'locked') return skipPlan(composedLspLockReason(preferred.label));
   const { providerId: preferredId, skipped } = preferred;
   const composedSet = composedLspAllowedSet(req.providers, req.composedLspProviderIds);
-  const enabled = req.providers.filter((p) => p.enabled && (!composedSet || composedSet.has(p.id)));
+  const allowed = req.providers.filter((p) => !composedSet || composedSet.has(p.id));
+  const enabled = allowed.filter((p) => p.enabled);
 
   if (enabled.length === 0) {
-    return skipPlan(composedSet ? composedLspLockReason(null) : 'no enabled cli providers');
+    return skipPlan(
+      composedSet
+        ? composedLspLockReason(null, allowed.map(providerLabel))
+        : 'no enabled cli providers',
+    );
   }
 
   const needsSubagents = req.input.capabilities.includes('subagents');
@@ -1151,7 +1156,22 @@ function assignedPersonaIds(req: DispatchRequest, prompts: string[]): string[] {
 }
 
 /** Display copy for a contract 2 task refused a provider that holds no verified composed image. */
-function composedLspLockReason(label: string | null): string {
+const MAX_DISABLED_PROVIDER_LABELS = 5;
+
+function composedLspLockReason(
+  label: string | null,
+  disabledLabels: readonly string[] = [],
+  labelLimit = MAX_DISABLED_PROVIDER_LABELS,
+): string {
+  if (label === null && disabledLabels.length > 0) {
+    const names = disabledLabels
+      .slice(0, labelLimit)
+      .map((name) => `"${name}"`)
+      .join(', ');
+    const more =
+      disabledLabels.length > labelLimit ? ` and ${disabledLabels.length - labelLimit} more` : '';
+    return `the CLI providers allowed by this task's composed language-server image exist but are disabled: ${names}${more}; re-enable one of them in CLI providers, then Retry this step`;
+  }
   const remedy =
     'choose that provider, or start a new task that keeps the language servers in the environment image';
   return label
