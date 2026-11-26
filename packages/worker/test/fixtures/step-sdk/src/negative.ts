@@ -50,3 +50,12 @@ export function invalidFixLoopReads(host: import('@haive/shared/step').StepHostS
   // @ts-expect-error The fix request read takes no options.
   void host.loadFixLoopDiagnosis({ round: 1 });
 }
+
+export const asynchronousTitle = {
+  ...steps[0],
+  llm: {
+    ...steps[0].llm,
+    // @ts-expect-error A run title is synchronous display text, never a promise.
+    runTitle: async () => 'Report',
+  },
+} satisfies StepDefinition<{ path: string }, { report: string }>;

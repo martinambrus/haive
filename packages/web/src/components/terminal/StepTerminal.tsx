@@ -415,6 +415,7 @@ function InvocationPanel({
   // auto-scroll fallback target (data-cli-queued) when nothing on the step is running.
   const isQueued = invocation.isActive && invocation.startedAt === null;
   const agentTitle = distinctAgentTitle(invocation.agentTitle, invocation.assignedAgentIds);
+  const runLabel = label && agentTitle ? `${label} · ${agentTitle}` : label;
   return (
     // scroll-mt-12: the auto-scroll aligns a panel's TOP with the viewport top and a
     // fixed 39px bar spans the content column — without the margin this panel's run
@@ -434,14 +435,24 @@ function InvocationPanel({
         className="flex w-full flex-wrap items-center gap-2 text-left text-[11px] text-neutral-400"
       >
         <span className="text-neutral-500">{expanded ? '▼' : '▶'}</span>
-        {label && <span className="font-medium text-neutral-200">{label}</span>}
+        {runLabel && (
+          <span
+            className="max-w-full truncate font-medium text-neutral-200 sm:max-w-[24rem]"
+            title={runLabel}
+          >
+            {runLabel}
+          </span>
+        )}
         <AgentPersonaBadges ids={invocation.assignedAgentIds} />
         {/* Fan-out titles name the specific finding an agent works ("Refuter 2/4
             [reachability] — high installer/actions_step_4.php:36 · <issue>"), long enough to
             push the badges and the runtime onto their own line. Capped and ellipsized; the
             full string stays readable on hover. */}
-        {agentTitle && (
-          <span className="max-w-[24rem] truncate font-medium text-indigo-300" title={agentTitle}>
+        {agentTitle && !label && (
+          <span
+            className="max-w-full truncate font-medium text-indigo-300 sm:max-w-[24rem]"
+            title={agentTitle}
+          >
             {agentTitle}
           </span>
         )}

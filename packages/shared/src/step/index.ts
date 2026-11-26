@@ -145,6 +145,13 @@ export interface LlmBuildArgs {
 export interface LlmInvocationSpec {
   requiredCapabilities: StepCapability[];
   buildPrompt: (args: LlmBuildArgs) => string;
+  /** Optional plain-text run label, computed host-side at each fresh dispatch with
+   * the same arguments as buildPrompt, after prepare. The host removes controls,
+   * trims and caps it at 256 Unicode characters for agent_title. Null, empty or
+   * throwing callbacks leave the run untitled; failures are logged without payloads.
+   * Existing loop role/pass titles take precedence. Choose display-safe metadata:
+   * include no secrets or user content beyond what the step deliberately exposes. */
+  runTitle?: (args: LlmBuildArgs) => string | null;
   /** Repack optional context after all dispatch additions have been measured. */
   promptBudget?: {
     maxChars: number;

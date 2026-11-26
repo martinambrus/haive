@@ -544,6 +544,22 @@ for its fence writers, name filters and lint line map. Review imports the portab
 guards; all other shared entries remain unable to reach any SDK entry. No extra subpath
 is published.
 
+A step's optional `llm.runTitle(args)` returns a plain-text run title or null. The host
+calls it for each fresh LLM dispatch after `prepare`, with the same `LlmBuildArgs` as
+`buildPrompt` (detection, form values and resolved integration account labels). It stores
+the result in `cli_invocations.agent_title`, including pre-form and apply-time dispatches,
+continuations, retries and re-rolls. Existing loop role/pass titles take precedence;
+mining and step-summary titles keep their separate contracts. A reused invocation keeps
+its recorded title. The terminal combines a distinct title with its run number, truncates
+long labels and exposes the full text on hover; titles repeating assigned personas are hidden.
+
+Titles are display metadata: choose plain text, with no secrets or user content beyond
+what the step deliberately decides to expose. The host removes control/format characters
+and line separators, trims whitespace and bounds the result to `MAX_RUN_TITLE_CHARS`
+(256 Unicode characters, the column limit). Null leaves the title unset; empty, invalid
+or throwing callbacks are ignored with payload-free warnings and cannot fail dispatch.
+Steps without the hook keep their existing null title. No migration is required.
+
 A module step may declare `attachmentContext: 'none'` directly on `StepDefinition`, including
 a mining-only step with no `llm` phase. Unset or `'notice'` preserves automatic attachment
 context. `'none'` skips the dispatch's automatic archive expansion, attachment lookup/list and

@@ -50,6 +50,8 @@ const step = {
   llm: {
     requiredCapabilities: [],
     buildPrompt: () => 'Return a report.',
+    runTitle: ({ detected, formValues }) =>
+      formValues['untitled'] ? null : `Report ${String(detected)}`,
     planSnapshot: () => snapshot,
     retry: { maxAttempts: 2, retryOn: (error: unknown) => error instanceof RetryableParseError },
   },
