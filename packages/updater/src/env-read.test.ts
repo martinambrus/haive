@@ -41,9 +41,11 @@ it('ignores assignment-shaped text in multiline quotes and uses the last assignm
 it('rejects unclosed quotes consistently with required-key parsing', async () => {
   await writeFile(file, "HAIVE_VERSION='broken\n");
   await expect(ensureEnvKeys(file, [{ key: 'HAIVE_VERSION', generate: 'never' }])).rejects.toThrow(
-    'syntax',
+    'could not read required env keys; check .env syntax',
   );
-  await expect(readEnvVar(file, 'HAIVE_VERSION')).rejects.toThrow('syntax');
+  await expect(readEnvVar(file, 'HAIVE_VERSION')).rejects.toThrow(
+    'readEnvVar: could not parse .env; check .env syntax',
+  );
 });
 
 it('distinguishes an absent value from an explicitly empty one', async () => {

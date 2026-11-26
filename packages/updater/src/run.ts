@@ -108,7 +108,7 @@ export async function readEnvVar(envFile: string, key: string): Promise<string |
     if (!(await dir.entry(name))) throw new Error('install env file is missing');
     const file = await dir.read(name);
     if (!file) throw new Error('install env file is missing');
-    return envValue(file.bytes.toString('utf8'), key);
+    return envValue(file.bytes.toString('utf8'), key, 'readEnvVar');
   });
 }
 

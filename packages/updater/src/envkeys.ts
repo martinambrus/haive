@@ -10,7 +10,11 @@ type EnvKeys = NonNullable<ReleaseManifest['bundle']>['env'];
  * The required-key writer exposes names only; display readers select literals below. A key whose unquoted or
  * double-quoted value holds a `$` reference goes into `interpolated`: Compose substitutes it
  * when it reads `.env`, so the written text says nothing about the value it will use. */
-function values(text: string, interpolated: Set<string>): Map<string, string> {
+function values(
+  text: string,
+  interpolated: Set<string>,
+  parseError = 'could not read required env keys',
+): Map<string, string> {
   const result = new Map<string, string>();
   const lines = text.split(/\r?\n/);
   for (let i = 0; i < lines.length; i++) {
@@ -31,8 +35,7 @@ function values(text: string, interpolated: Set<string>): Map<string, string> {
           else end++;
         }
         if (end < value.length) break;
-        if (++i >= lines.length)
-          throw new Error('could not read required env keys; check .env syntax');
+        if (++i >= lines.length) throw new Error(`${parseError}; check .env syntax`);
         value += '\n' + lines[i];
       }
       value = value.slice(1, end);
@@ -46,8 +49,8 @@ function values(text: string, interpolated: Set<string>): Map<string, string> {
 }
 
 /** Read one assignment with the same quote, comment and duplicate rules as required keys. */
-export function envValue(text: string, key: string): string | null {
-  return values(text, new Set()).get(key) ?? null;
+export function envValue(text: string, key: string, caller = 'envValue'): string | null {
+  return values(text, new Set(), `${caller}: could not parse .env`).get(key) ?? null;
 }
 
 /** Display-only literals: an interpolated value needs Compose and is deliberately unresolved. */
