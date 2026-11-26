@@ -1222,6 +1222,15 @@ In `martinambrus/haive-module-translator`. The owner's English-to-Slovak run fai
 
 1. Accept a declined form (same stem, up to 2 trailing letters changed on words of 5+ letters) at every keep-term check; a translated name still fails; codes and short words stay exact. Then the owner Retries the step.
 
+### T776 · RAG stats panel mixes rounds of a re-run step
+
+status: open · kind: bug · found: T769 build 2026-11-26 (Codex found-not-fixed) · priority: P3
+
+The step RAG stats endpoint selects by logical step id without a round selector (`api/src/routes/tasks/steps.ts` ~:883), so on a step that ran in several fix rounds the panel opened from one round's card can show another round's queries. T769's per-row count uses the row's own time window, so a card can say "No RAG used" while the panel would list queries from another round.
+
+1. Scope the panel request to the step row (or round) the card belongs to, using the same predicate as T769's count (`api/src/routes/tasks/_rag-queries.ts`).
+2. Control: two rounds of one step, each card's panel and count agree.
+
 ### T775 · Step terminal runs carry a title saying what each run did
 
 status: open, in work, design confirmed by owner 2026-11-26 · kind: ux · found: owner task ae8fb29c 2026-11-26 · priority: P2
