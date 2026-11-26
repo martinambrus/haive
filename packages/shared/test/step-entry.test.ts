@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import * as step from '@haive/shared/step';
 
 describe('public step entry', () => {
-  it('exports only the nine runtime constructors', () => {
+  it('exports only the ten runtime constructors', () => {
     expect(Object.keys(step).sort()).toEqual([
       'AdvisedStepError',
       'MiningRetryError',
@@ -11,6 +11,7 @@ describe('public step entry', () => {
       'ReopenStepFormError',
       'RetryableParseError',
       'StepPrepareDeferredError',
+      'StepPrepareFormError',
       'StepPrepareParkError',
       'TaskCancelledError',
     ]);
@@ -84,4 +85,14 @@ it('opts into pre-form re-entry and exposes the canonical pause signal', () => {
       step as unknown as { StepPrepareDeferredError: new () => Error }
     ).StepPrepareDeferredError().name,
   ).toBe('StepPrepareDeferredError');
+});
+
+it('exposes a payload-free decision form signal', () => {
+  const err = new step.StepPrepareFormError();
+  expect(err).toBeInstanceOf(Error);
+  expect(err).toMatchObject({
+    name: 'StepPrepareFormError',
+    message: 'pre-form dispatch requires a decision form',
+  });
+  expect(Object.keys(err)).toEqual(['name']);
 });

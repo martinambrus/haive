@@ -114,6 +114,12 @@ The current advance immediately re-enters the shared detect/pre-form/prepareForm
 pipeline, with all local old inputs discarded. It permits only one synchronous re-entry; a second
 request without an invocation park returns a boundary form. The hold ignores old job payloads
 before the fresh park, then the ordinary stale-submit timestamp guard protects that park.
+If the worker dies after saving the refreshed schema but before parking it, the same
+versioned, generation-bound checkpoint and unanswered hold identify that saved schema as
+ready. Pickup resumes form handling and parks it without repeating prepare, result acceptance,
+reservation or dispatch. The checkpoint cleared the old schema atomically, so this cannot
+adopt the previous form. The hold and checkpoint binding remain required until the park;
+a saved answer, a Retry generation or an unreadable latest checkpoint cannot qualify.
 A null form after prepare returns false is allowed; manual Continue policy still applies.
 A synchronous opt-in re-entry or boot/sweep-recovered held continuation that finishes with a null
 form clears the old-answer hold only in the owned done write after apply succeeds. The hold remains through apply and any crash before it.
@@ -133,9 +139,46 @@ Each later checkpoint gets its own allowance; another workspace refusal for the 
 without pause fails rather than polling forever. `StepPrepareParkError` keeps its separate live-winner
 contract. Ordinary module-schema deferrals retain their original delay.
 
-Rollback removes module opt-ins and imports of the new signal first. Keep capable workers until
-all resumable held continuations settle or park safely. No migration is added or reversed;
-retain invocation, acceptance, consent and spend history. Downgrading under live work is unsafe.
+**An opted-in pre-form dispatch refusal recovers on a decision form.**
+`llm.allowPreFormDecisionFallback` requires singleton pre-form detect/form/completePreForm,
+without runtime, loop, mining, DAG or merge execution, validated before mutation. A follow-up
+`prepare:false` keeps the default invariant unless opted in. With the opt-in it checkpoints a
+form barrier, refreshes detection and calls `completePreForm` with null output and invocation id.
+It never reuses the completed id or requests another dispatch from that fallback.
+
+`StepPrepareFormError` is handled only from the opted-in `prepareWorkspace` before enqueue
+has been attempted. In one run → step → task transaction the host ends, supersedes and consumes
+only this pass's just-inserted unqueued reservation, refusing a started/ended/superseded/consumed
+run. It preserves accounting and writes the same A1 held `waiting_cli`/task `running` checkpoint,
+clearing the old form and answers, with `decisionForm: true` on the current-generation
+`step.pre_form_continuation` event. Owner, generation, epoch, live/nondead status, pointer and
+round fence the whole transaction; an overtaking Stop/Cancel/Retry rolls cleanup back and no
+winner is changed. No external caller may nominate a run to release.
+
+A crash before cleanup commit leaves the inserted orphan with normal recovery. A crash after
+commit, including a lost cleanup acknowledgment, leaves the A1 no-live-run recovery shape.
+Both boot and stalled readers re-drive it without resetting generation or accounting. The
+marker prevents prepare/dispatch on pickup even when admission subsequently changes. The same
+advance, or recovery after a pause, refreshes detection after cleanup and builds a real decision
+form with null output/id. Null forms and repeated continuation requests fail configuration.
+Pause defers this fallback through A1; `StepPrepareDeferredError` keeps its existing contract.
+Old queued answers stay suppressed until the new form parks, after which the usual timestamp
+guard protects it. Unanswered forms remain ordinary durable decision barriers.
+
+Rollback first stops new fallback work. Retain a capable worker AND the module opt-in until
+all held decision checkpoints park real forms or settle. Let queued advances finish and boot/stalled
+recovery re-drive interrupted checkpoints; Resume paused tasks when appropriate. Check for current
+`waiting_cli` steps with `pause_form_on_retry`, null answers (with or without a saved schema)
+and a latest same-generation `step.pre_form_continuation` event carrying `decisionForm: true`: none may remain before removing
+the opt-in. Pickup without it fails loudly even on a capable worker. Retain compatible decision
+handlers for parked forms until owners settle them, then remove importing consumers before
+reverting host symbols. An older A1 worker cannot interpret the marker. No migration is added or
+reversed; retain invocation, acceptance, consent and spend history. Never downgrade under live work.
+
+A database error during the refusal checkpoint rolls that transaction back. The host then attempts
+to supersede only its exact still-unstarted, unended, unsuperseded, unconsumed reservation before
+propagating the error. Fence losses leave moved runs untouched; if the database also refuses the
+release, normal orphan recovery remains responsible. No enqueue is attempted on any refusal path.
 
 **A running task that nothing drives is taken over.** A `running` task whose current step row is
 missing, `pending` and not parked, parked with a heartbeat older than the cutoff, `running` with no

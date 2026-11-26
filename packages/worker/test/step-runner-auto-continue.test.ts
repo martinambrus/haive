@@ -47,6 +47,7 @@ interface MockState {
       rerunGeneration: number;
       checkpointEventId?: string;
       notice?: string;
+      decisionForm?: boolean;
     };
   };
   workspaceResumeEvent?: MockState['continuationEvent'];
@@ -152,6 +153,28 @@ function conditionColumns(node: unknown, acc: string[] = []): string[] {
     conditionColumns(obj.queryChunks, acc);
   }
   return acc;
+}
+
+/** Evaluate SQL IS NULL guards, including a missing timestamp on a fresh fake row. */
+function nullPredicatesHold(node: unknown, row: Record<string, unknown>): boolean {
+  if (Array.isArray(node)) return node.every((part) => nullPredicatesHold(part, row));
+  if (!node || typeof node !== 'object') return true;
+  const chunks = (node as { queryChunks?: unknown[] }).queryChunks;
+  if (!chunks) return true;
+  for (let i = 0; i < chunks.length - 1; i++) {
+    const column = chunks[i] as { table?: unknown; name?: string };
+    const suffix = chunks[i + 1] as { value?: unknown };
+    if (
+      column?.table &&
+      column.name &&
+      Array.isArray(suffix?.value) &&
+      suffix.value.join('').trim().toLowerCase() === 'is null'
+    ) {
+      const key = column.name.replace(/_([a-z])/g, (_, char: string) => char.toUpperCase());
+      if (row[key] != null) return false;
+    }
+  }
+  return chunks.every((part) => nullPredicatesHold(part, row));
 }
 
 /** The row guards, evaluated against the mock row: a pass's write lands only while the row is not
@@ -313,7 +336,8 @@ function makeMockDb(state: MockState): Database {
               if (
                 tableName === 'cli_invocations' &&
                 state.invocation &&
-                !conditionValues(cond).includes(state.invocation.id)
+                (!conditionValues(cond).includes(state.invocation.id) ||
+                  !nullPredicatesHold(cond, state.invocation))
               )
                 return [];
               if (tableName === 'tasks' && state.taskRow) {
@@ -3151,14 +3175,491 @@ describe('approved apply pre-form continuation', () => {
       return { complete: true };
     });
     const enqueue = vi.fn(async () => {});
+    const providers: NonNullable<Parameters<typeof advanceStep>[0]['providers']> = [];
     const advance = (values?: Record<string, unknown>) =>
       run(state, def, values, {
-        providers: [],
+        providers,
         deps: { enqueueCliInvocation: enqueue },
         epoch: 7,
       });
-    return { state, def, enqueue, advance };
+    return { state, def, enqueue, advance, providers };
   }
+
+  function decisionFixture() {
+    const h = fixture();
+    (h.def.llm as unknown as Record<string, unknown>).allowPreFormDecisionFallback = true;
+    h.def.llm!.completePreForm = vi.fn(async ({ llmOutput }) => ({
+      llmOutput,
+      continueRequested: llmOutput != null,
+    }));
+    h.def.form = vi.fn(() => ({ title: 'Fresh decision', fields: [] }));
+    h.def.apply = vi.fn(async () => ({ complete: true }));
+    return h;
+  }
+
+  function holdDecision(
+    h: ReturnType<typeof decisionFixture>,
+    decisionForm = true,
+    notice = 'Current notice',
+  ) {
+    Object.assign(h.state.taskStepRow, {
+      status: 'waiting_cli',
+      pauseFormOnRetry: true,
+      formSchema: null,
+      formValues: null,
+    });
+    h.state.invocation = undefined;
+    h.state.invocations = [];
+    h.state.continuationEvent = {
+      id: 'checkpoint',
+      taskId: 'task-1',
+      taskStepId: 'ts-1',
+      eventType: 'step.pre_form_continuation',
+      payload: { version: 1, rerunGeneration: 3, decisionForm, notice },
+    };
+  }
+
+  it('decision fallback held marker fails loudly when the opt-in was removed', async () => {
+    const h = decisionFixture();
+    holdDecision(h);
+    delete h.def.llm!.allowPreFormDecisionFallback;
+    const result = await h.advance();
+    expect(result.status).toBe('failed');
+    expect(result.status === 'failed' && result.error).toContain(
+      'Held decision form requires llm.allowPreFormDecisionFallback',
+    );
+    expect(h.enqueue).not.toHaveBeenCalled();
+    expect(h.def.llm!.prepare).not.toHaveBeenCalled();
+  });
+
+  it.each(['output and id', 'id only'] as const)(
+    'decision fallback never discards a completed unconsumed follow-up: %s',
+    async (shape) => {
+      const h = decisionFixture();
+      h.def.llm!.optional = shape === 'id only';
+      const completed = {
+        ...h.state.invocation!,
+        id: 'completed-followup',
+        rawOutput: shape === 'id only' ? null : 'keep this output',
+        // An optional failed follow-up returns null output with its persisted id.
+        exitCode: shape === 'id only' ? 1 : 0,
+        consumedAt: null,
+      };
+      h.state.beforeWrite = (table, patch) => {
+        if (table === 'task_steps' && patch.pauseFormOnRetry === true) {
+          h.state.invocation = completed;
+          h.state.invocations!.push(completed);
+        }
+      };
+      const result = await h.advance();
+      expect(result.status).toBe('failed');
+      expect(result.status === 'failed' && result.error).toContain(
+        'Pre-form continuation did not dispatch a fresh invocation',
+      );
+      expect(completed.consumedAt).toBeNull();
+      expect(h.def.llm!.completePreForm).toHaveBeenCalledOnce();
+      expect(h.enqueue).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([
+    'optional missing deps',
+    'optional unavailable',
+    'optional prompt budget',
+    'bypass',
+  ] as const)('decision fallback keeps the invariant on a null/null %s follow-up', async (kind) => {
+    const h = decisionFixture();
+    if (kind === 'bypass') {
+      // Bypass begins on the follow-up, after the first completion requested it.
+      const complete = h.def.llm!.completePreForm!;
+      h.def.llm!.completePreForm = vi.fn(async (args) => {
+        const result = await complete(args);
+        vi.stubEnv('HAIVE_TEST_BYPASS_LLM', '1');
+        return result;
+      });
+    } else {
+      h.def.llm!.optional = true;
+      const dispatch = vi.mocked(dispatcher.resolveTaskDispatch);
+      if (kind === 'optional prompt budget') {
+        const { PromptBudgetExceededError } = await import('@haive/shared/step');
+        dispatch.mockRejectedValue(new PromptBudgetExceededError('budget exhausted'));
+      } else {
+        dispatch.mockResolvedValue({ mode: 'skip', reason: 'no provider' } as never);
+      }
+    }
+    const result =
+      kind === 'optional missing deps'
+        ? await run(h.state, h.def, undefined, { epoch: 7 })
+        : await h.advance();
+    expect(result.status).toBe('failed');
+    expect(result.status === 'failed' && result.error).toContain(
+      'Pre-form continuation did not dispatch a fresh invocation',
+    );
+    expect(h.def.llm!.completePreForm).toHaveBeenCalledOnce();
+    expect(h.state.invocations).toHaveLength(1);
+    expect(h.enqueue).not.toHaveBeenCalled();
+  });
+
+  it.each([true, false])(
+    'decision fallback carries a notice only from a held current checkpoint: held=%s',
+    async (held) => {
+      const h = decisionFixture();
+      holdDecision(h, false);
+      if (!held) Object.assign(h.state.taskStepRow, { status: 'running', pauseFormOnRetry: false });
+      h.def.llm!.prepareWorkspace = async () => {
+        const { StepPrepareFormError } = await import('@haive/shared/step');
+        throw new StepPrepareFormError();
+      };
+      const result = await h.advance();
+      expect(result.status).toBe('waiting_form');
+      expect(h.state.continuationEvent!.payload.notice).toBe(held ? 'Current notice' : undefined);
+      expect(JSON.stringify(result.status === 'waiting_form' ? result.formSchema : {})).toContain(
+        held ? 'Current notice' : 'Fresh decision',
+      );
+      if (!held)
+        expect(
+          JSON.stringify(result.status === 'waiting_form' ? result.formSchema : {}),
+        ).not.toContain('Current notice');
+    },
+  );
+
+  it('decision fallback prepare false carries the notice through its follow-up checkpoint', async () => {
+    const h = decisionFixture();
+    const completed = h.state.invocation;
+    holdDecision(h, false);
+    h.state.invocation = completed;
+    h.state.invocations = [completed!];
+    h.def.llm!.prepare = async () => false;
+    const result = await h.advance();
+    expect(result.status).toBe('waiting_form');
+    expect(h.state.continuationEvent!.payload).toMatchObject({
+      decisionForm: true,
+      notice: 'Current notice',
+    });
+    expect(result.status === 'waiting_form' && result.formSchema.fields).toContainEqual(
+      expect.objectContaining({ id: 'reopenedFormNotice', body: 'Current notice' }),
+    );
+    expect(h.enqueue).not.toHaveBeenCalled();
+  });
+
+  it('decision fallback does not inherit a notice from an older generation', async () => {
+    const h = decisionFixture();
+    holdDecision(h, false);
+    h.state.continuationEvent!.payload.rerunGeneration = 2;
+    h.def.llm!.prepareWorkspace = async () => {
+      const { StepPrepareFormError } = await import('@haive/shared/step');
+      throw new StepPrepareFormError();
+    };
+    expect((await h.advance()).status).toBe('waiting_form');
+    expect(h.state.continuationEvent!.payload).not.toHaveProperty('notice');
+    expect(h.enqueue).not.toHaveBeenCalled();
+  });
+
+  it('decision fallback apply retry clears earlier answers and accepts the fresh decision once', async () => {
+    const h = decisionFixture();
+    h.def.llm!.retry = { maxAttempts: 3 };
+    h.def.llm!.prepare = vi.fn(async () => {});
+    h.def.llm!.completePreForm = vi.fn(async ({ llmOutput }) => ({
+      llmOutput,
+      continueRequested: false,
+    }));
+    h.def.llm!.prepareWorkspace = vi.fn(async () => {
+      const { StepPrepareFormError } = await import('@haive/shared/step');
+      throw new StepPrepareFormError();
+    });
+    h.def.form = () => ({
+      title: 'Owner decision',
+      fields: [{ id: 'approve', type: 'checkbox', label: 'Approve' }],
+    });
+    h.state.taskStepRow.formValues = { approve: false };
+    h.def.apply = vi
+      .fn()
+      .mockRejectedValueOnce(new Error('retryable output'))
+      .mockImplementation(async (_ctx, args) => {
+        expect(args.formValues).toEqual({ approve: true });
+        return { complete: true };
+      });
+    expect((await h.advance()).status).toBe('waiting_form');
+    expect(h.state.taskStepRow.errorMessage).toBeNull();
+    // The checkpoint deliberately discards the answer to the earlier schema.
+    expect(h.state.taskStepRow.formValues).toBeNull();
+    expect(h.state.invocations).toHaveLength(2);
+    expect(h.def.llm!.prepare).toHaveBeenCalledOnce();
+    expect(h.def.llm!.prepareWorkspace).toHaveBeenCalledOnce();
+    h.def.llm!.prepare = vi.fn(async () => false as const);
+    h.state.taskStepRow.formValues = { approve: true };
+    expect((await h.advance()).status).toBe('done');
+    expect(h.def.apply).toHaveBeenCalledTimes(2);
+    expect(h.state.taskStepRow.formValues).toEqual({ approve: true });
+    expect(h.enqueue).not.toHaveBeenCalled();
+  });
+
+  it('decision fallback releases its reservation when the cleanup transaction has a DB error', async () => {
+    const h = decisionFixture();
+    holdDecision(h, false);
+    h.def.llm!.prepareWorkspace = async () => {
+      const { StepPrepareFormError } = await import('@haive/shared/step');
+      throw new StepPrepareFormError();
+    };
+    h.state.beforeWrite = (table, patch) => {
+      if (table === 'cli_invocations' && patch.endedAt && patch.consumedAt)
+        throw new Error('cleanup DB unavailable');
+    };
+    expect((await h.advance()).status).toBe('failed');
+    expect(h.state.invocation!.supersededAt).toBeInstanceOf(Date);
+    expect(h.state.invocation!.consumedAt).toBeUndefined();
+    expect(h.enqueue).not.toHaveBeenCalled();
+  });
+
+  it.each(['startedAt', 'endedAt', 'supersededAt', 'consumedAt'] as const)(
+    'decision fallback DB-error release respects the %s predicate',
+    async (field) => {
+      const h = decisionFixture();
+      holdDecision(h, false);
+      h.def.llm!.prepareWorkspace = async ({ ctx }) => {
+        const original = ctx.db.transaction.bind(ctx.db);
+        ctx.db.transaction = (async (fn) => {
+          try {
+            return await original(fn);
+          } catch (err) {
+            // A peer moves R1 after rollback, before the non-fence release catch.
+            h.state.invocation![field] = new Date('2026-01-01T00:00:00.000Z');
+            throw err;
+          }
+        }) as typeof ctx.db.transaction;
+        const { StepPrepareFormError } = await import('@haive/shared/step');
+        throw new StepPrepareFormError();
+      };
+      h.state.beforeWrite = (table, patch) => {
+        if (table === 'cli_invocations' && patch.endedAt && patch.consumedAt)
+          throw new Error('cleanup DB unavailable');
+      };
+      expect((await h.advance()).status).toBe('failed');
+      expect(h.state.invocation![field]).toBeInstanceOf(Date);
+      if (field !== 'supersededAt') expect(h.state.invocation!.supersededAt).toBeUndefined();
+      else expect(h.state.invocation!.supersededAt).toEqual(new Date('2026-01-01T00:00:00.000Z'));
+      expect(h.enqueue).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(['truncation', 'capability'] as const)(
+    'decision fallback from a %s retry reaches the form',
+    async (failure) => {
+      const h = decisionFixture();
+      const { OUTPUT_TRUNCATION_HEADLINE, MODEL_CAPABILITY_HEADLINES } =
+        await import('../src/queues/cli-exec/failure-class.js');
+      h.providers.push({
+        id: 'provider',
+        modelLimits: { model: '', vision: false, learnedAt: new Date().toISOString() },
+      } as (typeof h.providers)[number]);
+      Object.assign(h.state.invocation!, {
+        cliProviderId: 'provider',
+        createdAt: new Date(),
+        exitCode: 1,
+        errorMessage:
+          failure === 'truncation'
+            ? OUTPUT_TRUNCATION_HEADLINE
+            : MODEL_CAPABILITY_HEADLINES.no_image_support,
+      });
+      h.def.llm!.prepareWorkspace = async () => {
+        const { StepPrepareFormError } = await import('@haive/shared/step');
+        throw new StepPrepareFormError();
+      };
+      const result = await h.advance();
+      expect(result.status, result.status === 'failed' ? result.error : '').toBe('waiting_form');
+      expect(h.def.llm!.completePreForm).toHaveBeenLastCalledWith(
+        expect.objectContaining({ llmOutput: null, llmInvocationId: null }),
+      );
+      expect(h.enqueue).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([false, true])(
+    'decision fallback opt-in=%s: follow-up prepare false clears old output and id',
+    async (enabled) => {
+      const h = decisionFixture();
+      (h.def.llm as unknown as Record<string, unknown>).allowPreFormDecisionFallback =
+        enabled || undefined;
+      h.def.detect = vi.fn(async () => ({ admission: 'blocked' }));
+      h.def.llm!.prepare = vi.fn(async ({ detected }) => {
+        Object.assign(detected as object, { admission: 'blocked' });
+        return false as const;
+      });
+      const result = await h.advance({ stale: true });
+      expect(result.status).toBe(enabled ? 'waiting_form' : 'failed');
+      expect(h.enqueue).not.toHaveBeenCalled();
+      expect(h.def.apply).not.toHaveBeenCalled();
+      if (enabled) {
+        expect(h.def.llm!.completePreForm).toHaveBeenLastCalledWith(
+          expect.objectContaining({
+            llmOutput: null,
+            llmInvocationId: null,
+            detected: expect.objectContaining({ admission: 'blocked' }),
+          }),
+        );
+        expect(h.def.form).toHaveBeenLastCalledWith(
+          expect.anything(),
+          expect.objectContaining({ admission: 'blocked' }),
+          null,
+        );
+        expect(h.state.taskStepRow.formValues).toBeNull();
+        expect(h.state.invocations).toHaveLength(1);
+        expect(h.state.invocations![0]!.consumedAt).toBeInstanceOf(Date);
+      }
+    },
+  );
+
+  it.each(['initial', 'follow-up'] as const)(
+    'decision fallback post-insert %s refuses enqueue and parks a real fresh form',
+    async (entry) => {
+      const h = decisionFixture();
+      if (entry === 'initial') {
+        Object.assign(h.state.taskStepRow, {
+          status: 'running',
+          detectOutput: null,
+          formSchema: null,
+          formValues: null,
+        });
+        h.state.invocation = undefined;
+        h.state.invocations = [];
+      }
+      h.def.llm!.prepareWorkspace = vi.fn(async () => {
+        const sdk = await import('@haive/shared/step');
+        throw new (
+          sdk as unknown as { StepPrepareFormError: new () => Error }
+        ).StepPrepareFormError();
+      });
+      const result = await h.advance({ stale: true });
+      expect(result.status).toBe('waiting_form');
+      expect(h.enqueue).not.toHaveBeenCalled();
+      expect(h.def.llm!.prepareWorkspace).toHaveBeenCalledOnce();
+      expect(h.state.invocation).toMatchObject({
+        endedAt: expect.any(Date),
+        supersededAt: expect.any(Date),
+        consumedAt: expect.any(Date),
+      });
+      expect(h.def.llm!.completePreForm).toHaveBeenLastCalledWith(
+        expect.objectContaining({ llmOutput: null, llmInvocationId: null }),
+      );
+      expect(h.state.taskStepRow).toMatchObject({ formValues: null, pauseFormOnRetry: false });
+      expect(h.def.apply).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(['no form', 'continued again'] as const)(
+    'decision fallback refuses %s rather than finalizing or redispatching',
+    async (bad) => {
+      const h = decisionFixture();
+      h.def.llm!.prepare = async () => false;
+      if (bad === 'no form') h.def.form = () => null;
+      else h.def.llm!.completePreForm = async () => ({ llmOutput: null, continueRequested: true });
+      const result = await h.advance();
+      expect(result.status).toBe('failed');
+      expect(result.status === 'failed' && result.error).toMatch(/decision.*form/i);
+      expect(h.def.apply).not.toHaveBeenCalled();
+      expect(h.enqueue).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([
+    'detect',
+    'form',
+    'completePreForm',
+    'preForm',
+    'loop',
+    'agentMining',
+    'dagExecute',
+    'mergeResolve',
+    'needsRuntime',
+  ])('decision fallback rejects unsupported %s before any mutation', async (bad) => {
+    const h = decisionFixture();
+    if (bad === 'completePreForm') delete h.def.llm!.completePreForm;
+    else if (bad === 'preForm') h.def.llm!.preForm = false;
+    else
+      (h.def as unknown as Record<string, unknown>)[bad] = ['detect', 'form'].includes(bad)
+        ? undefined
+        : {};
+    await expect(h.advance()).rejects.toThrow(/allowPreFormDecisionFallback/);
+    expect(h.state.updates).toHaveLength(0);
+    expect(h.enqueue).not.toHaveBeenCalled();
+  });
+
+  it('decision fallback pauses after cleanup and Resume constructs the form without a new prepare', async () => {
+    const h = decisionFixture();
+    h.def.llm!.prepareWorkspace = vi.fn(async () => {
+      h.state.taskRow!.pausedAt = new Date();
+      const sdk = await import('@haive/shared/step');
+      throw new (
+        sdk as unknown as { StepPrepareFormError: new () => Error }
+      ).StepPrepareFormError();
+    });
+    expect((await h.advance()).status).toBe('deferred');
+    expect(h.state.taskStepRow).toMatchObject({
+      status: 'waiting_cli',
+      pauseFormOnRetry: true,
+      formSchema: null,
+      formValues: null,
+    });
+    expect(h.state.invocation!.consumedAt).toBeInstanceOf(Date);
+    h.state.taskRow!.pausedAt = null;
+    expect((await h.advance({ stale: true })).status).toBe('waiting_form');
+    expect(h.def.llm!.prepareWorkspace).toHaveBeenCalledOnce();
+    expect(h.def.llm!.prepare).toHaveBeenCalledOnce();
+    expect(h.enqueue).not.toHaveBeenCalled();
+  });
+
+  it.each(['prepare', 'workspace without opt-in', 'enqueue'] as const)(
+    'decision fallback signal in %s retains ordinary failure handling',
+    async (hook) => {
+      const h = decisionFixture();
+      const sdk = await import('@haive/shared/step');
+      const refuse = async () => {
+        throw new sdk.StepPrepareFormError();
+      };
+      if (hook === 'prepare') h.def.llm!.prepare = refuse;
+      else if (hook === 'workspace without opt-in') {
+        delete h.def.llm!.allowPreFormDecisionFallback;
+        h.def.llm!.prepareWorkspace = refuse;
+      } else h.enqueue.mockImplementation(refuse);
+      const result = await h.advance();
+      expect(result.status).toBe('failed');
+      expect(h.state.continuationEvent?.payload ?? {}).not.toHaveProperty('decisionForm');
+      if (hook === 'enqueue') {
+        expect(h.enqueue).toHaveBeenCalledOnce();
+        expect(h.state.invocation!.endedAt).toBeNull();
+        expect(h.state.invocation!.supersededAt).toBeUndefined();
+        expect(h.state.invocation!.consumedAt).toBeUndefined();
+      } else expect(h.enqueue).not.toHaveBeenCalled();
+    },
+  );
+
+  it('decision fallback during a pre-form reroll refreshes null inputs instead of another dispatch', async () => {
+    const h = decisionFixture();
+    h.def.llm!.retry = { maxAttempts: 2 };
+    h.def.llm!.shouldRetryPreForm = () => true;
+    h.def.llm!.prepareWorkspace = async () => {
+      const sdk = await import('@haive/shared/step');
+      throw new sdk.StepPrepareFormError();
+    };
+    expect((await h.advance()).status).toBe('waiting_form');
+    expect(h.def.llm!.completePreForm).toHaveBeenLastCalledWith(
+      expect.objectContaining({ llmOutput: null, llmInvocationId: null }),
+    );
+    expect(h.enqueue).not.toHaveBeenCalled();
+  });
+
+  it('decision fallback prepare false honors a pause and rehydrates on Resume without repeating prepare', async () => {
+    const h = decisionFixture();
+    h.def.llm!.prepare = vi.fn(async () => {
+      h.state.taskRow!.pausedAt = new Date();
+      return false as const;
+    });
+    expect((await h.advance()).status).toBe('deferred');
+    h.state.taskRow!.pausedAt = null;
+    expect((await h.advance({ stale: true })).status).toBe('waiting_form');
+    expect(h.def.llm!.prepare).toHaveBeenCalledOnce();
+    expect(h.enqueue).not.toHaveBeenCalled();
+  });
 
   it('default notice-only reopen refreshes a form without another dispatch', async () => {
     const h = fixture(false);

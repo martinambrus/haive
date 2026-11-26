@@ -73,6 +73,14 @@ const h = vi.hoisted(() => {
 });
 
 vi.mock('../src/db.js', () => ({ getDb: () => h.db }));
+// Cross-package controls exercise the actual API action transactions. Only external
+// delivery/kill/config I/O is faked; task/run/step mutations use this dedicated DB.
+vi.mock('../../api/src/db.js', () => ({ getDb: () => h.db }));
+vi.mock('../../api/src/queues.js', () => ({
+  getTaskQueue: () => ({ add: async () => ({ id: 'queued' }) }),
+}));
+vi.mock('../../api/src/lib/sandbox-kill.js', () => ({ killTaskSandboxes: async () => 0 }));
+
 vi.mock('../src/redis.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../src/redis.js')>()),
   getBullRedis: () => ({}),
@@ -681,6 +689,721 @@ describe.skipIf(!url)(
         apply: vi.fn(async () => ({ complete: true })),
       });
 
+      async function decisionHarness(checkpointBefore = true) {
+        const { taskId, ctx } = await setup();
+        if (checkpointBefore) await checkpoint(ctx);
+        else
+          await db
+            .update(schema.cliInvocations)
+            .set({ consumedAt: AT })
+            .where(eq(schema.cliInvocations.id, R));
+        vi.spyOn(configService, 'getBoolean').mockResolvedValue(false);
+        vi.spyOn(configService, 'get').mockResolvedValue(null);
+        vi.spyOn(dispatcher, 'resolveTaskDispatch').mockResolvedValue({
+          mode: 'cli',
+          providerId: null,
+          invocation: { kind: 'cli', spec: {} },
+        } as unknown as Awaited<ReturnType<typeof dispatcher.resolveTaskDispatch>>);
+        vi.stubEnv('HAIVE_TEST_BYPASS_LLM', '0');
+        const step = continuationStep();
+        step.detect = vi.fn(async () => ({
+          calls: (
+            await db.query.cliInvocations.findMany({
+              where: eq(schema.cliInvocations.taskStepId, S.id),
+            })
+          ).length,
+        }));
+        (step.llm as unknown as Record<string, unknown>).allowPreFormDecisionFallback = true;
+        step.llm!.completePreForm = vi.fn(async ({ llmOutput }) => ({
+          llmOutput,
+          continueRequested: false,
+        }));
+        const enqueue = vi.fn(async () => {});
+        let reservation = '';
+        const refuse = async () => {
+          const sdk = await import('@haive/shared/step');
+          throw new (
+            sdk as unknown as { StepPrepareFormError: new () => Error }
+          ).StepPrepareFormError();
+        };
+        step.llm!.prepareWorkspace = async () => {
+          const runs = await db.query.cliInvocations.findMany({
+            where: eq(schema.cliInvocations.taskStepId, S.id),
+          });
+          reservation = runs.find((run) => !run.endedAt && !run.supersededAt)!.id;
+          await refuse();
+        };
+        const advance = async (handle = db) =>
+          runner.advanceStep({
+            db: handle,
+            taskId,
+            userId,
+            stepDef: step,
+            repoPath: NO_SUCH_DIR,
+            workspacePath: NO_SUCH_DIR,
+            cliProviderId: null,
+            epoch: (await taskOf(taskId))!.orchestrationEpoch,
+            providers: [],
+            deps: { enqueueCliInvocation: enqueue },
+            formValues: { stale: true },
+          });
+        return { taskId, ctx, step, enqueue, advance, refuse, reservation: () => reservation };
+      }
+
+      describe('decision fallback real-store controls', () => {
+        afterEach(() => {
+          vi.restoreAllMocks();
+          vi.unstubAllEnvs();
+        });
+
+        it('cleans only the inserted id, keeps paid history, and builds an actual new form without enqueue', async () => {
+          const f = await decisionHarness();
+          const paid = await runOf(R);
+          const result = await f.advance();
+          expect(result.status).toBe('waiting_form');
+          expect((await rowOf(S.id)).detectOutput).toEqual({ calls: 2 });
+          expect(await runOf(R)).toEqual(paid);
+          expect(await runOf(f.reservation())).toMatchObject({
+            endedAt: expect.any(Date),
+            supersededAt: expect.any(Date),
+            consumedAt: expect.any(Date),
+            startedAt: null,
+          });
+          expect(await rowOf(S.id)).toMatchObject({
+            status: 'waiting_form',
+            formValues: null,
+            rerunGeneration: 4,
+          });
+          expect(await taskOf(f.taskId)).toMatchObject({
+            status: 'running',
+            orchestrationEpoch: EPOCH,
+          });
+          expect(f.step.llm!.completePreForm).toHaveBeenLastCalledWith(
+            expect.objectContaining({ llmOutput: null, llmInvocationId: null }),
+          );
+          expect(f.enqueue).not.toHaveBeenCalled();
+          expect(f.step.apply).not.toHaveBeenCalled();
+        });
+
+        it.each(['fresh', 'startedAt', 'endedAt', 'supersededAt', 'consumedAt'] as const)(
+          'non-fence checkpoint DB error releases only the eligible reservation: %s',
+          async (moved) => {
+            const f = await decisionHarness();
+            const paid = await runOf(R);
+            // A separate live reservation must never be selected by the release.
+            const otherTask = await seedTask('running');
+            await seedStep(otherTask, A, 'running');
+            const otherId = randomUUID();
+            await seedRun(otherTask, { id: otherId, taskStepId: A.id });
+            const other = await runOf(otherId);
+            const fault = new Error('injected checkpoint database error');
+            let injected = false;
+            let beforeRelease: Awaited<ReturnType<typeof runOf>> | undefined;
+            const handle = new Proxy(db, {
+              get(target, prop) {
+                if (prop !== 'transaction') return Reflect.get(target, prop);
+                return async (fn: (tx: Tx) => Promise<unknown>) => {
+                  let releasing = false;
+                  try {
+                    return await target.transaction(async (tx) =>
+                      fn(
+                        new Proxy(tx, {
+                          get(transaction, method) {
+                            if (method === 'update')
+                              return (table: unknown) => {
+                                const update = transaction.update(
+                                  table as typeof schema.cliInvocations,
+                                );
+                                if (table !== schema.cliInvocations) return update;
+                                return new Proxy(update, {
+                                  get(builder, key) {
+                                    if (key !== 'set') return Reflect.get(builder, key);
+                                    return (patch: RunInsert) => {
+                                      if (patch.endedAt && patch.consumedAt) releasing = true;
+                                      return builder.set(patch);
+                                    };
+                                  },
+                                });
+                              };
+                            if (method === 'select' && releasing && !injected)
+                              return () => {
+                                // The exact-id UPDATE really ran. Fail the next statement
+                                // before its step lock; Postgres must roll the UPDATE back.
+                                injected = true;
+                                throw fault;
+                              };
+                            return Reflect.get(transaction, method);
+                          },
+                        }),
+                      ),
+                    );
+                  } catch (err) {
+                    if (err !== fault) throw err;
+                    const rolledBack = await runOf(f.reservation());
+                    expect(rolledBack).toMatchObject({
+                      startedAt: null,
+                      endedAt: null,
+                      supersededAt: null,
+                      consumedAt: null,
+                    });
+                    // Model a peer's committed move between rollback and the guarded
+                    // supersede-only release. Each null predicate must stand alone.
+                    if (moved !== 'fresh')
+                      await db
+                        .update(schema.cliInvocations)
+                        .set({ [moved]: AT })
+                        .where(eq(schema.cliInvocations.id, f.reservation()));
+                    beforeRelease = await runOf(f.reservation());
+                    throw err;
+                  }
+                };
+              },
+            });
+            const result = await f.advance(handle);
+            expect(injected).toBe(true);
+            expect(result.status).toBe('failed');
+            expect(result.status === 'failed' && result.error).toContain(fault.message);
+            const after = await runOf(f.reservation());
+            if (moved === 'fresh') {
+              expect(after.supersededAt).toBeInstanceOf(Date);
+              expect({ ...after, supersededAt: null }).toEqual(beforeRelease);
+            } else expect(after).toEqual(beforeRelease);
+            expect(await runOf(R)).toEqual(paid);
+            expect(await runOf(otherId)).toEqual(other);
+            expect(f.enqueue).not.toHaveBeenCalled();
+            expect(f.step.apply).not.toHaveBeenCalled();
+          },
+        );
+
+        it.each(['Stop', 'Retry'] as const)(
+          'real API %s overtakes workspace refusal without a stale checkpoint',
+          async (action) => {
+            const f = await decisionHarness();
+            // Retry folds the current span into int4 timing; use a recent span, not
+            // the historical T0 used by the lock-only fixtures.
+            await db
+              .update(schema.taskSteps)
+              .set({
+                startedAt: new Date(),
+                idleMs: 0,
+                carriedIdleMs: 0,
+                carriedWorkMs: 0,
+                waitingStartedAt: null,
+              })
+              .where(eq(schema.taskSteps.id, S.id));
+            vi.spyOn(configService, 'getFresh').mockResolvedValue(null);
+            let runId = '';
+            let runAfter: unknown;
+            let stepAfter: unknown;
+            let taskAfter: unknown;
+            f.step.llm!.prepareWorkspace = async () => {
+              runId = (
+                await db.query.cliInvocations.findMany({
+                  where: and(
+                    eq(schema.cliInvocations.taskStepId, S.id),
+                    isNull(schema.cliInvocations.endedAt),
+                    isNull(schema.cliInvocations.supersededAt),
+                  ),
+                })
+              )[0]!.id;
+              const controlPath = new URL('../../api/src/lib/task-control.js', import.meta.url)
+                .pathname;
+              const { stopActiveCliInvocations } = await import(controlPath);
+              expect(
+                await stopActiveCliInvocations(db, f.taskId, { failTask: true }),
+              ).toMatchObject({ cancelled: 1, stopped: 1 });
+              if (action === 'Retry') {
+                // Task Retry is admitted from failed; use the real Stop to reach it.
+                const retryPath = new URL('../../api/src/routes/tasks/steps.js', import.meta.url)
+                  .pathname;
+                const { retryTaskAtStep } = await import(retryPath);
+                const target = (await db.query.taskSteps.findFirst({
+                  where: eq(schema.taskSteps.id, S.id),
+                }))!;
+                await retryTaskAtStep(db, f.taskId, userId, target);
+              }
+              runAfter = await runOf(runId);
+              stepAfter = await rowOf(S.id);
+              taskAfter = await taskOf(f.taskId);
+              await f.refuse();
+            };
+            expect((await f.advance()).status).toBe('superseded');
+            expect(await runOf(runId)).toEqual(runAfter);
+            expect(await rowOf(S.id)).toEqual(stepAfter);
+            expect(await taskOf(f.taskId)).toEqual(taskAfter);
+            expect(await runOf(runId)).toMatchObject({
+              supersededAt: expect.any(Date),
+              endedAt: expect.any(Date),
+              consumedAt: null,
+            });
+            if (action === 'Retry') {
+              expect(await rowOf(S.id)).toMatchObject({ rerunGeneration: 5, status: 'pending' });
+              expect(await taskOf(f.taskId)).toMatchObject({ orchestrationEpoch: EPOCH + 1 });
+            } else expect(await taskOf(f.taskId)).toMatchObject({ status: 'failed' });
+            expect(f.enqueue).not.toHaveBeenCalled();
+          },
+        );
+
+        it.each([
+          'started',
+          'ended',
+          'superseded',
+          'generation',
+          'owner',
+          'epoch',
+          'pointer',
+          'round',
+          'dead',
+          'failed task status',
+          'Cancel',
+        ])('refuses cleanup after %s and rolls back exact-id consumption', async (lost) => {
+          const f = await decisionHarness();
+          let before: unknown;
+          f.step.llm!.prepareWorkspace = async () => {
+            const run = (
+              await db.query.cliInvocations.findMany({
+                where: and(
+                  eq(schema.cliInvocations.taskStepId, S.id),
+                  isNull(schema.cliInvocations.endedAt),
+                  isNull(schema.cliInvocations.supersededAt),
+                ),
+              })
+            )[0]!;
+            if (lost === 'started')
+              await db
+                .update(schema.cliInvocations)
+                .set({ startedAt: AT })
+                .where(eq(schema.cliInvocations.id, run.id));
+            else if (lost === 'ended')
+              await db
+                .update(schema.cliInvocations)
+                .set({ endedAt: AT })
+                .where(eq(schema.cliInvocations.id, run.id));
+            else if (lost === 'superseded')
+              await db
+                .update(schema.cliInvocations)
+                .set({ supersededAt: AT })
+                .where(eq(schema.cliInvocations.id, run.id));
+            else if (lost === 'generation')
+              await db
+                .update(schema.taskSteps)
+                .set({ rerunGeneration: 5 })
+                .where(eq(schema.taskSteps.id, S.id));
+            else if (lost === 'owner')
+              await db
+                .update(schema.taskSteps)
+                .set({ taskId: await seedTask('running') })
+                .where(eq(schema.taskSteps.id, S.id));
+            else if (lost === 'epoch')
+              await db
+                .update(schema.tasks)
+                .set({ orchestrationEpoch: EPOCH + 1 })
+                .where(eq(schema.tasks.id, f.taskId));
+            else if (lost === 'pointer')
+              await db
+                .update(schema.tasks)
+                .set({ currentStepId: MOVED_ON })
+                .where(eq(schema.tasks.id, f.taskId));
+            else if (lost === 'round')
+              await db
+                .update(schema.tasks)
+                .set({ currentRound: 1 })
+                .where(eq(schema.tasks.id, f.taskId));
+            else if (lost === 'dead')
+              await db
+                .update(schema.tasks)
+                .set({ deadAt: AT })
+                .where(eq(schema.tasks.id, f.taskId));
+            else
+              await db
+                .update(schema.tasks)
+                .set({ status: lost === 'failed task status' ? 'failed' : 'cancelled' })
+                .where(eq(schema.tasks.id, f.taskId));
+            before = await runOf(run.id);
+            await f.refuse();
+            expect.unreachable();
+          };
+          const result = await f.advance();
+          expect(result.status).toBe('superseded');
+          const runs = await db.query.cliInvocations.findMany({
+            where: eq(schema.cliInvocations.taskStepId, S.id),
+          });
+          expect(runs.find((run) => run.id !== R)).toEqual(before);
+          expect(f.enqueue).not.toHaveBeenCalled();
+        });
+
+        it('initial refusal consumes its exact id rather than a newer completed row, clearing an old form and answer atomically', async () => {
+          const f = await decisionHarness(false);
+          const newerId = randomUUID();
+          let ownId = '';
+          let newer: unknown;
+          f.step.llm!.prepareWorkspace = async () => {
+            ownId = (
+              await db.query.cliInvocations.findMany({
+                where: and(
+                  eq(schema.cliInvocations.taskStepId, S.id),
+                  isNull(schema.cliInvocations.endedAt),
+                  isNull(schema.cliInvocations.supersededAt),
+                ),
+              })
+            )[0]!.id;
+            await db
+              .update(schema.cliInvocations)
+              .set({
+                tokenUsage: { costUsd: 0.25, inputTokens: 2, outputTokens: 1, totalTokens: 3 },
+              })
+              .where(eq(schema.cliInvocations.id, ownId));
+            await db.insert(schema.cliInvocations).values({
+              id: newerId,
+              taskId: f.taskId,
+              taskStepId: S.id,
+              mode: 'cli',
+              prompt: 'newer completed pass',
+              endedAt: AT,
+              exitCode: 0,
+              createdAt: new Date(Date.now() + 1000),
+            });
+            newer = await runOf(newerId);
+            await f.refuse();
+          };
+          expect((await f.advance()).status).toBe('waiting_form');
+          expect(await runOf(newerId)).toEqual(newer);
+          expect(await runOf(ownId)).toMatchObject({
+            consumedAt: expect.any(Date),
+            supersededAt: expect.any(Date),
+            endedAt: expect.any(Date),
+            tokenUsage: { costUsd: 0.25 },
+          });
+          expect(await rowOf(S.id)).toMatchObject({
+            formValues: null,
+            formSchema: { title: 'Fresh decision' },
+          });
+          expect(f.enqueue).not.toHaveBeenCalled();
+          expect(f.step.apply).not.toHaveBeenCalled();
+        });
+
+        it('a newer live winner is never selected or consumed by an older refusing pass', async () => {
+          const f = await decisionHarness();
+          const winnerId = randomUUID();
+          let before: unknown;
+          f.step.llm!.prepareWorkspace = async () => {
+            await db
+              .update(schema.cliInvocations)
+              .set({ supersededAt: AT })
+              .where(
+                and(
+                  eq(schema.cliInvocations.taskStepId, S.id),
+                  isNull(schema.cliInvocations.endedAt),
+                ),
+              );
+            await db.insert(schema.cliInvocations).values({
+              id: winnerId,
+              taskId: f.taskId,
+              taskStepId: S.id,
+              mode: 'cli',
+              prompt: 'another pass owns this',
+            });
+            before = await runOf(winnerId);
+            await f.refuse();
+          };
+          const stepBefore = await rowOf(S.id);
+          expect((await f.advance()).status).toBe('superseded');
+          expect(await runOf(winnerId)).toEqual(before);
+          expect(await rowOf(S.id)).toMatchObject({
+            status: stepBefore.status,
+            formValues: stepBefore.formValues,
+          });
+          expect(f.enqueue).not.toHaveBeenCalled();
+        });
+
+        it.each(['none', 'failed task status', 'Cancel', 'generation change'] as const)(
+          'run → step → task cleanup beside a %s peer has no deadlock or stale checkpoint',
+          async (action) => {
+            const f = await decisionHarness();
+            let ready!: (id: string) => void;
+            const reached = new Promise<string>((resolve) => {
+              ready = resolve;
+            });
+            let release!: () => void;
+            const waiting = new Promise<void>((resolve) => {
+              release = resolve;
+            });
+            f.step.llm!.prepareWorkspace = async () => {
+              const run = (
+                await db.query.cliInvocations.findMany({
+                  where: and(
+                    eq(schema.cliInvocations.taskStepId, S.id),
+                    isNull(schema.cliInvocations.endedAt),
+                    isNull(schema.cliInvocations.supersededAt),
+                  ),
+                })
+              )[0]!;
+              ready(run.id);
+              await waiting;
+              await f.refuse();
+            };
+            const advance = f.advance();
+            const id = await reached;
+            const race = await interleave(
+              () => {
+                release();
+                return advance;
+              },
+              {
+                first: lockRun(id),
+                second: async (tx) => {
+                  if (action === 'none') await lockStepRow(S.id)(tx);
+                  else if (action === 'generation change')
+                    await tx
+                      .update(schema.taskSteps)
+                      .set({ rerunGeneration: 5 })
+                      .where(eq(schema.taskSteps.id, S.id));
+                  else
+                    await tx
+                      .update(schema.tasks)
+                      .set({ status: action === 'failed task status' ? 'failed' : 'cancelled' })
+                      .where(eq(schema.tasks.id, f.taskId));
+                },
+              },
+              [S.id],
+            );
+            expectClean(race);
+            expect(race.result?.status).toBe(action === 'none' ? 'waiting_form' : 'superseded');
+            expect((await runOf(id)).consumedAt === null).toBe(action !== 'none');
+            expect(f.enqueue).not.toHaveBeenCalled();
+          },
+          TEST_TIMEOUT,
+        );
+
+        describe.each(['boot', 'stalled'] as const)('%s schema-save crash recovery', (reader) => {
+          it.each([
+            'workspace decision',
+            'prepare false decision',
+            'A1 completed',
+            'A1 prepare false',
+          ] as const)('parks the saved %s form without repeating pre-form work', async (entry) => {
+            const f = await decisionHarness();
+            if (entry === 'prepare false decision') {
+              await db
+                .update(schema.cliInvocations)
+                .set({ consumedAt: null, rawOutput: 'completed report' })
+                .where(eq(schema.cliInvocations.id, R));
+              f.step.llm!.completePreForm = vi.fn(async ({ llmOutput }) => ({
+                llmOutput,
+                continueRequested: llmOutput != null,
+              }));
+              f.step.llm!.prepare = vi.fn(async () => false as const);
+            } else if (entry.startsWith('A1')) {
+              delete f.step.llm!.allowPreFormDecisionFallback;
+              if (entry === 'A1 completed')
+                await seedRun(f.taskId, {
+                  id: randomUUID(),
+                  endedAt: AT,
+                  exitCode: 0,
+                  rawOutput: 'fresh completed pass',
+                });
+              else f.step.llm!.prepare = vi.fn(async () => false as const);
+            }
+            let injected = false;
+            const handle = new Proxy(db, {
+              get(target, prop) {
+                if (prop !== 'update') return Reflect.get(target, prop);
+                return (table: typeof schema.taskSteps) => {
+                  const update = target.update(table);
+                  if (table !== schema.taskSteps) return update;
+                  return new Proxy(update, {
+                    get(builder, key) {
+                      if (key !== 'set') return Reflect.get(builder, key);
+                      return (patch: StepInsert) => {
+                        // Kill the pass before its park UPDATE, after the separate
+                        // schema write has committed to the real database.
+                        if (patch.status === 'waiting_form' && !injected) {
+                          injected = true;
+                          throw new StepSupersededError(S.id);
+                        }
+                        return builder.set(patch);
+                      };
+                    },
+                  });
+                };
+              },
+            });
+            expect((await f.advance(handle)).status).toBe('superseded');
+            expect(injected).toBe(true);
+            const saved = await rowOf(S.id);
+            expect(saved).toMatchObject({
+              status: 'waiting_cli',
+              pauseFormOnRetry: true,
+              formSchema: { title: 'Fresh decision' },
+              formValues: null,
+              errorMessage: null,
+              rerunGeneration: 4,
+            });
+            const queue = vi.fn(async () => {});
+            if (reader === 'boot')
+              await reconcileOrphanedSteps(db, {
+                enqueueAdvance: queue,
+                queuedInvocationIds: async () => new Set(),
+              });
+            else {
+              await db
+                .update(schema.tasks)
+                .set({ updatedAt: T0 })
+                .where(eq(schema.tasks.id, f.taskId));
+              await redriveStalledTasks(
+                db,
+                {
+                  queuedTaskJobs: async () => ({ steps: new Set(), starts: new Set() }),
+                  enqueueAdvance: queue,
+                  enqueueStart: async () => {},
+                  failTask: async () => false,
+                  queuedInvocationIds: async () => new Set(),
+                },
+                { staleMs: 0 },
+              );
+            }
+            expect(queue).toHaveBeenCalledOnce();
+            expect((await taskOf(f.taskId))!.orchestrationEpoch).toBe(EPOCH + 1);
+            const runsBefore = await db.query.cliInvocations.findMany({
+              where: eq(schema.cliInvocations.taskStepId, S.id),
+              orderBy: asc(schema.cliInvocations.id),
+            });
+            f.step.llm!.prepare = vi.fn(async () => {
+              throw new Error('must not prepare after schema save');
+            });
+            f.step.llm!.prepareWorkspace = vi.fn(async () => {
+              throw new Error('must not reserve after schema save');
+            });
+            vi.mocked(f.step.llm!.completePreForm!).mockClear();
+            const dispatch = vi.mocked(dispatcher.resolveTaskDispatch).mockClear();
+            const result = await f.advance();
+            expect(result.status).toBe('waiting_form');
+            expect(result.status === 'waiting_form' && result.formSchema).toEqual(saved.formSchema);
+            expect(await rowOf(S.id)).toMatchObject({
+              status: 'waiting_form',
+              waitingStartedAt: expect.any(Date),
+              pauseFormOnRetry: false,
+              formSchema: saved.formSchema,
+              formValues: null,
+              errorMessage: null,
+              rerunGeneration: 4,
+            });
+            expect(f.step.llm!.prepare).not.toHaveBeenCalled();
+            expect(f.step.llm!.prepareWorkspace).not.toHaveBeenCalled();
+            expect(f.step.llm!.completePreForm).not.toHaveBeenCalled();
+            expect(dispatch).not.toHaveBeenCalled();
+            expect(f.enqueue).not.toHaveBeenCalled();
+            expect(f.step.apply).not.toHaveBeenCalled();
+            expect(
+              await db.query.cliInvocations.findMany({
+                where: eq(schema.cliInvocations.taskStepId, S.id),
+                orderBy: asc(schema.cliInvocations.id),
+              }),
+            ).toEqual(runsBefore);
+            expect((await taskOf(f.taskId))!.status).toBe('running');
+          });
+        });
+
+        describe.each(['boot', 'stalled'] as const)('%s refusal recovery', (reader) => {
+          it.each([
+            ['workspace', 'before'],
+            ['workspace', 'after'],
+            ['prepare false', 'before'],
+            ['prepare false', 'after'],
+          ] as const)(
+            'crash %s %s the cleanup checkpoint recovers without dispatch after durable refusal',
+            async (entry, cut) => {
+              const f = await decisionHarness(entry !== 'prepare false');
+              if (entry === 'prepare false') {
+                await db
+                  .update(schema.cliInvocations)
+                  .set({ consumedAt: null, rawOutput: 'completed report' })
+                  .where(eq(schema.cliInvocations.id, R));
+                f.step.llm!.completePreForm = vi.fn(async ({ llmOutput }) => ({
+                  llmOutput,
+                  continueRequested: llmOutput != null,
+                }));
+                f.step.llm!.prepare = vi.fn(async () => false as const);
+              }
+              let injected = false;
+              const handle = new Proxy(db, {
+                get(target, prop) {
+                  if (prop !== 'transaction') return Reflect.get(target, prop);
+                  return async (fn: (tx: Tx) => Promise<unknown>) => {
+                    let decision = false;
+                    const result = await target.transaction(async (tx) => {
+                      const value = await fn(tx);
+                      const events = await tx.query.taskEvents.findMany({
+                        where: and(
+                          eq(schema.taskEvents.taskStepId, S.id),
+                          eq(schema.taskEvents.eventType, 'step.pre_form_continuation'),
+                        ),
+                      });
+                      decision = events.some((event) => event.payload?.decisionForm === true);
+                      if (decision && !injected && cut === 'before') {
+                        injected = true;
+                        throw new StepSupersededError(S.id);
+                      }
+                      return value;
+                    });
+                    if (decision && !injected && cut === 'after') {
+                      injected = true;
+                      throw new StepSupersededError(S.id);
+                    }
+                    return result;
+                  };
+                },
+              });
+              expect((await f.advance(handle)).status).toBe('superseded');
+              expect(injected).toBe(true);
+              if (entry === 'workspace') {
+                const run = await runOf(f.reservation());
+                expect(run.consumedAt === null).toBe(cut === 'before');
+              } else {
+                expect((await runOf(R)).consumedAt).toBeInstanceOf(Date);
+                expect(
+                  await db.query.cliInvocations.findMany({
+                    where: eq(schema.cliInvocations.taskStepId, S.id),
+                  }),
+                ).toHaveLength(1);
+              }
+              const queue = vi.fn(async () => {});
+              if (reader === 'boot')
+                await reconcileOrphanedSteps(db, {
+                  enqueueAdvance: queue,
+                  queuedInvocationIds: async () => new Set(),
+                });
+              else {
+                await db
+                  .update(schema.tasks)
+                  .set({ updatedAt: T0 })
+                  .where(eq(schema.tasks.id, f.taskId));
+                await redriveStalledTasks(
+                  db,
+                  {
+                    queuedTaskJobs: async () => ({ steps: new Set(), starts: new Set() }),
+                    enqueueAdvance: queue,
+                    enqueueStart: async () => {},
+                    failTask: async () => false,
+                    queuedInvocationIds: async () => new Set(),
+                  },
+                  { staleMs: 0 },
+                );
+              }
+              expect(queue).toHaveBeenCalledOnce();
+              if (cut === 'after') {
+                f.step.llm!.prepare = vi.fn(async () => {
+                  throw new Error('must not prepare after refusal');
+                });
+              }
+              expect((await f.advance()).status).toBe('waiting_form');
+              expect(f.enqueue).not.toHaveBeenCalled();
+              expect(f.step.apply).not.toHaveBeenCalled();
+            },
+          );
+        });
+      });
+
       it('reads the persisted opt-in event and refuses its stale generation after a Retry-order update', async () => {
         const { ctx } = await setup();
         await checkpoint(ctx);
@@ -696,6 +1419,51 @@ describe.skipIf(!url)(
             .set({ rerunGeneration: sql`${schema.taskSteps.rerunGeneration} + 1` })
             .where(eq(schema.taskSteps.id, S.id));
         });
+        expect(await runner.isHeldPreFormContinuation(db, step, await rowOf(S.id))).toBe(false);
+      });
+
+      it.each([
+        'missing event',
+        'version',
+        'generation',
+        'answer',
+        'hold',
+        'latest checkpoint',
+      ] as const)('a saved schema cannot bypass checkpoint binding: %s', async (lost) => {
+        const { taskId, ctx } = await setup();
+        await checkpoint(ctx);
+        await db
+          .update(schema.taskSteps)
+          .set({
+            formSchema: { title: 'Saved fresh form', fields: [] },
+            ...(lost === 'answer' ? { formValues: {} } : {}),
+            ...(lost === 'hold' ? { pauseFormOnRetry: false } : {}),
+          })
+          .where(eq(schema.taskSteps.id, S.id));
+        const step = continuationStep();
+        expect(await runner.isHeldPreFormContinuation(db, step, await rowOf(S.id))).toBe(
+          lost !== 'answer' && lost !== 'hold',
+        );
+        if (lost === 'missing event')
+          await db.delete(schema.taskEvents).where(eq(schema.taskEvents.taskId, taskId));
+        else if (lost === 'version' || lost === 'generation')
+          await db
+            .update(schema.taskEvents)
+            .set({
+              payload: {
+                version: lost === 'version' ? 2 : 1,
+                rerunGeneration: lost === 'generation' ? 3 : 4,
+              },
+            })
+            .where(eq(schema.taskEvents.taskId, taskId));
+        else if (lost === 'latest checkpoint')
+          await db.insert(schema.taskEvents).values({
+            taskId,
+            taskStepId: S.id,
+            eventType: 'step.pre_form_continuation',
+            payload: { version: 2, rerunGeneration: 4 },
+            createdAt: new Date(Date.now() + 1_000),
+          });
         expect(await runner.isHeldPreFormContinuation(db, step, await rowOf(S.id))).toBe(false);
       });
 

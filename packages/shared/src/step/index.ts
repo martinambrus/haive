@@ -117,6 +117,18 @@ export class StepPrepareDeferredError extends Error {
   }
 }
 
+/** From an opted-in pre-form prepareWorkspace, refuse this fresh, not-yet-enqueued
+ * dispatch and return to deterministic detection/form preparation. The host releases
+ * only this pass's inserted invocation under ownership fencing, preserves accounting,
+ * and requires an actual decision form. Carries no payload. Import the canonical
+ * constructor from @haive/shared/step and leave that peer unbundled. */
+export class StepPrepareFormError extends Error {
+  constructor() {
+    super('pre-form dispatch requires a decision form');
+    this.name = 'StepPrepareFormError';
+  }
+}
+
 export interface LlmBuildArgs {
   detected: unknown;
   formValues: FormValues;
@@ -145,6 +157,18 @@ export interface LlmInvocationSpec {
   /** When true, LLM runs after detect but before the form is generated.
    *  The form() function receives the parsed llmOutput as its third argument. */
   preForm?: boolean;
+  /** Default off. Allow a follow-up prepare returning false, or StepPrepareFormError
+   * from prepareWorkspace, to refresh detection and completePreForm with null output
+   * and invocation id, then park an actual decision form without another dispatch.
+   * Requires singleton preForm, detect, form and completePreForm; excludes needsRuntime,
+   * loop, mining, DAG and merge execution. Validated before any host mutation.
+   * The durable continuation hold preserves pause/Resume and crash recovery. Opting in
+   * also routes ordinary completePreForm follow-ups through that checkpoint: it clears
+   * detect_output, form/answers and statusMessage, keeps the task running, and strictly
+   * consumes the exact completed invocation under ownership fences. Persist partial
+   * results outside detect_output. While a decision form is outstanding, prepare MUST
+   * return false, including submitted-form re-entry before host validation. */
+  allowPreFormDecisionFallback?: true;
   /** When true, a failed or un-dispatchable LLM invocation does NOT fail the
    *  step — the runner degrades to `llmOutput = null` so downstream phases fall
    *  back to defaults. Use for a best-effort enrichment (e.g. a gate-1 config
@@ -233,7 +257,9 @@ export interface LlmInvocationSpec {
    *  concurrent advances can both pass its guard. A throw releases the reservation and
    *  then fails the step, except StepPrepareDeferredError on an opted-in held
    *  pre-form continuation: the host rechecks pause and defers. If Resume wins
-   *  the race, it defers one second and prepares a fresh pass, once per checkpoint. */
+   *  the race, it defers one second and prepares a fresh pass, once per checkpoint.
+   *  StepPrepareFormError requires allowPreFormDecisionFallback and refuses only this
+   *  fresh unqueued reservation, retaining its charge and requiring a real form. */
   prepareWorkspace?: (args: LlmBuildArgs & { ctx: StepContext }) => Promise<void>;
   /** Retry the LLM phase when apply() throws — for steps whose output is a strict
    *  JSON contract a flaky model intermittently misses (emits prose, an empty turn,
@@ -241,7 +267,9 @@ export interface LlmInvocationSpec {
    *  invocation (the prior one is marked consumed) up to `maxAttempts` TOTAL attempts,
    *  then lets the error fail the step. `retryOn` decides which thrown errors are
    *  retryable (default: all); it does not filter truncation retries, which never reach
-   *  apply(). Ignored for steps that also declare loop?. */
+   *  apply(). Ignored for steps that also declare loop?. An opted-in retry refused
+   *  by StepPrepareFormError checkpoints and parks its decision form instead of
+   *  failing with the original apply error. */
   retry?: {
     maxAttempts: number;
     retryOn?: (err: unknown) => boolean;
@@ -253,10 +281,15 @@ export interface LlmInvocationSpec {
    *  warrants a re-roll. Requires llm.retry (for the maxAttempts budget) and
    *  llm.preForm; ignored under HAIVE_TEST_BYPASS_LLM. */
   shouldRetryPreForm?: (llmOutput: unknown) => boolean;
-  /** Finish a pre-form report before presenting it. May checkpoint partial results in
-   * detect_output and request another targeted invocation. The step must bound retries
-   * and make processing an invocation idempotent across crash recovery and submitted
-   * forms. A continuation clears the previous form and its answers. */
+  /** Finish a pre-form report before presenting it and optionally request another
+   * targeted invocation. Default follow-ups keep detect_output and may checkpoint partial
+   * results there (as 07_7-secret-sweep does); only opted-in follow-ups use the A1
+   * checkpoint. Persist partial results in the module's durable store: Retry,
+   * rerunPreForm and opted-in decision-fallback follow-ups clear detect_output. Bound
+   * retries and make invocation processing idempotent across recovery/submitted forms.
+   * A continuation clears the previous form and answers. With allowPreFormDecisionFallback
+   * it also clears statusMessage (including this hook's message), keeps the task running,
+   * and strictly consumes the exact completed id under the A1 checkpoint's fences. */
   completePreForm?: (args: {
     ctx: StepContext;
     detected: unknown;

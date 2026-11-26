@@ -10,6 +10,7 @@ import {
   TaskCancelledError,
   StepPrepareParkError,
   StepPrepareDeferredError,
+  StepPrepareFormError,
   type ChatPlanRead,
   type StepDefinition,
 } from '@haive/shared/step';
@@ -25,6 +26,7 @@ export const errors = {
   TaskCancelledError,
   StepPrepareParkError,
   StepPrepareDeferredError,
+  StepPrepareFormError,
 };
 
 const snapshot: ChatPlanRead = { nodes: [], edges: [] };
