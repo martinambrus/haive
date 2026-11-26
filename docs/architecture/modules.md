@@ -656,7 +656,8 @@ outcome totals (`itemCounts`) beside its item page, so the history line counts e
 the step the task's pinned execution contract names as its fix target, and only while that
 step's registered definition is a module step declaring the pinned `fixConsumer` version; any
 other caller, a task with no pin and a pin without a target throw `StepHostBindingError`. The
-result is null unless a `fix_loop.requested` event is recorded for the row's own round, because
+result is null unless a `fix_loop.requested` event of the current START is recorded for the row's own round (see
+Fix loop), because
 `round > 0` is also true after a revise-loop fork. A request recorded with an empty diagnosis
 still returns a result with an empty `diagnosis`, so a fix round is never read as an original
 pass. `diagnosis`, `humanSourced`, `marked` and `guidance` are the values 07's detect reads;
@@ -837,7 +838,7 @@ output-contract replacement or host role policy. A capable step must also declar
 not set `metadata.allowSkip`: boot rejects the combination (`fix-consumer-skippable`), since a
 fix target the user could skip leaves a fix round with nothing to repair.
 A fan-out step (`agentMining`) is not capable: repair evidence is captured only on the LLM
-phase, so the host does not publish its capability, and availability, create and the worker (START, advance, boot, revive) refuse a pin naming one by name, saying it fans out, rather than let it repair without snapshots. The loader logs one warning per withheld step at boot, carrying only the step id. The catalog is synced at worker boot, so until a capable worker has booted, availability and create still read the older catalog and the task dies at START with a named reason.
+phase, so the host does not publish its capability, and availability, create and the worker (START, advance, boot, revive) refuse a pin naming one by name rather than let it repair without snapshots; the worker's refusal says it fans out, while availability and create, which see only the withheld capability, refuse it as not capable. The loader logs one warning per withheld step at boot, carrying only the step id. The catalog is synced at worker boot, so until a capable worker has booted, availability and create still read the older catalog and the task dies at START with a named reason.
 Every gate admits a pin that selects a capable target on a static pinned run list (see Task types). The fix router resolves a pinned target (see Fix loop), `loadFixLoopDiagnosis()` supplies its
 diagnosis, repair evidence follows the capability, and the next-round CLI choice, the gates'
 provider options and the api display follow the target's own step id. Readers of the implementation's output follow the pinned target too: the changed-file supplement (`reportedFiles`) reads the target's `filesTouched` only as an array of strings and the git collector keeps the review scope, `loadTaskSimilarSites` reads the target's rounds, and learned guidance (`guidanceTargetStep`) is appended to the target.
