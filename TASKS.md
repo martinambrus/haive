@@ -1224,7 +1224,7 @@ In `martinambrus/haive-module-translator`. The owner's English-to-Slovak run fai
 
 ### T775 · Step terminal runs carry a title saying what each run did
 
-status: open, design confirmed by owner 2026-11-26, starts after T773 · kind: ux · found: owner task ae8fb29c 2026-11-26 · priority: P2
+status: open, in work, design confirmed by owner 2026-11-26 · kind: ux · found: owner task ae8fb29c 2026-11-26 · priority: P2
 
 Runs of a single-agent step show only "Run 1", "Run 2" (`web/src/components/terminal/StepTerminal.tsx:295`). `cli_invocations.agent_title` already exists and the terminal header shows it, but only loop roles, mining agents and step summaries set it; a module's pre-form dispatch cannot.
 
@@ -1233,7 +1233,7 @@ Runs of a single-agent step show only "Run 1", "Run 2" (`web/src/components/term
 
 ### T774 · Translator review: an ignored correction stays ignored; explicit "later"
 
-status: open, design confirmed by owner 2026-11-26, starts after T773 · kind: ux · found: owner task ae8fb29c 2026-11-26 · priority: P1
+status: open, in work, design confirmed by owner 2026-11-26 · kind: ux · found: owner task ae8fb29c 2026-11-26 · priority: P1
 
 Unticked corrections are recorded as rejected, but every re-review of a unit stores its corrections as new proposals with no comparison to earlier decisions, so a rejected correction returns whenever its unit is reviewed again (ae8fb29c: 17 proposals, 17 distinct fingerprints; unit 1 block b3 proposed twice, b8 four times as reworded variants, so an exact-fingerprint match would not catch them).
 
@@ -1243,7 +1243,7 @@ Unticked corrections are recorded as rejected, but every re-review of a unit sto
 
 ### T773 · Translator review: finish without more calls, keeping the current text
 
-status: open, in work (module branch `feat/review-finish-waiver` on T772's PR D); plan approved 2026-11-26 (`docs/plans/translator-review-continuation.md` PR E, after T772's PR D) · kind: feature · found: owner decision 2026-11-26 · priority: P2
+status: done 2026-11-26, module PR E merged #24 09ef1c1 and live (0013 applied 20:14Z); plan approved 2026-11-26 (`docs/plans/translator-review-continuation.md` PR E, after T772's PR D) · kind: feature · found: owner decision 2026-11-26 · priority: P2
 
 The owner wants this built, not optional. On the T772 budget form, review gets a third choice: finish without more calls, keeping all accepted text and already applied corrections. Remaining units stay unreviewed and outstanding proposals stay unapplied; an explicit, unticked acknowledgment records a waiver bound to that exact text snapshot (T772 design section 5).
 
