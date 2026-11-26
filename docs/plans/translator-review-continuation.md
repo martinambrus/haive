@@ -20,12 +20,12 @@ A2. Host, for T772: pre-form decision fallback + `StepPrepareFormError` for a ca
 B. T767 PR1 (already built, in review) merges on its own.
 C. Translator T771: opt in after the committed patch batch; one-sweep bound; drop Retry and confirm forms; page copy discloses the automatic review cost. xhigh.
 D. Translator T772: the next free module migration (0012 if it lands before T767 PR2, whose later PRs then renumber) for call waits, owner decisions and refusal codes, common admission for all tasks incl. legacy, owner grants, specific messages, typed refusal reason codes. xhigh.
-(E, only if the owner wants it) "Finish review without more calls" with an explicit partial-coverage waiver carried through render and the manifest.
+E. Translator T773: "Finish review without more calls, keep the current text" with an explicit partial-coverage waiver carried through render and the manifest (T772 design section 5). Built after D; the choice appears on the budget form only once render accepts it. xhigh.
 
 ## Decisions (approved by the owner 2026-11-26)
 - Grant bounds: one grant at most min(1000, 8U) calls; owner extensions over the task's life at most another 8U (the budget can at most double); one extra attempt per pass decision, at most two per pass. Historical operator grants stay valid. Owner: revisit after a real book.
 - Stop: no in-form Stop (that needs another host signal); the form points to the task's Stop button.
-- Finish without more calls: deferred to optional PR E (needs render to accept a deliberately partial review).
+- Finish without more calls: BUILD it (owner, 2026-11-26: practical, not optional) as PR E after D, since render must first accept a deliberately partial review.
 - Recovery of ae8fb29c: after deploy the owner clicks Retry on the failed review once; it parks on the new budget form without a paid call; the owner decides there.
 
 ## Rollback
