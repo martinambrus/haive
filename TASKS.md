@@ -1281,7 +1281,7 @@ OWNER DECISION 2026-11-26: submitting the correction form continues on its own. 
 
 ### T769 · Task page: no "Show RAG stats" link on a step that made no RAG query
 
-status: open · kind: ux · found: owner request 2026-11-26 · priority: P3
+status: done 2026-11-26, merged #1351 4c3a6b08d and live · kind: ux · found: owner request 2026-11-26 · priority: P3
 
 The step card shows `Show RAG stats` for every step that ran an agent (`ranAgent = step.cliInvocationCount > 0`, `web/src/app/(app)/tasks/[id]/page.tsx` ~:3696, link ~:4424). Whether any `rag_search` happened is known only after the click, when `RagStatsPanel` says "No RAG queries recorded for this step." (~:4548). Steps that never query RAG (module steps with tools off, the translator passes) all carry a link to an empty panel.
 
