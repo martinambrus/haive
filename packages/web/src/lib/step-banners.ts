@@ -21,6 +21,19 @@ import { parseStepId } from '@haive/shared/modularity';
  *  exist so that decision lives in one tested place instead of being re-derived per call site.
  */
 
+/** The RAG disclosure is available once an agent starts; unfinished steps can
+ *  still receive queries. Finished empty steps keep an aligned informational row. */
+export function stepRagStatsState(step: {
+  status: string;
+  cliInvocationCount: number;
+  startedAt: string | Date | null;
+  ragQueryCount: number;
+}): 'hidden' | 'unused' | 'queries' {
+  if (step.cliInvocationCount === 0 || !step.startedAt) return 'hidden';
+  const finished = step.status === 'done' || step.status === 'failed' || step.status === 'skipped';
+  return finished && step.ragQueryCount === 0 ? 'unused' : 'queries';
+}
+
 /** Usage stamps are collected only for done attempts. Retry, Resume, loops and re-offered forms can
  *  reuse its row with its old figures; those figures have no meaning while it is open. */
 export function showsStepUsageStamp(step: { status: string }): boolean {
