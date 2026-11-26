@@ -13,7 +13,8 @@ vi.mock('@haive/shared', async (original) => ({
   ...(await original<typeof import('@haive/shared')>()),
   configService: { initialize: h.initialize },
 }));
-vi.mock('./journal.js', () => ({
+vi.mock('./journal.js', async (original) => ({
+  formatAttemptError: (await original<typeof import('./journal.js')>()).formatAttemptError,
   ensureJournal: vi.fn(),
   findLiveRun: vi.fn(),
   lastDoneChannel: vi.fn(),
@@ -1076,6 +1077,24 @@ describe('early refusal install fields', () => {
     expect(vi.mocked(journal.recordAttempt).mock.calls[0]![1].error).toContain(
       'without activity. Install channel and current version were not read',
     );
+  });
+
+  it('keeps the display note in the stored journal after a long refusal is truncated', async () => {
+    await writeFile(join(dir, '.env'), 'HAIVE_CHANNEL=acme\n');
+    const failure = new Error('x'.repeat(2050));
+    vi.mocked(images.readImageSettings).mockRejectedValueOnce(failure);
+    const stored = vi.fn(async (..._args: unknown[]) => [{ id: 'attempt' }]);
+    const tx = Object.assign(stored, { json: (value: unknown) => value });
+    const sql = { begin: async (work: (conn: typeof tx) => Promise<void>) => work(tx) };
+    const actual = await vi.importActual<typeof journal>('./journal.js');
+    vi.mocked(journal.recordAttempt).mockImplementationOnce(async (_sql, entry) =>
+      actual.recordAttempt(sql as never, entry),
+    );
+    await expect(main()).rejects.toBe(failure);
+    const error = stored.mock.calls[0]![5] as string;
+    expect(error.length).toBeLessThanOrEqual(2048);
+    expect(error).toContain('… [truncated]');
+    expect(error).toMatch(/Current version could not be resolved from literal \.env settings\.$/);
   });
 
   it('records safe display fields when reading install image settings fails', async () => {

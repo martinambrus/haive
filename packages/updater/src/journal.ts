@@ -80,6 +80,21 @@ export async function startRun(
   return rows[0]!.id;
 }
 
+/** Bound the diagnosis before joining the display note, so truncation cannot erase the note. */
+export function formatAttemptError(error: string, note?: string, limit = 2048): string {
+  const marker = '… [truncated]';
+  const bound = (text: string, budget: number): string =>
+    text.length > budget
+      ? text.slice(0, Math.max(0, budget - marker.length)) + marker.slice(0, budget)
+      : text;
+  if (!note) return bound(error, limit);
+  const suffix = bound(note, limit);
+  const budget = limit - suffix.length - 2;
+  if (budget <= 0) return suffix;
+  const diagnosis = bound(error, budget);
+  return `${diagnosis}${/[.!?]\s*$/.test(diagnosis) ? '' : '.'} ${suffix}`;
+}
+
 /** A terminal preflight attempt is history only: it can neither resume nor pin a channel. */
 export async function recordAttempt(
   sql: Sql,
@@ -93,9 +108,7 @@ export async function recordAttempt(
   },
 ): Promise<void> {
   await assertStackLease();
-  const marker = '… [truncated]';
-  const error =
-    entry.error.length > 2048 ? entry.error.slice(0, 2048 - marker.length) + marker : entry.error;
+  const error = formatAttemptError(entry.error);
   await sql.begin(async (tx) => {
     await assertStackLease();
     const rows = await tx<{ id: string }[]>`

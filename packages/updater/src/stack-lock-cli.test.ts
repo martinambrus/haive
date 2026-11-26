@@ -21,7 +21,8 @@ vi.mock('@haive/shared', async (original) => ({
   ...(await original<typeof import('@haive/shared')>()),
   configService: { initialize: h.initialize, set: h.setConfig, getFresh: h.getFreshConfig },
 }));
-vi.mock('./journal.js', () => ({
+vi.mock('./journal.js', async (original) => ({
+  formatAttemptError: (await original<typeof import('./journal.js')>()).formatAttemptError,
   ensureJournal: vi.fn(),
   enterPhase: vi.fn(),
   recordFoundState: vi.fn(),

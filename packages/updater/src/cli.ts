@@ -32,6 +32,7 @@ import {
 import { attemptVersion, readAttemptInstallFields } from './attempt-fields.js';
 import {
   ensureJournal,
+  formatAttemptError,
   findLiveRun,
   lastDoneChannel,
   recordRunError,
@@ -727,9 +728,7 @@ async function upgradeOwned(options: { stackLock?: StackLockOptions }): Promise<
               toVersion,
               channel: fields.channel,
               ...attempt,
-              error: fields.note
-                ? `${attempt.error}${/[.!?]\s*$/.test(attempt.error) ? '' : '.'} ${fields.note}`
-                : attempt.error,
+              error: formatAttemptError(attempt.error, fields.note),
             });
           });
         } catch (err) {
