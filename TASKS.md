@@ -1233,7 +1233,7 @@ The step RAG stats endpoint selects by logical step id without a round selector 
 
 ### T775 · Step terminal runs carry a title saying what each run did
 
-status: open, in work, design confirmed by owner 2026-11-26 · kind: ux · found: owner task ae8fb29c 2026-11-26 · priority: P2
+status: done 2026-11-27: host seam #1350 (5a96f82e2) and translator #25 (be182b2), both live; design confirmed by owner 2026-11-26 · kind: ux · found: owner task ae8fb29c 2026-11-26 · priority: P2
 
 Runs of a single-agent step show only "Run 1", "Run 2" (`web/src/components/terminal/StepTerminal.tsx:295`). `cli_invocations.agent_title` already exists and the terminal header shows it, but only loop roles, mining agents and step summaries set it; a module's pre-form dispatch cannot.
 
