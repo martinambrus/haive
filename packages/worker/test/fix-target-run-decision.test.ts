@@ -38,7 +38,7 @@ function makeDb(contract: unknown, requestedRounds: number[]) {
           name === 'task_steps'
             ? [state.row]
             : name === 'task_events'
-              ? requestedRounds.map((round) => ({ payload: { round } }))
+              ? requestedRounds.map((round) => ({ round }))
               : [];
         return {
           where: () => {

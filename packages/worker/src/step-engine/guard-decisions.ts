@@ -187,7 +187,7 @@ export async function decideLoadedGuardDecision(
     fixTarget && ctx.round > 0
       ? (
           await tx
-            .select({ payload: schema.taskEvents.payload })
+            .select({ round: sql<unknown>`${schema.taskEvents.payload}->'round'` })
             .from(schema.taskEvents)
             .where(
               and(
@@ -196,7 +196,7 @@ export async function decideLoadedGuardDecision(
                 currentStartFixRequest(ctx.taskId),
               ),
             )
-        ).map((r) => (r.payload as { round?: number } | null)?.round)
+        ).map((r) => r.round)
       : [],
   );
   const reuseEarlierDecision = fixRounds.has(ctx.round);

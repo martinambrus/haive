@@ -793,7 +793,7 @@ export function currentStartFixRequest(taskId: string) {
 export async function isFixRound(ctx: StepContext): Promise<boolean> {
   if (ctx.round <= 0) return false;
   const rows = await ctx.db
-    .select({ payload: schema.taskEvents.payload })
+    .select({ round: sql<unknown>`${schema.taskEvents.payload}->'round'` })
     .from(schema.taskEvents)
     .where(
       and(
@@ -802,7 +802,7 @@ export async function isFixRound(ctx: StepContext): Promise<boolean> {
         currentStartFixRequest(ctx.taskId),
       ),
     );
-  return rows.some((r) => (r.payload as { round?: number } | null)?.round === ctx.round);
+  return rows.some((r) => r.round === ctx.round);
 }
 
 /** Source steps whose fix-loop diagnoses are OBJECTIVE/runtime failures the implementation

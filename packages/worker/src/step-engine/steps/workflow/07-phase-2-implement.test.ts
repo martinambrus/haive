@@ -597,9 +597,7 @@ describe('phase2ImplementStep same-check repeat in the form', () => {
 // a human had rejected the spec at gate 1 (task ef954a3d).
 function shouldRunDb(mode: string | null, requestedRounds: FixRequest[]) {
   const stepRows = mode === null ? [] : [{ detectOutput: null, output: { mode }, iterations: [] }];
-  const eventRows = requestedRounds.map((r) => ({
-    payload: { round: r.round, diagnosis: r.diagnosis ?? 'tests failed' },
-  }));
+  const eventRows = requestedRounds.map((r) => ({ round: r.round }));
   let rows: unknown[] = stepRows;
   const chain: Record<string, unknown> = {};
   Object.assign(chain, {

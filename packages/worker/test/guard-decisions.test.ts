@@ -188,7 +188,7 @@ describe('guard decisions from loaded rows', () => {
       ]),
     );
     tx = {
-      select: () => ({ from: () => ({ where: async () => [{ payload: { round: 1 } }] }) }),
+      select: () => ({ from: () => ({ where: async () => [{ round: 1 }] }) }),
     } as unknown as StepContext['db'];
     ctx = {
       taskId: task.id,
@@ -331,7 +331,7 @@ describe('guard decisions from loaded rows', () => {
     const current = nextRound();
     current.round = ctx.round = task.currentRound = 3;
     const from = vi.fn(() => ({
-      where: async () => [{ payload: { round: 2 } }, { payload: { round: 3 } }],
+      where: async () => [{ round: 2 }, { round: 3 }],
     }));
     const select = vi.fn(() => ({ from }));
     tx = { select } as unknown as StepContext['db'];
@@ -355,7 +355,14 @@ describe('guard decisions from loaded rows', () => {
       tx = {
         ...events.db,
         // The real Postgres control covers the START subquery; this unit seam supplies its rows.
-        select: () => ({ from: () => ({ where: async () => events.rows(schema.taskEvents) }) }),
+        select: () => ({
+          from: () => ({
+            where: async () =>
+              events
+                .rows(schema.taskEvents)
+                .map((e) => ({ round: (e.payload as { round: number }).round })),
+          }),
+        }),
       } as unknown as StepContext['db'];
       if (kind === 'restart') {
         // restartLoop returns loop_back, whose handler records this durable request.
