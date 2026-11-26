@@ -1212,6 +1212,15 @@ Today consent reserves worst-case storage for all `8 x U` calls up front (about 
 
 1. Design: one task per book with one glossary and one approved style, translated and reviewed in batches with storage reserved per batch (recommended), versus part tasks importing an earlier part's approved glossary and style. Plan in `docs/plans/` before building; review at xhigh (consent, money).
 
+
+### T768 · Translator: keep terms refused when the target language declines them
+
+status: open, in work 2026-11-26 (blocks the owner's first paid run, T735) · kind: fix · found: owner task ae8fb29c 2026-11-26 · priority: P1
+
+In `martinambrus/haive-module-translator`. The owner's English-to-Slovak run failed at `tr-translate`: unit 0's accuracy pass was accepted, its restructure pass was refused with `Source-present keep term missing`. `keepTermLost` (`src/protocol/passes.ts` ~:115, used ~:142, `review.ts` ~:123, `patch.ts` ~:50) needs the literal keep term in the target as often as in the source, so a declined name (Marek to Marka) fails. One attempt is left on that pass key.
+
+1. Accept a declined form (same stem, up to 2 trailing letters changed on words of 5+ letters) at every keep-term check; a translated name still fails; codes and short words stay exact. Then the owner Retries the step.
+
 ### T721 · The Claude usage grant reaches sandbox environments
 
 status: open (items 2-5 and 10-12; item 1 done #1281; items 6-9 done by #1300, 9cc4e4382, deployed 2026-11-21 04:30Z) · kind: security · found: login-set design (T720) 2026-11-19 · priority: P3 (was P1 until #1281)
