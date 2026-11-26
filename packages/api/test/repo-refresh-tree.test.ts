@@ -40,12 +40,14 @@ function setup(repo: Record<string, unknown>, taskStatus?: string, task = {}) {
     tasks: schema.tasks,
     taskSteps: schema.taskSteps,
     repoUploads: schema.repoUploads,
+    taskEvents: schema.taskEvents,
   });
   fake.insert(schema.repositories, {
     id: REPO,
     userId: USER,
     name: 'repo',
     status: 'ready',
+    refreshPending: false,
     ...repo,
   });
   if (taskStatus) {
@@ -77,7 +79,10 @@ describe('refreshing a repository', () => {
     const fake = setup({ source: 'git_https', remoteUrl: 'https://example.com/r.git' });
     expect((await refresh()).status).toBe(200);
     expect(h.add.mock.calls[0]![0]).toBe(REPO_JOB_NAMES.REFRESH);
-    expect(status(fake)).toBe('cloning');
+    expect(status(fake)).toBe('ready');
+    expect(fake.rows(schema.repositories)[0]!.refreshPending).toBe(true);
+    expect((await refresh()).status).toBe(409);
+    expect(h.add).toHaveBeenCalledTimes(1);
   });
 
   it('fast-forwards a writable folder import from the folder, and rescans a read-only one', async () => {
@@ -172,6 +177,7 @@ describe('the repository row a refresh reads', () => {
       'errorCode',
       'id',
       'localPath',
+      'refreshPending',
       'remoteUrl',
       'source',
       'status',
@@ -317,6 +323,7 @@ describe('retrying an upload', () => {
     h.add.mockRejectedValue(new Error('Redis unavailable'));
     expect((await refresh()).status).toBe(500);
     expect(status(fake)).toBe('error');
+    expect(fake.rows(schema.repositories)[0]!.refreshPending).toBe(false);
   });
 
   it('keeps refreshing an upload linked to a remote, without re-extracting it', async () => {
@@ -353,7 +360,7 @@ describe('explicit checkout recovery', () => {
     expect(h.add).toHaveBeenCalledTimes(1);
   });
   it.each(['checkout_repair_needed', 'source_repair_needed'])(
-    'keeps a direct refresh check-only while recovery of %s is queued',
+    'refuses a direct check while recovery of %s is queued',
     async (errorCode) => {
       setup({
         source: 'git_https',
@@ -364,11 +371,9 @@ describe('explicit checkout recovery', () => {
       expect((await recover()).status).toBe(200);
       h.getJobs.mockResolvedValue([{ data: { repositoryId: REPO } }]);
 
-      expect((await refresh()).status).toBe(200);
-      expect(h.add).toHaveBeenCalledTimes(2);
+      expect((await refresh()).status).toBe(409);
+      expect(h.add).toHaveBeenCalledTimes(1);
       expect(h.add.mock.calls[0]![1]).toMatchObject({ recoverCheckout: true });
-      expect(h.add.mock.calls[1]![1]).toMatchObject({ checkCheckoutOnly: true });
-      expect(h.add.mock.calls[1]![1]).not.toHaveProperty('recoverCheckout');
     },
   );
   it.each(['checkout_repair_needed', 'source_repair_needed'])(
@@ -389,8 +394,8 @@ describe('explicit checkout recovery', () => {
       expect(h.add.mock.calls[0]![1]).not.toHaveProperty('recoverCheckout');
       expect(fake.rows(schema.repositories)[0]!.errorCode).toBe(errorCode);
       // A second API call before pickup cannot turn the queued check into an ordinary rebuild.
-      expect((await refresh()).status).toBe(200);
-      expect(h.add.mock.calls[1]![1]).toMatchObject({ checkCheckoutOnly: true });
+      expect((await refresh()).status).toBe(409);
+      expect(h.add).toHaveBeenCalledTimes(1);
     },
   );
   it('refuses recovery for an ordinary error', async () => {
@@ -436,6 +441,7 @@ it('keeps the recovery action available when its enqueue fails', async () => {
   expect(fake.rows(schema.repositories)[0]).toMatchObject({
     status: 'error',
     errorCode: 'checkout_repair_needed',
+    refreshPending: false,
   });
 });
 
@@ -468,7 +474,7 @@ describe('rebuild admission for task worktrees and repaired sources', () => {
     expect(h.add).not.toHaveBeenCalled();
   });
   it.each(['failed', 'created'])(
-    'refuses a %s task worktree until the task is cancelled',
+    'refuses a %s task worktree until cancellation teardown finishes',
     async (taskStatus) => {
       const fake = setup(
         {
@@ -489,11 +495,16 @@ describe('rebuild admission for task worktrees and repaired sources', () => {
         .update(schema.tasks)
         .set({ status: 'cancelled' })
         .where(eq(schema.tasks.repositoryId, REPO));
+      expect((await recover()).status).toBe(409);
+      fake.insert(schema.taskEvents, {
+        taskId: fake.rows(schema.tasks)[0]!.id,
+        eventType: 'task.cancel_finished',
+      });
       expect((await recover()).status).toBe(200);
     },
   );
   it.each(['completed', 'cancelled'])('allows a %s task worktree', async (taskStatus) => {
-    setup(
+    const fake = setup(
       {
         source: 'git_https',
         remoteUrl: 'https://example.com/r.git',
@@ -503,6 +514,11 @@ describe('rebuild admission for task worktrees and repaired sources', () => {
       taskStatus,
       { worktreePath: `${checkout}/.haive/worktrees/feature` },
     );
+    if (taskStatus === 'cancelled')
+      fake.insert(schema.taskEvents, {
+        taskId: fake.rows(schema.tasks)[0]!.id,
+        eventType: 'task.cancel_finished',
+      });
     expect((await recover()).status).toBe(200);
   });
   it('allows an unfinished task whose worktree is outside the checkout', async () => {

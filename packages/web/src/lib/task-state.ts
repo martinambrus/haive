@@ -1,5 +1,5 @@
 import type { StopActivityResult } from './api-client';
-import { isTaskDead } from './step-banners';
+import { isTaskDead, taskRepositoryDeleted } from './step-banners';
 import type { TaskToneLike } from './task-tone';
 
 export type TaskBadgeKind = 'finished' | 'dead' | 'paused' | 'slotWait' | 'status';
@@ -33,14 +33,19 @@ export function taskCanStop(task: TaskToneLike, opts: TaskStopState): boolean {
 
 /** The entries of the task page's actions menu. A dead task keeps Cancel and nothing else. */
 export function taskMenuKeys(
-  task: TaskToneLike & { pauseLocked?: boolean },
+  task: TaskToneLike & {
+    pauseLocked?: boolean;
+    repositoryId?: string | null;
+    type?: string;
+    metadata?: unknown;
+  },
   opts: TaskStopState,
 ): TaskMenuKey[] {
   if (isTaskDead(task)) return ['cancel'];
   const open = task.status !== 'completed' && task.status !== 'cancelled';
   const keys: TaskMenuKey[] = [];
   if (task.status === 'created') keys.push('start');
-  if (task.status === 'failed') keys.push('retry');
+  if (task.status === 'failed' && !taskRepositoryDeleted(task)) keys.push('retry');
   if (open) {
     if (task.pausedAt == null) keys.push('pause');
     else if (!task.pauseLocked) keys.push('resume');

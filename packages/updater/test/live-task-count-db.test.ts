@@ -53,6 +53,23 @@ describe.skipIf(!url)('liveWorkCount on Postgres', () => {
     await sql.end({ timeout: 5 });
   });
 
+  it('T594 R1: counts a ready repository until its queued refresh settles', async () => {
+    const id = await repository('ready');
+    await sql`UPDATE repositories SET refresh_pending = true WHERE id = ${id}`;
+    expect(await liveWorkCount(sql)).toBe(1);
+    await sql`UPDATE repositories SET refresh_pending = false WHERE id = ${id}`;
+    expect(await liveWorkCount(sql)).toBe(0);
+  });
+
+  it('T594 R1: drains a source schema predating the refresh marker', async () => {
+    await sql.begin(async (tx) => {
+      await tx`CREATE TEMP TABLE repositories (LIKE public.repositories INCLUDING DEFAULTS) ON COMMIT DROP`;
+      await tx`ALTER TABLE pg_temp.repositories DROP COLUMN refresh_pending`;
+      await tx`INSERT INTO repositories (user_id, name, source, status) VALUES (${OWNER}, 'legacy', 'local_path', 'cloning')`;
+      expect(await liveWorkCount(tx)).toBe(1);
+    });
+  });
+
   it('counts a task in every live status', async () => {
     for (const status of LIVE) await task(status);
 

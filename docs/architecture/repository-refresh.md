@@ -15,12 +15,14 @@ twice: once under the claim, and again with the fast-forward itself under the pr
 (`lockProjectState`), and the set-aside reads it a third time under each of its own locks before it touches a file (its
 restoring transaction takes the task-creation lock, `lockRepositoryTasksKey`, first; its first takes
 only the domain lock), so a task that starts while the refresh fetches or waits for that lock, and an
-upgrade still writing its record (which holds the same lock), keeps the checkout where it was. A same-branch merge reads the same check before it opens a merge in the checkout ([Merge conflicts](merge-conflicts.md)). A task
-that starts after the fast-forward is not fenced out, since nothing that starts a task reads the claim:
-the window writer 1 in [Onboarding reset](onboarding-reset.md) leaves open for the reset. It loses nothing
-here either, since the fetch writes no working tree, the fast-forward stops at a change git sees and
-the rebuild renames; what it can cost is a git lock collision that fails one side, which a Retry
-clears. Before the checkout moves, a plan row stamped before migration 0196 takes its plan base from the plan.json still on disk (`seedPlanBaseFromCheckout`); a seed that fails fails the refresh and leaves a usable checkout where it was, since afterwards no Pull could recover that base. A rebuild needs proof that the checkout is unusable at its own top level. Exit 1 of the quiet HEAD
+upgrade still writing its record (which holds the same lock), keeps the checkout where it was. A same-branch merge reads the same check before it opens a merge in the checkout ([Merge conflicts](merge-conflicts.md)). Task starts and revivals now read the live root claim under the task-creation key and answer
+409 while it is held, including after the rename transaction releases that key and throughout the
+clone and restore. Explicit recovery claims as `rebuild` and says "This repository is being rebuilt
+from its source. Wait for that to finish and try again." An ordinary refresh can also rebuild, so
+its `refresh` claim refuses Start and revival too, saying "This repository is being refreshed from
+its source. Try again in a moment." This deliberately extends the creation rule to a deferred
+Start and every revival; a refused Start stays `created`, and a refused revival keeps its failed
+or dead state. No database connection is held across the build. Before the checkout moves, a plan row stamped before migration 0196 takes its plan base from the plan.json still on disk (`seedPlanBaseFromCheckout`); a seed that fails fails the refresh and leaves a usable checkout where it was, since afterwards no Pull could recover that base. A rebuild needs proof that the checkout is unusable at its own top level. Exit 1 of the quiet HEAD
 probe is not proof alone, since a broken branch ref exits 1 too: `provesUnbornHead` needs HEAD to name a branch and a clean, empty enumeration of it; a failed top-level probe needs strict no-follow structural reads proving
 missing or invalid metadata before it can justify a rebuild. A corrupt config, unreadable metadata,
 external git dir or a command that gave no answer is unknown. That path ends in `error`, moves
@@ -85,13 +87,22 @@ or `created` one included, since its unpushed commits would move with the tree):
 admission (409), and the worker counts again, together with the holding tasks, under the
 task-creation lock (`lockRepositoryTasksKey`) in the transaction that renames the checkout aside;
 the lock spans only the recount and the rename, never the clone. Cancel the task, or finish it, and
-rebuild. A start after the rename can still overlap the clone (the window above).
+rebuild. A cancelled task with a worktree keeps that hold until `task.cancel_finished` proves its
+asynchronous teardown ended (or was explicitly abandoned); Cancel alone is insufficient. The
+refusal asks the user to wait for cancellation cleanup before rebuilding. The claim blocks a
+Start or revival after the rename too (the admission rule above).
 
 The list's `canRetry` / `retryUnavailableReason` describe the durable source the retry
 route can use: a local folder, a remote URL, or a completed upload record belonging to the
 repository's owner whose archive has not been recorded as unavailable. A blank project or a
 clone without a remote cannot be refreshed; the card replaces stale Retry copy with instructions
-to delete and create the repository again from a URL or folder. Root claims, holding tasks and
+to delete and create the repository again from a URL or folder. An ordinary refresh of a `ready` repository keeps it `ready` while queued or running, leaving
+its Terminal, Plan and task links available; a genuine preparation or recovery still uses
+`cloning`. `refresh_pending` (0250, declared last) is set in the admission transaction so the
+maintenance page and updater still count queued and running refresh work, including delayed
+retries, independently of availability. A second admission refuses while it is set. A successful
+handler, final failure or failed enqueue clears it; the ordinary stranded-preparation sweep also
+releases an old marker whose queue has no live job, preserving any repair code. Root claims, holding tasks and
 live queue jobs remain temporary route refusals and do not hide Retry. An older list response
 without capability fields keeps the Retry action for compatibility. Repository archives use
 the chunked API: `POST /repos/upload/init`, `PUT /repos/upload/:id/chunk` with `Content-Range: bytes start-end/total`,
@@ -99,6 +110,14 @@ then `POST /repos/upload/:id/complete`. Completion persists its `repo_uploads` s
 enqueuing extraction, so a failed preparation can use Retry. The unused single-shot
 `POST /repos/upload` route is retired (404). Existing completed upload records remain valid
 Retry sources, and archive retention is unchanged.
+
+T594 rollback: revert the code commits after active rebuilds and cancellation teardowns settle.
+Keep additive migration 0250 and its column on rollback; never remove an applied file.
+Settle every pending refresh before downgrading the API/worker/updater. Deploy all three together:
+an older updater cannot count a new API's ready refresh. The new updater detects the marker's
+presence before counting so it can drain a source schema that predates 0250. Keep existing `.aside-*` and `.rebuild-*` siblings;
+reverting code never restores or removes them. The recovery staging and repair-code retention
+already shipped in `2c16ca95e` remain unchanged. T594 C2 also resolves T602 item 2.
 
 ## Remote relink reconciliation
 

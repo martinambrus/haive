@@ -119,7 +119,9 @@ async function listBlockingJobs(db: ReturnType<typeof getDb>) {
       })
       .from(schema.repositories)
       .leftJoin(schema.users, eq(schema.users.id, schema.repositories.userId))
-      .where(eq(schema.repositories.status, 'cloning'))
+      .where(
+        or(eq(schema.repositories.status, 'cloning'), eq(schema.repositories.refreshPending, true)),
+      )
       .orderBy(desc(schema.repositories.updatedAt))
       .limit(BLOCKING_LIST_CAP + 1),
     db

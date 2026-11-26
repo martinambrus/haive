@@ -9,7 +9,7 @@ import {
   pinnedTaskStepIds,
 } from '@haive/shared/modularity';
 import { reviveRefusal } from '@haive/shared/onboarding-admission';
-import { taskRootMergeBusy, ROOT_MERGE_BUSY_MESSAGE } from '@haive/shared/root-merge-busy';
+import { taskRootMergeBusy } from '@haive/shared/root-merge-busy';
 import { ModuleAdmissionError } from '@haive/shared/modularity-server';
 import {
   and,
@@ -85,6 +85,15 @@ export interface DeadTaskBootDeps {
 const defaultDeps: DeadTaskBootDeps = { enqueueStart, enqueueAdvance: enqueueRedrive };
 
 export const DEAD_TASK_REVIVE_RETRY_MS = 30_000;
+export const DEAD_TASK_REVIVE_MAX_RETRY_MS = 5 * 60_000;
+
+// One notice for a continuously held revival, including boot and its later polls.
+const heldRevivalNotices = new WeakMap<Database, Set<string>>();
+function heldNotices(db: Database): Set<string> {
+  let notices = heldRevivalNotices.get(db);
+  if (!notices) heldRevivalNotices.set(db, (notices = new Set()));
+  return notices;
+}
 
 /** A task as the pass read it; the revive swaps on this state. */
 export interface DeadTaskView {
@@ -229,6 +238,7 @@ export async function reviveDeadTask(
   c: DeadTaskView,
   deps: DeadTaskBootDeps,
 ): Promise<ReviveJob['kind'] | 'held' | null> {
+  let heldReason = 'new-work';
   const reviving = db.transaction(async (tx) => {
     if (await newWorkHeldUnderFence(tx)) return 'held' as const;
     try {
@@ -239,7 +249,9 @@ export async function reviveDeadTask(
       );
       if (refusal) {
         const reason = 'refusal' in refusal ? refusal.refusal.reason : refusal.admission.reason;
-        log.info({ taskId: c.id, reason }, 'dead task revival refused');
+        heldReason = reason;
+        if (reason === 'no-repository')
+          log.info({ taskId: c.id, reason }, 'dead task revival refused');
         return reason === 'root-claim' ||
           reason === 'live-upgrade' ||
           reason === 'live-onboarding' ||
@@ -248,7 +260,10 @@ export async function reviveDeadTask(
           : null;
       }
     } catch (err) {
-      if (err instanceof ModuleAdmissionError) return 'held' as const;
+      if (err instanceof ModuleAdmissionError) {
+        heldReason = 'module-admission';
+        return 'held' as const;
+      }
       throw err;
     }
     const [current] = await readCandidates(tx, eq(schema.tasks.id, c.id));
@@ -263,7 +278,7 @@ export async function reviveDeadTask(
     )
       return null;
     if (await taskRootMergeBusy(tx, c.id)) {
-      log.info({ taskId: c.id, reason: ROOT_MERGE_BUSY_MESSAGE }, 'dead task revival held');
+      heldReason = 'root-merge';
       return 'held' as const;
     }
     const locked = await boundedLockWait(
@@ -313,10 +328,21 @@ export async function reviveDeadTask(
     return { epoch: row.epoch, job };
   });
   const revived = await reviving.catch((err: unknown) => {
-    if (isLockNotAvailable(err)) return 'held' as const;
+    if (isLockNotAvailable(err)) {
+      heldReason = 'busy';
+      return 'held' as const;
+    }
     throw err;
   });
-  if (revived === 'held') return 'held';
+  const notices = heldNotices(db);
+  if (revived === 'held') {
+    if (!notices.has(c.id)) {
+      notices.add(c.id);
+      log.info({ taskId: c.id, reason: heldReason }, 'dead task revival held');
+    }
+    return 'held';
+  }
+  notices.delete(c.id);
   if (!revived) return null;
 
   const delays = deps.redriveRetryDelaysMs ?? REDRIVE_RETRY_DELAYS_MS;
@@ -502,6 +528,7 @@ export async function reviveDeadTasks(
   let revived = 0;
   let held = 0;
   let failed = 0;
+  const seen = new Set<string>();
   for (const c of await readCandidates(
     db,
     or(
@@ -523,6 +550,7 @@ export async function reviveDeadTasks(
       ),
     ),
   )) {
+    seen.add(c.id);
     try {
       if (!(await judgeCandidate(db, c)).resolves || c.deadAt === null) continue;
       const outcome = await reviveDeadTask(db, c, deps);
@@ -534,33 +562,39 @@ export async function reviveDeadTasks(
         log.error({ err, taskId: c.id }, 'dead task reconciliation failed for a task');
     }
   }
-  if (held > 0) {
-    log.info({ held }, 'dead tasks not revived: admission is held or its state cannot be read');
-  }
+  const notices = heldNotices(db);
+  for (const id of notices) if (!seen.has(id)) notices.delete(id);
   return { revived, held, failed };
 }
 
-/** Tries the revivals again every interval until a pass holds none back and fails none; the returned function stops it. */
+/** Retries with capped exponential backoff until no revival is held or failed. */
 export function retryHeldRevivals(
   db: Database,
   deps: DeadTaskBootDeps = defaultDeps,
   intervalMs = DEAD_TASK_REVIVE_RETRY_MS,
+  maxIntervalMs = DEAD_TASK_REVIVE_MAX_RETRY_MS,
 ): () => void {
-  let running = false;
-  const timer = setInterval(() => {
-    if (running) return;
-    running = true;
-    reviveDeadTasks(db, deps)
-      .then(({ held, failed }) => {
-        if (held === 0 && failed === 0) clearInterval(timer);
-      })
-      .catch((err) => log.warn({ err }, 'retrying the held dead-task revivals failed'))
-      .finally(() => {
-        running = false;
-      });
-  }, intervalMs);
-  timer.unref();
-  return () => clearInterval(timer);
+  let stopped = false;
+  let delay = Math.min(intervalMs, maxIntervalMs);
+  let timer: ReturnType<typeof setTimeout>;
+  const schedule = () => {
+    timer = setTimeout(async () => {
+      try {
+        const { held, failed } = await reviveDeadTasks(db, deps);
+        if (held === 0 && failed === 0) return;
+      } catch (err) {
+        log.warn({ err }, 'retrying the held dead-task revivals failed');
+      }
+      delay = Math.min(delay * 2, maxIntervalMs);
+      if (!stopped) schedule();
+    }, delay);
+    timer.unref();
+  };
+  schedule();
+  return () => {
+    stopped = true;
+    clearTimeout(timer);
+  };
 }
 
 export async function reconcileDeadTasks(

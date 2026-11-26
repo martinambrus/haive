@@ -2414,7 +2414,7 @@ describe.skipIf(!url)('recovery of a fix round on Postgres', () => {
 
       it('retryHeldRevivals revives a restored target once and stops', async () => {
         const id = await deadAtTarget();
-        vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
+        vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
         try {
           const stop = retryHeldRevivals(db, deps, 10);
           await vi.advanceTimersByTimeAsync(10);

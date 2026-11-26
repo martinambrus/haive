@@ -542,7 +542,7 @@ export async function reconcileStrandedCloningRepos(db: Database): Promise<void>
     .from(schema.repositories)
     .where(
       and(
-        eq(schema.repositories.status, 'cloning'),
+        or(eq(schema.repositories.status, 'cloning'), eq(schema.repositories.refreshPending, true)),
         lt(schema.repositories.updatedAt, cutoff),
         unclaimed,
       ),
@@ -581,6 +581,7 @@ export async function reconcileStrandedCloningRepos(db: Database): Promise<void>
     .update(schema.repositories)
     .set({
       status: 'error',
+      refreshPending: false,
       // Keep a repair signal (check-only or recovery preparation), just as the processor's catch does.
       statusMessage:
         'Preparing this repository did not finish — the worker stopped while it was running. Retry if available; otherwise delete the repository and add it again.',
@@ -589,12 +590,12 @@ export async function reconcileStrandedCloningRepos(db: Database): Promise<void>
     .where(
       and(
         inArray(schema.repositories.id, stranded),
-        eq(schema.repositories.status, 'cloning'),
+        or(eq(schema.repositories.status, 'cloning'), eq(schema.repositories.refreshPending, true)),
         lt(schema.repositories.updatedAt, cutoff),
         unclaimed,
       ),
     );
-  log.warn({ count: stranded.length }, 'released repositories stranded at cloning');
+  log.warn({ count: stranded.length }, 'released repositories with stranded preparation work');
 }
 
 /** Fails a bundle left at `syncing` with no live job; resync and replace restart the clock. */

@@ -108,7 +108,7 @@ const taskRow = (over: Record<string, unknown> = {}) => ({
   completedAt: null,
   createdAt: PAUSED_AT,
   updatedAt: PAUSED_AT,
-  repositoryId: null,
+  repositoryId: 'r1',
   cliProviderId: null,
   containerId: null,
   worktreePath: null,
@@ -715,7 +715,7 @@ it('accepts a slow task poll while a newer poll is still pending', async () => {
   await view.flush();
 });
 
-it('shows the API explanation when Retry refuses a deleted repository', async () => {
+it('shows the API explanation when the repository is deleted after the last poll', async () => {
   const sentence = 'The repository of this task was deleted; it cannot be retried.';
   net.actionError = sentence;
   const view = await mount({ status: 'failed', pausedAt: null });
@@ -889,4 +889,23 @@ describe('task page: a refused answer to a re-parked form', () => {
     expect(net.detailFetches).toBe(fetchesBefore);
     expect(textOf(view.tree())).toContain('Something else broke');
   });
+});
+
+it('T594 C4: hides header and step recovery for a structurally deleted repository', async () => {
+  const view = await mount(
+    {
+      status: 'failed',
+      pausedAt: null,
+      repositoryId: null,
+      repository: null,
+      errorMessage: 'unrelated failure',
+    },
+    [{ ...stepRow(), status: 'failed' }],
+  );
+  const labels = await menuLabels(view);
+  expect(labels).not.toContain('Retry');
+  expect(buttons(view.tree(), /^retry$/i)).toHaveLength(0);
+  expect(buttons(view.tree(), /^retry with ai$/i)).toHaveLength(0);
+  expect(buttons(view.tree(), /^resume/i)).toHaveLength(0);
+  expect(labels).toContain('Cancel');
 });

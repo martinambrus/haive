@@ -147,10 +147,20 @@ export async function checkRevive(
   if (row.type !== 'onboarding' && row.type !== 'onboarding_upgrade') {
     await lockRepositoryTasksKey(tx, row.repositoryId);
     const [repo] = await tx
-      .select({ id: schema.repositories.id })
+      .select({
+        id: schema.repositories.id,
+        rootClaimedAt: schema.repositories.rootClaimedAt,
+        rootClaimKind: schema.repositories.rootClaimKind,
+      })
       .from(schema.repositories)
       .where(eq(schema.repositories.id, row.repositoryId));
-    return repo ? null : { task: row, refusal: { reason: 'no-repository' } };
+    if (!repo) return { task: row, refusal: { reason: 'no-repository' } };
+    if (isRootClaimLive(repo.rootClaimedAt))
+      return {
+        task: row,
+        refusal: { reason: 'root-claim', claimKind: repo.rootClaimKind as RootClaimKind | null },
+      };
+    return null;
   }
   const task: ReviveTask & { repositoryId: string } = {
     type: row.type,

@@ -230,7 +230,7 @@ function deriveTopLevelPaths(fileTree: string[] | null): string[] {
 
 /** Enqueue a repository job, and mark the row `error` if the ENQUEUE itself fails.
  *
- *  The row is committed at `cloning` before any of these calls run, so a throwing `queue.add` —
+ *  The row is committed at `cloning` or with refreshPending before these calls run, so a throwing `queue.add` —
  *  Redis down or failing over — otherwise leaves a repository whose job never existed, with
  *  nothing to move it off `cloning`. The worker's boot reconciler cannot cover that case in
  *  bounded time: it deliberately ignores rows younger than its cutoff, because a young row is
@@ -253,6 +253,7 @@ export async function addRepoJobOrMarkError(
       .update(schema.repositories)
       .set({
         status: 'error',
+        refreshPending: false,
         errorCode,
         statusMessage:
           'Could not queue the job that prepares this repository. Retry if available; otherwise delete the repository and add it again.',
@@ -3688,6 +3689,7 @@ async function refreshRepository(c: Context<AppEnv>, recovery = false) {
     columns: {
       id: true,
       status: true,
+      refreshPending: true,
       errorCode: true,
       source: true,
       remoteUrl: true,
@@ -3698,6 +3700,8 @@ async function refreshRepository(c: Context<AppEnv>, recovery = false) {
     },
   });
   if (!repo) throw new HttpError(404, 'Repository not found');
+  if (repo.refreshPending)
+    throw new HttpError(409, 'Repository preparation is already queued or running.');
   if (
     recovery &&
     (repo.status !== 'error' ||
@@ -3785,7 +3789,11 @@ async function refreshRepository(c: Context<AppEnv>, recovery = false) {
     const changed = await tx
       .update(schema.repositories)
       .set({
-        status: 'cloning',
+        // A ready checkout remains available during an ordinary refresh or rescan.
+        ...(repo.status === 'ready' && !recovery && !retryUpload
+          ? {}
+          : { status: 'cloning' as const }),
+        refreshPending: true,
         statusMessage: null,
         // Keep the repair signal until recovery settles: even before enqueue, another refresh
         // must remain check-only rather than rebuild without restoring this install's data.
@@ -3795,6 +3803,7 @@ async function refreshRepository(c: Context<AppEnv>, recovery = false) {
       .where(
         and(
           eq(schema.repositories.id, id),
+          eq(schema.repositories.refreshPending, false),
           retryUpload || recovery ? eq(schema.repositories.status, 'error') : undefined,
           recovery
             ? inArray(schema.repositories.errorCode, [
@@ -3805,9 +3814,9 @@ async function refreshRepository(c: Context<AppEnv>, recovery = false) {
         ),
       )
       .returning({ id: schema.repositories.id });
-    // The live-job read alone cannot fence two simultaneous requests. Only one can move error
-    // to cloning, and a second click before pickup cannot queue a second destructive extraction.
-    if ((retryUpload || recovery) && changed.length === 0) {
+    // Claim pending work in the admission transaction: simultaneous requests cannot queue
+    // two preparations, and a ready checkout still holds the maintenance drain before enqueue.
+    if (changed.length === 0) {
       throw new HttpError(409, 'Repository preparation is already queued or running.');
     }
   });

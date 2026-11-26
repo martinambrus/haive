@@ -1,7 +1,7 @@
 import { CheckoutRepairNeededError } from '../repo/repair-needed.js';
 import { scrubErrorPaths } from '@haive/shared/logger';
 import { safeProcessor } from './safe-processor.js';
-import { Worker, type Job } from 'bullmq';
+import { Worker, UnrecoverableError, type Job } from 'bullmq';
 import { eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import {
@@ -44,6 +44,10 @@ export function startRepoWorker(repoStorageRoot: string): Worker {
         } else {
           throw new Error(`Unknown repo job: ${job.name}`);
         }
+        await db
+          .update(schema.repositories)
+          .set({ refreshPending: false })
+          .where(eq(schema.repositories.id, payload.repositoryId));
       } catch (err) {
         const message = scrubErrorPaths(err);
         logger.error(
@@ -54,6 +58,11 @@ export function startRepoWorker(repoStorageRoot: string): Worker {
           .update(schema.repositories)
           .set({
             status: 'error',
+            // A delayed retry still owes work; only its final failure releases the drain.
+            ...((job.attemptsMade ?? 0) + 1 >= (job.opts?.attempts ?? 1) ||
+            err instanceof UnrecoverableError
+              ? { refreshPending: false }
+              : {}),
             // A check-only job runs for a repair code and keeps it whatever failed, so its
             // Retry stays a check and a rebuild still needs the explicit recovery.
             ...(payload.checkCheckoutOnly

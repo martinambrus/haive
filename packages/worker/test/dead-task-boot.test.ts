@@ -1371,7 +1371,7 @@ describe.skipIf(!url)('dead tasks at worker boot, on Postgres', () => {
     });
 
     it('keeps trying after boot, revives the task once the state is normal, and stops', async () => {
-      vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
       try {
         const id = await makeDead({ status: 'queued', currentStepId: null });
         const stays = await makeDead({ runListSnapshot: [A, GONE] });
@@ -1389,7 +1389,7 @@ describe.skipIf(!url)('dead tasks at worker boot, on Postgres', () => {
         expect(vi.getTimerCount()).toBe(1);
 
         stored('normal');
-        await vi.advanceTimersByTimeAsync(DEAD_TASK_REVIVE_RETRY_MS);
+        await vi.advanceTimersByTimeAsync(2 * DEAD_TASK_REVIVE_RETRY_MS);
         await vi.waitFor(async () => expect((await task(id)).deadAt).toBeNull());
         await vi.waitFor(() => expect(vi.getTimerCount()).toBe(0));
         expect(sent).toEqual([{ kind: 'start', taskId: id }]);

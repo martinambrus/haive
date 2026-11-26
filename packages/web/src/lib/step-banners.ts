@@ -1,3 +1,4 @@
+import { taskMayRunWithoutRepository } from '@haive/shared/task-scratch';
 import {
   leftCommittedMerges,
   leftOpenMerges,
@@ -493,4 +494,16 @@ export function rejectedReplyBanner(step: {
         ? 'An earlier attempt produced output this step could not use, so it re-ran automatically. The latest run is shown below.'
         : `${count} earlier attempts produced output this step could not use, so it re-ran automatically. The latest run is shown below.`,
   };
+}
+
+/** A NULL FK proves a deleted repository unless this task was explicitly created repo-less. */
+export function taskRepositoryDeleted(task: {
+  repositoryId?: string | null;
+  type?: string;
+  metadata?: unknown;
+}): boolean {
+  return (
+    task.repositoryId === null &&
+    !taskMayRunWithoutRepository({ type: task.type ?? '', metadata: task.metadata })
+  );
 }

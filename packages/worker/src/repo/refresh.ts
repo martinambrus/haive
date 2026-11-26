@@ -777,6 +777,6 @@ export async function handleRefresh(
       }
       await persistDetection(db, payload.repositoryId, dest, await fastForward(db, payload, dest));
     },
-    'refresh',
+    payload.recoverCheckout ? 'rebuild' : 'refresh',
   );
 }

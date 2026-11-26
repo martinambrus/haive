@@ -10,7 +10,11 @@ const repositoryId = '00000000-0000-4000-8000-000000000002';
 const otherTaskId = '00000000-0000-4000-8000-000000000003';
 
 function fixture(status = 'failed', worktreePath: string | null = null) {
-  const fake = createFakeDb({ tasks: schema.tasks, taskSteps: schema.taskSteps });
+  const fake = createFakeDb({
+    tasks: schema.tasks,
+    taskSteps: schema.taskSteps,
+    taskEvents: schema.taskEvents,
+  });
   fake.insert(schema.tasks, {
     id: taskId,
     repositoryId,
@@ -32,7 +36,7 @@ describe('checkoutWorktreeRefusal', () => {
     );
   });
 
-  it.each(['completed', 'cancelled'])('ignores a %s legacy task', async (status) => {
+  it.each(['completed'])('ignores a %s legacy task', async (status) => {
     const fake = fixture(status);
     fake.step({ worktreePath: inside });
     expect(await checkoutWorktreeRefusal(fake.db, repositoryId, checkout)).toBeNull();
@@ -68,4 +72,23 @@ describe('checkoutWorktreeRefusal', () => {
     fake.step({ worktreePath: inside }, 0, taskId, '02-other-step');
     expect(await checkoutWorktreeRefusal(fake.db, repositoryId, checkout)).toBeNull();
   });
+});
+
+describe('T594 C5: cancelled worktree teardown', () => {
+  it.each([false, true])(
+    'holds a cancelled task until teardown finished (legacy=%s)',
+    async (legacy) => {
+      const fake = fixture('cancelled', legacy ? null : inside);
+      if (legacy) fake.step({ worktreePath: inside });
+      expect(await checkoutWorktreeRefusal(fake.db, repositoryId, checkout)).toContain(
+        '1 task has',
+      );
+      fake.insert(schema.taskEvents, { taskId: otherTaskId, eventType: 'task.cancel_finished' });
+      expect(await checkoutWorktreeRefusal(fake.db, repositoryId, checkout)).toContain(
+        '1 task has',
+      );
+      fake.insert(schema.taskEvents, { taskId, eventType: 'task.cancel_finished' });
+      expect(await checkoutWorktreeRefusal(fake.db, repositoryId, checkout)).toBeNull();
+    },
+  );
 });

@@ -1247,6 +1247,7 @@ describe('the routes that start a background job', () => {
       source: 'git_https',
       remoteUrl: 'https://example.com/r.git',
       status: 'ready',
+      refreshPending: false,
     });
     h.db = answersBundles(fake.db);
     h.dbCalls = 0;
@@ -1262,7 +1263,9 @@ describe('the routes that start a background job', () => {
 
   /** What the updater's live-work count reads, off the rows the routes wrote. */
   const inProgress = ({ fake }: JobFixture) =>
-    fake.rows(schema.repositories).filter((r) => r.status === 'cloning').length +
+    fake
+      .rows(schema.repositories)
+      .filter((r) => r.status === 'cloning' || r.refreshPending === true).length +
     fake.rows(schema.customBundles).filter((r) => r.status === 'syncing').length +
     fake
       .rows(schema.cliProviders)

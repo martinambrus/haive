@@ -3,10 +3,13 @@ import { and, eq, isNull } from 'drizzle-orm';
 import {
   TASK_START_LOCK_TIMEOUT_MS,
   lockRepositoryTasksKey,
+  readLiveRootClaim,
+  rootClaimRefusal,
   schema,
   type DbTx,
 } from '@haive/database';
 import { TASK_JOB_NAMES, type TaskJobPayload } from '@haive/shared';
+import { HttpError } from '../context.js';
 import { assertCustomToolsUsable } from './custom-tools-start-check.js';
 import { assertRootMergeIdle } from './root-merge-busy.js';
 import { boundedLockWait } from './repository-busy.js';
@@ -63,6 +66,9 @@ export async function markQueuedForStart(
         TASK_START_LOCK_TIMEOUT_MS,
       );
       if (task?.status === 'created' && task.deadAt == null) {
+        // The move's short key has ended, but its lease spans the whole clone/restore.
+        const claim = await readLiveRootClaim(tx, repositoryId);
+        if (claim) throw new HttpError(409, rootClaimRefusal(claim.kind));
         await assertRootMergeIdle(tx, taskId, { ...task, repositoryId });
       }
     }

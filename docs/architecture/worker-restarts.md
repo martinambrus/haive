@@ -938,12 +938,17 @@ takes the shared new-work fence and reads the state past the cache: while new wo
 state cannot be read, it writes nothing (the updater starts the target worker in maintenance, so a
 revived task would otherwise run during verify and commit). A boot pass that held a revival back,
 failed one (a thrown write or a refused enqueue it put back) or could not run at all retries the
-revival alone every 30 s (`retryHeldRevivals`), never the boot-only marking or run supersede, until
+revival alone with capped exponential backoff (`retryHeldRevivals`): 30 s, 60 s, 120 s, 240 s,
+then at most once per five minutes, measured from completion of the preceding pass. It never
+repeats boot-only marking or run supersede, and continues until
 a pass holds none back and fails none; shutdown stops it. A revival re-enters the same checkout
 admission as a Retry whatever status the dead task kept (`running` and `queued` included), excluding
 only the task itself from the sibling checks. A revival the repository's own state refuses for now
 (its root claim, a live upgrade or onboarding of the repository, or unanswered project-state
-conflicts) counts as held and is logged at info with that structural reason; a revival refused
+conflicts) counts as held and is logged at info with that structural reason once per continuously held
+revival in this worker process, including a maintenance hold; subsequent polls emit no repeated
+hold or aggregate notice. Notices are discarded after resolution or removal. Shutdown cancels
+the timer and prevents an in-flight pass from scheduling another; a revival refused
 because the repository was deleted is permanent and keeps no timer running. A malformed v3 or derived pin is permanent
 too: an epoch-fenced update fails the task, clears the dead marker and records one
 `task.failed` event in the same transaction. The pin is retained unchanged. Remaining runs

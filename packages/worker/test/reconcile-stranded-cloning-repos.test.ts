@@ -92,6 +92,25 @@ describe('reconcileStrandedCloningRepos', () => {
       expect(fake.rows(schema.repositories)[0]).toMatchObject({ status: 'error', errorCode });
     },
   );
+  it('releases a stranded ready refresh marker without discarding its repair code', async () => {
+    getJobs.mockReset().mockResolvedValue([]);
+    const fake = createFakeDb({ repositories: schema.repositories });
+    fake.insert(schema.repositories, {
+      id: '00000000-0000-4000-8000-0000000000b1',
+      status: 'ready',
+      refreshPending: true,
+      errorCode: 'checkout_repair_needed',
+      updatedAt: new Date(Date.now() - 10 * 60_000),
+      rootClaimedAt: null,
+    });
+    await reconcileStrandedCloningRepos(fake.db as unknown as Database);
+    expect(fake.rows(schema.repositories)[0]).toMatchObject({
+      status: 'error',
+      refreshPending: false,
+      errorCode: 'checkout_repair_needed',
+    });
+  });
+
   it('releases a repository whose job is nowhere in the queue', async () => {
     getJobs.mockReset().mockResolvedValue([{ data: { repositoryId: 'other-repo' } }]);
     const recorded: RecordedUpdate[] = [];
