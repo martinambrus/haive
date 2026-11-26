@@ -37,12 +37,22 @@ a round of the cap. The oscillation and cap legs record the next round's request
 router runs, so a refusal after them leaves that request behind. A module whose schema is still
 being set up routes, and the advance parks as it does for any module step. The step reads the
 defect through
-`ctx.host.loadFixLoopDiagnosis()`, which is null unless a request is recorded for its own
-round: `round > 0` is also true after a revise-loop fork, so it never decides a fix round.
+`ctx.host.loadFixLoopDiagnosis()`, which is null unless a request of the current START is recorded for
+its own round: `round > 0` is also true after a revise-loop fork, so it never decides a fix round.
+
+A request belongs to a START generation. `claimTaskStart` writes the `task.running` event in the same
+transaction that claims the task (`queues/task-queue.ts`), and every `fix_loop.requested` carries that event's id as
+`startEventId`. A stamped request counts only when it names the task's latest `task.running`, so a request
+left by an earlier START cannot make a revise round look like a fix round. A request recorded before the stamp
+existed has no `startEventId` and counts at its round under every START, as it did before: those tasks keep the
+old cross-START exposure until they finish, rather than skip a fix round at deploy. One predicate decides it for
+every fix-round reader: `isFixRound` (07's DAG `shouldRun`, a pinned target's run decision and repair read), guard
+decisions, the diagnosis read and the gate-directive lookup. The history readers (prior-round context, same-check
+repeats, oscillation and the round cap) still read every generation.
 
 A pinned target is never skipped, as 07 is not: the api refuses Skip on it (`canSkip` is false),
 boot rejects a step that declares `fixConsumer` together with `allowSkip` (`fix-consumer-skippable`),
-and at a round a recorded request entered its own `shouldRun` cannot skip it (07's `shouldRun`
+and at a round a recorded request of the current START entered its own `shouldRun` cannot skip it (07's `shouldRun`
 answers true there for the same reason). Round 0 keeps the step's own run decision.
 
 Recovery addresses a round as (task, step, round) at an epoch, never by step id: resets, step

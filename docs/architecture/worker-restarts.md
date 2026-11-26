@@ -325,7 +325,8 @@ no task or runtime state. Both repository and bundle Workers tolerate ten stalls
 belongs to those two queues alone.
 
 **START claims the task, or does nothing.** `claimTaskStart` moves only a `queued` task to
-`running` (a stray START leaves a `created` draft alone), pointed at its first step, in one statement fenced on the epoch START read. A START that
+`running` (a stray START leaves a `created` draft alone), pointed at its first step, in one statement fenced on the epoch START read, and writes the generation's `task.running` event in the same
+transaction, so a claimed START always has the marker that scopes its fix-round requests ([Fix loop](fix-loop.md)). A START that
 finds the task anywhere else — redelivered after the task ran on, a second START a task Retry
 queued, a task a repository deletion cancelled — logs and returns, where it used to restart the
 task from its first step or revive a cancelled one. The pointer is load-bearing: a task Retry
@@ -797,7 +798,8 @@ went away (`UnresolvedStepError`). A registered step that the task's run list do
 pinned output contract or host role policy (`pinned-step-support-unavailable`). An unsupported or malformed execution-contract pin is another cause (`invalid-execution-contract`): an off-list or non-capable custom fix target, a guarded span on a derived, non-static or non-unique run list, a span predicate no
 registered step provides, or a span whose first step leads the list. Behind that fence, which admits a custom fix target only when the step is capable (see [Modules](modules.md)), `deadTaskResolution` also asks `unsupportedPinnedFixTarget`
 (`step-engine/fix-consumer.ts`) about the pinned target: a target absent from the pinned run list,
-or registered but not a module step declaring the pinned `fixConsumer` version (or fanning out),
+or registered but not a module step declaring the pinned `fixConsumer` version (or a declared fix consumer that fans out, whose
+refusal names fan-out),
 is a cause too; an unregistered target stays an unresolved step (a task with no run-list snapshot
 has no list to find it in, so its pin names it) and the task revives once the target registers.
 Dead is neither failed nor completed. `markTaskDead`
