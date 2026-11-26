@@ -1220,6 +1220,23 @@ In `martinambrus/haive-module-translator`. The owner's English-to-Slovak run fai
 
 1. Accept a declined form (same stem, up to 2 trailing letters changed on words of 5+ letters) at every keep-term check; a translated name still fails; codes and short words stay exact. Then the owner Retries the step.
 
+### T769 · Task page: no "Show RAG stats" link on a step that made no RAG query
+
+status: open · kind: ux · found: owner request 2026-11-26 · priority: P3
+
+The step card shows `Show RAG stats` for every step that ran an agent (`ranAgent = step.cliInvocationCount > 0`, `web/src/app/(app)/tasks/[id]/page.tsx` ~:3696, link ~:4424). Whether any `rag_search` happened is known only after the click, when `RagStatsPanel` says "No RAG queries recorded for this step." (~:4548). Steps that never query RAG (module steps with tools off, the translator passes) all carry a link to an empty panel.
+
+1. Give the step DTO a RAG query count (or a has-queries flag), attributed the way `RagStatsPanel`'s endpoint attributes queries (by time window), without a per-step request on page load.
+2. A finished step with no query shows a muted info line such as "No RAG used" in the link's place, so steps line up with those that have the link; a step with queries keeps the link. A step still running keeps today's link (queries can still arrive).
+
+### T770 · A form note defaulted to null broke the translator review form
+
+status: in review #1346 · kind: fix · found: owner task ae8fb29c 2026-11-26 · priority: P1
+
+`validateFormValues` (`shared/src/step-engine/schemas.ts`) gave every note the page did not send a `null` value, so saved answers gained a key per note and per reopen notice. `parseApproval` in the translator's `tr-review` accepts an exact key set, so every submission came back as "Submit the form as shown". Nothing was recorded, no paid call was spent.
+
+1. Notes and `global-kb-status` fields never enter the answers. After deploy the owner submits the parked review form again.
+
 ### T721 · The Claude usage grant reaches sandbox environments
 
 status: open (items 2-5 and 10-12; item 1 done #1281; items 6-9 done by #1300, 9cc4e4382, deployed 2026-11-21 04:30Z) · kind: security · found: login-set design (T720) 2026-11-19 · priority: P3 (was P1 until #1281)
