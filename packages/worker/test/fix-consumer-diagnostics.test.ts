@@ -41,6 +41,43 @@ it.each(['helper', 'router', 'fence'])('names fan-out in the %s refusal', (site)
     ).toThrow('fan-out');
 });
 
+it.each(['helper', 'router', 'fence'])(
+  'keeps the ordinary refusal for fan-out without a declared fix consumer (%s)',
+  (site) => {
+    const registry = new StepRegistry();
+    const def = { ...mining, fixConsumer: undefined };
+    registry.register(def);
+    const task = { executionContract: pin, runListSnapshot: [id] };
+    if (site === 'helper') {
+      const reason = unsupportedPinnedFixTarget(task, registry);
+      expect(reason).toContain('not a registered module step');
+      expect(reason).not.toContain('fan-out');
+    } else if (site === 'router') {
+      const result = resolveFixLoopTarget({
+        taskType: 'fx',
+        runList: [def],
+        registry,
+        executionContract: pin,
+        fixLoop: null,
+      });
+      expect(result).toMatchObject({
+        ok: false,
+        reason: expect.stringContaining('not a registered module step'),
+      });
+      expect(result).toMatchObject({ reason: expect.not.stringContaining('fan-out') });
+    } else {
+      const check = () =>
+        assertWorkerExecutionContractSupported(
+          pin,
+          { runListStrategy: 'static', runListSnapshot: [id] },
+          registry,
+        );
+      expect(check).toThrow('not a registered module fix consumer');
+      expect(check).not.toThrow('fan-out');
+    }
+  },
+);
+
 it('warns once per withheld step, including a step without a composable entry, with only its id', () => {
   const warn = vi.spyOn(logger, 'warn').mockImplementation(() => {});
   const steps = ['mine', 'other', 'writer', 'reader'].map((local) => ({

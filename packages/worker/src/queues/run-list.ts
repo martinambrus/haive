@@ -348,10 +348,11 @@ export function resolveFixLoopTarget(args: {
   if (pinned) {
     const consumer = resolvePinnedFixConsumer(pinned, args.registry);
     if (!consumer.ok) {
+      const def = args.registry.get(pinned.stepId);
       return {
         ok: false,
         reason:
-          args.registry.get(pinned.stepId)?.agentMining !== undefined
+          def?.fixConsumer !== undefined && def.agentMining !== undefined
             ? `fix loop target ${pinned.stepId} of task type ${args.taskType} uses fan-out, which cannot capture repair evidence`
             : `fix loop target ${pinned.stepId} of task type ${args.taskType} is not a registered module step with fix consumer version ${pinned.capabilityVersion}`,
       };

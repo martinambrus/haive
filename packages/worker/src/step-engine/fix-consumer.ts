@@ -77,7 +77,7 @@ export function unsupportedPinnedFixTarget(
     return `the pinned fix target ${target.stepId} is not in the run list of this task`;
   const def = registry.get(target.stepId);
   if (!def) return null;
-  if (def.agentMining !== undefined)
+  if (def.fixConsumer !== undefined && def.agentMining !== undefined)
     return `the pinned fix target ${target.stepId} uses fan-out, which cannot capture repair evidence`;
   return resolvePinnedFixConsumer(target, registry).ok
     ? null
