@@ -15,6 +15,7 @@ import { safeErrorMessage } from '@haive/shared/logger';
 import * as dk from './docker.js';
 import { assertStackLease, withStackLeaseRecovery } from './lease-fence.js';
 import { inInstall } from './install-files.js';
+import { envValue } from './envkeys.js';
 import { IMAGE_KEYS, imageFor, type ImageOverrides } from './images.js';
 import {
   enterPhase,
@@ -104,7 +105,7 @@ export async function setEnvVar(envFile: string, key: string, value: string): Pr
 
 export async function readEnvVar(envFile: string, key: string): Promise<string | null> {
   const text = await readFile(envFile, 'utf8');
-  return new RegExp(`^${key}=(.*)$`, 'm').exec(text)?.[1]?.trim() ?? null;
+  return envValue(text, key);
 }
 
 /** Compose reads the pin from the environment as well as from .env, so the version being acted on

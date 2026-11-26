@@ -45,6 +45,11 @@ function values(text: string, interpolated: Set<string>): Map<string, string> {
   return result;
 }
 
+/** Read one assignment with the same quote, comment and duplicate rules as required keys. */
+export function envValue(text: string, key: string): string | null {
+  return values(text, new Set()).get(key) ?? null;
+}
+
 /** Display-only literals: an interpolated value needs Compose and is deliberately unresolved. */
 export function literalEnvValues(
   text: string,
