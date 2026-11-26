@@ -426,8 +426,8 @@ start ends before the install settings were read (`install-locked`, `install-fil
 that read), the row records the literal `HAIVE_CHANNEL` and `HAIVE_VERSION` of `.env` instead
 (`readAttemptInstallFields`; an empty channel is `public`). A value that is absent, invalid or interpolated is
 stored as `unknown`, and a `.env` that is missing, linked, not a regular file, over 256 KiB or unparsable puts
-`not-read` in both columns (every updater read of `.env`, this one and the version read, uses the one strict
-parser in `envkeys.ts` and reads through the held install directory, never by path); either way a sentence appended to `error` says which. The read runs without the
+`not-read` in both columns (this display read and the installed-version read use the one strict parser in
+`envkeys.ts`, as the required-key check does, and read through the held install directory, never by path); either way a sentence appended to `error` says which. The read runs without the
 stack lock in the `install-locked` case, so it shows what `.env` held at that moment. In
 the same transaction, after the insert, it deletes the attempt rows beyond the newest 50 (ordered
 `started_at DESC, id DESC`, never the row it just wrote), so repeated refusals cannot grow the
@@ -526,7 +526,7 @@ cannot be removed it refuses with `updater-child-cleanup-failed` (exit 3, the ru
 failure's code) and does not roll back, which would race the survivor: the run stays for recovery, and the next
 start's child check refuses until the container is gone. A SIGTERM to the updater removes this attempt's running
 one-shots before it releases the lock and exits 143, waiting at most `STACK_LOCK_SIGNAL_CLEANUP_TIMEOUT_MS` (5 s,
-under `docker stop`'s 10 s grace) so a hung daemon cannot keep the lock held; from the moment it starts, that attempt launches no further one-shot (`one-shot attempt is stopping`), so a later phase cannot start a child its list has already missed after removing what it listed it lists once more within the same bound and removes what the first listing missed, so only
+under `docker stop`'s 10 s grace) so a hung daemon cannot keep the lock held; from the moment it starts, that attempt launches no further one-shot (`one-shot attempt is stopping`), so a later phase cannot start a child its list has already missed; after removing what it listed it lists once more within the same bound and removes what the first listing missed, so only
 a child created after that second listing can survive, and the next start's check catches it; a removal that fails or overruns is
 logged and the lock still released, so the next start's check catches the survivor. A SIGTERM that lands while the
 updater is rolling back can end it mid-rollback: the run stays for recovery, and the next start reverses it, as after
