@@ -1201,7 +1201,6 @@ C1. Boot can revive a dead task whose registered revise target is still off the 
 C2. The api and web missing-step wording ignores the stored dead reason, so an off-list step still reads as not registered in the UI.
 C3. Accept with no next step still writes the findings in a separate statement after the gate closes; a crash between leaves them open on a finished gate.
 
-
 ### T767 · Translator: books of any size with one glossary and one style
 
 status: open, in work 2026-11-26 (design analysis: `.claude/tmp/codex-run/TRBIG-S/`; OWNER DECISION 2026-11-26: one task per book, one glossary and style, batched translation/review with storage reserved per batch) · kind: feature · found: owner decision 2026-11-26 · priority: P2
@@ -1211,7 +1210,6 @@ In `martinambrus/haive-module-translator`. Owner (2026-11-26): "the translator m
 Today consent reserves worst-case storage for all `8 x U` calls up front (about 3.5 MB per unit, `src/protocol/storage.ts`), and a document's quota tops out at 512 MiB, so flat prose stops at about 130 units (roughly 90,000 to 130,000 words); nesting lowers it. Over that, consent says to split the file, which makes separate tasks with separate paid glossary and calibration, so terms and style can drift. A unit is whole paragraphs up to about 1,000 words (`src/chunking/group.ts`).
 
 1. Design: one task per book with one glossary and one approved style, translated and reviewed in batches with storage reserved per batch (recommended), versus part tasks importing an earlier part's approved glossary and style. Plan in `docs/plans/` before building; review at xhigh (consent, money).
-
 
 ### T768 · Translator: keep terms refused when the target language declines them
 
