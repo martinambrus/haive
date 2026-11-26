@@ -1016,7 +1016,7 @@ async function resolveLlmPhase(
     return { resolved: false, result: { status: 'waiting_cli', row: current } };
   }
 
-  const heldContinuation = await isHeldPreFormContinuation(db, stepDef, current);
+  const heldContinuation = await heldPreFormContinuation(db, stepDef, current);
   if (heldContinuation) {
     const deferred = await deferPreFormContinuation(db, ctx, current);
     if (deferred) return { resolved: false, result: deferred };
@@ -1435,7 +1435,37 @@ async function resolveLlmPhase(
     ) {
       // This catch is before the first enqueue attempt, and invRow is local to THIS
       // dispatch. No caller or module can nominate a different run for release.
-      current = await checkpointPreFormDecision(db, ctx, invRow.id);
+      try {
+        current = await checkpointPreFormDecision(db, ctx, invRow.id, heldContinuation?.notice);
+      } catch (checkpointErr) {
+        if (!(checkpointErr instanceof StepSupersededError)) {
+          // A failed checkpoint rolled back its release. Keep the old prepareWorkspace
+          // failure contract even on a DB error, without touching a run another owner
+          // has already started or finalized. Recovery handles a failed release too.
+          try {
+            await db
+              .update(schema.cliInvocations)
+              .set({ supersededAt: new Date() })
+              .where(
+                and(
+                  eq(schema.cliInvocations.id, invRow.id),
+                  eq(schema.cliInvocations.taskId, ctx.taskId),
+                  eq(schema.cliInvocations.taskStepId, ctx.taskStepId),
+                  isNull(schema.cliInvocations.startedAt),
+                  isNull(schema.cliInvocations.endedAt),
+                  isNull(schema.cliInvocations.supersededAt),
+                  isNull(schema.cliInvocations.consumedAt),
+                ),
+              );
+          } catch (releaseErr) {
+            ctx.logger.warn(
+              { err: releaseErr, invocationId: invRow.id },
+              'failed to release unqueued decision reservation',
+            );
+          }
+        }
+        throw checkpointErr;
+      }
       return {
         resolved: true,
         llmOutput: null,
@@ -2590,6 +2620,7 @@ async function checkpointPreFormDecision(
   db: Database,
   ctx: StepContext,
   reservationId?: string,
+  notice?: string,
 ): Promise<TaskStepRow> {
   return db.transaction(async (tx) => {
     if (reservationId) {
@@ -2611,23 +2642,7 @@ async function checkpointPreFormDecision(
         .returning({ id: schema.cliInvocations.id });
       if (!released.length) throw new StepSupersededError(ctx.taskStepId);
     }
-    // Retain an A1 notice while recording the stronger no-redispatch checkpoint.
-    const prior = await tx.query.taskEvents.findFirst({
-      where: and(
-        eq(schema.taskEvents.taskId, ctx.taskId),
-        eq(schema.taskEvents.taskStepId, ctx.taskStepId),
-        eq(schema.taskEvents.eventType, PRE_FORM_CONTINUATION_EVENT),
-      ),
-      orderBy: desc(schema.taskEvents.createdAt),
-      columns: { payload: true },
-    });
-    const payload = prior?.payload;
-    const notice =
-      payload?.version === 1 &&
-      payload.rerunGeneration === ctx.rerunGeneration &&
-      typeof payload.notice === 'string'
-        ? payload.notice
-        : undefined;
+    // The caller carries only the notice from its verified held checkpoint.
     return writePreFormCheckpoint(tx, ctx, notice, true);
   });
 }
@@ -3931,7 +3946,7 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
       redetected = true;
     }
 
-    const heldAtStart = await heldPreFormContinuation(db, stepDef, current);
+    let heldAtStart = await heldPreFormContinuation(db, stepDef, current);
     let reenteredPreForm = false;
     let reopenNotice = heldAtStart?.notice;
     const runPipeline = async (): Promise<AdvanceStepResult> => {
@@ -4120,10 +4135,15 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
           }
           const followup = await resolveLlmPhase(db, stepDef, current, ctx, detected, null, params);
           if (!followup.resolved) return followup.result;
-          if (!stepDef.llm.allowPreFormDecisionFallback)
+          if (
+            !stepDef.llm.allowPreFormDecisionFallback ||
+            followup.llmOutput !== null ||
+            followup.llmInvocationId !== null
+          )
             throw new Error('Pre-form continuation did not dispatch a fresh invocation');
           current = followup.current;
-          if (!followup.decisionForm) current = await checkpointPreFormDecision(db, ctx);
+          if (!followup.decisionForm)
+            current = await checkpointPreFormDecision(db, ctx, undefined, reopenNotice);
           decisionFormRequired = true;
           const deferred = await refreshDecisionDetection();
           if (deferred) return deferred;
@@ -4848,6 +4868,12 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
               // so the orchestrator re-enters when the retry invocation completes. If it
               // somehow resolved synchronously, fall through and rethrow.
               if (!retryLlm.resolved) return retryLlm.result;
+              if (retryLlm.decisionForm) {
+                current = retryLlm.current;
+                heldAtStart = await heldPreFormContinuation(db, stepDef, current);
+                reopenNotice = heldAtStart?.notice;
+                return runPipeline();
+              }
             }
           }
           throw applyErr;

@@ -73,6 +73,14 @@ const h = vi.hoisted(() => {
 });
 
 vi.mock('../src/db.js', () => ({ getDb: () => h.db }));
+// Cross-package controls exercise the actual API action transactions. Only external
+// delivery/kill/config I/O is faked; task/run/step mutations use this dedicated DB.
+vi.mock('../../api/src/db.js', () => ({ getDb: () => h.db }));
+vi.mock('../../api/src/queues.js', () => ({
+  getTaskQueue: () => ({ add: async () => ({ id: 'queued' }) }),
+}));
+vi.mock('../../api/src/lib/sandbox-kill.js', () => ({ killTaskSandboxes: async () => 0 }));
+
 vi.mock('../src/redis.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../src/redis.js')>()),
   getBullRedis: () => ({}),
@@ -777,6 +785,75 @@ describe.skipIf(!url)(
           expect(f.step.apply).not.toHaveBeenCalled();
         });
 
+        it.each(['Stop', 'Retry'] as const)(
+          'real API %s overtakes workspace refusal without a stale checkpoint',
+          async (action) => {
+            const f = await decisionHarness();
+            // Retry folds the current span into int4 timing; use a recent span, not
+            // the historical T0 used by the lock-only fixtures.
+            await db
+              .update(schema.taskSteps)
+              .set({
+                startedAt: new Date(),
+                idleMs: 0,
+                carriedIdleMs: 0,
+                carriedWorkMs: 0,
+                waitingStartedAt: null,
+              })
+              .where(eq(schema.taskSteps.id, S.id));
+            vi.spyOn(configService, 'getFresh').mockResolvedValue(null);
+            let runId = '';
+            let runAfter: unknown;
+            let stepAfter: unknown;
+            let taskAfter: unknown;
+            f.step.llm!.prepareWorkspace = async () => {
+              runId = (
+                await db.query.cliInvocations.findMany({
+                  where: and(
+                    eq(schema.cliInvocations.taskStepId, S.id),
+                    isNull(schema.cliInvocations.endedAt),
+                    isNull(schema.cliInvocations.supersededAt),
+                  ),
+                })
+              )[0]!.id;
+              const controlPath = new URL('../../api/src/lib/task-control.js', import.meta.url)
+                .pathname;
+              const { stopActiveCliInvocations } = await import(controlPath);
+              expect(
+                await stopActiveCliInvocations(db, f.taskId, { failTask: true }),
+              ).toMatchObject({ cancelled: 1, stopped: 1 });
+              if (action === 'Retry') {
+                // Task Retry is admitted from failed; use the real Stop to reach it.
+                const retryPath = new URL('../../api/src/routes/tasks/steps.js', import.meta.url)
+                  .pathname;
+                const { retryTaskAtStep } = await import(retryPath);
+                const target = (await db.query.taskSteps.findFirst({
+                  where: eq(schema.taskSteps.id, S.id),
+                }))!;
+                await retryTaskAtStep(db, f.taskId, userId, target);
+              }
+              runAfter = await runOf(runId);
+              stepAfter = await rowOf(S.id);
+              taskAfter = await taskOf(f.taskId);
+              await f.refuse();
+            };
+            expect((await f.advance()).status).toBe('superseded');
+            expect(await runOf(runId)).toEqual(runAfter);
+            expect(await rowOf(S.id)).toEqual(stepAfter);
+            expect(await taskOf(f.taskId)).toEqual(taskAfter);
+            expect(await runOf(runId)).toMatchObject({
+              supersededAt: expect.any(Date),
+              endedAt: expect.any(Date),
+              consumedAt: null,
+            });
+            if (action === 'Retry') {
+              expect(await rowOf(S.id)).toMatchObject({ rerunGeneration: 5, status: 'pending' });
+              expect(await taskOf(f.taskId)).toMatchObject({ orchestrationEpoch: EPOCH + 1 });
+            } else expect(await taskOf(f.taskId)).toMatchObject({ status: 'failed' });
+            expect(f.enqueue).not.toHaveBeenCalled();
+          },
+        );
+
         it.each([
           'started',
           'ended',
@@ -787,9 +864,8 @@ describe.skipIf(!url)(
           'pointer',
           'round',
           'dead',
-          'Stop',
+          'failed task status',
           'Cancel',
-          'Retry',
         ])('refuses cleanup after %s and rolls back exact-id consumption', async (lost) => {
           const f = await decisionHarness();
           let before: unknown;
@@ -818,7 +894,7 @@ describe.skipIf(!url)(
                 .update(schema.cliInvocations)
                 .set({ supersededAt: AT })
                 .where(eq(schema.cliInvocations.id, run.id));
-            else if (lost === 'generation' || lost === 'Retry')
+            else if (lost === 'generation')
               await db
                 .update(schema.taskSteps)
                 .set({ rerunGeneration: 5 })
@@ -851,7 +927,7 @@ describe.skipIf(!url)(
             else
               await db
                 .update(schema.tasks)
-                .set({ status: lost === 'Stop' ? 'failed' : 'cancelled' })
+                .set({ status: lost === 'failed task status' ? 'failed' : 'cancelled' })
                 .where(eq(schema.tasks.id, f.taskId));
             before = await runOf(run.id);
             await f.refuse();
@@ -950,7 +1026,7 @@ describe.skipIf(!url)(
           expect(f.enqueue).not.toHaveBeenCalled();
         });
 
-        it.each(['none', 'Stop', 'Cancel', 'Retry'] as const)(
+        it.each(['none', 'failed task status', 'Cancel', 'generation change'] as const)(
           'run → step → task cleanup beside a %s peer has no deadlock or stale checkpoint',
           async (action) => {
             const f = await decisionHarness();
@@ -987,7 +1063,7 @@ describe.skipIf(!url)(
                 first: lockRun(id),
                 second: async (tx) => {
                   if (action === 'none') await lockStepRow(S.id)(tx);
-                  else if (action === 'Retry')
+                  else if (action === 'generation change')
                     await tx
                       .update(schema.taskSteps)
                       .set({ rerunGeneration: 5 })
@@ -995,7 +1071,7 @@ describe.skipIf(!url)(
                   else
                     await tx
                       .update(schema.tasks)
-                      .set({ status: action === 'Stop' ? 'failed' : 'cancelled' })
+                      .set({ status: action === 'failed task status' ? 'failed' : 'cancelled' })
                       .where(eq(schema.tasks.id, f.taskId));
                 },
               },
@@ -1010,10 +1086,26 @@ describe.skipIf(!url)(
         );
 
         describe.each(['boot', 'stalled'] as const)('%s refusal recovery', (reader) => {
-          it.each(['before', 'after'] as const)(
-            'crash %s the cleanup checkpoint recovers through boot and never dispatches after the durable refusal',
-            async (cut) => {
-              const f = await decisionHarness();
+          it.each([
+            ['workspace', 'before'],
+            ['workspace', 'after'],
+            ['prepare false', 'before'],
+            ['prepare false', 'after'],
+          ] as const)(
+            'crash %s %s the cleanup checkpoint recovers without dispatch after durable refusal',
+            async (entry, cut) => {
+              const f = await decisionHarness(entry !== 'prepare false');
+              if (entry === 'prepare false') {
+                await db
+                  .update(schema.cliInvocations)
+                  .set({ consumedAt: null, rawOutput: 'completed report' })
+                  .where(eq(schema.cliInvocations.id, R));
+                f.step.llm!.completePreForm = vi.fn(async ({ llmOutput }) => ({
+                  llmOutput,
+                  continueRequested: llmOutput != null,
+                }));
+                f.step.llm!.prepare = vi.fn(async () => false as const);
+              }
               let injected = false;
               const handle = new Proxy(db, {
                 get(target, prop) {
@@ -1045,8 +1137,17 @@ describe.skipIf(!url)(
               });
               expect((await f.advance(handle)).status).toBe('superseded');
               expect(injected).toBe(true);
-              const run = await runOf(f.reservation());
-              expect(run.consumedAt === null).toBe(cut === 'before');
+              if (entry === 'workspace') {
+                const run = await runOf(f.reservation());
+                expect(run.consumedAt === null).toBe(cut === 'before');
+              } else {
+                expect((await runOf(R)).consumedAt).toBeInstanceOf(Date);
+                expect(
+                  await db.query.cliInvocations.findMany({
+                    where: eq(schema.cliInvocations.taskStepId, S.id),
+                  }),
+                ).toHaveLength(1);
+              }
               const queue = vi.fn(async () => {});
               if (reader === 'boot')
                 await reconcileOrphanedSteps(db, {

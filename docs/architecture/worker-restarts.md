@@ -159,10 +159,20 @@ Pause defers this fallback through A1; `StepPrepareDeferredError` keeps its exis
 Old queued answers stay suppressed until the new form parks, after which the usual timestamp
 guard protects it. Unanswered forms remain ordinary durable decision barriers.
 
-Rollback removes module opt-ins and imports of the new signal first. Keep capable workers until
-all resumable held continuations settle or park safely. No migration is added or reversed;
-retain invocation, acceptance, consent and spend history. Downgrading under live work is unsafe. An older A1 worker cannot interpret the new
-`decisionForm` marker; retain compatible workers for every resumable decision checkpoint.
+Rollback first stops new fallback work. Retain a capable worker AND the module opt-in until
+all held decision checkpoints park real forms or settle. Let queued advances finish and boot/stalled
+recovery re-drive interrupted checkpoints; Resume paused tasks when appropriate. Check for current
+`waiting_cli` steps with `pause_form_on_retry`, null form/answers and a latest same-generation
+`step.pre_form_continuation` event carrying `decisionForm: true`: none may remain before removing
+the opt-in. Pickup without it fails loudly even on a capable worker. Retain compatible decision
+handlers for parked forms until owners settle them, then remove importing consumers before
+reverting host symbols. An older A1 worker cannot interpret the marker. No migration is added or
+reversed; retain invocation, acceptance, consent and spend history. Never downgrade under live work.
+
+A database error during the refusal checkpoint rolls that transaction back. The host then attempts
+to supersede only its exact still-unstarted, unended, unsuperseded, unconsumed reservation before
+propagating the error. Fence losses leave moved runs untouched; if the database also refuses the
+release, normal orphan recovery remains responsible. No enqueue is attempted on any refusal path.
 
 **A running task that nothing drives is taken over.** A `running` task whose current step row is
 missing, `pending` and not parked, parked with a heartbeat older than the cutoff, `running` with no

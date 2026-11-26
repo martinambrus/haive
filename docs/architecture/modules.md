@@ -727,7 +727,19 @@ pre-form execution with detect, form and `completePreForm`. The runner validates
 creating or changing a row; loop, mining, DAG, merge resolution and `needsRuntime` are excluded.
 When a follow-up `prepare` returns false, the host refreshes detection, calls `completePreForm`
 with null output and invocation id, and builds a fresh decision form without dispatching again.
-Default consumers keep the invariant that a requested follow-up must dispatch.
+A completed, unconsumed follow-up with output or an invocation id retains the invariant failure;
+it is never discarded as a preparation refusal. Default consumers keep the invariant that a
+requested follow-up must dispatch.
+
+Opting in also routes plain `completePreForm` follow-ups through A1's continuation checkpoint.
+That transaction clears `detect_output`, provider detection, form, answers and the status message
+(including `completePreForm.statusMessage`), keeps the task `running`, and strictly consumes the
+exact completed invocation: a lost fence throws `StepSupersededError` instead of silently doing
+nothing. Persist partial report results in the module's durable store, not `detect_output`.
+A fallback module must return false from `prepare` while its decision form is outstanding,
+including submitted-form re-entry before host validation; only validated `apply` may act on the
+owner's answer. Apply-time `llm.retry` also honors a committed decision checkpoint: it re-enters
+detection and form construction instead of failing with the original apply error.
 
 The canonical payload-free `StepPrepareFormError` from `@haive/shared/step` has this contract:
 “From an opted-in pre-form `prepareWorkspace`, refuse this fresh, not-yet-enqueued dispatch and return to deterministic detection/form preparation. The host releases only this pass's inserted invocation under ownership fencing, preserves accounting, and requires an actual decision form.”
@@ -749,10 +761,16 @@ Pause defers this held fallback; Resume and boot/stalled recovery retain the dec
 and build the form without another prepare or dispatch. A follow-up `prepare:false` records the
 same barrier. Retry advances generation and cannot inherit it.
 
-Rollback removes importing consumers and opt-ins first, then retains compatible workers for
-all resumable decision checkpoints. An older A1 worker does not understand `decisionForm` and
-must not recover one. Keep every binding, invocation, accepted result and spend record; no core
-migration or stored-state conversion is added.
+Rollback first stops new fallback work while retaining a capable worker AND each module's
+opt-in until all held decision checkpoints have parked real forms or settled. Drain by letting
+current advances finish and boot/stalled recovery re-drive interrupted checkpoints; Resume paused
+tasks as appropriate. Inspect current `waiting_cli` steps with `pause_form_on_retry`, null
+form/answers and a latest same-generation `step.pre_form_continuation` event whose
+`decisionForm` is true. None may remain before removing the opt-in: even a capable worker fails
+pickup loudly if the flag is removed. Keep compatible module decision handlers for every parked
+form until owners settle it; disable importing consumers before reverting host symbols. An older
+A1 worker cannot recover a decision checkpoint. Keep every binding, invocation, accepted result
+and spend record; no core migration or stored-state conversion is added.
 
 `StepPrepareDeferredError` is the canonical pause-race signal from `prepare` or `prepareWorkspace`
 on an opted-in held pre-form continuation. The host rechecks pause and yields without failure or
