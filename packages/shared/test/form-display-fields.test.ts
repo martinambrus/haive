@@ -6,7 +6,7 @@ const schema: FormSchema = {
   title: 'Review proposed corrections',
   fields: [
     { type: 'note', id: 'reopenedFormNotice', label: 'Notice', body: 'Refused once.' },
-    { type: 'text', id: 'formToken', label: 'formToken', hidden: true, default: 't1' },
+    { type: 'text', id: 'formToken', label: 'formToken', default: 't1' },
     { type: 'note', id: 'counts', label: 'Pending', body: '3 corrections await a decision.' },
     {
       type: 'multi-select',
