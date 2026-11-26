@@ -4424,7 +4424,12 @@ function StepCardImpl({
         onToggle={() => setShowRagStats((v) => !v)}
       />
       {ragStats === 'queries' && showRagStats && (
-        <RagStatsPanel taskId={taskId} stepId={step.stepId} live={!taskEnded && !taskDead} />
+        <RagStatsPanel
+          taskId={taskId}
+          stepId={step.stepId}
+          stepRowId={step.id}
+          live={!taskEnded && !taskDead}
+        />
       )}
 
       {step.cliInvocationCount > 0 && (
@@ -4496,10 +4501,12 @@ const RAG_STATS_POLL_MS = 10_000;
 function RagStatsPanel({
   taskId,
   stepId,
+  stepRowId,
   live,
 }: {
   taskId: string;
   stepId: string;
+  stepRowId: string;
   live: boolean;
 }) {
   const [queries, setQueries] = useState<RagQueryEntry[] | null>(null);
@@ -4509,7 +4516,9 @@ function RagStatsPanel({
     let cancelled = false;
     const load = () =>
       api
-        .get<{ queries: RagQueryEntry[] }>(`/tasks/${taskId}/steps/${stepId}/rag-queries`)
+        .get<{ queries: RagQueryEntry[] }>(
+          `/tasks/${taskId}/steps/${stepId}/rag-queries?stepRowId=${encodeURIComponent(stepRowId)}`,
+        )
         .then((d) => {
           if (cancelled) return;
           setQueries(d.queries);
@@ -4532,7 +4541,7 @@ function RagStatsPanel({
       cancelled = true;
       clearInterval(t);
     };
-  }, [taskId, stepId, live]);
+  }, [taskId, stepId, stepRowId, live]);
 
   // A failed POLL must not blank a panel that is already showing data — the error
   // only replaces the panel when there is nothing to fall back to.

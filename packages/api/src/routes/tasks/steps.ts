@@ -867,10 +867,13 @@ stepRoutes.get('/:id/steps', async (c) => {
 // RAG query telemetry for a step: the rag_search calls made during the step's
 // run window (historical time-window attribution, independent of invocation
 // bindings). Drives the "Show RAG stats" panel and the step DTO's query count.
+// Cards supply stepRowId to select their exact round. Without it, retain the
+// legacy logical-step lookup for callers of the original route.
 stepRoutes.get('/:id/steps/:stepId/rag-queries', async (c) => {
   const userId = c.get('userId');
   const id = c.req.param('id');
   const stepId = c.req.param('stepId');
+  const stepRowId = c.req.query('stepRowId');
   const db = getDb();
 
   const task = await db.query.tasks.findFirst({
@@ -879,10 +882,17 @@ stepRoutes.get('/:id/steps/:stepId/rag-queries', async (c) => {
   });
   if (!task) throw new HttpError(404, 'Task not found');
 
+  if (stepRowId !== undefined && !z.uuid().safeParse(stepRowId).success)
+    throw new HttpError(404, 'Step not found');
   const step = await db.query.taskSteps.findFirst({
-    where: and(eq(schema.taskSteps.taskId, id), eq(schema.taskSteps.stepId, stepId)),
+    where: and(
+      eq(schema.taskSteps.taskId, id),
+      eq(schema.taskSteps.stepId, stepId),
+      stepRowId !== undefined ? eq(schema.taskSteps.id, stepRowId) : undefined,
+    ),
     columns: { startedAt: true, endedAt: true },
   });
+  if (stepRowId !== undefined && !step) throw new HttpError(404, 'Step not found');
   if (!step?.startedAt) return c.json({ queries: [] });
   const end = step.endedAt ?? new Date();
 

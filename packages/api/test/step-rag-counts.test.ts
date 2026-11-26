@@ -103,6 +103,14 @@ function setup() {
       stepIndex,
       round: stepIndex === 4 ? 1 : 0,
     });
+  fake.insert(schema.taskSteps, {
+    id: '00000000-0000-4000-8000-000000000099',
+    taskId: FOREIGN,
+    stepId: 'used',
+    stepIndex: 0,
+    startedAt: at(1),
+    endedAt: at(3),
+  });
   const store = new DatabaseSync(':memory:');
   store.exec(`create table task_steps (id text, task_id text, started_at text, ended_at text);
     create table rag_query_log (id text, task_id text, query text, top_k integer,
@@ -212,6 +220,69 @@ describe('step RAG query counts', () => {
     try {
       expect((await app.request(`/${FOREIGN}${suffix}`)).status).toBe(404);
       expect(statements).toEqual([]);
+    } finally {
+      store.close();
+    }
+  });
+
+  it('keeps each round panel in its own inclusive window and agrees with its row count', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(at(10));
+    const { store } = setup();
+    try {
+      const response = await app.request(`/${TASK}/steps`);
+      const { steps } = (await response.json()) as {
+        steps: { id: string; ragQueryCount: number }[];
+      };
+      for (const [name, logicalId, expected] of [
+        ['used', 'used', ['q1', 'q2', 'q3']],
+        ['used-again', 'used', ['q7', 'q8']],
+        ['unused', 'unused', []],
+        ['pending', 'pending', []],
+        ['live', 'live', ['q6', 'q7', 'q8', 'q9']],
+      ] as const) {
+        const panel = await app.request(
+          `/${TASK}/steps/${logicalId}/rag-queries?stepRowId=${rowId(name)}`,
+        );
+        expect(panel.status).toBe(200);
+        const { queries } = (await panel.json()) as { queries: { id: string }[] };
+        expect(queries.map((q) => q.id)).toEqual(expected);
+        expect(queries).toHaveLength(steps.find((s) => s.id === rowId(name))!.ragQueryCount);
+      }
+    } finally {
+      store.close();
+    }
+  });
+
+  it.each([
+    [TASK, 'used', '00000000-0000-4000-8000-000000000099'],
+    [TASK, 'used', rowId('unused')],
+    [TASK, 'used', '00000000-0000-4000-8000-000000000098'],
+    [TASK, 'used', ''],
+    [FOREIGN, 'used', rowId('used')],
+  ])('rejects an unavailable task/step row: %s / %s / %s', async (taskId, stepId, stepRowId) => {
+    const { store, statements } = setup();
+    try {
+      const panel = await app.request(
+        `/${taskId}/steps/${stepId}/rag-queries?stepRowId=${stepRowId}`,
+      );
+      expect(panel.status).toBe(404);
+      expect(statements).toEqual([]);
+    } finally {
+      store.close();
+    }
+  });
+
+  it('preserves the logical-step request when no row selector is supplied', async () => {
+    const { store } = setup();
+    try {
+      const panel = await app.request(`/${TASK}/steps/used/rag-queries`);
+      expect(panel.status).toBe(200);
+      const { queries } = (await panel.json()) as { queries: { id: string }[] };
+      expect(queries.map((q) => q.id)).toEqual(['q1', 'q2', 'q3']);
+      const missing = await app.request(`/${TASK}/steps/missing/rag-queries`);
+      expect(missing.status).toBe(200);
+      expect(await missing.json()).toEqual({ queries: [] });
     } finally {
       store.close();
     }
