@@ -12,6 +12,7 @@ const constructors = [
   'PromptBudgetExceededError',
   'StepPrepareParkError',
   'StepPrepareDeferredError',
+  'StepPrepareFormError',
 ] as const;
 
 describe('step SDK compatibility', () => {

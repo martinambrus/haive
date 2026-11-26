@@ -151,6 +151,7 @@ import {
   PromptBudgetExceededError,
   StepPrepareParkError,
   StepPrepareDeferredError,
+  StepPrepareFormError,
   TaskCancelledError,
   MiningRetryError,
   MiningWaveError,
@@ -486,7 +487,13 @@ type UpdatePatch = Partial<{
 }>;
 
 type LlmResolved =
-  | { resolved: true; llmOutput: unknown; llmInvocationId: string | null; current: TaskStepRow }
+  | {
+      resolved: true;
+      llmOutput: unknown;
+      llmInvocationId: string | null;
+      current: TaskStepRow;
+      decisionForm?: true;
+    }
   | { resolved: false; result: AdvanceStepResult };
 
 // Deliberately WIDER than the shared IN_STACK_OLLAMA_HOSTS, which must not be used
@@ -902,7 +909,7 @@ async function resolveLlmPhase(
             formValues,
             params,
           );
-          if (!retryLlm.resolved) return retryLlm;
+          if (!retryLlm.resolved || llmSpec.allowPreFormDecisionFallback) return retryLlm;
         }
         // Transient budget spent — fall through and fail with the orphan reason.
       }
@@ -951,7 +958,7 @@ async function resolveLlmPhase(
             formValues,
             params,
           );
-          if (!retryLlm.resolved) return retryLlm;
+          if (!retryLlm.resolved || llmSpec.allowPreFormDecisionFallback) return retryLlm;
         }
       }
       // Model-capability failure (model cannot read images / hit its output-token
@@ -990,7 +997,7 @@ async function resolveLlmPhase(
             formValues,
             params,
           );
-          if (!retryLlm.resolved) return retryLlm;
+          if (!retryLlm.resolved || llmSpec.allowPreFormDecisionFallback) return retryLlm;
         }
         // Remediation budget spent — fall through and fail with the capability reason.
       }
@@ -1398,9 +1405,11 @@ async function resolveLlmPhase(
   // `hasLiveInvocation`'s definition and nothing has been enqueued that would ever end it,
   // so leaving it would park the step for good; superseded is the same release the orphan
   // re-dispatch above performs.
+  let inPrepareWorkspace = true;
   try {
     if (llmSpec.prepareWorkspace)
       await llmSpec.prepareWorkspace({ ctx, detected, formValues: formValues ?? {} });
+    inPrepareWorkspace = false;
     const repairPass =
       (stepDef.metadata.id === '07-phase-2-implement' &&
         !!(detected as { fixContext?: unknown } | null)?.fixContext) ||
@@ -1419,6 +1428,22 @@ async function resolveLlmPhase(
         workspace: await resolveInvocationWorkerTree(db, params.taskId, worktreeRel),
       });
   } catch (err) {
+    if (
+      inPrepareWorkspace &&
+      err instanceof StepPrepareFormError &&
+      llmSpec.allowPreFormDecisionFallback
+    ) {
+      // This catch is before the first enqueue attempt, and invRow is local to THIS
+      // dispatch. No caller or module can nominate a different run for release.
+      current = await checkpointPreFormDecision(db, ctx, invRow.id);
+      return {
+        resolved: true,
+        llmOutput: null,
+        llmInvocationId: null,
+        current,
+        decisionForm: true,
+      };
+    }
     if (err instanceof StepPrepareDeferredError && heldContinuation) {
       const deferred = await deferPreFormContinuation(db, ctx, current, invRow.id, true);
       if (deferred) return { resolved: false, result: deferred };
@@ -2346,7 +2371,7 @@ async function heldPreFormContinuation(
   db: Database,
   step: StepDefinition,
   row: TaskStepRow,
-): Promise<{ notice?: string } | null> {
+): Promise<{ notice?: string; decisionForm?: true } | null> {
   if (!(
     step.detect &&
     step.form &&
@@ -2372,9 +2397,13 @@ async function heldPreFormContinuation(
     columns: { payload: true },
   });
   const optIn = event?.payload as
-    { version?: unknown; rerunGeneration?: unknown; notice?: unknown } | undefined;
+    | { version?: unknown; rerunGeneration?: unknown; notice?: unknown; decisionForm?: unknown }
+    | undefined;
   if (optIn?.version !== 1 || optIn.rerunGeneration !== row.rerunGeneration) return null;
+  if (optIn.decisionForm === true && !step.llm?.allowPreFormDecisionFallback)
+    throw new Error('Held decision form requires llm.allowPreFormDecisionFallback');
   return {
+    ...(optIn.decisionForm === true ? { decisionForm: true as const } : {}),
     notice:
       typeof optIn.notice === 'string'
         ? optIn.notice.slice(0, REOPEN_FORM_NOTICE_MAX_LENGTH)
@@ -2388,6 +2417,24 @@ export async function isHeldPreFormContinuation(
   row: TaskStepRow,
 ): Promise<boolean> {
   return (await heldPreFormContinuation(db, step, row)) !== null;
+}
+
+function validatePreFormDecisionFallback(step: StepDefinition): void {
+  if (!step.llm?.allowPreFormDecisionFallback) return;
+  if (
+    !step.detect ||
+    !step.form ||
+    !step.llm.preForm ||
+    !step.llm.completePreForm ||
+    step.needsRuntime ||
+    step.loop ||
+    step.agentMining ||
+    step.dagExecute ||
+    step.mergeResolve
+  )
+    throw new Error(
+      'llm.allowPreFormDecisionFallback requires singleton preForm, detect, form and completePreForm and excludes needsRuntime, loop, mining, DAG and merge resolution',
+    );
 }
 
 function validatePreFormReopen(step: StepDefinition, err: ReopenStepFormError): void {
@@ -2489,40 +2536,99 @@ export async function checkpointPreFormContinuation(
         .returning({ id: schema.cliInvocations.id });
       if (!consumed.length) throw new StepSupersededError(ctx.taskStepId);
     }
-    const held = await lockContinuationStep(tx, ctx);
-    await foldCliParkOnResume(tx, held.id);
-    const step = await updateOwnedStep(
-      tx,
-      held.id,
-      {
-        status: 'waiting_cli',
-        detectOutput: null,
-        detectCliProviderId: null,
-        formSchema: null,
-        formValues: null,
-        pauseFormOnRetry: true,
-        statusMessage: null,
-        errorMessage: null,
-      },
-      ctx.rerunGeneration,
-    );
-    const task = await tx
-      .update(schema.tasks)
-      .set({ status: 'running', updatedAt: new Date() })
-      .where(continuationTaskTarget(ctx, held.stepId))
-      .returning({ id: schema.tasks.id });
-    if (!task.length) throw new StepSupersededError(ctx.taskStepId);
-    await tx.insert(schema.taskEvents).values({
-      taskId: ctx.taskId,
-      taskStepId: ctx.taskStepId,
-      eventType: PRE_FORM_CONTINUATION_EVENT,
-      payload: {
-        version: 1,
-        rerunGeneration: ctx.rerunGeneration,
-        ...(notice ? { notice: notice.slice(0, REOPEN_FORM_NOTICE_MAX_LENGTH) } : {}),
-      },
+    return writePreFormCheckpoint(tx, ctx, notice);
+  });
+}
+
+async function writePreFormCheckpoint(
+  tx: DbTx,
+  ctx: StepContext,
+  notice?: string,
+  decisionForm = false,
+): Promise<TaskStepRow> {
+  const held = await lockContinuationStep(tx, ctx);
+  await foldCliParkOnResume(tx, held.id);
+  const step = await updateOwnedStep(
+    tx,
+    held.id,
+    {
+      status: 'waiting_cli',
+      detectOutput: null,
+      detectCliProviderId: null,
+      formSchema: null,
+      formValues: null,
+      pauseFormOnRetry: true,
+      statusMessage: null,
+      errorMessage: null,
+    },
+    ctx.rerunGeneration,
+  );
+  const task = await tx
+    .update(schema.tasks)
+    .set({ status: 'running', updatedAt: new Date() })
+    .where(continuationTaskTarget(ctx, held.stepId))
+    .returning({ id: schema.tasks.id });
+  if (!task.length) throw new StepSupersededError(ctx.taskStepId);
+  await tx.insert(schema.taskEvents).values({
+    taskId: ctx.taskId,
+    taskStepId: ctx.taskStepId,
+    eventType: PRE_FORM_CONTINUATION_EVENT,
+    payload: {
+      version: 1,
+      rerunGeneration: ctx.rerunGeneration,
+      ...(decisionForm ? { decisionForm: true } : {}),
+      ...(notice ? { notice: notice.slice(0, REOPEN_FORM_NOTICE_MAX_LENGTH) } : {}),
+    },
+  });
+  return step;
+}
+
+/** Private to dispatch: the exact id is the just-inserted local reservation and
+ * this function is reached only before any enqueue attempt. All writes roll back
+ * together when the run, step or task fence loses to another pass or action. */
+async function checkpointPreFormDecision(
+  db: Database,
+  ctx: StepContext,
+  reservationId?: string,
+): Promise<TaskStepRow> {
+  return db.transaction(async (tx) => {
+    if (reservationId) {
+      const at = new Date();
+      const released = await tx
+        .update(schema.cliInvocations)
+        .set({ endedAt: at, supersededAt: at, consumedAt: at })
+        .where(
+          and(
+            eq(schema.cliInvocations.id, reservationId),
+            eq(schema.cliInvocations.taskId, ctx.taskId),
+            eq(schema.cliInvocations.taskStepId, ctx.taskStepId),
+            isNull(schema.cliInvocations.startedAt),
+            isNull(schema.cliInvocations.endedAt),
+            isNull(schema.cliInvocations.supersededAt),
+            isNull(schema.cliInvocations.consumedAt),
+          ),
+        )
+        .returning({ id: schema.cliInvocations.id });
+      if (!released.length) throw new StepSupersededError(ctx.taskStepId);
+    }
+    // Retain an A1 notice while recording the stronger no-redispatch checkpoint.
+    const prior = await tx.query.taskEvents.findFirst({
+      where: and(
+        eq(schema.taskEvents.taskId, ctx.taskId),
+        eq(schema.taskEvents.taskStepId, ctx.taskStepId),
+        eq(schema.taskEvents.eventType, PRE_FORM_CONTINUATION_EVENT),
+      ),
+      orderBy: desc(schema.taskEvents.createdAt),
+      columns: { payload: true },
     });
-    return step;
+    const payload = prior?.payload;
+    const notice =
+      payload?.version === 1 &&
+      payload.rerunGeneration === ctx.rerunGeneration &&
+      typeof payload.notice === 'string'
+        ? payload.notice
+        : undefined;
+    return writePreFormCheckpoint(tx, ctx, notice, true);
   });
 }
 
@@ -3651,6 +3757,7 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
   const meta = stepDef.metadata;
   const round = params.round ?? 0;
 
+  validatePreFormDecisionFallback(stepDef);
   const row = await upsertRow(db, taskId, stepDef, round, params.runSeq);
 
   // Terminal short-circuit. A `done`/`skipped` row reaching advanceStep is always a
@@ -3828,7 +3935,7 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
     let reenteredPreForm = false;
     let reopenNotice = heldAtStart?.notice;
     const runPipeline = async (): Promise<AdvanceStepResult> => {
-      let detected = current.detectOutput;
+      let detected = heldAtStart?.decisionForm ? null : current.detectOutput;
       if (detected === null || detected === undefined) {
         detected = stepDef.detect ? await stepDef.detect(ctx) : null;
         current = await updateRow(db, current.id, {
@@ -3877,12 +3984,29 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
       }
 
       // --- Pre-form LLM phase ---
-      let llmOutput: unknown = undefined;
+      let decisionFormRequired = heldAtStart?.decisionForm === true;
+      let llmOutput: unknown = decisionFormRequired ? null : undefined;
       // The invocation llmOutput came from, so a step that records review findings can
       // attribute them durably (review_findings.cli_invocation_id). Tracks llmOutput at every
       // assignment below, including the re-roll paths.
       let llmInvocationId: string | null = null;
-      if (stepDef.llm?.preForm) {
+      const refreshDecisionDetection = async (): Promise<AdvanceStepResult | null> => {
+        const deferred = await deferPreFormContinuation(db, ctx, current);
+        if (deferred) return deferred;
+        detected = await stepDef.detect!(ctx);
+        current = await updateRow(db, current.id, {
+          detectOutput: detected,
+          detectCliProviderId: ctx.cliProviderId ?? null,
+        });
+        llmOutput = null;
+        llmInvocationId = null;
+        return null;
+      };
+      if (decisionFormRequired) {
+        const deferred = await deferPreFormContinuation(db, ctx, current);
+        if (deferred) return deferred;
+      }
+      if (stepDef.llm?.preForm && !decisionFormRequired) {
         const skip =
           stepDef.llm.skipIf?.({
             detected,
@@ -3905,6 +4029,11 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
           llmOutput = llmResult.llmOutput;
           llmInvocationId = llmResult.llmInvocationId;
           current = llmResult.current;
+          if (llmResult.decisionForm) {
+            decisionFormRequired = true;
+            const deferred = await refreshDecisionDetection();
+            if (deferred) return deferred;
+          }
 
           // Form-aware retry: re-roll a preForm generator whose output is unusable
           // BEFORE the form renders, so a form that surfaces the parse failure (a
@@ -3914,6 +4043,7 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
           // Skipped under test bypass (no real invocation to re-roll).
           const preFormRetry = stepDef.llm.retry;
           if (
+            !decisionFormRequired &&
             preFormRetry &&
             process.env.HAIVE_TEST_BYPASS_LLM !== '1' &&
             stepDef.llm.shouldRetryPreForm?.(llmOutput)
@@ -3949,6 +4079,11 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
               llmOutput = reroll.llmOutput;
               llmInvocationId = reroll.llmInvocationId;
               current = reroll.current;
+              if (reroll.decisionForm) {
+                decisionFormRequired = true;
+                const deferred = await refreshDecisionDetection();
+                if (deferred) return deferred;
+              }
             }
           }
         }
@@ -3969,15 +4104,41 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
         llmOutput = completion.llmOutput;
         throwIfCancelled();
         if (completion.continueRequested) {
-          current = await updateRow(db, current.id, {
-            formSchema: null,
-            formValues: null,
-            statusMessage: completion.statusMessage ?? 'Completing the report…',
-          });
-          await markCompletedInvocationConsumed(db, current.id, llmInvocationId);
+          if (decisionFormRequired)
+            throw new Error(
+              'Pre-form decision fallback requires a decision form, not another continuation',
+            );
+          if (stepDef.llm.allowPreFormDecisionFallback) {
+            current = await checkpointPreFormContinuation(db, ctx, llmInvocationId, reopenNotice);
+          } else {
+            current = await updateRow(db, current.id, {
+              formSchema: null,
+              formValues: null,
+              statusMessage: completion.statusMessage ?? 'Completing the report…',
+            });
+            await markCompletedInvocationConsumed(db, current.id, llmInvocationId);
+          }
           const followup = await resolveLlmPhase(db, stepDef, current, ctx, detected, null, params);
           if (!followup.resolved) return followup.result;
-          throw new Error('Pre-form continuation did not dispatch a fresh invocation');
+          if (!stepDef.llm.allowPreFormDecisionFallback)
+            throw new Error('Pre-form continuation did not dispatch a fresh invocation');
+          current = followup.current;
+          if (!followup.decisionForm) current = await checkpointPreFormDecision(db, ctx);
+          decisionFormRequired = true;
+          const deferred = await refreshDecisionDetection();
+          if (deferred) return deferred;
+          const fallback = await stepDef.llm.completePreForm({
+            ctx,
+            detected,
+            llmOutput: null,
+            llmInvocationId: null,
+          });
+          throwIfCancelled();
+          if (fallback.continueRequested)
+            throw new Error(
+              'Pre-form decision fallback requires a decision form, not another continuation',
+            );
+          llmOutput = fallback.llmOutput;
         }
       }
 
@@ -4062,6 +4223,9 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
           statusMessage: null,
         });
       }
+
+      if (decisionFormRequired && !persistedSchema)
+        throw new Error('Pre-form decision fallback requires an actual decision form');
 
       if (insightApprovalRequired && persistedSchema) {
         // Keep the form's evidence-based defaults; only an attested owner submit

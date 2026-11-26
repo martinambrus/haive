@@ -522,7 +522,7 @@ including entries whose exports use a string.
 A module's `./steps` entry imports `StepDefinition`, its phase contracts, form and metadata
 types, and `ChatPlanRead` from `@haive/shared/step`. Define local steps with
 `satisfies StepDefinition<Detect, Apply>` and default-export a readonly array; the worker
-namespaces their ids and workflow type when it loads them. Import the nine control-error
+namespaces their ids and workflow type when it loads them. Import the ten control-error
 constructors from this same entry so the runner receives the canonical class objects.
 A module takes `@haive/shared` as a peer and never bundles it, since class identity depends on it (see [Packaging a registry module](#packaging-a-registry-module)).
 The contract entry also exports the `ImplementationFileSet`, `ChangedLineNotes`, `FileCoverage`
@@ -721,6 +721,38 @@ dispatch or recovery. Only the latest checkpoint in the current generation suppl
 a later checkpoint without one or a Retry cannot resurrect it. A notice never forces a form.
 Only one synchronous re-entry is permitted per advance;
 a repeated request without an invocation park offers the decision/boundary form.
+
+`llm.allowPreFormDecisionFallback?: true` is default off and requires singleton
+pre-form execution with detect, form and `completePreForm`. The runner validates it before
+creating or changing a row; loop, mining, DAG, merge resolution and `needsRuntime` are excluded.
+When a follow-up `prepare` returns false, the host refreshes detection, calls `completePreForm`
+with null output and invocation id, and builds a fresh decision form without dispatching again.
+Default consumers keep the invariant that a requested follow-up must dispatch.
+
+The canonical payload-free `StepPrepareFormError` from `@haive/shared/step` has this contract:
+“From an opted-in pre-form `prepareWorkspace`, refuse this fresh, not-yet-enqueued dispatch and return to deterministic detection/form preparation. The host releases only this pass's inserted invocation under ownership fencing, preserves accounting, and requires an actual decision form.”
+It is handled only at that hook before any enqueue attempt. No module supplies an invocation id
+to release. The host ends, supersedes and consumes only its local inserted reservation, provided
+it is still unstarted, unended, unsuperseded and unconsumed. A lost fence leaves it and any newer
+winner untouched. A started run or uncertain enqueue stays with normal recovery.
+A module must commit its exact binding and conservative accounting before signaling, rather than
+throw inside a savepoint and roll attribution back. All other prepare errors retain their behavior.
+
+Cleanup and the continuation checkpoint share one run → step → task transaction, fenced on
+owner, generation, epoch, live/nondead status, step pointer and round. It clears old detection,
+form and answers, sets `waiting_cli` with the A1 old-answer hold, and keeps the task `running`.
+Its version-1 `step.pre_form_continuation` event adds `decisionForm: true`. The same advance
+refreshes detect/admission after cleanup so the refused id is included in accounting, then calls
+`completePreForm` with null output/id and parks a real form. A continuation request there or a
+null form is a configuration failure; a generic manual Continue cannot substitute for that form.
+Pause defers this held fallback; Resume and boot/stalled recovery retain the decision-form marker
+and build the form without another prepare or dispatch. A follow-up `prepare:false` records the
+same barrier. Retry advances generation and cannot inherit it.
+
+Rollback removes importing consumers and opt-ins first, then retains compatible workers for
+all resumable decision checkpoints. An older A1 worker does not understand `decisionForm` and
+must not recover one. Keep every binding, invocation, accepted result and spend record; no core
+migration or stored-state conversion is added.
 
 `StepPrepareDeferredError` is the canonical pause-race signal from `prepare` or `prepareWorkspace`
 on an opted-in held pre-form continuation. The host rechecks pause and yields without failure or

@@ -681,6 +681,409 @@ describe.skipIf(!url)(
         apply: vi.fn(async () => ({ complete: true })),
       });
 
+      async function decisionHarness(checkpointBefore = true) {
+        const { taskId, ctx } = await setup();
+        if (checkpointBefore) await checkpoint(ctx);
+        else
+          await db
+            .update(schema.cliInvocations)
+            .set({ consumedAt: AT })
+            .where(eq(schema.cliInvocations.id, R));
+        vi.spyOn(configService, 'getBoolean').mockResolvedValue(false);
+        vi.spyOn(configService, 'get').mockResolvedValue(null);
+        vi.spyOn(dispatcher, 'resolveTaskDispatch').mockResolvedValue({
+          mode: 'cli',
+          providerId: null,
+          invocation: { kind: 'cli', spec: {} },
+        } as unknown as Awaited<ReturnType<typeof dispatcher.resolveTaskDispatch>>);
+        vi.stubEnv('HAIVE_TEST_BYPASS_LLM', '0');
+        const step = continuationStep();
+        step.detect = vi.fn(async () => ({
+          calls: (
+            await db.query.cliInvocations.findMany({
+              where: eq(schema.cliInvocations.taskStepId, S.id),
+            })
+          ).length,
+        }));
+        (step.llm as unknown as Record<string, unknown>).allowPreFormDecisionFallback = true;
+        step.llm!.completePreForm = vi.fn(async ({ llmOutput }) => ({
+          llmOutput,
+          continueRequested: false,
+        }));
+        const enqueue = vi.fn(async () => {});
+        let reservation = '';
+        const refuse = async () => {
+          const sdk = await import('@haive/shared/step');
+          throw new (
+            sdk as unknown as { StepPrepareFormError: new () => Error }
+          ).StepPrepareFormError();
+        };
+        step.llm!.prepareWorkspace = async () => {
+          const runs = await db.query.cliInvocations.findMany({
+            where: eq(schema.cliInvocations.taskStepId, S.id),
+          });
+          reservation = runs.find((run) => !run.endedAt && !run.supersededAt)!.id;
+          await refuse();
+        };
+        const advance = async (handle = db) =>
+          runner.advanceStep({
+            db: handle,
+            taskId,
+            userId,
+            stepDef: step,
+            repoPath: NO_SUCH_DIR,
+            workspacePath: NO_SUCH_DIR,
+            cliProviderId: null,
+            epoch: (await taskOf(taskId))!.orchestrationEpoch,
+            providers: [],
+            deps: { enqueueCliInvocation: enqueue },
+            formValues: { stale: true },
+          });
+        return { taskId, ctx, step, enqueue, advance, refuse, reservation: () => reservation };
+      }
+
+      describe('decision fallback real-store controls', () => {
+        afterEach(() => {
+          vi.restoreAllMocks();
+          vi.unstubAllEnvs();
+        });
+
+        it('cleans only the inserted id, keeps paid history, and builds an actual new form without enqueue', async () => {
+          const f = await decisionHarness();
+          const paid = await runOf(R);
+          const result = await f.advance();
+          expect(result.status).toBe('waiting_form');
+          expect((await rowOf(S.id)).detectOutput).toEqual({ calls: 2 });
+          expect(await runOf(R)).toEqual(paid);
+          expect(await runOf(f.reservation())).toMatchObject({
+            endedAt: expect.any(Date),
+            supersededAt: expect.any(Date),
+            consumedAt: expect.any(Date),
+            startedAt: null,
+          });
+          expect(await rowOf(S.id)).toMatchObject({
+            status: 'waiting_form',
+            formValues: null,
+            rerunGeneration: 4,
+          });
+          expect(await taskOf(f.taskId)).toMatchObject({
+            status: 'running',
+            orchestrationEpoch: EPOCH,
+          });
+          expect(f.step.llm!.completePreForm).toHaveBeenLastCalledWith(
+            expect.objectContaining({ llmOutput: null, llmInvocationId: null }),
+          );
+          expect(f.enqueue).not.toHaveBeenCalled();
+          expect(f.step.apply).not.toHaveBeenCalled();
+        });
+
+        it.each([
+          'started',
+          'ended',
+          'superseded',
+          'generation',
+          'owner',
+          'epoch',
+          'pointer',
+          'round',
+          'dead',
+          'Stop',
+          'Cancel',
+          'Retry',
+        ])('refuses cleanup after %s and rolls back exact-id consumption', async (lost) => {
+          const f = await decisionHarness();
+          let before: unknown;
+          f.step.llm!.prepareWorkspace = async () => {
+            const run = (
+              await db.query.cliInvocations.findMany({
+                where: and(
+                  eq(schema.cliInvocations.taskStepId, S.id),
+                  isNull(schema.cliInvocations.endedAt),
+                  isNull(schema.cliInvocations.supersededAt),
+                ),
+              })
+            )[0]!;
+            if (lost === 'started')
+              await db
+                .update(schema.cliInvocations)
+                .set({ startedAt: AT })
+                .where(eq(schema.cliInvocations.id, run.id));
+            else if (lost === 'ended')
+              await db
+                .update(schema.cliInvocations)
+                .set({ endedAt: AT })
+                .where(eq(schema.cliInvocations.id, run.id));
+            else if (lost === 'superseded')
+              await db
+                .update(schema.cliInvocations)
+                .set({ supersededAt: AT })
+                .where(eq(schema.cliInvocations.id, run.id));
+            else if (lost === 'generation' || lost === 'Retry')
+              await db
+                .update(schema.taskSteps)
+                .set({ rerunGeneration: 5 })
+                .where(eq(schema.taskSteps.id, S.id));
+            else if (lost === 'owner')
+              await db
+                .update(schema.taskSteps)
+                .set({ taskId: await seedTask('running') })
+                .where(eq(schema.taskSteps.id, S.id));
+            else if (lost === 'epoch')
+              await db
+                .update(schema.tasks)
+                .set({ orchestrationEpoch: EPOCH + 1 })
+                .where(eq(schema.tasks.id, f.taskId));
+            else if (lost === 'pointer')
+              await db
+                .update(schema.tasks)
+                .set({ currentStepId: MOVED_ON })
+                .where(eq(schema.tasks.id, f.taskId));
+            else if (lost === 'round')
+              await db
+                .update(schema.tasks)
+                .set({ currentRound: 1 })
+                .where(eq(schema.tasks.id, f.taskId));
+            else if (lost === 'dead')
+              await db
+                .update(schema.tasks)
+                .set({ deadAt: AT })
+                .where(eq(schema.tasks.id, f.taskId));
+            else
+              await db
+                .update(schema.tasks)
+                .set({ status: lost === 'Stop' ? 'failed' : 'cancelled' })
+                .where(eq(schema.tasks.id, f.taskId));
+            before = await runOf(run.id);
+            await f.refuse();
+            expect.unreachable();
+          };
+          const result = await f.advance();
+          expect(result.status).toBe('superseded');
+          const runs = await db.query.cliInvocations.findMany({
+            where: eq(schema.cliInvocations.taskStepId, S.id),
+          });
+          expect(runs.find((run) => run.id !== R)).toEqual(before);
+          expect(f.enqueue).not.toHaveBeenCalled();
+        });
+
+        it('initial refusal consumes its exact id rather than a newer completed row, clearing an old form and answer atomically', async () => {
+          const f = await decisionHarness(false);
+          const newerId = randomUUID();
+          let ownId = '';
+          let newer: unknown;
+          f.step.llm!.prepareWorkspace = async () => {
+            ownId = (
+              await db.query.cliInvocations.findMany({
+                where: and(
+                  eq(schema.cliInvocations.taskStepId, S.id),
+                  isNull(schema.cliInvocations.endedAt),
+                  isNull(schema.cliInvocations.supersededAt),
+                ),
+              })
+            )[0]!.id;
+            await db
+              .update(schema.cliInvocations)
+              .set({
+                tokenUsage: { costUsd: 0.25, inputTokens: 2, outputTokens: 1, totalTokens: 3 },
+              })
+              .where(eq(schema.cliInvocations.id, ownId));
+            await db.insert(schema.cliInvocations).values({
+              id: newerId,
+              taskId: f.taskId,
+              taskStepId: S.id,
+              mode: 'cli',
+              prompt: 'newer completed pass',
+              endedAt: AT,
+              exitCode: 0,
+              createdAt: new Date(Date.now() + 1000),
+            });
+            newer = await runOf(newerId);
+            await f.refuse();
+          };
+          expect((await f.advance()).status).toBe('waiting_form');
+          expect(await runOf(newerId)).toEqual(newer);
+          expect(await runOf(ownId)).toMatchObject({
+            consumedAt: expect.any(Date),
+            supersededAt: expect.any(Date),
+            endedAt: expect.any(Date),
+            tokenUsage: { costUsd: 0.25 },
+          });
+          expect(await rowOf(S.id)).toMatchObject({
+            formValues: null,
+            formSchema: { title: 'Fresh decision' },
+          });
+          expect(f.enqueue).not.toHaveBeenCalled();
+          expect(f.step.apply).not.toHaveBeenCalled();
+        });
+
+        it('a newer live winner is never selected or consumed by an older refusing pass', async () => {
+          const f = await decisionHarness();
+          const winnerId = randomUUID();
+          let before: unknown;
+          f.step.llm!.prepareWorkspace = async () => {
+            await db
+              .update(schema.cliInvocations)
+              .set({ supersededAt: AT })
+              .where(
+                and(
+                  eq(schema.cliInvocations.taskStepId, S.id),
+                  isNull(schema.cliInvocations.endedAt),
+                ),
+              );
+            await db.insert(schema.cliInvocations).values({
+              id: winnerId,
+              taskId: f.taskId,
+              taskStepId: S.id,
+              mode: 'cli',
+              prompt: 'another pass owns this',
+            });
+            before = await runOf(winnerId);
+            await f.refuse();
+          };
+          const stepBefore = await rowOf(S.id);
+          expect((await f.advance()).status).toBe('superseded');
+          expect(await runOf(winnerId)).toEqual(before);
+          expect(await rowOf(S.id)).toMatchObject({
+            status: stepBefore.status,
+            formValues: stepBefore.formValues,
+          });
+          expect(f.enqueue).not.toHaveBeenCalled();
+        });
+
+        it.each(['none', 'Stop', 'Cancel', 'Retry'] as const)(
+          'run → step → task cleanup beside a %s peer has no deadlock or stale checkpoint',
+          async (action) => {
+            const f = await decisionHarness();
+            let ready!: (id: string) => void;
+            const reached = new Promise<string>((resolve) => {
+              ready = resolve;
+            });
+            let release!: () => void;
+            const waiting = new Promise<void>((resolve) => {
+              release = resolve;
+            });
+            f.step.llm!.prepareWorkspace = async () => {
+              const run = (
+                await db.query.cliInvocations.findMany({
+                  where: and(
+                    eq(schema.cliInvocations.taskStepId, S.id),
+                    isNull(schema.cliInvocations.endedAt),
+                    isNull(schema.cliInvocations.supersededAt),
+                  ),
+                })
+              )[0]!;
+              ready(run.id);
+              await waiting;
+              await f.refuse();
+            };
+            const advance = f.advance();
+            const id = await reached;
+            const race = await interleave(
+              () => {
+                release();
+                return advance;
+              },
+              {
+                first: lockRun(id),
+                second: async (tx) => {
+                  if (action === 'none') await lockStepRow(S.id)(tx);
+                  else if (action === 'Retry')
+                    await tx
+                      .update(schema.taskSteps)
+                      .set({ rerunGeneration: 5 })
+                      .where(eq(schema.taskSteps.id, S.id));
+                  else
+                    await tx
+                      .update(schema.tasks)
+                      .set({ status: action === 'Stop' ? 'failed' : 'cancelled' })
+                      .where(eq(schema.tasks.id, f.taskId));
+                },
+              },
+              [S.id],
+            );
+            expectClean(race);
+            expect(race.result?.status).toBe(action === 'none' ? 'waiting_form' : 'superseded');
+            expect((await runOf(id)).consumedAt === null).toBe(action !== 'none');
+            expect(f.enqueue).not.toHaveBeenCalled();
+          },
+          TEST_TIMEOUT,
+        );
+
+        describe.each(['boot', 'stalled'] as const)('%s refusal recovery', (reader) => {
+          it.each(['before', 'after'] as const)(
+            'crash %s the cleanup checkpoint recovers through boot and never dispatches after the durable refusal',
+            async (cut) => {
+              const f = await decisionHarness();
+              let injected = false;
+              const handle = new Proxy(db, {
+                get(target, prop) {
+                  if (prop !== 'transaction') return Reflect.get(target, prop);
+                  return async (fn: (tx: Tx) => Promise<unknown>) => {
+                    let decision = false;
+                    const result = await target.transaction(async (tx) => {
+                      const value = await fn(tx);
+                      const events = await tx.query.taskEvents.findMany({
+                        where: and(
+                          eq(schema.taskEvents.taskStepId, S.id),
+                          eq(schema.taskEvents.eventType, 'step.pre_form_continuation'),
+                        ),
+                      });
+                      decision = events.some((event) => event.payload?.decisionForm === true);
+                      if (decision && !injected && cut === 'before') {
+                        injected = true;
+                        throw new StepSupersededError(S.id);
+                      }
+                      return value;
+                    });
+                    if (decision && !injected && cut === 'after') {
+                      injected = true;
+                      throw new StepSupersededError(S.id);
+                    }
+                    return result;
+                  };
+                },
+              });
+              expect((await f.advance(handle)).status).toBe('superseded');
+              expect(injected).toBe(true);
+              const run = await runOf(f.reservation());
+              expect(run.consumedAt === null).toBe(cut === 'before');
+              const queue = vi.fn(async () => {});
+              if (reader === 'boot')
+                await reconcileOrphanedSteps(db, {
+                  enqueueAdvance: queue,
+                  queuedInvocationIds: async () => new Set(),
+                });
+              else {
+                await db
+                  .update(schema.tasks)
+                  .set({ updatedAt: T0 })
+                  .where(eq(schema.tasks.id, f.taskId));
+                await redriveStalledTasks(
+                  db,
+                  {
+                    queuedTaskJobs: async () => ({ steps: new Set(), starts: new Set() }),
+                    enqueueAdvance: queue,
+                    enqueueStart: async () => {},
+                    failTask: async () => false,
+                    queuedInvocationIds: async () => new Set(),
+                  },
+                  { staleMs: 0 },
+                );
+              }
+              expect(queue).toHaveBeenCalledOnce();
+              if (cut === 'after') {
+                f.step.llm!.prepare = vi.fn(async () => {
+                  throw new Error('must not prepare after refusal');
+                });
+              }
+              expect((await f.advance()).status).toBe('waiting_form');
+              expect(f.enqueue).not.toHaveBeenCalled();
+              expect(f.step.apply).not.toHaveBeenCalled();
+            },
+          );
+        });
+      });
+
       it('reads the persisted opt-in event and refuses its stale generation after a Retry-order update', async () => {
         const { ctx } = await setup();
         await checkpoint(ctx);

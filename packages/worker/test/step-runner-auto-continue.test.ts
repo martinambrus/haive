@@ -47,6 +47,7 @@ interface MockState {
       rerunGeneration: number;
       checkpointEventId?: string;
       notice?: string;
+      decisionForm?: boolean;
     };
   };
   workspaceResumeEvent?: MockState['continuationEvent'];
@@ -3159,6 +3160,205 @@ describe('approved apply pre-form continuation', () => {
       });
     return { state, def, enqueue, advance };
   }
+
+  function decisionFixture() {
+    const h = fixture();
+    (h.def.llm as unknown as Record<string, unknown>).allowPreFormDecisionFallback = true;
+    h.def.llm!.completePreForm = vi.fn(async ({ llmOutput }) => ({
+      llmOutput,
+      continueRequested: llmOutput != null,
+    }));
+    h.def.form = vi.fn(() => ({ title: 'Fresh decision', fields: [] }));
+    h.def.apply = vi.fn(async () => ({ complete: true }));
+    return h;
+  }
+
+  it.each([false, true])(
+    'decision fallback opt-in=%s: follow-up prepare false clears old output and id',
+    async (enabled) => {
+      const h = decisionFixture();
+      (h.def.llm as unknown as Record<string, unknown>).allowPreFormDecisionFallback =
+        enabled || undefined;
+      h.def.detect = vi.fn(async () => ({ admission: 'blocked' }));
+      h.def.llm!.prepare = vi.fn(async ({ detected }) => {
+        Object.assign(detected as object, { admission: 'blocked' });
+        return false as const;
+      });
+      const result = await h.advance({ stale: true });
+      expect(result.status).toBe(enabled ? 'waiting_form' : 'failed');
+      expect(h.enqueue).not.toHaveBeenCalled();
+      expect(h.def.apply).not.toHaveBeenCalled();
+      if (enabled) {
+        expect(h.def.llm!.completePreForm).toHaveBeenLastCalledWith(
+          expect.objectContaining({
+            llmOutput: null,
+            llmInvocationId: null,
+            detected: expect.objectContaining({ admission: 'blocked' }),
+          }),
+        );
+        expect(h.def.form).toHaveBeenLastCalledWith(
+          expect.anything(),
+          expect.objectContaining({ admission: 'blocked' }),
+          null,
+        );
+        expect(h.state.taskStepRow.formValues).toBeNull();
+        expect(h.state.invocations).toHaveLength(1);
+        expect(h.state.invocations![0]!.consumedAt).toBeInstanceOf(Date);
+      }
+    },
+  );
+
+  it.each(['initial', 'follow-up'] as const)(
+    'decision fallback post-insert %s refuses enqueue and parks a real fresh form',
+    async (entry) => {
+      const h = decisionFixture();
+      if (entry === 'initial') {
+        Object.assign(h.state.taskStepRow, {
+          status: 'running',
+          detectOutput: null,
+          formSchema: null,
+          formValues: null,
+        });
+        h.state.invocation = undefined;
+        h.state.invocations = [];
+      }
+      h.def.llm!.prepareWorkspace = vi.fn(async () => {
+        const sdk = await import('@haive/shared/step');
+        throw new (
+          sdk as unknown as { StepPrepareFormError: new () => Error }
+        ).StepPrepareFormError();
+      });
+      const result = await h.advance({ stale: true });
+      expect(result.status).toBe('waiting_form');
+      expect(h.enqueue).not.toHaveBeenCalled();
+      expect(h.def.llm!.prepareWorkspace).toHaveBeenCalledOnce();
+      expect(h.state.invocation).toMatchObject({
+        endedAt: expect.any(Date),
+        supersededAt: expect.any(Date),
+        consumedAt: expect.any(Date),
+      });
+      expect(h.def.llm!.completePreForm).toHaveBeenLastCalledWith(
+        expect.objectContaining({ llmOutput: null, llmInvocationId: null }),
+      );
+      expect(h.state.taskStepRow).toMatchObject({ formValues: null, pauseFormOnRetry: false });
+      expect(h.def.apply).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(['no form', 'continued again'] as const)(
+    'decision fallback refuses %s rather than finalizing or redispatching',
+    async (bad) => {
+      const h = decisionFixture();
+      h.def.llm!.prepare = async () => false;
+      if (bad === 'no form') h.def.form = () => null;
+      else h.def.llm!.completePreForm = async () => ({ llmOutput: null, continueRequested: true });
+      const result = await h.advance();
+      expect(result.status).toBe('failed');
+      expect(result.status === 'failed' && result.error).toMatch(/decision.*form/i);
+      expect(h.def.apply).not.toHaveBeenCalled();
+      expect(h.enqueue).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([
+    'detect',
+    'form',
+    'completePreForm',
+    'preForm',
+    'loop',
+    'agentMining',
+    'dagExecute',
+    'mergeResolve',
+    'needsRuntime',
+  ])('decision fallback rejects unsupported %s before any mutation', async (bad) => {
+    const h = decisionFixture();
+    if (bad === 'completePreForm') delete h.def.llm!.completePreForm;
+    else if (bad === 'preForm') h.def.llm!.preForm = false;
+    else
+      (h.def as unknown as Record<string, unknown>)[bad] = ['detect', 'form'].includes(bad)
+        ? undefined
+        : {};
+    await expect(h.advance()).rejects.toThrow(/allowPreFormDecisionFallback/);
+    expect(h.state.updates).toHaveLength(0);
+    expect(h.enqueue).not.toHaveBeenCalled();
+  });
+
+  it('decision fallback pauses after cleanup and Resume constructs the form without a new prepare', async () => {
+    const h = decisionFixture();
+    h.def.llm!.prepareWorkspace = vi.fn(async () => {
+      h.state.taskRow!.pausedAt = new Date();
+      const sdk = await import('@haive/shared/step');
+      throw new (
+        sdk as unknown as { StepPrepareFormError: new () => Error }
+      ).StepPrepareFormError();
+    });
+    expect((await h.advance()).status).toBe('deferred');
+    expect(h.state.taskStepRow).toMatchObject({
+      status: 'waiting_cli',
+      pauseFormOnRetry: true,
+      formSchema: null,
+      formValues: null,
+    });
+    expect(h.state.invocation!.consumedAt).toBeInstanceOf(Date);
+    h.state.taskRow!.pausedAt = null;
+    expect((await h.advance({ stale: true })).status).toBe('waiting_form');
+    expect(h.def.llm!.prepareWorkspace).toHaveBeenCalledOnce();
+    expect(h.def.llm!.prepare).toHaveBeenCalledOnce();
+    expect(h.enqueue).not.toHaveBeenCalled();
+  });
+
+  it.each(['prepare', 'workspace without opt-in', 'enqueue'] as const)(
+    'decision fallback signal in %s retains ordinary failure handling',
+    async (hook) => {
+      const h = decisionFixture();
+      const sdk = await import('@haive/shared/step');
+      const refuse = async () => {
+        throw new sdk.StepPrepareFormError();
+      };
+      if (hook === 'prepare') h.def.llm!.prepare = refuse;
+      else if (hook === 'workspace without opt-in') {
+        delete h.def.llm!.allowPreFormDecisionFallback;
+        h.def.llm!.prepareWorkspace = refuse;
+      } else h.enqueue.mockImplementation(refuse);
+      const result = await h.advance();
+      expect(result.status).toBe('failed');
+      expect(h.state.continuationEvent?.payload ?? {}).not.toHaveProperty('decisionForm');
+      if (hook === 'enqueue') {
+        expect(h.enqueue).toHaveBeenCalledOnce();
+        expect(h.state.invocation!.endedAt).toBeNull();
+        expect(h.state.invocation!.supersededAt).toBeUndefined();
+        expect(h.state.invocation!.consumedAt).toBeUndefined();
+      } else expect(h.enqueue).not.toHaveBeenCalled();
+    },
+  );
+
+  it('decision fallback during a pre-form reroll refreshes null inputs instead of another dispatch', async () => {
+    const h = decisionFixture();
+    h.def.llm!.retry = { maxAttempts: 2 };
+    h.def.llm!.shouldRetryPreForm = () => true;
+    h.def.llm!.prepareWorkspace = async () => {
+      const sdk = await import('@haive/shared/step');
+      throw new sdk.StepPrepareFormError();
+    };
+    expect((await h.advance()).status).toBe('waiting_form');
+    expect(h.def.llm!.completePreForm).toHaveBeenLastCalledWith(
+      expect.objectContaining({ llmOutput: null, llmInvocationId: null }),
+    );
+    expect(h.enqueue).not.toHaveBeenCalled();
+  });
+
+  it('decision fallback prepare false honors a pause and rehydrates on Resume without repeating prepare', async () => {
+    const h = decisionFixture();
+    h.def.llm!.prepare = vi.fn(async () => {
+      h.state.taskRow!.pausedAt = new Date();
+      return false as const;
+    });
+    expect((await h.advance()).status).toBe('deferred');
+    h.state.taskRow!.pausedAt = null;
+    expect((await h.advance({ stale: true })).status).toBe('waiting_form');
+    expect(h.def.llm!.prepare).toHaveBeenCalledOnce();
+    expect(h.enqueue).not.toHaveBeenCalled();
+  });
 
   it('default notice-only reopen refreshes a form without another dispatch', async () => {
     const h = fixture(false);

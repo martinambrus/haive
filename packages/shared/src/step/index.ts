@@ -117,6 +117,18 @@ export class StepPrepareDeferredError extends Error {
   }
 }
 
+/** From an opted-in pre-form prepareWorkspace, refuse this fresh, not-yet-enqueued
+ * dispatch and return to deterministic detection/form preparation. The host releases
+ * only this pass's inserted invocation under ownership fencing, preserves accounting,
+ * and requires an actual decision form. Carries no payload. Import the canonical
+ * constructor from @haive/shared/step and leave that peer unbundled. */
+export class StepPrepareFormError extends Error {
+  constructor() {
+    super('pre-form dispatch requires a decision form');
+    this.name = 'StepPrepareFormError';
+  }
+}
+
 export interface LlmBuildArgs {
   detected: unknown;
   formValues: FormValues;
@@ -145,6 +157,13 @@ export interface LlmInvocationSpec {
   /** When true, LLM runs after detect but before the form is generated.
    *  The form() function receives the parsed llmOutput as its third argument. */
   preForm?: boolean;
+  /** Default off. Allow a follow-up prepare returning false, or StepPrepareFormError
+   * from prepareWorkspace, to refresh detection and completePreForm with null output
+   * and invocation id, then park an actual decision form without another dispatch.
+   * Requires singleton preForm, detect, form and completePreForm; excludes needsRuntime,
+   * loop, mining, DAG and merge execution. Validated before any host mutation.
+   * The durable continuation hold preserves pause/Resume and crash recovery. */
+  allowPreFormDecisionFallback?: true;
   /** When true, a failed or un-dispatchable LLM invocation does NOT fail the
    *  step — the runner degrades to `llmOutput = null` so downstream phases fall
    *  back to defaults. Use for a best-effort enrichment (e.g. a gate-1 config
@@ -233,7 +252,9 @@ export interface LlmInvocationSpec {
    *  concurrent advances can both pass its guard. A throw releases the reservation and
    *  then fails the step, except StepPrepareDeferredError on an opted-in held
    *  pre-form continuation: the host rechecks pause and defers. If Resume wins
-   *  the race, it defers one second and prepares a fresh pass, once per checkpoint. */
+   *  the race, it defers one second and prepares a fresh pass, once per checkpoint.
+   *  StepPrepareFormError requires allowPreFormDecisionFallback and refuses only this
+   *  fresh unqueued reservation, retaining its charge and requiring a real form. */
   prepareWorkspace?: (args: LlmBuildArgs & { ctx: StepContext }) => Promise<void>;
   /** Retry the LLM phase when apply() throws — for steps whose output is a strict
    *  JSON contract a flaky model intermittently misses (emits prose, an empty turn,

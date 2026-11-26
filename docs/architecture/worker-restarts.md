@@ -133,9 +133,36 @@ Each later checkpoint gets its own allowance; another workspace refusal for the 
 without pause fails rather than polling forever. `StepPrepareParkError` keeps its separate live-winner
 contract. Ordinary module-schema deferrals retain their original delay.
 
+**An opted-in pre-form dispatch refusal recovers on a decision form.**
+`llm.allowPreFormDecisionFallback` requires singleton pre-form detect/form/completePreForm,
+without runtime, loop, mining, DAG or merge execution, validated before mutation. A follow-up
+`prepare:false` keeps the default invariant unless opted in. With the opt-in it checkpoints a
+form barrier, refreshes detection and calls `completePreForm` with null output and invocation id.
+It never reuses the completed id or requests another dispatch from that fallback.
+
+`StepPrepareFormError` is handled only from the opted-in `prepareWorkspace` before enqueue
+has been attempted. In one run → step → task transaction the host ends, supersedes and consumes
+only this pass's just-inserted unqueued reservation, refusing a started/ended/superseded/consumed
+run. It preserves accounting and writes the same A1 held `waiting_cli`/task `running` checkpoint,
+clearing the old form and answers, with `decisionForm: true` on the current-generation
+`step.pre_form_continuation` event. Owner, generation, epoch, live/nondead status, pointer and
+round fence the whole transaction; an overtaking Stop/Cancel/Retry rolls cleanup back and no
+winner is changed. No external caller may nominate a run to release.
+
+A crash before cleanup commit leaves the inserted orphan with normal recovery. A crash after
+commit, including a lost cleanup acknowledgment, leaves the A1 no-live-run recovery shape.
+Both boot and stalled readers re-drive it without resetting generation or accounting. The
+marker prevents prepare/dispatch on pickup even when admission subsequently changes. The same
+advance, or recovery after a pause, refreshes detection after cleanup and builds a real decision
+form with null output/id. Null forms and repeated continuation requests fail configuration.
+Pause defers this fallback through A1; `StepPrepareDeferredError` keeps its existing contract.
+Old queued answers stay suppressed until the new form parks, after which the usual timestamp
+guard protects it. Unanswered forms remain ordinary durable decision barriers.
+
 Rollback removes module opt-ins and imports of the new signal first. Keep capable workers until
 all resumable held continuations settle or park safely. No migration is added or reversed;
-retain invocation, acceptance, consent and spend history. Downgrading under live work is unsafe.
+retain invocation, acceptance, consent and spend history. Downgrading under live work is unsafe. An older A1 worker cannot interpret the new
+`decisionForm` marker; retain compatible workers for every resumable decision checkpoint.
 
 **A running task that nothing drives is taken over.** A `running` task whose current step row is
 missing, `pending` and not parked, parked with a heartbeat older than the cutoff, `running` with no
