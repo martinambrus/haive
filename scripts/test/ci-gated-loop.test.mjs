@@ -40,7 +40,7 @@ function fixture(script, full = false) {
 }
 const small = fixture(fullScript);
 
-function runGated(t, mode, script = small.script) {
+function runGated(t, mode, script = small.script, shardEnv = {}) {
   const selected = fixture(script, true);
   const dir = mkdtempSync(join(tmpdir(), 'haive-gated-'));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
@@ -105,6 +105,7 @@ if [[ "$1" != scripts/gen-modules.mjs ]]; then exec "$REAL_NODE" "$@"; fi
       PGVECTOR_CONTAINER: 'pgvector-stub',
       CALLS: join(dir, 'calls'),
       MODE: mode,
+      ...shardEnv,
       TARGET_DB: selected.db,
       TARGET_FILE: selected.file,
     },
@@ -296,5 +297,43 @@ describe('remaining gated fixture diagnostics (item 10)', () => {
           ),
         /missing target file or database/,
       ));
+  }
+});
+
+describe('the real gated loop shard selection', () => {
+  it('assigns each row exactly once and preserves list order within each shard', (t) => {
+    const rows = listPattern.exec(fullScript)[1].split('\n');
+    const seen = [];
+    for (const shard of [1, 2]) {
+      const out = runGated(t, 'pass', fullScript, {
+        GATED_SHARD: String(shard),
+        GATED_SHARDS: '2',
+      });
+      assert.equal(out.status, 0, out.output);
+      const expected = rows.filter((_, index) => index % 2 === shard - 1);
+      const calls = out.calls.trim().split('\n');
+      assert.equal(calls.length, expected.length);
+      for (const [index, row] of expected.entries()) {
+        const [pkg, file] = row.split(' ');
+        assert.ok(calls[index].includes(`--filter @haive/${pkg} exec vitest run ${file} `));
+      }
+      seen.push(...expected);
+    }
+    assert.deepEqual(seen.sort(), [...rows].sort());
+    assert.equal(new Set(seen).size, rows.length);
+  });
+  for (const [shard, count] of [
+    ['0', '2'],
+    ['3', '2'],
+    ['x', '2'],
+    ['1', '0'],
+    ['1', 'x'],
+  ]) {
+    it(`rejects invalid shard ${shard}/${count} before running rows`, (t) => {
+      const out = runGated(t, 'pass', small.script, { GATED_SHARD: shard, GATED_SHARDS: count });
+      assert.notEqual(out.status, 0);
+      assert.match(out.output, /invalid GATED shard/);
+      assert.equal(out.calls, '');
+    });
   }
 });

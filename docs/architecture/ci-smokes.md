@@ -25,7 +25,11 @@ override only if it can take more than about 40 s; one that exceeds its limit fa
 A hung smoke or step costs its limit in place of its usual time, so each job's limit has to cover a green run and the
 largest hang. The former combined `smokes` job is now two independent jobs: `smokes` retains the check name
 **End-to-end smokes** (api/worker/migration smokes and Redis scripts), and `postgres-gated` adds **Postgres-gated tests**.
-The latter owns the unchanged, ordered GATED list (115 rows at the split on 2026-11-01); files still run serially.
+The latter owns the ordered GATED list (115 rows at the split on 2026-11-01). Since T742 it is a matrix of
+`GATED_BUDGET.shards` legs (`shard: [1, 2]`, fail-fast off): leg `k` of `n` runs rows `k`, `k + n`, `k + 2n`, ... in list
+order, serially, with its own Postgres, pgvector and Redis, so every row runs exactly once. The **Postgres-gated tests**
+check name now belongs to the aggregate job `postgres-gated-result`, which runs `always()` and passes only when
+`needs.postgres-gated.result` is `success`, so a failed, cancelled or skipped leg fails it.
 `pnpm test:gated` runs rows of that list locally (see Workflow scanners and [Testing](testing.md)).
 Neither job waits for the other, shares a service or passes database state/artifacts to it. Each has its own Postgres
 and Redis; only `postgres-gated` needs pgvector. Both build shared/database, web-kit and modules, generate module
@@ -41,22 +45,28 @@ now models each split job with those historical numbers and explicit setup allow
 - `smokes`: 907 + 62 = 969 s modelled green. Its 32-minute limit (1920 s) leaves 951 s over that model and covers
   the largest check's entire 900 s limit plus modelled green (1869 s), so later checks still have room after a hang.
   The extra 62 s conservatively allows moving module preparation from the old gated step into this job's setup.
-- `postgres-gated`: 120 s setup/module allowance + 10 s per GATED row. MEASURED 2026-11-12 on ubuntu-latest: the
+- `postgres-gated`: per leg, 120 s setup/module allowance + 10 s per GATED row of that leg. MEASURED 2026-11-12 on ubuntu-latest: the
   gated step took 1222 s for 134 rows on main and 1423 s for 143 rows, about 10 s per row, so the older 7.5 s figure
   undercounted. The 120 s allowance rounds up the historical 62 s setup maximum to include module preparation.
 - Both jobs retain at least 600 s over modelled green, stay within twice that model and leave room for a check's
   whole time limit plus the rest of a green run. The gated step also retains at least 1.5 times its modelled row time,
   and the job limit covers the setup plus that step's whole limit.
-- The constants and the formula live in one place: the `budget` of each job in
-  `scripts/test/ci-step-independence.test.mjs` (`minimumLimits` is the formula). None of this document, `ci.yml` or
+- The constants and the formula live in one place: the `smokes` budget in `scripts/test/ci-step-independence.test.mjs`,
+  and `GATED_BUDGET`, `minimumLimits` and `suggestedShards` in `scripts/lib/ci-gated-budget.mjs` for the gated legs
+  (`rowHeadroom` is per leg, `shards` the matrix size). None of this document, `ci.yml` or
   `scripts/test/ci-gated-list.test.mjs` states the current number of rows, so adding a GATED row needs no edit to a
-  count or a limit, until the list outgrows the limits in `ci.yml`. The pin then fails and names the minutes to raise
-  both limits to, which hold the list plus the budget's `rowHeadroom` rows, so the rows added after a raise need no edit
-  either. Measure a green run again, then raise the two limits together. The ceiling of twice a green run bounds
+  count or a limit, until a leg outgrows the limits in `ci.yml`. The pin then fails and names the minutes to raise both limits to, which
+  hold the largest leg plus `rowHeadroom` rows, so the rows added after a raise need no edit either. When the list
+  outgrows the legs (`suggestedShards` of the list less the headroom exceeds `shards`), `ci-gated-shards.test.mjs`
+  fails and names the shard count: add matrix legs and raise `GATED_BUDGET.shards` together. Measure a green run again, then raise the two limits together. The ceiling of twice a green run bounds
   `rowHeadroom`, and the test checks that it does.
 - The five guarded-span controls added on 2026-11-18 ran in 6.4 to 18.8 s each locally including Vitest startup,
   11.5 s on average, close to the modelled 10 s; this does not remeasure the complete CI job. The historical 10 s
   per-row model is retained; verify the next green CI run.
+
+The two-leg split is a projection too until a green sharded run exists: replaying the per-row times of main run
+45119606760 (176 rows, gated step 1684 s) over the round-robin split gives legs of 944 s and 740 s, inside the 26-minute
+step and 29-minute job limits; rows are not equal (one took 182 s), so a leg can run a few minutes over its model.
 
 The old model at 115 rows was 907 + 862.5 = 1769.5 s in one job. The split's expected critical path is the larger
 of 969 s and 982.5 s (about 16.4 minutes rather than 29.5), subject to runner scheduling and repeated setup. This is
@@ -69,7 +79,7 @@ the auth throttle script), and the pin cannot see future growth outside the list
 a green run comes within 600 s of its limit, including whether the new setup allowances remain adequate.
 
 A check that is not a `smoke:ci` chain has its own `timeout-minutes`, set well above its slowest green run (MEASURED over
-the same runs): the Postgres-gated tests 378-704 s (26 minutes), the auth throttle script 90-149 s (10 minutes), the
+the same runs): the Postgres-gated tests 378-704 s (then 26 minutes; now each leg's step limit comes from `GATED_BUDGET`), the auth throttle script 90-149 s (10 minutes), the
 other five Redis scripts at most 10 s (5 minutes). The recovery re-drive script came later and has no CI runs yet: 6 s
 locally (5 minutes, as its siblings). Repo refresh retries has a separate five-minute Redis check,
 using database 5 so its queue cleanup cannot reach another check's jobs. A new such check gets a limit

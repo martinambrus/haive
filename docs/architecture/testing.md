@@ -68,8 +68,11 @@ or run `node scripts/gen-modules.mjs` once from the repository root.
 
 Unit tests run in their own matrix job, separate from lint and typecheck: `@haive/worker` as two vitest shards
 and one shared job for all other packages. Each job lists its 15 slowest files in the job summary; the list is
-report only, because a timing gate on shared runners would flake. Env-gated real-store tests run in the
-**Postgres-gated tests** job, or in the step their exemption names.
+report only, because a timing gate on shared runners would flake. Env-gated real-store tests run in the `postgres-gated` matrix (two legs, each with its own Postgres, pgvector and
+Redis), reported under the **Postgres-gated tests** check by the aggregate job `postgres-gated-result`, or in the step
+their exemption names. `scripts/test/ci-gated-list.test.mjs` checks every column of a row (package, file, variable,
+database, server) against the file's own guard; the admin-URL suites with no database-name predicate are listed in
+`unrestrictedDatabases` with a reason. Each row runs vitest with `--maxWorkers=2`.
 
 The **desktop-bridge-go** job runs `gofmt -l`, `go vet` for linux, windows and darwin on amd64 and arm64, and
 `go test -p 1 ./...` for `docker/desktop-extension/bridge/`, in the golang image the extension's Dockerfile pins
@@ -81,7 +84,9 @@ when the bridge, its embedded installers, the Dockerfile or the job's own files 
 `pnpm test:gated <selection...>` (`scripts/run-gated-tests.mjs`) runs rows of the CI GATED list the way the CI loop
 runs them. A selection is a test file (`test/pg-transaction-fence.test.ts`, optionally behind its package:
 `database/test/...`), a package name (all its rows) or `all`. No selection, or a name that matches no row, exits 2
-before any container starts. Rows run one at a time in list order; a failed row does not stop the later ones.
+before any container starts. Rows run one at a time in list order; a failed row does not stop the later ones. The runner does not shard: it runs every
+selected row. The CI step script defaults `GATED_SHARD` and `GATED_SHARDS` to 1, so the script harnesses that run it
+without a matrix see the whole list.
 
 The runner keeps no list of its own. `scripts/lib/ci-gated.mjs` reads the rows, the service images and the job and
 step env from the `postgres-gated` job of `.github/workflows/ci.yml` through the reader the workflow pins use

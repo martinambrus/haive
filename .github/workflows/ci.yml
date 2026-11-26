@@ -481,13 +481,15 @@ jobs:
         run: pnpm --filter @haive/database smoke:ci
 
   postgres-gated:
-    name: Postgres-gated tests
+    name: Postgres-gated tests (shard ${{ matrix.shard }})
     runs-on: ubuntu-latest
-    # Sized by the budget in scripts/test/ci-step-independence.test.mjs, which holds the formula: the gated
-    # step covers its rows' modelled time on a slower runner, and this limit covers the setup plus that
-    # step's whole limit. A new row needs no edit here until the list outgrows the two limits; that test then
-    # fails, naming the minutes to raise both to, which hold the list plus the budget's rowHeadroom rows.
-    timeout-minutes: 52
+    # Limits and shard count are pinned against scripts/lib/ci-gated-budget.mjs, which holds the
+    # model and the headroom; the tests in scripts/test/ name the minutes to raise.
+    timeout-minutes: 29
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2]
     services:
       postgres:
         image: postgres:18-alpine
@@ -589,8 +591,10 @@ jobs:
       # Setup, including module builds, ends at migrate; a failed setup never runs the list.
       - name: Postgres-gated tests
         if: ${{ !cancelled() && steps.migrate.conclusion == 'success' }}
-        timeout-minutes: 50
+        timeout-minutes: 26
         env:
+          GATED_SHARD: ${{ matrix.shard }}
+          GATED_SHARDS: ${{ strategy.job-total }}
           PG_CONTAINER: ${{ job.services.postgres.id }}
           PGVECTOR_CONTAINER: ${{ job.services.pgvector.id }}
           # This job owns its Redis service: gated databases 11-14, job default 0.
@@ -601,8 +605,19 @@ jobs:
         run: |
           set -uo pipefail
           failed=0
+          # Defaults keep this same script usable by the local harness without a matrix.
+          shard=${GATED_SHARD:-1}
+          shards=${GATED_SHARDS:-1}
+          if ! [[ "$shard" =~ ^[1-9][0-9]*$ && "$shards" =~ ^[1-9][0-9]*$ ]] || (( shard > shards )); then
+            echo '::error::invalid GATED shard'
+            exit 1
+          fi
+          row=0
           while IFS=' ' read -r pkg file var db server; do
             [ -n "$pkg" ] || continue
+            # Every row models 10 s; stable round-robin differs by at most one row.
+            row=$((row + 1))
+            if (( (row - 1) % shards + 1 != shard )); then continue; fi
             echo "::group::$pkg $file ($var, database $db on $server)"
             if [ "$server" = pgvector ]; then container="$PGVECTOR_CONTAINER"; port=5433; else container="$PG_CONTAINER"; port=5432; fi
             url="postgres://haive:haive_dev_password@localhost:$port/$db"
@@ -616,7 +631,7 @@ jobs:
             fi
             DATABASE_URL="$url" pnpm --filter @haive/database migrate \
               || { echo "::error::migrate failed for $db"; failed=1; echo "::endgroup::"; continue; }
-            env "$var=$url" pnpm --filter "@haive/$pkg" exec vitest run "$file" --reporter=default --reporter=json --outputFile.json="$report" \
+            env "$var=$url" pnpm --filter "@haive/$pkg" exec vitest run "$file" --reporter=default --reporter=json --maxWorkers=2 --outputFile.json="$report" \
               || { echo "::error::$file failed"; failed=1; }
             REPORT="$report" FILE="$file" node -e '
               const r = JSON.parse(require("fs").readFileSync(process.env.REPORT, "utf8"));
@@ -807,6 +822,20 @@ jobs:
           worker test/rag-step-warning-db.test.ts RAG_STEP_WARNING_TEST_URL rag_step_warning_test pg
           GATED
           exit "$failed"
+
+  # Keep the original public check name even if branch protection later requires it.
+  postgres-gated-result:
+    name: Postgres-gated tests
+    needs: [postgres-gated]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Require every shard to pass
+        timeout-minutes: 1
+        env:
+          RESULT: ${{ needs.postgres-gated.result }}
+        run: test "$RESULT" = success
 
   schema-parity:
     name: Schema parity (migrations == push)
