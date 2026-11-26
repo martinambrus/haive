@@ -384,8 +384,10 @@ async function upgradeOwned(options: { stackLock?: StackLockOptions }): Promise<
         throw err;
       throw new UpgradeRefusal(
         'updater-bootstrap-failed',
-        `could not bootstrap updater journal (${code}); check PostgreSQL availability ` +
-          '(an interrupted snapshot may have left PostgreSQL stopped), then retry',
+        `could not bootstrap updater journal (${code}); an interrupted snapshot may have left PostgreSQL stopped; ` +
+          'check for and remove surviving updater one-shot containers for this install ' +
+          '(labels org.haive.updater.attempt / org.haive.updater.role) before starting PostgreSQL again; ' +
+          'then check PostgreSQL availability and retry',
       );
     }
 

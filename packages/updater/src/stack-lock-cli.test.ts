@@ -1435,7 +1435,14 @@ describe('takeover after a snapshot stopped PostgreSQL', () => {
         message: expect.stringContaining(`(${code})`),
       }),
     );
-    expect(JSON.stringify(vi.mocked(console.log).mock.calls)).not.toContain(offline.message);
+    const output = JSON.stringify(vi.mocked(console.log).mock.calls);
+    expect(output).toContain(
+      'check for and remove surviving updater one-shot containers for this install',
+    );
+    expect(output).toContain('org.haive.updater.attempt');
+    expect(output).toContain('org.haive.updater.role');
+    expect(output).toContain('before starting PostgreSQL again');
+    expect(output).not.toContain(offline.message);
     expect(journal.tryLock).not.toHaveBeenCalled();
     expect(journal.findLiveRun).not.toHaveBeenCalled();
     expect(run.resume).not.toHaveBeenCalled();
