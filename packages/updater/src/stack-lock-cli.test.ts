@@ -3,6 +3,7 @@ import { randomBytes, randomUUID } from 'node:crypto';
 import { mkdtemp, open, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { createServer, type AddressInfo } from 'node:net';
 const h = vi.hoisted(() => ({
   sql: Object.assign(vi.fn(), { end: vi.fn(), options: { parsers: {}, serializers: {} } }),
   initialize: vi.fn(),
@@ -1450,6 +1451,68 @@ describe('takeover after a snapshot stopped PostgreSQL', () => {
     expect(await readFile(lock, 'utf8')).toBe(dead);
     expect(h.sql.end).toHaveBeenCalledWith({ timeout: 5 });
   });
+});
+
+it('names the refusal from real ensureJournal against a closed local PostgreSQL port', async () => {
+  const listener = createServer();
+  await new Promise<void>((resolve, reject) => {
+    listener.once('error', reject);
+    listener.listen(0, '127.0.0.1', resolve);
+  });
+  const port = (listener.address() as AddressInfo).port;
+  await new Promise<void>((resolve, reject) =>
+    listener.close((error) => (error ? reject(error) : resolve())),
+  );
+  const { default: rawPostgres } = await vi.importActual<{ default: typeof postgres }>('postgres');
+  const { ensureJournal } = await vi.importActual<typeof import('./journal.js')>('./journal.js');
+  // Inject the real client at the factory seam. Only the socket's deadline is real;
+  // the listener is already closed and no database or Docker daemon is required.
+  const sql = rawPostgres({
+    host: '127.0.0.1',
+    port,
+    username: 'probe',
+    database: 'probe',
+    password: randomBytes(16).toString('hex'),
+    max: 1,
+    connect_timeout: 0.05,
+  });
+  const end = vi.spyOn(sql, 'end');
+  vi.mocked(postgres).mockReturnValueOnce(sql);
+  let failure: unknown;
+  vi.mocked(journal.ensureJournal).mockImplementationOnce(async (client) => {
+    expect(client).toBe(sql);
+    try {
+      await ensureJournal(client);
+    } catch (error) {
+      failure = error;
+      throw error;
+    }
+  });
+  const dead = record(ext.token, 'updater', ext.seq);
+  await writeFile(lock, dead);
+  try {
+    expect(await main()).toBe(3);
+    expect(failure).toBeInstanceOf(Error);
+    const { code } = failure as NodeJS.ErrnoException;
+    expect(['ECONNREFUSED', 'CONNECT_TIMEOUT']).toContain(code);
+    expect(
+      vi.mocked(console.log).mock.calls.map(([line]) => JSON.parse(String(line))),
+    ).toContainEqual(
+      expect.objectContaining({
+        event: 'refused',
+        refusal: 'updater-bootstrap-failed',
+        message: expect.stringContaining(`(${code})`),
+      }),
+    );
+    expect(journal.tryLock).not.toHaveBeenCalled();
+    expect(journal.findLiveRun).not.toHaveBeenCalled();
+    expect(journal.recordAttempt).not.toHaveBeenCalled();
+    expect(h.dockerExec).not.toHaveBeenCalled();
+    expect(await readFile(lock, 'utf8')).toBe(dead);
+    expect(end).toHaveBeenCalledExactlyOnceWith({ timeout: 5 });
+  } finally {
+    await sql.end({ timeout: 5 });
+  }
 });
 
 describe('bootstrap errors that must retain their diagnosis', () => {
