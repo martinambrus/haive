@@ -1214,7 +1214,7 @@ Today consent reserves worst-case storage for all `8 x U` calls up front (about 
 
 ### T768 · Translator: keep terms refused when the target language declines them
 
-status: open, in work 2026-11-26 (blocks the owner's first paid run, T735) · kind: fix · found: owner task ae8fb29c 2026-11-26 · priority: P1
+status: done 2026-11-26, module #20 (d8a8db7, deployed with `pnpm docker libs`): literal matches always count; a 5+ letter keep word also matches a same-script stem (word minus 2 letters) where nothing else overlaps; one helper for passes, review and patches; README states the false-accept floor (`Marek` to `Marcel` passes). Owner to Retry `tr-translate` on ae8fb29c · kind: fix · found: owner task ae8fb29c 2026-11-26 · priority: P1
 
 In `martinambrus/haive-module-translator`. The owner's English-to-Slovak run failed at `tr-translate`: unit 0's accuracy pass was accepted, its restructure pass was refused with `Source-present keep term missing`. `keepTermLost` (`src/protocol/passes.ts` ~:115, used ~:142, `review.ts` ~:123, `patch.ts` ~:50) needs the literal keep term in the target as often as in the source, so a declined name (Marek to Marka) fails. One attempt is left on that pass key.
 
