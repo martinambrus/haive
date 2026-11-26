@@ -1,10 +1,11 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
-import { isValidElement, type ReactElement, type ReactNode } from 'react';
+import { isValidElement, type ComponentProps, type ReactElement, type ReactNode } from 'react';
 import { Dialog } from '@/components/dialog';
 import { Button, FormError, Label } from '@/components/ui';
 import GlobalKbPage from './page';
 import { MarkdownView } from '@/components/markdown/markdown-view';
 import { InlineMarkdown } from '@/components/markdown/inline-markdown';
+import { MarkdownEditor } from '@/components/markdown/markdown-editor';
 
 // No DOM in this package: the page's hooks run on a plain slot list, as in components/task-type-editor.test.tsx.
 const hooks = vi.hoisted(() => ({ slots: [] as unknown[], next: 0, dirty: false, mounting: true }));
@@ -644,6 +645,42 @@ describe('entry management controls', () => {
     await ui.settle();
     expect(namedControls(ui, save)).toHaveLength(0);
     expect(ui.all().some((e) => e.type === MarkdownView && e.props.body === row.body)).toBe(true);
+  });
+
+  it('rejects an empty editor draft and keeps a correction after a failed save', async () => {
+    const row = entry();
+    const ui = await mount({}, [], [row]);
+    await ui.openEntry();
+    await ui.pressTarget(namedControls(ui, 'Edit body')[0], 'Edit body');
+    const editor = () =>
+      ui.all().find((e) => e.type === MarkdownEditor) as unknown as ReactElement<
+        ComponentProps<typeof MarkdownEditor>
+      >;
+    const error = () =>
+      ui.all().find((e) => e.type === FormError && e.props.message)?.props.message;
+
+    editor().props.onChange('');
+    await ui.settle();
+    await ui.press('Save body');
+    expect(error()).toBe('The article body cannot be empty.');
+    expect(api.patch).not.toHaveBeenCalled();
+
+    editor().props.onChange('A correction to keep');
+    await ui.settle();
+    api.patch.mockRejectedValueOnce({ message: 'Could not save this article.' });
+    await ui.press('Save body');
+    expect(error()).toBe('Could not save this article.');
+    expect(editor().props.value).toBe('A correction to keep');
+
+    api.patch.mockResolvedValueOnce({ entry: { ...row, body: 'A correction to keep' } });
+    await ui.press('Save body');
+    expect(api.patch).toHaveBeenLastCalledWith(`/global-kb/entries/${row.id}`, {
+      body: 'A correction to keep',
+    });
+    expect(namedControls(ui, 'Edit body')).toHaveLength(1);
+    expect(
+      ui.all().some((e) => e.type === MarkdownView && e.props.body === 'A correction to keep'),
+    ).toBe(true);
   });
 
   it('keeps enforcement controls governed by canEnforce', async () => {
