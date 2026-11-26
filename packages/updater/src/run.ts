@@ -1,4 +1,3 @@
-import { readFile } from 'node:fs/promises';
 import { basename, dirname, join } from 'node:path';
 import type { ISql, Sql } from 'postgres';
 import {
@@ -104,8 +103,13 @@ export async function setEnvVar(envFile: string, key: string, value: string): Pr
 }
 
 export async function readEnvVar(envFile: string, key: string): Promise<string | null> {
-  const text = await readFile(envFile, 'utf8');
-  return envValue(text, key);
+  return inInstall(dirname(envFile), async (dir) => {
+    const name = basename(envFile);
+    if (!(await dir.entry(name))) throw new Error('install env file is missing');
+    const file = await dir.read(name);
+    if (!file) throw new Error('install env file is missing');
+    return envValue(file.bytes.toString('utf8'), key);
+  });
 }
 
 /** Compose reads the pin from the environment as well as from .env, so the version being acted on
