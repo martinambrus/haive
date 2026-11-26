@@ -1204,7 +1204,7 @@ C3. Accept with no next step still writes the findings in a separate statement a
 
 ### T767 · Translator: books of any size with one glossary and one style
 
-status: open, in work 2026-11-26 (design analysis: `.claude/tmp/codex-run/TRBIG-S/`; OWNER DECISION 2026-11-26: one task per book, one glossary and style, batched translation/review with storage reserved per batch) · kind: feature · found: owner decision 2026-11-26 · priority: P2
+status: open; PR1 (batch storage mode, quota wait, migration 0011) merged module #21 559205f and deployed 2026-11-26; PR2-PR4 next
 
 In `martinambrus/haive-module-translator`. Owner (2026-11-26): "the translator module should be able to translate book of any size, so if we have to update it to do it in parts because of a possible big size, that's fine as well, we just need to keep the vocabulary and terms and the such intact between them".
 
