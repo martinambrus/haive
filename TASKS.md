@@ -1224,7 +1224,7 @@ In `martinambrus/haive-module-translator`. The owner's English-to-Slovak run fai
 
 ### T776 · RAG stats panel mixes rounds of a re-run step
 
-status: open · kind: bug · found: T769 build 2026-11-26 (Codex found-not-fixed) · priority: P3
+status: done 2026-11-26, merged #1352 6a832e551 and live · kind: bug · found: T769 build 2026-11-26 (Codex found-not-fixed) · priority: P3
 
 The step RAG stats endpoint selects by logical step id without a round selector (`api/src/routes/tasks/steps.ts` ~:883), so on a step that ran in several fix rounds the panel opened from one round's card can show another round's queries. T769's per-row count uses the row's own time window, so a card can say "No RAG used" while the panel would list queries from another round.
 
