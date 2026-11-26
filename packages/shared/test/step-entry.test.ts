@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import * as step from '@haive/shared/step';
 
 describe('public step entry', () => {
-  it('exports only the eight runtime constructors', () => {
+  it('exports only the nine runtime constructors', () => {
     expect(Object.keys(step).sort()).toEqual([
       'AdvisedStepError',
       'MiningRetryError',
@@ -10,6 +10,7 @@ describe('public step entry', () => {
       'PromptBudgetExceededError',
       'ReopenStepFormError',
       'RetryableParseError',
+      'StepPrepareDeferredError',
       'StepPrepareParkError',
       'TaskCancelledError',
     ]);
@@ -53,6 +54,7 @@ describe('public step entry', () => {
       message: 'step has another decision to present',
       notice: false,
       newAttempt: false,
+      rerunPreForm: false,
     });
     expect(new step.ReopenStepFormError('Next batch', { notice: true }).notice).toBe(true);
   });
@@ -70,4 +72,16 @@ describe('public step entry', () => {
       notice: options?.notice === true,
     });
   });
+});
+
+it('opts into pre-form re-entry and exposes the canonical pause signal', () => {
+  expect(new step.ReopenStepFormError('next', { rerunPreForm: true } as never)).toMatchObject({
+    rerunPreForm: true,
+    newAttempt: false,
+  });
+  expect(
+    new (
+      step as unknown as { StepPrepareDeferredError: new () => Error }
+    ).StepPrepareDeferredError().name,
+  ).toBe('StepPrepareDeferredError');
 });

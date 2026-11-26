@@ -159,10 +159,14 @@ function makeMockDb(state: MockState): Database {
     transaction: async (fn: (tx: unknown) => Promise<unknown>) => {
       const row = { ...state.taskStepRow };
       const writes = state.updates.length;
+      const task = state.taskRow && { ...state.taskRow };
+      const invocation = state.invocation && { ...state.invocation };
       try {
         return await fn(db);
       } catch (err) {
         state.taskStepRow = row;
+        state.taskRow = task;
+        if (invocation && state.invocation) Object.assign(state.invocation, invocation);
         state.updates.length = writes;
         throw err;
       }
@@ -181,6 +185,7 @@ function makeMockDb(state: MockState): Database {
           where: (cond: unknown) => ({
             then: (resolve: (rows: unknown[]) => unknown) => Promise.resolve([]).then(resolve),
             limit: async () => {
+              if (tableName === 'tasks') return state.taskRow ? [state.taskRow] : [];
               if (tableName === 'task_steps') {
                 return state.taskStepRow.id ? [persistedRow(state)] : [];
               }
@@ -262,6 +267,11 @@ function makeMockDb(state: MockState): Database {
                 !conditionValues(cond).includes(state.invocation.id)
               )
                 return [];
+              if (tableName === 'tasks' && state.taskRow) {
+                Object.assign(state.taskRow, v);
+                state.updates.push({ table: tableName, patch: v });
+                return [state.taskRow];
+              }
               state.updates.push({ table: tableName, patch: v });
               if (tableName === 'cli_invocations' && state.invocation)
                 Object.assign(state.invocation, v);
@@ -2999,4 +3009,242 @@ describe('gates after a gate-3 insight cycle (database faked)', () => {
       },
     );
   });
+});
+
+describe('approved apply pre-form continuation', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.stubEnv('HAIVE_TEST_BYPASS_LLM', '0');
+    vi.spyOn(configService, 'getBoolean').mockResolvedValue(false);
+    vi.spyOn(configService, 'get').mockResolvedValue(null);
+    vi.spyOn(dispatcher, 'resolveTaskDispatch').mockResolvedValue({
+      mode: 'cli',
+      providerId: 'provider',
+      invocation: { kind: 'cli', spec: {} },
+    } as unknown as Awaited<ReturnType<typeof dispatcher.resolveTaskDispatch>>);
+  });
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.unstubAllEnvs();
+    vi.useRealTimers();
+  });
+
+  function fixture(rerunPreForm = true) {
+    const state = freshState();
+    Object.assign(state.taskStepRow, {
+      status: 'waiting_form',
+      round: 0,
+      rerunGeneration: 3,
+      detectOutput: { revision: 'old' },
+      formSchema: ZERO_FIELD_FORM,
+      formValues: {},
+    });
+    state.taskRow = {
+      id: 'task-1',
+      userId: 'user-1',
+      currentStepId: 'cfg-step',
+      currentRound: 0,
+      status: 'waiting_user',
+      orchestrationEpoch: 7,
+      autoContinue: true,
+      summaryLlmEnabled: false,
+    };
+    state.invocation = {
+      id: 'old-run',
+      taskStepId: 'ts-1',
+      endedAt: new Date(),
+      exitCode: 0,
+      rawOutput: 'old-output',
+      parsedOutput: null,
+      errorMessage: null,
+      consumedAt: null,
+    };
+    state.invocations = [state.invocation];
+    let applied = false;
+    const def = makeStep({ form: () => ZERO_FIELD_FORM });
+    def.detect = vi.fn(async () => ({ revision: applied ? 'new' : 'old' }));
+    def.prepareForm = vi.fn(async () => {});
+    def.llm = {
+      preForm: true,
+      requiredCapabilities: [],
+      buildPrompt: () => 'review refreshed work',
+      prepare: vi.fn(async ({ formValues }) => {
+        expect(formValues).toEqual({});
+      }),
+    };
+    def.apply = vi.fn(async (_ctx, args) => {
+      if (!applied) {
+        expect(args.llmInvocationId).toBe('old-run');
+        expect(args.llmOutput).toBe('old-output');
+        applied = true;
+        // Cast keeps the new behavior test runnable on the parent SDK.
+        throw new ReopenStepFormError('Continue approved work', { rerunPreForm } as never);
+      }
+      expect(args.formValues).toEqual({});
+      expect(args.llmOutput).not.toBe('old-output');
+      return { complete: true };
+    });
+    const enqueue = vi.fn(async () => {});
+    const advance = (values?: Record<string, unknown>) =>
+      run(state, def, values, {
+        providers: [],
+        deps: { enqueueCliInvocation: enqueue },
+        epoch: 7,
+      });
+    return { state, def, enqueue, advance };
+  }
+
+  it('default notice-only reopen refreshes a form without another dispatch', async () => {
+    const h = fixture(false);
+    expect((await h.advance({})).status).toBe('waiting_form');
+    expect(h.enqueue).not.toHaveBeenCalled();
+    expect(h.def.llm!.prepare).not.toHaveBeenCalled();
+    expect(h.state.invocation!.consumedAt).toBeNull();
+  });
+
+  it('checkpoints waiting_user as running and re-enters detect then the normal reservation path', async () => {
+    const h = fixture();
+    h.enqueue.mockImplementation(async () => {
+      expect(h.state.taskRow).toMatchObject({ status: 'running', orchestrationEpoch: 7 });
+      expect(h.state.taskStepRow).toMatchObject({
+        pauseFormOnRetry: true,
+        formValues: null,
+        rerunGeneration: 3,
+      });
+    });
+    expect((await h.advance({ stale: true })).status).toBe('waiting_cli');
+    expect(h.enqueue).toHaveBeenCalledOnce();
+    expect(h.def.detect).toHaveBeenCalledOnce();
+    expect(h.def.llm!.prepare).toHaveBeenCalledOnce();
+    expect(h.state.invocations![0]!.consumedAt).toBeInstanceOf(Date);
+    expect(h.state.taskStepRow.detectOutput).toEqual({ revision: 'new' });
+    expect((await h.advance({ stale: true })).status).toBe('waiting_cli');
+    expect(h.enqueue).toHaveBeenCalledOnce();
+    Object.assign(h.state.invocation!, {
+      endedAt: new Date(),
+      exitCode: 0,
+      rawOutput: 'new-output',
+    });
+    expect((await h.advance({ stale: true })).status).toBe('waiting_form');
+    expect(h.def.apply).toHaveBeenCalledOnce();
+    expect(h.state.taskStepRow).toMatchObject({ formValues: null, pauseFormOnRetry: false });
+  });
+
+  it.each([true, false])('prepare false continues normally with a form=%s', async (form) => {
+    const h = fixture();
+    h.def.llm!.prepare = async () => false;
+    h.def.form = () => (form ? ZERO_FIELD_FORM : null);
+    expect((await h.advance({})).status).toBe(form ? 'waiting_form' : 'done');
+    expect(h.enqueue).not.toHaveBeenCalled();
+    expect(h.def.apply).toHaveBeenCalledTimes(form ? 1 : 2);
+  });
+
+  it('bounds synchronous re-entry and parks a repeated request on the decision form', async () => {
+    const h = fixture();
+    h.def.llm!.prepare = async () => false;
+    h.def.form = () => null;
+    h.def.apply = vi.fn(async () => {
+      throw new ReopenStepFormError('boundary', { rerunPreForm: true } as never);
+    });
+    expect((await h.advance({})).status).toBe('waiting_form');
+    expect(h.def.apply).toHaveBeenCalledTimes(2);
+    expect(h.enqueue).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    'detect',
+    'form',
+    'preForm',
+    'newAttempt',
+    'loop',
+    'agentMining',
+    'dagExecute',
+    'mergeResolve',
+  ])('refuses incompatible %s before continuation writes or dispatch', async (bad) => {
+    const h = fixture();
+    if (bad === 'preForm') h.def.llm!.preForm = false;
+    else if (bad === 'newAttempt')
+      h.def.apply = async () => {
+        throw new ReopenStepFormError('invalid', { rerunPreForm: true, newAttempt: true } as never);
+      };
+    else
+      (h.def as unknown as Record<string, unknown>)[bad] = ['detect', 'form'].includes(bad)
+        ? undefined
+        : {};
+    // Remove fan-out execution itself: request the invalid config from apply after the earlier phases.
+    if (['loop', 'agentMining', 'dagExecute', 'mergeResolve'].includes(bad)) {
+      delete (h.def as unknown as Record<string, unknown>)[bad];
+      const apply = h.def.apply;
+      h.def.apply = async (ctx, args) => {
+        (h.def as unknown as Record<string, unknown>)[bad] = {};
+        return apply(ctx, args);
+      };
+    }
+    const result = await h.advance({});
+    expect(result.status).toBe('failed');
+    expect(result.status === 'failed' && result.error).toMatch(/rerunPreForm/);
+    expect(h.enqueue).not.toHaveBeenCalled();
+    expect(h.state.invocation!.consumedAt).toBeNull();
+    expect(h.state.updates.some(({ patch }) => patch.pauseFormOnRetry === true)).toBe(false);
+  });
+
+  it.each(['task', 'global', 'unreadable'] as const)(
+    'pause %s defers before prepare, and Resume dispatches once',
+    async (scope) => {
+      const h = fixture();
+      if (scope === 'task') h.state.taskRow!.pausedAt = new Date();
+      else if (scope === 'global') vi.mocked(configService.getBoolean).mockResolvedValue(true);
+      else {
+        const { ConfigUnavailableError } = await import('@haive/shared');
+        vi.mocked(configService.getBoolean).mockRejectedValue(new ConfigUnavailableError('pause'));
+      }
+      expect((await h.advance({})).status).toBe('deferred');
+      expect(h.def.llm!.prepare).not.toHaveBeenCalled();
+      expect(h.state.taskStepRow).toMatchObject({
+        status: 'waiting_cli',
+        pauseFormOnRetry: true,
+        formValues: null,
+      });
+      h.state.taskRow!.pausedAt = null;
+      vi.mocked(configService.getBoolean).mockResolvedValue(false);
+      expect((await h.advance({ stale: true })).status).toBe('waiting_cli');
+      expect(h.enqueue).toHaveBeenCalledOnce();
+    },
+  );
+
+  it('accepts a completed held pass while paused but defers its completePreForm follow-up', async () => {
+    const h = fixture();
+    await h.advance({});
+    Object.assign(h.state.invocation!, { endedAt: new Date(), exitCode: 0, rawOutput: 'accepted' });
+    const accept = vi.fn(async () => ({ llmOutput: 'accepted', continueRequested: true }));
+    h.def.llm!.completePreForm = accept;
+    h.state.taskRow!.pausedAt = new Date();
+    expect((await h.advance({ stale: true })).status).toBe('deferred');
+    expect(accept).toHaveBeenCalledOnce();
+    expect(h.enqueue).toHaveBeenCalledOnce();
+    expect(h.state.invocation!.consumedAt).toBeInstanceOf(Date);
+  });
+
+  it.each(['prepare', 'prepareWorkspace'] as const)(
+    'canonical pause race from %s yields and releases only its unqueued reservation',
+    async (hook) => {
+      const h = fixture();
+      h.def.llm![hook] = async () => {
+        h.state.taskRow!.pausedAt = new Date();
+        const sdk = await import('@haive/shared/step');
+        throw new (
+          sdk as unknown as { StepPrepareDeferredError: new () => Error }
+        ).StepPrepareDeferredError();
+      };
+      expect((await h.advance({})).status).toBe('deferred');
+      expect(h.enqueue).not.toHaveBeenCalled();
+      if (hook === 'prepareWorkspace')
+        expect(h.state.invocation!.supersededAt).toBeInstanceOf(Date);
+      expect(h.state.taskStepRow).toMatchObject({ status: 'waiting_cli', pauseFormOnRetry: true });
+      delete h.def.llm![hook];
+      h.state.taskRow!.pausedAt = null;
+      expect((await h.advance()).status).toBe('waiting_cli');
+      expect(h.enqueue).toHaveBeenCalledOnce();
+    },
+  );
 });

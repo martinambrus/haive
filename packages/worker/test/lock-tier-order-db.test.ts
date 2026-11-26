@@ -14,6 +14,7 @@ import { TASK_JOB_NAMES } from '@haive/shared';
 import {
   processTaskJob,
   recoverParkedStep,
+  reconcileOrphanedSteps,
   setContainerCleanupRunner,
   type ParkedOrphan,
   type ReconcileDeps,
@@ -25,6 +26,8 @@ import {
 } from '../src/step-engine/steps/workflow/_insight-batch.js';
 import type { AgentMiningResult, StepContext } from '../src/step-engine/step-definition.js';
 import { StepSupersededError } from '../src/step-engine/step-ownership.js';
+import * as runner from '../src/step-engine/step-runner.js';
+import { redriveStalledTasks } from '../src/queues/stalled-redrive.js';
 import { holdReopenedForm } from '../src/step-engine/step-runner.js';
 
 const url = process.env.WORKER_LOCK_TIER_ORDER_TEST_URL;
@@ -610,6 +613,211 @@ describe.skipIf(!url)(
       formSchema: { fields: [] },
       formValues: { answer: 'kept until the hold' },
     } satisfies StepInsert;
+
+    describe('approved pre-form continuation checkpoint', () => {
+      const checkpoint = (ctx: StepContext, invocationId: string | null = R) =>
+        (
+          runner as unknown as {
+            checkpointPreFormContinuation: (
+              db: Database,
+              ctx: StepContext,
+              invocationId: string | null,
+            ) => Promise<unknown>;
+          }
+        ).checkpointPreFormContinuation(db, ctx, invocationId);
+      const setup = async () => {
+        const taskId = await seedTask('waiting_user', { currentStepId: S.stepId, currentRound: 0 });
+        await seedStep(taskId, S, 'running', {
+          ...OPEN_FORM,
+          rerunGeneration: 4,
+          pauseFormOnRetry: false,
+        });
+        await seedRun(taskId, { endedAt: T0, exitCode: 0, costUsd: '0.100000' });
+        const ctx = {
+          db,
+          taskId,
+          taskStepId: S.id,
+          userId,
+          epoch: EPOCH,
+          round: 0,
+          rerunGeneration: 4,
+        } as StepContext;
+        return { taskId, ctx };
+      };
+      const taskOf = (taskId: string) =>
+        db.query.tasks.findFirst({ where: eq(schema.tasks.id, taskId) });
+
+      it('atomically consumes the exact completed id and holds a running task without changing generation, epoch, pointer, spend or downstream', async () => {
+        const { taskId, ctx } = await setup();
+        await seedStep(taskId, A, 'done', { output: { retained: true } });
+        const newer = randomUUID();
+        await db
+          .insert(schema.cliInvocations)
+          .values({ id: newer, taskId, taskStepId: S.id, mode: 'cli', prompt: 'newer live' });
+        const downstream = await rowOf(A.id);
+        const live = await runOf(newer);
+        await checkpoint(ctx);
+        expect(await rowOf(S.id)).toMatchObject({
+          status: 'waiting_cli',
+          rerunGeneration: 4,
+          detectOutput: null,
+          detectCliProviderId: null,
+          formSchema: null,
+          formValues: null,
+          pauseFormOnRetry: true,
+          waitingStartedAt: null,
+        });
+        expect(await taskOf(taskId)).toMatchObject({
+          status: 'running',
+          orchestrationEpoch: EPOCH,
+          currentStepId: S.stepId,
+          currentRound: 0,
+        });
+        expect((await runOf(R)).consumedAt).toBeInstanceOf(Date);
+        expect((await runOf(R)).costUsd).toBe('0.100000');
+        expect(await runOf(newer)).toEqual(live);
+        expect(await rowOf(A.id)).toEqual(downstream);
+      });
+
+      it.each([
+        'generation',
+        'step-owner',
+        'task-owner',
+        'epoch',
+        'pointer',
+        'round',
+        'dead',
+        'failed',
+        'cancelled',
+        'completed',
+        'pending',
+        'skipped',
+        'run-superseded',
+        'run-live',
+      ])('lost %s rolls back consumption and the whole checkpoint', async (lost) => {
+        const { taskId, ctx } = await setup();
+        if (lost === 'generation')
+          await db
+            .update(schema.taskSteps)
+            .set({ rerunGeneration: 5 })
+            .where(eq(schema.taskSteps.id, S.id));
+        else if (lost === 'step-owner') ctx.taskId = randomUUID();
+        else if (lost === 'task-owner') ctx.userId = randomUUID();
+        else if (lost === 'epoch') ctx.epoch = EPOCH - 1;
+        else if (lost === 'pointer')
+          await db
+            .update(schema.tasks)
+            .set({ currentStepId: MOVED_ON })
+            .where(eq(schema.tasks.id, taskId));
+        else if (lost === 'round')
+          await db.update(schema.tasks).set({ currentRound: 1 }).where(eq(schema.tasks.id, taskId));
+        else if (lost === 'dead')
+          await db.update(schema.tasks).set({ deadAt: AT }).where(eq(schema.tasks.id, taskId));
+        else if (lost === 'pending' || lost === 'skipped')
+          await db
+            .update(schema.taskSteps)
+            .set({ status: lost })
+            .where(eq(schema.taskSteps.id, S.id));
+        else if (lost === 'run-superseded')
+          await db
+            .update(schema.cliInvocations)
+            .set({ supersededAt: AT })
+            .where(eq(schema.cliInvocations.id, R));
+        else if (lost === 'run-live')
+          await db
+            .update(schema.cliInvocations)
+            .set({ endedAt: null })
+            .where(eq(schema.cliInvocations.id, R));
+        else
+          await db
+            .update(schema.tasks)
+            .set({ status: lost as 'failed' | 'cancelled' | 'completed' })
+            .where(eq(schema.tasks.id, taskId));
+        const before = { row: await rowOf(S.id), run: await runOf(R), task: await taskOf(taskId) };
+        await expect(checkpoint(ctx)).rejects.toBeInstanceOf(StepSupersededError);
+        expect(await rowOf(S.id)).toEqual(before.row);
+        expect(await runOf(R)).toEqual(before.run);
+        expect(await taskOf(taskId)).toEqual(before.task);
+      });
+
+      it(
+        'takes run before step before task beside a Retry-order peer',
+        async () => {
+          const { ctx } = await setup();
+          expectClean(await interleave(() => checkpoint(ctx), runThenStepPeer, [S.id]));
+        },
+        TEST_TIMEOUT,
+      );
+
+      it(
+        'a Retry that overtakes the blocked checkpoint rolls consumption back',
+        async () => {
+          const { ctx } = await setup();
+          const race = await interleave(
+            () => settle(checkpoint(ctx)),
+            {
+              first: lockRun(R),
+              second: async (tx) => {
+                await tx
+                  .update(schema.taskSteps)
+                  .set({ rerunGeneration: 5 })
+                  .where(eq(schema.taskSteps.id, S.id));
+              },
+            },
+            [S.id],
+          );
+          expectClean(race);
+          expect(race.result?.ok).toBe(false);
+          expect((await runOf(R)).consumedAt).toBeNull();
+          expect((await rowOf(S.id)).formValues).toEqual(OPEN_FORM.formValues);
+        },
+        TEST_TIMEOUT,
+      );
+
+      it.each(['boot', 'stalled'] as const)(
+        'crash after checkpoint from waiting_user is recovered by the real %s reader',
+        async (reader) => {
+          const { taskId, ctx } = await setup();
+          await checkpoint(ctx);
+          const held = await rowOf(S.id);
+          // Model an acknowledged checkpoint followed by death before reserve/insert/enqueue.
+          const enqueue = vi.fn(async () => {});
+          if (reader === 'boot')
+            await reconcileOrphanedSteps(db, {
+              enqueueAdvance: enqueue,
+              queuedInvocationIds: async () => new Set(),
+            });
+          else {
+            await db.update(schema.tasks).set({ updatedAt: T0 }).where(eq(schema.tasks.id, taskId));
+            await db
+              .update(schema.taskSteps)
+              .set({ updatedAt: T0 })
+              .where(eq(schema.taskSteps.id, S.id));
+            await redriveStalledTasks(
+              db,
+              {
+                queuedTaskJobs: async () => ({ steps: new Set(), starts: new Set() }),
+                enqueueAdvance: enqueue,
+                enqueueStart: async () => {},
+                failTask: async () => false,
+                queuedInvocationIds: async () => new Set(),
+              },
+              { staleMs: 0 },
+            );
+          }
+          expect(enqueue).toHaveBeenCalledOnce();
+          expect(await rowOf(S.id)).toMatchObject({
+            status: 'waiting_cli',
+            rerunGeneration: held.rerunGeneration,
+            formSchema: null,
+            formValues: null,
+            pauseFormOnRetry: true,
+          });
+          expect((await taskOf(taskId))!.orchestrationEpoch).toBe(EPOCH + 1);
+          expect((await runOf(R)).consumedAt).toBeInstanceOf(Date);
+        },
+      );
+    });
 
     // Sanity: the setup can produce the cycle.
 
