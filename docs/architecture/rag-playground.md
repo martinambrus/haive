@@ -100,3 +100,9 @@ a step without a start has zero queries. Finished agent steps with zero queries
 show “No RAG used” in the disclosure's place; unfinished agent steps retain the
 disclosure because queries can still arrive. Persisted expansion never opens an
 empty finished panel.
+
+The panel supplies `stepRowId` on `/tasks/:id/steps/:stepId/rag-queries`, selecting
+the card's exact task-step row so repeated logical steps keep their own windows.
+The row must belong to both the owned task and the logical step; an unavailable
+or invalid selector returns 404. Omitting it preserves the original logical-step
+lookup, including an empty response for a missing step.
