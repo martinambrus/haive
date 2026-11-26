@@ -44,7 +44,9 @@ export function assertWorkerExecutionContractSupported(
       !resolvePinnedFixConsumer(contract.fixTarget, registry).ok)
   )
     throw new ExecutionContractError(
-      `fix-target ${contract.fixTarget.stepId} is off-list or not a registered module fix consumer at version ${contract.fixTarget.capabilityVersion}`,
+      registry.get(contract.fixTarget.stepId)?.agentMining !== undefined
+        ? `fix-target ${contract.fixTarget.stepId} uses fan-out, which cannot capture repair evidence`
+        : `fix-target ${contract.fixTarget.stepId} is off-list or not a registered module fix consumer at version ${contract.fixTarget.capabilityVersion}`,
     );
   executionContractPaths(
     ids,

@@ -137,6 +137,11 @@ export function registerModuleSteps(
           { cause: err },
         );
       }
+      if (def.fixConsumer !== undefined && def.agentMining !== undefined)
+        logger.warn(
+          { stepId: id },
+          'fix consumer capability withheld: fan-out cannot capture repair evidence',
+        );
       for (const [predicateId, predicate] of Object.entries(def.guardPredicates ?? {})) {
         const id = namespaced(moduleId, predicateId);
         if (
