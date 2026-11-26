@@ -128,7 +128,7 @@ import {
 } from '../step-engine/steps/workflow/_app-runtime.js';
 import { computeFoldContribution } from '@haive/shared/timing';
 import type { AgentMiningDispatch, StepDefinition } from '../step-engine/step-definition.js';
-import { pauseParkMessage, resolvePause } from '../orchestrator/pause.js';
+import { pauseParkMessage, resolvePause, PAUSE_POLL_MS } from '../orchestrator/pause.js';
 import { providerHoldMessage } from '../orchestrator/provider-hold.js';
 import {
   AGENT_PERSONA_UNRESOLVED_EVENT,
@@ -1607,12 +1607,6 @@ async function defaultContainerCleanup(db: Database, taskId: string): Promise<nu
  *  The delayed advance re-checks admission; matches the in-process gate's repump cadence. */
 const RUNTIME_PARK_POLL_MS = 15_000;
 
-/** Poll interval for a step held by a task or global PAUSE. Longer than the runtime park: that
- *  one is racing for a slot that can free at any moment, this one waits on a human clicking
- *  Resume. It is also the upper bound on how long a resume takes to visibly restart the task,
- *  which is why it is not longer still. */
-const PAUSE_POLL_MS = 30_000;
-
 /** Poll interval for a step held on a disabled CLI provider. Like the pause hold it waits on a
  *  person, here enabling the provider in settings or switching the step's CLI. */
 const PROVIDER_HOLD_POLL_MS = 30_000;
@@ -2380,7 +2374,7 @@ export async function handleResult(
         result.row.round,
         ctx.orchestrationEpoch,
         {
-          delayMs: MODULE_SCHEMA_POLL_MS,
+          delayMs: result.delayMs ?? MODULE_SCHEMA_POLL_MS,
         },
       );
       return;
@@ -4835,6 +4829,9 @@ export async function reconcileOrphanedSteps(
     queuedInvocationIds: readQueuedInvocationIds,
   },
 ): Promise<void> {
+  // Includes the approved pre-form checkpoint: running task, waiting_cli step,
+  // no live invocation, null answers/schema and pauseFormOnRetry held. No run is
+  // required here; recovery must re-enter preparation after death before insert.
   const stuckCli = await db
     .select({
       taskStepId: schema.taskSteps.id,

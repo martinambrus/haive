@@ -104,6 +104,19 @@ export class StepPrepareParkError extends Error {
   }
 }
 
+/** From prepare or prepareWorkspace on an opted-in held pre-form continuation,
+ * yield this pass when current pause admission refuses dispatch. The host rechecks
+ * pause; if Resume wins the race, prepare may run once more, or prepareWorkspace
+ * may run on a fresh pass after a one-second deferral (once per checkpoint).
+ * A repeat without pause or a signal without a hold fails. Only this pass's unqueued
+ * reservation is released, under run -> step -> task fencing. History is retained. */
+export class StepPrepareDeferredError extends Error {
+  constructor(message = 'pre-form continuation dispatch is paused') {
+    super(message);
+    this.name = 'StepPrepareDeferredError';
+  }
+}
+
 export interface LlmBuildArgs {
   detected: unknown;
   formValues: FormValues;
@@ -209,6 +222,7 @@ export interface LlmInvocationSpec {
   // still runs with null llmOutput. Other preparation hooks return void.
   // Throw StepPrepareParkError to yield to a live singleton invocation owned by
   // another advance. The host checks it exists; without one the step fails.
+  // StepPrepareDeferredError is handled only on an opted-in held pre-form continuation.
   prepare?: (args: LlmBuildArgs & { ctx: StepContext }) => Promise<void | false>;
   /** Like `prepare`, but run only once THIS job has WON the dispatch — after the
    *  cli_invocations insert the live-per-step unique index backs, before the job is
@@ -217,7 +231,9 @@ export interface LlmInvocationSpec {
    *  `prepare` cannot carry that work — it runs before the prompt is built (08a resolves
    *  the app login there and buildPrompt renders it), so it is a check-before-act and two
    *  concurrent advances can both pass its guard. A throw releases the reservation and
-   *  then fails the step. */
+   *  then fails the step, except StepPrepareDeferredError on an opted-in held
+   *  pre-form continuation: the host rechecks pause and defers. If Resume wins
+   *  the race, it defers one second and prepares a fresh pass, once per checkpoint. */
   prepareWorkspace?: (args: LlmBuildArgs & { ctx: StepContext }) => Promise<void>;
   /** Retry the LLM phase when apply() throws — for steps whose output is a strict
    *  JSON contract a flaky model intermittently misses (emits prose, an empty turn,
@@ -556,31 +572,42 @@ export class MiningWaveError extends Error {
 }
 
 /**
- * Throw from apply() when a bounded unit of user-approved work finished but the
- * same step still has another decision to present. The runner refreshes detect(),
- * rebuilds the form, clears the prior answer, and parks on `waiting_form` without
- * finalizing the step.
- *
- * This is intentionally different from a mining wave: MiningWaveError is an
- * automated continuation inside one approval, while this signal returns control
- * to the person before another bounded batch is dispatched.
+ * By default, `ReopenStepFormError` refreshes detection and parks another form. With
+ * `rerunPreForm: true`, a step may request further work covered by its recorded approval. The host
+ * checkpoints the continuation, consumes only the completed invocation supplied to that apply pass,
+ * discards the old form and answer, and re-enters detect and the normal pre-form pipeline before
+ * deciding whether another form is needed. The option requires detect, form, and `llm.preForm`, and
+ * is incompatible with `newAttempt`, `needsRuntime`, a step loop, mining, DAG execution, or merge
+ * resolution. It preserves the physical step, round, generation, accepted results, and spend history. The step must
+ * derive continuation authority and a finite work bound from durable state. New decisions must still
+ * park; this option does not approve future proposals or guarantee a new invocation when refreshed
+ * preparation returns false.
  */
 export class ReopenStepFormError extends Error {
   /** True when `message` is written for the user: the refreshed form then shows it as a note.
+   *  At most 2,000 characters are shown. With rerunPreForm the checkpoint retains
+   *  the text through dispatch/recovery for its eventual non-null form only.
    *  Plan steps reopen with internal control text, which stays out of the form. */
   readonly notice: boolean;
   /** Start a new durable batch after consuming the previous attempt's agent results.
    *  A generation bump is only safe for steps whose attempt identity is journal-backed,
    *  currently 08e. */
   readonly newAttempt: boolean;
+  /** Re-enter detect and the normal pre-form pipeline under recorded approval.
+   * Requires detect, form and llm.preForm; excludes newAttempt, needsRuntime, loop,
+   * mining, DAG and merge resolution. Preserves step/round/generation and spend. The step
+   * derives authority and a finite work bound from durable state. New decisions
+   * still park; prepare returning false need not create an invocation or form. */
+  readonly rerunPreForm: boolean;
   constructor(
     message = 'step has another decision to present',
-    opts?: { notice?: boolean; newAttempt?: boolean },
+    opts?: { notice?: boolean; newAttempt?: boolean; rerunPreForm?: boolean },
   ) {
     super(message);
     this.name = 'ReopenStepFormError';
     this.notice = opts?.notice === true;
     this.newAttempt = opts?.newAttempt === true;
+    this.rerunPreForm = opts?.rerunPreForm === true;
   }
 }
 

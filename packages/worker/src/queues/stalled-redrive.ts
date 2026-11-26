@@ -212,6 +212,8 @@ function runEndedSince(cutoff: Date) {
  *  recovery's below. The cutoff counts from the end of the last run as well as from the row's own
  *  stamp: the cli-exec handler stamps the row (`markCliParkBegin`) only after the end has committed,
  *  and not at all when the park marker is already set or the stamp throws. */
+// Also admits an approved pre-form checkpoint with no run at all and the old-answer
+// hold set. Recovery keeps its answers cleared and generation unchanged.
 function idleWaitingCliRow(cutoff: Date) {
   return and(
     lt(schema.taskSteps.updatedAt, cutoff),

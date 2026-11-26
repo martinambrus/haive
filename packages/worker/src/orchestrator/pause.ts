@@ -4,6 +4,12 @@ import { CONFIG_KEYS, ConfigUnavailableError, configService, logger } from '@hai
 
 const log = logger.child({ module: 'pause' });
 
+/** Poll interval for a step held by a task or global PAUSE. Longer than the runtime park: that
+ *  one is racing for a slot that can free at any moment, this one waits on a human clicking
+ *  Resume. It is also the upper bound on how long a resume takes to visibly restart the task,
+ *  which is why it is not longer still. */
+export const PAUSE_POLL_MS = 30_000;
+
 /** Why a task is being held. `global` is the admin kill-switch, `task` is the per-task
  *  Pause button. Reported so the park banner can name the one the user has to undo.
  *  `unreadable` is neither: the pause state could not be read (config store down, task read

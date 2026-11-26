@@ -94,7 +94,9 @@ describe('compiled module step SDK consumer', () => {
     });
   });
 
-  it('resolves all eight constructors to the worker objects through the compiled module', () => {
+  it('resolves all nine constructors to the worker objects through the compiled module', () => {
+    expect(Object.keys(errors)).toHaveLength(9);
+    expect(errors).toHaveProperty('StepPrepareDeferredError', worker.StepPrepareDeferredError);
     for (const name of Object.keys(errors) as (keyof typeof errors)[]) {
       expect(errors[name]).toBe(worker[name]);
     }

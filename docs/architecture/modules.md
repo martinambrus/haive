@@ -522,7 +522,7 @@ including entries whose exports use a string.
 A module's `./steps` entry imports `StepDefinition`, its phase contracts, form and metadata
 types, and `ChatPlanRead` from `@haive/shared/step`. Define local steps with
 `satisfies StepDefinition<Detect, Apply>` and default-export a readonly array; the worker
-namespaces their ids and workflow type when it loads them. Import the eight control-error
+namespaces their ids and workflow type when it loads them. Import the nine control-error
 constructors from this same entry so the runner receives the canonical class objects.
 A module takes `@haive/shared` as a peer and never bundles it, since class identity depends on it (see [Packaging a registry module](#packaging-a-registry-module)).
 The contract entry also exports the `ImplementationFileSet`, `ChangedLineNotes`, `FileCoverage`
@@ -695,6 +695,48 @@ A step that repeats agent calls through `llm.completePreForm` bounds its own pas
 fails the step), records each result keyed by the persisted invocation id before returning
 `continueRequested`, and rebuilds the next pass from its own store in `prepare`, since Retry clears
 `detect_output`.
+
+By default, `ReopenStepFormError` refreshes detection and parks another form. With
+`rerunPreForm: true`, a step may request further work covered by its recorded approval. The host
+checkpoints the continuation, consumes only the completed invocation supplied to that apply pass,
+discards the old form and answer, and re-enters detect and the normal pre-form pipeline before
+deciding whether another form is needed. The option requires detect, form, and `llm.preForm`, and
+is incompatible with `newAttempt`, `needsRuntime`, a step loop, mining, DAG execution, or merge
+resolution. It preserves the physical step, round, generation, accepted results, and spend history. The step must
+derive continuation authority and a finite work bound from durable state. New decisions must still
+park; this option does not approve future proposals or guarantee a new invocation when refreshed
+preparation returns false. Runtime-dependent steps are excluded because runtime admission can
+park their row as `pending`, which does not retain this held continuation shape.
+
+The default is false. Ordinary notice-only and `newAttempt` reopens retain their behavior.
+The checkpoint records a versioned, generation-bound `step.pre_form_continuation` event in the
+same transaction. The hold alone does not opt in: ordinary Retry can produce the same row shape.
+An epoch takeover retains this policy; a new Retry generation must opt in again.
+An opted-in continuation can finish without a form when preparation returns false and the refreshed
+form is null. Synchronous and recovered continuations clear the old-answer hold only in the
+owned done write after apply succeeds; manual mode retains the host's generic Continue policy.
+A `notice: true` message is stored as plain text (at most 2,000 characters, as on ordinary reopens)
+in that checkpoint event and decorates the eventual non-null refreshed form, including after
+dispatch or recovery. Only the latest checkpoint in the current generation supplies a notice;
+a later checkpoint without one or a Retry cannot resurrect it. A notice never forces a form.
+Only one synchronous re-entry is permitted per advance;
+a repeated request without an invocation park offers the decision/boundary form.
+
+`StepPrepareDeferredError` is the canonical pause-race signal from `prepare` or `prepareWorkspace`
+on an opted-in held pre-form continuation. The host rechecks pause and yields without failure or
+enqueue while pause admission refuses dispatch (an unreadable pause holds too). Without
+that continuation hold this is an ordinary configuration failure. If Resume lands between the
+module's pause read and the host recheck, `prepare` is re-invoked once; a repeated signal with no
+pause fails as a configuration error. In `prepareWorkspace` the host releases the reservation and
+defers for one second to prepare a fresh pass. The `step.pre_form_workspace_resume_deferred`
+event binds this allowance to the latest `step.pre_form_continuation` event id in the current
+generation. A later checkpoint gets its own allowance; a repeated workspace signal for the same
+checkpoint with no pause fails rather than polling forever.
+If this pass already inserted a reservation, the host releases only its own unqueued, unstarted
+invocation under run → step → task fencing. It preserves spend/history and the continuation
+checkpoint. It never converts owner/epoch/Stop/consent failures into a pause. The ordinary
+`deferred` outcome polls the same step, with an optional delay; module-schema deferral keeps its
+existing default. Finished held invocations may be accepted before the next fresh dispatch defers.
 
 A `llm.prepare` hook may throw `StepPrepareParkError` from `@haive/shared/step`
 when its ledger sees an attempt another advance already owns. The host rechecks

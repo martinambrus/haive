@@ -60,7 +60,8 @@ import {
   sql,
   type SQL,
 } from 'drizzle-orm';
-import type { Database } from '@haive/database';
+import type { Database, DbTx } from '@haive/database';
+import { resolvePause, pauseParkMessage, PAUSE_POLL_MS } from '../orchestrator/pause.js';
 import { schema, hasPgCode, isUniqueViolation, type StepIterationEntry } from '@haive/database';
 import {
   CONFIG_KEYS,
@@ -144,11 +145,12 @@ import {
   withoutPreemptions,
 } from '../queues/cli-exec/failure-class.js';
 import { enqueueUsagePollTick } from '../queues/usage-poll-queue.js';
-import { foldCliParkOnResume } from '../queues/cli-park-timing.js';
+import { foldCliParkOnResume, markCliParkBegin } from '../queues/cli-park-timing.js';
 import {
   AdvisedStepError,
   PromptBudgetExceededError,
   StepPrepareParkError,
+  StepPrepareDeferredError,
   TaskCancelledError,
   MiningRetryError,
   MiningWaveError,
@@ -177,6 +179,7 @@ import {
 } from './step-integrations.js';
 import {
   StepSupersededError,
+  taskWriteTarget,
   assertOwnsStep,
   insertOwnedRun,
   openPendingStep,
@@ -456,7 +459,7 @@ export type AdvanceStepResult =
   /** A Retry or Skip took the row over while this pass ran; the pass wrote no outcome. */
   | { status: 'superseded'; row: TaskStepRow }
   /** A schema setup that failed at admission was reset since; the step re-enters admission and writes nothing. */
-  | { status: 'deferred'; row: TaskStepRow }
+  | { status: 'deferred'; row: TaskStepRow; delayMs?: number }
   | { status: 'integration_blocked'; row: TaskStepRow; block: IntegrationBlock };
 
 type UpdatePatch = Partial<{
@@ -1006,6 +1009,12 @@ async function resolveLlmPhase(
     return { resolved: false, result: { status: 'waiting_cli', row: current } };
   }
 
+  const heldContinuation = await isHeldPreFormContinuation(db, stepDef, current);
+  if (heldContinuation) {
+    const deferred = await deferPreFormContinuation(db, ctx, current);
+    if (deferred) return { resolved: false, result: deferred };
+  }
+
   // No invocation exists yet — dispatch one
   if (!params.providers || !params.deps) {
     // Best-effort LLM with no providers available: skip rather than fail.
@@ -1060,26 +1069,45 @@ async function resolveLlmPhase(
     if (await hasLiveInvocation(db, current.id)) {
       return { resolved: false, result: { status: 'waiting_cli', row: current } };
     }
-    let prepared: void | false;
-    try {
-      prepared = await llmSpec.prepare({ ctx, detected, formValues: formValues ?? {} });
-    } catch (err) {
-      if (!(err instanceof StepPrepareParkError)) throw err;
-      // A module's ledger can see a winner bound after the cheap guard above.
-      // Verify the same singleton invariant as the insert backstop. No checkpoint,
-      // output, reservation or handoff belongs to this losing pass: waiting_cli
-      // would make the queue handler write a park over the winner's running row.
-      if (await hasLiveInvocation(db, current.id)) {
-        ctx.logger.info(
-          { taskStepId: current.id },
-          'preparation yielded to a concurrent live invocation; nothing to hand off',
+    let prepared: void | false = undefined;
+    for (let attempt = 0; ; attempt++) {
+      try {
+        prepared = await llmSpec.prepare({ ctx, detected, formValues: formValues ?? {} });
+        break;
+      } catch (err) {
+        if (err instanceof StepPrepareDeferredError) {
+          if (!heldContinuation)
+            throw new Error(
+              'StepPrepareDeferredError requires an opted-in held pre-form continuation',
+              { cause: err },
+            );
+          const deferred = await deferPreFormContinuation(db, ctx, current);
+          if (deferred) return { resolved: false, result: deferred };
+          // Resume can land between the module's pause read and ours. Retry once;
+          // a repeated refusal without a pause is a module contract violation.
+          if (attempt === 0) continue;
+          throw new Error(
+            'StepPrepareDeferredError requires current pause admission to refuse dispatch',
+            { cause: err },
+          );
+        }
+        if (!(err instanceof StepPrepareParkError)) throw err;
+        // A module's ledger can see a winner bound after the cheap guard above.
+        // Verify the same singleton invariant as the insert backstop. No checkpoint,
+        // output, reservation or handoff belongs to this losing pass: waiting_cli
+        // would make the queue handler write a park over the winner's running row.
+        if (await hasLiveInvocation(db, current.id)) {
+          ctx.logger.info(
+            { taskStepId: current.id },
+            'preparation yielded to a concurrent live invocation; nothing to hand off',
+          );
+          return { resolved: false, result: { status: 'superseded', row: current } };
+        }
+        throw new Error(
+          'StepPrepareParkError from llm.prepare requires a live invocation for this step, but none exists',
+          { cause: err },
         );
-        return { resolved: false, result: { status: 'superseded', row: current } };
       }
-      throw new Error(
-        'StepPrepareParkError from llm.prepare requires a live invocation for this step, but none exists',
-        { cause: err },
-      );
     }
     // Preparation may hydrate a saved detection from before versioned plan reads.
     // Checkpoint it through the same owned write as detect, before dispatch: a
@@ -1318,8 +1346,12 @@ async function resolveLlmPhase(
   // countTrailingOrphans (the sibling counter for the re-dispatch cap) has always been called
   // pre-insert for the same reason.
   const budget = await resolveDispatchTimeoutMs(db, current, llmSpec.timeoutMs);
-  const invRow = await insertInvocationOrNull(() =>
-    insertDispatchRun(db, params.taskId, current.id, stamp, {
+  if (heldContinuation) {
+    const deferred = await deferPreFormContinuation(db, ctx, current);
+    if (deferred) return { resolved: false, result: deferred };
+  }
+  const insertFresh = (handle: Database) =>
+    insertDispatchRun(handle, params.taskId, current.id, stamp, {
       taskId: params.taskId,
       taskStepId: current.id,
       cliProviderId: plan.providerId,
@@ -1331,7 +1363,11 @@ async function resolveLlmPhase(
       truncationRetry: trailingTruncations > 0,
       agentTitle: roleLabel,
       steerable,
-    }),
+    });
+  const invRow = await insertInvocationOrNull(() =>
+    heldContinuation
+      ? insertHeldPreFormInvocation(db, ctx, current.stepId, insertFresh)
+      : insertFresh(db),
   );
   if (!invRow) {
     ctx.logger.info(
@@ -1383,11 +1419,24 @@ async function resolveLlmPhase(
         workspace: await resolveInvocationWorkerTree(db, params.taskId, worktreeRel),
       });
   } catch (err) {
+    if (err instanceof StepPrepareDeferredError && heldContinuation) {
+      const deferred = await deferPreFormContinuation(db, ctx, current, invRow.id, true);
+      if (deferred) return { resolved: false, result: deferred };
+    }
     await db
       .update(schema.cliInvocations)
       .set({ supersededAt: new Date() })
       .where(eq(schema.cliInvocations.id, invRow.id));
+    if (err instanceof StepPrepareDeferredError)
+      throw new Error(
+        'StepPrepareDeferredError requires a held pre-form continuation and current pause admission refusal',
+        { cause: err },
+      );
     throw err;
+  }
+  if (heldContinuation) {
+    const deferred = await deferPreFormContinuation(db, ctx, current, invRow.id);
+    if (deferred) return { resolved: false, result: deferred };
   }
   await params.deps.enqueueCliInvocation({
     invocationId: invRow.id,
@@ -2278,6 +2327,330 @@ export async function consumeFoldedMiningRows(
         ),
       ),
     );
+}
+
+const REOPEN_FORM_NOTICE_MAX_LENGTH = 2_000;
+
+function reopenFormNotice(err: ReopenStepFormError): string | undefined {
+  return err.notice ? err.message.slice(0, REOPEN_FORM_NOTICE_MAX_LENGTH) : undefined;
+}
+
+const PRE_FORM_CONTINUATION_EVENT = 'step.pre_form_continuation';
+const PRE_FORM_WORKSPACE_RESUME_EVENT = 'step.pre_form_workspace_resume_deferred';
+const PRE_FORM_WORKSPACE_RESUME_DELAY_MS = 1_000;
+
+/** Retry can produce the same held row before its first pre-form invocation.
+ * Require the checkpoint's generation-bound opt-in too. Epoch takeover preserves
+ * it; Retry advances generation and therefore cannot inherit this dispatch policy. */
+async function heldPreFormContinuation(
+  db: Database,
+  step: StepDefinition,
+  row: TaskStepRow,
+): Promise<{ notice?: string } | null> {
+  if (!(
+    step.detect &&
+    step.form &&
+    step.llm?.preForm &&
+    !step.needsRuntime &&
+    !step.loop &&
+    !step.agentMining &&
+    !step.dagExecute &&
+    !step.mergeResolve &&
+    row.status === 'waiting_cli' &&
+    row.pauseFormOnRetry &&
+    row.formSchema == null &&
+    row.formValues == null
+  ))
+    return null;
+  const event = await db.query.taskEvents.findFirst({
+    where: and(
+      eq(schema.taskEvents.taskId, row.taskId),
+      eq(schema.taskEvents.taskStepId, row.id),
+      eq(schema.taskEvents.eventType, PRE_FORM_CONTINUATION_EVENT),
+    ),
+    orderBy: desc(schema.taskEvents.createdAt),
+    columns: { payload: true },
+  });
+  const optIn = event?.payload as
+    { version?: unknown; rerunGeneration?: unknown; notice?: unknown } | undefined;
+  if (optIn?.version !== 1 || optIn.rerunGeneration !== row.rerunGeneration) return null;
+  return {
+    notice:
+      typeof optIn.notice === 'string'
+        ? optIn.notice.slice(0, REOPEN_FORM_NOTICE_MAX_LENGTH)
+        : undefined,
+  };
+}
+
+export async function isHeldPreFormContinuation(
+  db: Database,
+  step: StepDefinition,
+  row: TaskStepRow,
+): Promise<boolean> {
+  return (await heldPreFormContinuation(db, step, row)) !== null;
+}
+
+function validatePreFormReopen(step: StepDefinition, err: ReopenStepFormError): void {
+  if (
+    !step.detect ||
+    !step.form ||
+    !step.llm?.preForm ||
+    err.newAttempt ||
+    step.needsRuntime ||
+    step.loop ||
+    step.agentMining ||
+    step.dagExecute ||
+    step.mergeResolve
+  )
+    throw new Error(
+      'ReopenStepFormError.rerunPreForm requires detect, form and llm.preForm and excludes newAttempt, needsRuntime, loop, mining, DAG and merge resolution',
+    );
+}
+
+async function lockContinuationStep(tx: DbTx, ctx: StepContext): Promise<TaskStepRow> {
+  if (ctx.epoch == null || ctx.rerunGeneration == null)
+    throw new StepSupersededError(ctx.taskStepId);
+  const [step] = await tx
+    .select()
+    .from(schema.taskSteps)
+    .where(
+      and(
+        eq(schema.taskSteps.id, ctx.taskStepId),
+        eq(schema.taskSteps.taskId, ctx.taskId),
+        eq(schema.taskSteps.round, ctx.round),
+        eq(schema.taskSteps.rerunGeneration, ctx.rerunGeneration),
+        inArray(schema.taskSteps.status, ['running', 'waiting_cli', 'waiting_form']),
+      ),
+    )
+    .for('no key update');
+  if (!step) throw new StepSupersededError(ctx.taskStepId);
+  return step;
+}
+
+function continuationTaskTarget(ctx: StepContext, stepId: string) {
+  return and(
+    taskWriteTarget(ctx.taskId, { epoch: ctx.epoch! }),
+    eq(schema.tasks.userId, ctx.userId),
+    isNull(schema.tasks.deadAt),
+    eq(schema.tasks.currentStepId, stepId),
+    eq(schema.tasks.currentRound, ctx.round),
+  );
+}
+
+async function lockContinuationTask(tx: DbTx, ctx: StepContext, stepId: string): Promise<void> {
+  const rows = await tx
+    .select({ id: schema.tasks.id })
+    .from(schema.tasks)
+    .where(continuationTaskTarget(ctx, stepId))
+    .for('share');
+  if (!rows.length) throw new StepSupersededError(ctx.taskStepId);
+}
+
+/** Keep reservation insertion and both continuation fences in one transaction.
+ * Exported so real-Postgres controls exercise the same composition as dispatch. */
+export async function insertHeldPreFormInvocation<T>(
+  db: Database,
+  ctx: StepContext,
+  stepId: string,
+  insert: (handle: Database) => Promise<T>,
+): Promise<T> {
+  return db.transaction(async (tx) => {
+    const run = await insert(tx as unknown as Database);
+    await lockContinuationStep(tx, ctx);
+    await lockContinuationTask(tx, ctx, stepId);
+    return run;
+  });
+}
+
+/** One short run -> step -> task transaction. A failed fence takes exact-id
+ * consumption back with the checkpoint; no reset, generation or epoch change.
+ * Exported for the real lock-order and crash-cut controls. */
+export async function checkpointPreFormContinuation(
+  db: Database,
+  ctx: StepContext,
+  invocationId: string | null,
+  notice?: string,
+): Promise<TaskStepRow> {
+  return db.transaction(async (tx) => {
+    if (invocationId) {
+      const consumed = await tx
+        .update(schema.cliInvocations)
+        .set({ consumedAt: new Date() })
+        .where(
+          and(
+            eq(schema.cliInvocations.id, invocationId),
+            eq(schema.cliInvocations.taskStepId, ctx.taskStepId),
+            eq(schema.cliInvocations.taskId, ctx.taskId),
+            isNotNull(schema.cliInvocations.endedAt),
+            isNull(schema.cliInvocations.supersededAt),
+            isNull(schema.cliInvocations.consumedAt),
+          ),
+        )
+        .returning({ id: schema.cliInvocations.id });
+      if (!consumed.length) throw new StepSupersededError(ctx.taskStepId);
+    }
+    const held = await lockContinuationStep(tx, ctx);
+    await foldCliParkOnResume(tx, held.id);
+    const step = await updateOwnedStep(
+      tx,
+      held.id,
+      {
+        status: 'waiting_cli',
+        detectOutput: null,
+        detectCliProviderId: null,
+        formSchema: null,
+        formValues: null,
+        pauseFormOnRetry: true,
+        statusMessage: null,
+        errorMessage: null,
+      },
+      ctx.rerunGeneration,
+    );
+    const task = await tx
+      .update(schema.tasks)
+      .set({ status: 'running', updatedAt: new Date() })
+      .where(continuationTaskTarget(ctx, held.stepId))
+      .returning({ id: schema.tasks.id });
+    if (!task.length) throw new StepSupersededError(ctx.taskStepId);
+    await tx.insert(schema.taskEvents).values({
+      taskId: ctx.taskId,
+      taskStepId: ctx.taskStepId,
+      eventType: PRE_FORM_CONTINUATION_EVENT,
+      payload: {
+        version: 1,
+        rerunGeneration: ctx.rerunGeneration,
+        ...(notice ? { notice: notice.slice(0, REOPEN_FORM_NOTICE_MAX_LENGTH) } : {}),
+      },
+    });
+    return step;
+  });
+}
+
+/** Pause is a hold, never a new approval or attempt. Only this pass's reservation,
+ * still unstarted and unqueued, may be released, before taking step/task locks. */
+export async function deferPreFormContinuation(
+  db: Database,
+  ctx: StepContext,
+  current: TaskStepRow,
+  reservationId?: string,
+  resumeRace = false,
+): Promise<AdvanceStepResult | null> {
+  const pause = await resolvePause(db, ctx.taskId);
+  const blocked = pause
+    ? null
+    : ((await moduleDeactivationMessage(db, current.stepId)) ??
+      moduleSchemaFailedMessage(current.stepId));
+  let repeatedResumeRace = false;
+  const row = await db.transaction(async (tx) => {
+    if (reservationId && !pause && !blocked && !resumeRace) {
+      const live = await tx
+        .select({ id: schema.cliInvocations.id })
+        .from(schema.cliInvocations)
+        .where(
+          and(
+            eq(schema.cliInvocations.id, reservationId),
+            eq(schema.cliInvocations.taskStepId, ctx.taskStepId),
+            eq(schema.cliInvocations.taskId, ctx.taskId),
+            isNull(schema.cliInvocations.startedAt),
+            isNull(schema.cliInvocations.endedAt),
+            isNull(schema.cliInvocations.supersededAt),
+          ),
+        )
+        .for('no key update');
+      if (!live.length) throw new StepSupersededError(ctx.taskStepId);
+    }
+    if (reservationId && (pause || blocked || resumeRace)) {
+      const released = await tx
+        .update(schema.cliInvocations)
+        .set({ supersededAt: new Date() })
+        .where(
+          and(
+            eq(schema.cliInvocations.id, reservationId),
+            eq(schema.cliInvocations.taskStepId, ctx.taskStepId),
+            eq(schema.cliInvocations.taskId, ctx.taskId),
+            isNull(schema.cliInvocations.startedAt),
+            isNull(schema.cliInvocations.endedAt),
+            isNull(schema.cliInvocations.supersededAt),
+          ),
+        )
+        .returning({ id: schema.cliInvocations.id });
+      if (!released.length) throw new StepSupersededError(ctx.taskStepId);
+    }
+    const durable = await lockContinuationStep(tx, ctx);
+    if (
+      durable.status !== 'waiting_cli' ||
+      !durable.pauseFormOnRetry ||
+      durable.formSchema != null ||
+      durable.formValues != null
+    )
+      throw new StepSupersededError(ctx.taskStepId);
+    await lockContinuationTask(tx, ctx, current.stepId);
+    if (!pause) {
+      if (!resumeRace || blocked) return null;
+      const event = await tx.query.taskEvents.findFirst({
+        where: and(
+          eq(schema.taskEvents.taskId, ctx.taskId),
+          eq(schema.taskEvents.taskStepId, ctx.taskStepId),
+          eq(schema.taskEvents.eventType, PRE_FORM_WORKSPACE_RESUME_EVENT),
+        ),
+        orderBy: desc(schema.taskEvents.createdAt),
+      });
+      const checkpoint = await tx.query.taskEvents.findFirst({
+        where: and(
+          eq(schema.taskEvents.taskId, ctx.taskId),
+          eq(schema.taskEvents.taskStepId, ctx.taskStepId),
+          eq(schema.taskEvents.eventType, PRE_FORM_CONTINUATION_EVENT),
+        ),
+        orderBy: desc(schema.taskEvents.createdAt),
+        columns: { id: true },
+      });
+      if (!checkpoint) throw new StepSupersededError(ctx.taskStepId);
+      const payload = event?.payload as
+        { rerunGeneration?: number; checkpointEventId?: string } | undefined;
+      if (
+        payload?.rerunGeneration === ctx.rerunGeneration &&
+        payload?.checkpointEventId === checkpoint.id
+      ) {
+        repeatedResumeRace = true;
+        return durable;
+      }
+      // Persist the allowance for the latest checkpoint, including across recovery.
+      await tx.insert(schema.taskEvents).values({
+        taskId: ctx.taskId,
+        taskStepId: ctx.taskStepId,
+        eventType: PRE_FORM_WORKSPACE_RESUME_EVENT,
+        payload: {
+          version: 1,
+          rerunGeneration: ctx.rerunGeneration,
+          checkpointEventId: checkpoint.id,
+        },
+      });
+      await markCliParkBegin(tx, current.id);
+      ctx.logger.warn(
+        { taskStepId: current.id },
+        'pause ended during workspace preparation; deferring once',
+      );
+      return durable;
+    }
+    const held = await updateOwnedStep(
+      tx,
+      current.id,
+      { statusMessage: pauseParkMessage(pause) },
+      ctx.rerunGeneration,
+    );
+    await markCliParkBegin(tx, current.id);
+    return held;
+  });
+  if (blocked) throw new Error(blocked);
+  if (repeatedResumeRace)
+    throw new Error('StepPrepareDeferredError repeated without current pause admission refusal');
+  return row
+    ? {
+        status: 'deferred',
+        row,
+        delayMs: pause ? PAUSE_POLL_MS : PRE_FORM_WORKSPACE_RESUME_DELAY_MS,
+      }
+    : null;
 }
 
 /** The reopened form's consumed agent rows and its hold, in one transaction. The agent rows go
@@ -3451,1048 +3824,1120 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
       redetected = true;
     }
 
-    let detected = current.detectOutput;
-    if (detected === null || detected === undefined) {
-      detected = stepDef.detect ? await stepDef.detect(ctx) : null;
-      current = await updateRow(db, current.id, {
-        detectOutput: detected,
-        detectCliProviderId: ctx.cliProviderId ?? null,
-        statusMessage: null,
-      });
-    }
+    const heldAtStart = await heldPreFormContinuation(db, stepDef, current);
+    let reenteredPreForm = false;
+    let reopenNotice = heldAtStart?.notice;
+    const runPipeline = async (): Promise<AdvanceStepResult> => {
+      let detected = current.detectOutput;
+      if (detected === null || detected === undefined) {
+        detected = stepDef.detect ? await stepDef.detect(ctx) : null;
+        current = await updateRow(db, current.id, {
+          detectOutput: detected,
+          detectCliProviderId: ctx.cliProviderId ?? null,
+          statusMessage: null,
+        });
+      }
 
-    // Durable originals and the owned edit-form park commit together, so a reset
-    // cannot discard a recovered submission or let a superseded pass append it.
-    const legacyValues =
-      current.formValues ??
-      (!redetected && !current.pauseFormOnRetry ? params.formValues : undefined);
-    const recovery = stepDef.recoverLegacyFormValues;
-    const recoveredCheckpoint = recovery
-      ? await db.transaction(async (tx) => {
-          const recovered = await recovery(detected, (legacyValues ?? {}) as FormValues, {
-            ...ctx,
-            db: tx as unknown as Database,
-          });
-          if (!recovered) return null;
-          const formSchema = stepDef.form?.(ctx, recovered.detected);
-          if (!formSchema) throw new Error('Legacy answer recovery requires an edit form.');
-          const row = await updateOwnedStep(tx, current.id, {
-            detectOutput: recovered.detected,
-            formValues: recovered.formValues ?? null,
-            formSchema,
-            status: 'waiting_form',
-            waitingStartedAt: recovered.formValues ? null : new Date(),
-            pauseFormOnRetry: false,
-            statusMessage: null,
-          });
-          return { row, formSchema, resumeSubmission: recovered.formValues !== undefined };
-        })
-      : null;
-    if (recoveredCheckpoint) {
-      if (!recoveredCheckpoint.resumeSubmission)
-        return {
-          status: 'waiting_form',
-          row: recoveredCheckpoint.row,
-          formSchema: recoveredCheckpoint.formSchema,
-        };
-      current = recoveredCheckpoint.row;
-      detected = current.detectOutput;
-    }
-
-    // --- Pre-form LLM phase ---
-    let llmOutput: unknown = undefined;
-    // The invocation llmOutput came from, so a step that records review findings can
-    // attribute them durably (review_findings.cli_invocation_id). Tracks llmOutput at every
-    // assignment below, including the re-roll paths.
-    let llmInvocationId: string | null = null;
-    if (stepDef.llm?.preForm) {
-      const skip =
-        stepDef.llm.skipIf?.({
-          detected,
-          formValues: {},
-          iteration: stepIterationsAsRecords(current).length,
-        }) ?? false;
-      if (skip) {
-        ctx.logger.info({ phase: 'llm.preForm' }, 'skipping llm phase via skipIf predicate');
-      } else {
-        const llmResult = await resolveLlmPhase(db, stepDef, current, ctx, detected, null, params);
-        if (!llmResult.resolved) return llmResult.result;
-        llmOutput = llmResult.llmOutput;
-        llmInvocationId = llmResult.llmInvocationId;
-        current = llmResult.current;
-
-        // Form-aware retry: re-roll a preForm generator whose output is unusable
-        // BEFORE the form renders, so a form that surfaces the parse failure (a
-        // manual-topics / candidate-selection / recipe-prefill prompt) is only shown
-        // after the retry budget is spent. Reuses the llm.retry budget; each re-roll
-        // parks and re-enters here, so this advances one attempt per completion.
-        // Skipped under test bypass (no real invocation to re-roll).
-        const preFormRetry = stepDef.llm.retry;
-        if (
-          preFormRetry &&
-          process.env.HAIVE_TEST_BYPASS_LLM !== '1' &&
-          stepDef.llm.shouldRetryPreForm?.(llmOutput)
-        ) {
-          const attempts = await countLlmAttempts(db, current.id);
-          if (attempts < preFormRetry.maxAttempts) {
-            ctx.logger.warn(
-              { stepId: meta.id, attempts, maxAttempts: preFormRetry.maxAttempts },
-              'preForm output unusable — re-rolling before form',
-            );
-            // shouldRetryPreForm is a per-step predicate with no message of its own, so this
-            // is the one retry whose reason really is generic. Still beats the card's guess.
-            await updateRow(db, current.id, {
-              warningMessage: stepWarningAppend(
-                retryWarning(
-                  attempts,
-                  preFormRetry.maxAttempts,
-                  'the run produced nothing this step could use',
-                ),
-              ),
+      // Durable originals and the owned edit-form park commit together, so a reset
+      // cannot discard a recovered submission or let a superseded pass append it.
+      const legacyValues =
+        current.formValues ??
+        (!redetected && !current.pauseFormOnRetry ? params.formValues : undefined);
+      const recovery = stepDef.recoverLegacyFormValues;
+      const recoveredCheckpoint = recovery
+        ? await db.transaction(async (tx) => {
+            const recovered = await recovery(detected, (legacyValues ?? {}) as FormValues, {
+              ...ctx,
+              db: tx as unknown as Database,
             });
-            await markLatestInvocationConsumed(db, current.id);
-            const reroll = await resolveLlmPhase(db, stepDef, current, ctx, detected, null, params);
-            if (!reroll.resolved) return reroll.result;
-            llmOutput = reroll.llmOutput;
-            llmInvocationId = reroll.llmInvocationId;
-            current = reroll.current;
-          }
-        }
-      }
-    }
-
-    // A report may need targeted follow-ups before it is ready for its form. Its
-    // checkpoint lands before consuming the invocation, so a crash replays that id
-    // safely or dispatches from the saved checkpoint. Every enqueue uses the existing
-    // ownership/reservation path; no CLI is spawned directly from this hook.
-    // Include submitted forms: a legacy form can predate this completion checkpoint.
-    if (stepDef.llm?.preForm && stepDef.llm.completePreForm) {
-      const completion = await stepDef.llm.completePreForm({
-        ctx,
-        detected,
-        llmOutput,
-        llmInvocationId,
-      });
-      llmOutput = completion.llmOutput;
-      throwIfCancelled();
-      if (completion.continueRequested) {
-        current = await updateRow(db, current.id, {
-          formSchema: null,
-          formValues: null,
-          statusMessage: completion.statusMessage ?? 'Completing the report…',
-        });
-        await markCompletedInvocationConsumed(db, current.id, llmInvocationId);
-        const followup = await resolveLlmPhase(db, stepDef, current, ctx, detected, null, params);
-        if (!followup.resolved) return followup.result;
-        throw new Error('Pre-form continuation did not dispatch a fresh invocation');
-      }
-    }
-
-    // --- Form ---
-    // Auto-continue flag + gate-1 pre-answers for this step. One indexed PK
-    // lookup; a missing row (unit-test fixtures) behaves like autoContinue=true
-    // with no pre-answers, i.e. today's behavior.
-    const taskFlags = await db.query.tasks.findFirst({
-      where: eq(schema.tasks.id, taskId),
-      columns: { autoContinue: true, preAnswers: true, repositoryId: true, type: true },
-    });
-    const autoContinue = taskFlags?.autoContinue ?? true;
-    const insightApprovalRequired =
-      (meta.id === '09-gate-2-verify-approval' &&
-        ((await pendingInsightApproval(db, taskId)) !== null ||
-          (await insightGate2QaKept(db, current)))) ||
-      (meta.id === '10-gate-3-commit' && (await insightGate3ReviewRequired(db, current)));
-    const insightHumanSubmission =
-      insightApprovalRequired && (await freshInsightGateSubmission(db, params.userId, current));
-    // A queue payload is delivery, never proof of a person. Only the submit route's
-    // atomic saved answer/event can satisfy the failed-insight approval requirement.
-    if (insightApprovalRequired && !insightHumanSubmission && current.formValues) {
-      current = await updateRow(db, current.id, { formValues: null });
-    }
-    const rawPreAnswer = insightApprovalRequired
-      ? undefined
-      : withoutHumanOnlyFields((taskFlags?.preAnswers ?? {})[meta.id], stepDef.humanOnlyFormFields);
-    const normalizedPreAnswer = rawPreAnswer && normalizeStepFormValues(meta.id, rawPreAnswer);
-    if (normalizedPreAnswer && !normalizedPreAnswer.success)
-      throw new Error(normalizedPreAnswer.issues.join('; '));
-    const normalizedAnswers = normalizedPreAnswer?.data;
-    // 06 used to generate this exact empty 08e preset. It is not a human decision.
-    // Saved answers and deliberate submits are handled separately below and remain valid.
-    const stepPreAnswer =
-      meta.id === '08e-insights-triage' &&
-      normalizedAnswers &&
-      Object.keys(normalizedAnswers).length === 1 &&
-      Array.isArray(normalizedAnswers.selectedInsights) &&
-      normalizedAnswers.selectedInsights.length === 0
-        ? undefined
-        : normalizedAnswers;
-
-    let persistedSchema: FormSchema | null = (current.formSchema as FormSchema | null) ?? null;
-    const safeExistingSchema = normalizeStepSchemaDefaults(meta.id, persistedSchema);
-    if (safeExistingSchema !== persistedSchema) {
-      persistedSchema = safeExistingSchema;
-      current = await updateRow(db, current.id, { formSchema: persistedSchema });
-    }
-    // A parked schema may have been built by an older worker with a preset overlay.
-    // Rebuild an unanswered latched form from detect so its own recommendations win.
-    if (
-      (!persistedSchema || (insightApprovalRequired && !insightHumanSubmission)) &&
-      stepDef.form
-    ) {
-      // Post-llm / pre-form seam: let the step produce any artifact the form's
-      // web viewer will reference (form() itself is sync). Awaited once, here,
-      // only when the form is first built.
-      if (stepDef.prepareForm) {
-        await stepDef.prepareForm(ctx, detected, llmOutput);
-      }
-      persistedSchema = stepDef.form(ctx, detected, llmOutput);
-      // Pre-answers render as pre-filled defaults whenever this form DOES stop
-      // (manual mode, or auto mode falling back after a validation miss).
-      if (persistedSchema && stepPreAnswer) {
-        persistedSchema = overlayPreAnswerDefaults(persistedSchema, stepPreAnswer);
-      }
-      persistedSchema = normalizeStepSchemaDefaults(meta.id, persistedSchema);
-      current = await updateRow(db, current.id, {
-        formSchema: persistedSchema ?? null,
-        statusMessage: null,
-      });
-    }
-
-    if (insightApprovalRequired && persistedSchema) {
-      // Keep the form's evidence-based defaults; only an attested owner submit
-      // may apply them. Task/type presets and prior-task reuse stay suppressed.
-      persistedSchema = { ...persistedSchema, autoSubmit: false };
-      if (meta.id === '10-gate-3-commit' && !insightHumanSubmission) {
-        persistedSchema = {
-          ...persistedSchema,
-          fields: [
-            {
-              type: 'note',
-              id: 'reopenedFormNotice',
-              label: 'Review before continuing',
-              body: 'The changes were refreshed after your review. Review them and confirm whether to commit.',
-              variant: 'warning',
-            },
-            ...persistedSchema.fields.filter((field) => field.id !== 'reopenedFormNotice'),
-          ],
-        };
-      }
-      current = await updateRow(db, current.id, { formSchema: persistedSchema });
-    }
-
-    // A form held by a Retry or a reopen (pauseFormOnRetry) has not been offered since the hold was
-    // set, so values a job carries can only be a submit sent before it: the form parks instead.
-    const submitted =
-      redetected || current.pauseFormOnRetry || insightApprovalRequired
-        ? undefined
-        : params.formValues;
-
-    // Manual mode: EVERY step pauses before apply. Formless steps get a
-    // synthesized confirm-only schema so the existing waiting_form plumbing
-    // (submit endpoint, events, idle bookkeeping, web renderer) works
-    // unchanged; submitting it posts {} which validates against zero fields.
-    if (!persistedSchema && !autoContinue && !current.formValues && !submitted) {
-      persistedSchema = synthesizeConfirmSchema(meta.title, meta.description);
-      current = await updateRow(db, current.id, { formSchema: persistedSchema });
-    }
-
-    const answersForPersistence = (validated: FormValues, input: FormValues): FormValues =>
-      stepDef.preserveOmittedFormFields
-        ? Object.fromEntries(
-            Object.entries(validated).filter(
-              ([key]) => input[key] !== undefined && input[key] !== null && input[key] !== '',
-            ),
-          )
-        : validated;
-    let formValues = current.formValues as FormValues | null;
-    if (formValues) {
-      const normalized = normalizeStepFormValues(meta.id, formValues);
-      if (!normalized.success) throw new Error(normalized.issues.join('; '));
-      if (normalized.data !== formValues) {
-        formValues = normalized.data;
-        // A saved continuation keeps its waiting_cli status; only its copied answer changes.
-        current = await updateRow(db, current.id, { formValues });
-      }
-    }
-    if (persistedSchema && !formValues && !submitted) {
-      // Auto mode: (a) a gate-1 pre-answer for this step, else (b) {} for
-      // zero-field info forms → try to auto-submit. A validation failure falls
-      // through to waiting_form (never fails the step) — e.g. a pre-answered
-      // browser mode that the runtime schema no longer offers. submitAction
-      // 'retry' forms signal a broken precondition and are never auto-passed.
-      // A form may opt to auto-submit even in manual mode (autoContinue off) via
-      // its own `autoSubmit` flag — for an info-only form with nothing to decide
-      // (e.g. 06b's single-agent decision).
-      // A gate decision is always the person's.
-      const isGateForm = persistedSchema.fields.some((f) => f.id === FIX_LOOP_ACTION_FIELD);
-      if (
-        // A plain manual Retry set pauseFormOnRetry to force this step to STOP at
-        // its form even under auto-continue — suppress every auto-submit variant
-        // (pre-answer / reuse / zero-field / step defaults / form autoSubmit) so the
-        // user can inspect and edit. Cleared on park below (one-shot).
-        !isGateForm &&
-        !insightApprovalRequired &&
-        !current.pauseFormOnRetry &&
-        !meta.alwaysWaitForUser &&
-        (autoContinue || persistedSchema.autoSubmit === true) &&
-        (persistedSchema.submitAction ?? 'submit') === 'submit'
-      ) {
-        // A step may reuse a prior completed task's exact answers for this form
-        // (env-replicate's declare-deps / generate-dockerfile, whose values are
-        // stable per project). Strictly auto-continue gated — never fires in manual
-        // mode, even for a form that set its own autoSubmit. undefined when not
-        // opted in, the task has no repository, or no prior completed task has this
-        // form filled.
-        const reusedValues =
-          autoContinue &&
-          !stepPreAnswer &&
-          meta.reuseLastCompletedFormValues &&
-          taskFlags?.repositoryId
-            ? withoutHumanOnlyFields(
-                await loadLastCompletedFormValues(db, {
-                  repositoryId: taskFlags.repositoryId,
-                  userId: params.userId,
-                  type: taskFlags.type,
-                  stepId: meta.id,
-                }),
-                stepDef.humanOnlyFormFields,
-              )
-            : undefined;
-        // Those answers are a snapshot of the repo as it was when the prior task ran.
-        // A step whose answers can go stale (declare-deps: the repo gained a DDEV
-        // project since) refreshes them against this task's detect() output before
-        // they are auto-submitted, so the reuse path cannot replay a value the fresh
-        // scan already contradicts.
-        const reuseCandidate =
-          reusedValues && stepDef.reconcileReusedFormValues
-            ? await stepDef.reconcileReusedFormValues(ctx, detected, reusedValues)
-            : reusedValues;
-        // Candidate precedence: a gate pre-answer wins; else a prior completed
-        // task's reused values; else a zero-field info form auto-passes with {};
-        // else a step that opts in via metadata.autoSubmitDefaults (or the form's
-        // own autoSubmit) auto-submits its declared field defaults.
-        const candidate =
-          stepPreAnswer ??
-          reuseCandidate ??
-          (persistedSchema.fields.length === 0
-            ? {}
-            : meta.autoSubmitDefaults || persistedSchema.autoSubmit
-              ? extractFormDefaults(persistedSchema)
-              : undefined);
-        if (candidate !== undefined) {
-          const expanded = validateFormValues(persistedSchema, candidate);
-          const validation = expanded.success
-            ? normalizeStepFormValues(meta.id, expanded.data)
-            : expanded;
-          if (validation.success) {
-            formValues = answersForPersistence(validation.data, candidate);
-            current = await updateRow(db, current.id, { formValues, status: 'running' });
-            ctx.logger.info(
-              {
-                source: stepPreAnswer
-                  ? 'pre_answer'
-                  : reuseCandidate
-                    ? 'prior_task'
-                    : persistedSchema.fields.length === 0
-                      ? 'zero_field'
-                      : 'step_defaults',
-              },
-              'auto-continue: form auto-submitted',
-            );
-          } else {
-            ctx.logger.warn(
-              { issues: validation.issues },
-              'auto-continue: pre-answer failed validation; waiting for user',
-            );
-          }
-        }
-      }
-      if (!formValues) {
-        current = await updateRow(db, current.id, {
-          status: 'waiting_form',
-          // Stamped with the park rather than after it, so a submit redelivered before the task is
-          // marked waiting is still older than the park (isStaleSubmit).
-          waitingStartedAt: new Date(),
-          // One-shot: a manual Retry set pauseFormOnRetry to force this park instead
-          // of auto-submitting. Clear it here so the pause never leaks into a later
-          // automatic re-run (fix-loop / revise / gate loop-back) of this same step.
-          ...(current.pauseFormOnRetry ? { pauseFormOnRetry: false } : {}),
-        });
-        return {
-          status: 'waiting_form',
-          row: current,
-          formSchema: persistedSchema,
-        };
-      }
-    }
-
-    // A continuation re-enters a step parked on its CLI with its answers already saved: they were
-    // validated when they were saved, and the row stays `waiting_cli` while apply runs, so a worker
-    // that dies here leaves a parked step that boot recovery re-drives instead of one it resets.
-    // Values carried by the job can then only be a submit redelivered after it was applied.
-    const continuing = row.status === 'waiting_cli' && current.formValues != null;
-    // A latched owner answer comes from the attested saved values, never the job.
-    // Validate it and close the form through the ordinary submitted-answer path.
-    const submittedAnswer = insightHumanSubmission ? formValues : submitted;
-    if (persistedSchema && submittedAnswer && !continuing) {
-      const expanded = validateFormValues(persistedSchema, submittedAnswer);
-      const validation = expanded.success
-        ? normalizeStepFormValues(meta.id, expanded.data)
-        : expanded;
-      if (!validation.success) {
-        const failed = await updateRow(db, current.id, {
-          status: 'failed',
-          errorMessage: `validation failed: ${validation.issues.join('; ')}`,
-          endedAt: new Date(),
-        });
-        return {
-          status: 'failed',
-          row: failed,
-          error: validation.issues.join('; '),
-        };
-      }
-      formValues = answersForPersistence(validation.data, submittedAnswer);
-      current = await updateRow(db, current.id, {
-        formValues,
-        status: 'running',
-      });
-    }
-
-    params.validateResolvedForm?.(formValues);
-
-    // --- AI-fix phase (retry_ai recovery) ---
-    // When retry_ai set a fix marker, run a diagnose-and-fix agent once, then
-    // re-run apply against the fixed workspace. The DAG executor is exempt: it
-    // owns aiFixContext to resolve a merge conflict inside the integration
-    // worktree (the generic agent would run at the repo root and would also
-    // mis-consume a completed coder invocation). See resolveDagPhase.
-    if (current.aiFixContext && !stepDef.dagExecute && !stepDef.mergeResolve) {
-      const fixResult = await resolveAiFixPhase(db, stepDef, current, ctx, params);
-      if (!fixResult.resolved) return fixResult.result;
-      current = fixResult.current;
-    }
-
-    // --- Post-form LLM phase (default) ---
-    if (stepDef.llm && !stepDef.llm.preForm) {
-      const skip =
-        stepDef.llm.skipIf?.({
-          detected,
-          formValues: formValues ?? {},
-          iteration: stepIterationsAsRecords(current).length,
-        }) ?? false;
-      if (skip) {
-        ctx.logger.info({ phase: 'llm.postForm' }, 'skipping llm phase via skipIf predicate');
-      } else {
-        const llmResult = await resolveLlmPhase(
-          db,
-          stepDef,
-          current,
-          ctx,
-          detected,
-          formValues,
-          params,
-        );
-        if (!llmResult.resolved) return llmResult.result;
-        llmOutput = llmResult.llmOutput;
-        llmInvocationId = llmResult.llmInvocationId;
-        current = llmResult.current;
-      }
-    }
-
-    // --- Agent mining phase (fan-out N CLI jobs, wait for all) ---
-    let agentMiningResults: AgentMiningResult[] | undefined;
-    let newAgentMiningResults: AgentMiningResult[] | undefined;
-    if (stepDef.agentMining) {
-      const miningResult = await resolveAgentMiningPhase(
-        db,
-        stepDef,
-        current,
-        ctx,
-        detected,
-        formValues,
-        llmOutput,
-        params,
-      );
-      if (!miningResult.resolved) return miningResult.result;
-      agentMiningResults = miningResult.results;
-      newAgentMiningResults = miningResult.newResults;
-      current = miningResult.current;
-      // Barrier: every agent of this fan-out has ended, so any tab still open is one
-      // nobody is coming back for.
-      await reapAgentBrowserTabs(ctx.taskId, ctx.logger);
-    }
-
-    // --- DAG execution phase (multi-level coder fan-out; parks waiting_cli per
-    // level until every level checkpoints, then apply finalizes the step) ---
-    if (stepDef.dagExecute) {
-      const dagResult = await resolveDagPhase(db, stepDef, current, ctx, params);
-      if (!dagResult.resolved) return dagResult.result;
-      current = dagResult.current;
-      // Same barrier property as the mining fan-out: reached only once every level has
-      // checkpointed, i.e. no coder/reviewer of this step is still running. Tabs from an
-      // earlier level therefore survive until the whole step ends — accepted; a per-level
-      // reap belongs in dag-executor.ts if it ever matters.
-      await reapAgentBrowserTabs(ctx.taskId, ctx.logger);
-    }
-
-    // --- Merge-resolution phase (12-worktree-cleanup): merge the feature branch
-    // into its base with an LLM conflict-resolution loop, parking waiting_cli (fix
-    // agent) / waiting_form (user clarification) until the merge commits, then apply
-    // removes the worktree. Mutually exclusive with dagExecute. ---
-    if (stepDef.mergeResolve) {
-      const mergeResult = await resolveMergePhase(db, stepDef, current, ctx, params);
-      if (!mergeResult.resolved) return mergeResult.result;
-      current = mergeResult.current;
-    }
-
-    const previousIterations = stepIterationsAsRecords(current);
-    const iteration = previousIterations.length;
-    // For llm.retry steps, tell apply whether this is the final attempt so it can
-    // degrade (return its stub) instead of throwing a RetryableParseError once the
-    // re-roll budget is spent. Non-retry steps are always "final" (degrade now).
-    // Bypass (smoke) enqueues no invocation, so treat it as the final attempt
-    // (degrade, never throw-to-retry). Non-retry steps are always final.
-    const llmRetry = stepDef.llm?.retry;
-    const isFinalLlmAttempt =
-      process.env.HAIVE_TEST_BYPASS_LLM === '1' || !llmRetry
-        ? true
-        : (await countLlmAttempts(db, current.id)) >= llmRetry.maxAttempts;
-    // Same contract for mining agents: final once NO agent has a re-roll left, so
-    // apply() degrades (surfaces the reviewer as non-approving) instead of throwing.
-    const miningRetry = stepDef.agentMining?.retry;
-    const isFinalMiningAttempt =
-      process.env.HAIVE_TEST_BYPASS_LLM === '1' || !miningRetry || stepDef.loop
-        ? true
-        : !(await miningAgentsWithBudget(db, current.id, miningRetry.maxAttempts));
-    // EVERY apply() pass runs inside this loop, not just the first. apply() states its
-    // needs by THROWING — MiningRetryError to re-roll an agent, MiningWaveError to fan out
-    // a wave whose prompts depend on the first one's findings — and the degrade passes
-    // below can raise a signal of their own: a reviewer that burned its re-roll budget
-    // still leaves blocking findings to refute. Running those passes nested inside the
-    // catch left their signals with nobody to catch them, so a step (and a task that had
-    // been running for a day) died on "second mining wave requested" with every one of its
-    // CLI invocations exited 0. Each arm sets a monotone flag its own guard requires
-    // unset, so a signal is honored at most once and the loop is bounded at three passes.
-    const applyArgs: StepApplyArgs = {
-      detected,
-      formValues: formValues ?? {},
-      llmOutput,
-      llmInvocationId,
-      agentMiningResults,
-      // Only the rows no previous apply() pass folded. Undefined for non-mining
-      // steps; identical to agentMiningResults until a MiningWaveError stamps
-      // consumed_at, so steps that ignore it are unaffected.
-      newAgentMiningResults,
-      iteration,
-      previousIterations,
-      isFinalLlmAttempt,
-      isFinalMiningAttempt,
-    };
-    // A dispatch below that lost agents to another pass leaves the results apply() was handed
-    // possibly stale, so the barrier is read again, once, and apply() re-run on what it finds.
-    let reread = false;
-    const rereadMiningBarrier = async (): Promise<AdvanceStepResult | null> => {
-      reread = true;
-      const fresh = await resolveAgentMiningPhase(
-        db,
-        stepDef,
-        current,
-        ctx,
-        detected,
-        formValues,
-        llmOutput,
-        params,
-        true,
-      );
-      if (!fresh.resolved) return fresh.result;
-      applyArgs.agentMiningResults = fresh.results;
-      applyArgs.newAgentMiningResults = fresh.newResults;
-      current = fresh.current;
-      return null;
-    };
-    let output: unknown;
-    for (;;) {
-      try {
-        output = await stepDef.apply(ctx, { ...applyArgs });
-        if (stepDef.dagExecute?.failurePolicy === 'record-and-continue') {
-          output = {
-            ...(output as Record<string, unknown>),
-            dagOutcomes: await loadDagOutcomeCounts(db, ctx.taskId),
+            if (!recovered) return null;
+            const formSchema = stepDef.form?.(ctx, recovered.detected);
+            if (!formSchema) throw new Error('Legacy answer recovery requires an edit form.');
+            const row = await updateOwnedStep(tx, current.id, {
+              detectOutput: recovered.detected,
+              formValues: recovered.formValues ?? null,
+              formSchema,
+              status: 'waiting_form',
+              waitingStartedAt: recovered.formValues ? null : new Date(),
+              pauseFormOnRetry: false,
+              statusMessage: null,
+            });
+            return { row, formSchema, resumeSubmission: recovered.formValues !== undefined };
+          })
+        : null;
+      if (recoveredCheckpoint) {
+        if (!recoveredCheckpoint.resumeSubmission)
+          return {
+            status: 'waiting_form',
+            row: recoveredCheckpoint.row,
+            formSchema: recoveredCheckpoint.formSchema,
           };
-        }
-        break;
-      } catch (applyErr) {
-        // A bounded, user-approved apply batch completed but produced another
-        // decision for the same step. Refresh detection and the form instead of
-        // finalizing, and consume all mining rows so none of their patches are
-        // folded a second time after the next submission.
-        if (
-          applyErr instanceof ReopenStepFormError &&
-          stepDef.detect &&
-          stepDef.form &&
-          !stepDef.loop
-        ) {
-          // Consumed and cleared together, with the form held: a worker that dies before the park
-          // below re-detects and stops at the form rather than re-sending the answered items. Only
-          // while the pass owns the row, so a Retry's reset keeps its own hold and the agent rows are
-          // left as the reset left them.
-          const nextGeneration = applyErr.newAttempt
-            ? (current.rerunGeneration ?? 0) + 1
-            : undefined;
-          await holdReopenedForm(
-            db,
-            current.id,
-            applyArgs.agentMiningResults,
-            new Date(),
-            nextGeneration,
-            ctx,
-          );
-          if (nextGeneration != null) {
-            current = { ...current, rerunGeneration: nextGeneration };
-            ctx.rerunGeneration = nextGeneration;
-          }
-          const refreshedDetected = await stepDef.detect(ctx);
-          if (stepDef.prepareForm) {
-            await stepDef.prepareForm(ctx, refreshedDetected, llmOutput);
-          }
-          const refreshedSchema = normalizeStepSchemaDefaults(
-            meta.id,
-            stepDef.form(ctx, refreshedDetected, llmOutput),
-          );
-          if (!refreshedSchema) {
-            throw new Error(
-              `${meta.id} requested another form, but refreshed detection produced no form`,
-            );
-          }
-          if (applyErr.notice) {
-            refreshedSchema.fields.unshift({
-              type: 'note',
-              id: 'reopenedFormNotice',
-              label: 'Review before continuing',
-              body: applyErr.message,
-              variant: 'warning',
-            });
-          }
-          current = await updateRow(db, current.id, {
-            status: 'waiting_form',
-            detectOutput: refreshedDetected,
-            detectCliProviderId: ctx.cliProviderId ?? null,
-            formSchema: refreshedSchema,
-            formValues: null,
-            pauseFormOnRetry: false,
-            waitingStartedAt: new Date(),
-            statusMessage: null,
-            errorMessage: null,
-          });
-          ctx.logger.info({ stepId: meta.id }, 'apply batch completed; reopened step form');
-          return { status: 'waiting_form', row: current, formSchema: refreshedSchema };
-        }
-        // A second mining wave: agents whose prompts depend on what the first wave found.
-        // Fresh rows, so the fan-out barrier re-parks the step; apply() runs again with
-        // both waves in agentMiningResults. See MiningWaveError for why no other phase
-        // can express this.
-        if (
-          applyErr instanceof MiningWaveError &&
-          stepDef.agentMining &&
-          !stepDef.loop &&
-          params.providers &&
-          params.deps &&
-          applyArgs.miningWaveExhausted !== true
-        ) {
-          if (meta.id === INSIGHT_STEP && process.env.HAIVE_TEST_BYPASS_LLM === '1') {
-            params.validateMiningDispatch?.(applyErr.dispatches);
-            const synthetic: AgentMiningResult[] = applyErr.dispatches.map((d) => ({
-              agentId: d.agentId,
-              agentTitle: d.agentTitle,
-              status: 'done',
-              output: null,
-              rawOutput: syntheticInsightReply(d, detected),
-              errorMessage: null,
-            }));
-            applyArgs.agentMiningResults = [...(applyArgs.agentMiningResults ?? []), ...synthetic];
-            continue;
-          }
-          // Mark every row apply() has just folded, BEFORE the wave's fresh rows
-          // exist: the next apply() pass asks for the unconsumed set via
-          // newAgentMiningResults, so a step whose fold is not idempotent (temp-ref
-          // creation, e.g. the plan builder) folds each wave exactly once. Steps
-          // that fold idempotently (08c, by fingerprint) never read it back.
-          await consumeFoldedMiningRows(db, current.id, applyArgs.agentMiningResults, new Date());
-          const { sent: dispatched, lost } = await dispatchMiningAgents(
+        current = recoveredCheckpoint.row;
+        detected = current.detectOutput;
+      }
+
+      // --- Pre-form LLM phase ---
+      let llmOutput: unknown = undefined;
+      // The invocation llmOutput came from, so a step that records review findings can
+      // attribute them durably (review_findings.cli_invocation_id). Tracks llmOutput at every
+      // assignment below, including the re-roll paths.
+      let llmInvocationId: string | null = null;
+      if (stepDef.llm?.preForm) {
+        const skip =
+          stepDef.llm.skipIf?.({
+            detected,
+            formValues: {},
+            iteration: stepIterationsAsRecords(current).length,
+          }) ?? false;
+        if (skip) {
+          ctx.logger.info({ phase: 'llm.preForm' }, 'skipping llm phase via skipIf predicate');
+        } else {
+          const llmResult = await resolveLlmPhase(
             db,
             stepDef,
             current,
             ctx,
-            params,
-            applyErr.dispatches,
+            detected,
             null,
+            params,
           );
-          if (dispatched > 0) {
-            ctx.logger.info(
-              { stepId: meta.id, agentIds: applyErr.dispatches.map((d) => d.agentId) },
-              'second mining wave dispatched',
-            );
-            const parked = await updateRow(db, current.id, {
-              status: 'waiting_cli',
-              statusMessage: `Running ${dispatched} follow-up agent(s)...`,
-            });
-            return { status: 'waiting_cli', row: parked };
+          if (!llmResult.resolved) return llmResult.result;
+          llmOutput = llmResult.llmOutput;
+          llmInvocationId = llmResult.llmInvocationId;
+          current = llmResult.current;
+
+          // Form-aware retry: re-roll a preForm generator whose output is unusable
+          // BEFORE the form renders, so a form that surfaces the parse failure (a
+          // manual-topics / candidate-selection / recipe-prefill prompt) is only shown
+          // after the retry budget is spent. Reuses the llm.retry budget; each re-roll
+          // parks and re-enters here, so this advances one attempt per completion.
+          // Skipped under test bypass (no real invocation to re-roll).
+          const preFormRetry = stepDef.llm.retry;
+          if (
+            preFormRetry &&
+            process.env.HAIVE_TEST_BYPASS_LLM !== '1' &&
+            stepDef.llm.shouldRetryPreForm?.(llmOutput)
+          ) {
+            const attempts = await countLlmAttempts(db, current.id);
+            if (attempts < preFormRetry.maxAttempts) {
+              ctx.logger.warn(
+                { stepId: meta.id, attempts, maxAttempts: preFormRetry.maxAttempts },
+                'preForm output unusable — re-rolling before form',
+              );
+              // shouldRetryPreForm is a per-step predicate with no message of its own, so this
+              // is the one retry whose reason really is generic. Still beats the card's guess.
+              await updateRow(db, current.id, {
+                warningMessage: stepWarningAppend(
+                  retryWarning(
+                    attempts,
+                    preFormRetry.maxAttempts,
+                    'the run produced nothing this step could use',
+                  ),
+                ),
+              });
+              await markLatestInvocationConsumed(db, current.id);
+              const reroll = await resolveLlmPhase(
+                db,
+                stepDef,
+                current,
+                ctx,
+                detected,
+                null,
+                params,
+              );
+              if (!reroll.resolved) return reroll.result;
+              llmOutput = reroll.llmOutput;
+              llmInvocationId = reroll.llmInvocationId;
+              current = reroll.current;
+            }
           }
-          if (lost > 0 && !reread) {
-            const settled = await rereadMiningBarrier();
-            if (settled) return settled;
-            continue;
-          }
-          if (await hasLiveMiningAgents(db, current.id)) {
-            return { status: 'waiting_cli', row: current };
-          }
-          // Nothing went out: every agent already had a row, or no provider could take
-          // them (dispatchMiningAgents wrote those rows as failed). Parking would hang the
-          // step on a barrier with nothing pending, so run apply() again and tell it the
-          // wave is not coming. It must not ask a second time — the guard above is what
-          // stops a step that asks anyway from spinning here forever.
-          ctx.logger.warn(
-            { stepId: meta.id, agentIds: applyErr.dispatches.map((d) => d.agentId) },
-            'second mining wave dispatched no agents; continuing without it',
-          );
-          applyArgs.miningWaveExhausted = true;
-          continue;
         }
-        // agentMining.retry: a reviewer that ran but emitted prose instead of its JSON
-        // contract is re-rolled on its own, leaving the other agents' completed rows
-        // alone. Re-running one agent is far cheaper than the alternatives: a fix round
-        // through implementation, or a developer reject at the gate.
+      }
+
+      // A report may need targeted follow-ups before it is ready for its form. Its
+      // checkpoint lands before consuming the invocation, so a crash replays that id
+      // safely or dispatches from the saved checkpoint. Every enqueue uses the existing
+      // ownership/reservation path; no CLI is spawned directly from this hook.
+      // Include submitted forms: a legacy form can predate this completion checkpoint.
+      if (stepDef.llm?.preForm && stepDef.llm.completePreForm) {
+        const completion = await stepDef.llm.completePreForm({
+          ctx,
+          detected,
+          llmOutput,
+          llmInvocationId,
+        });
+        llmOutput = completion.llmOutput;
+        throwIfCancelled();
+        if (completion.continueRequested) {
+          current = await updateRow(db, current.id, {
+            formSchema: null,
+            formValues: null,
+            statusMessage: completion.statusMessage ?? 'Completing the report…',
+          });
+          await markCompletedInvocationConsumed(db, current.id, llmInvocationId);
+          const followup = await resolveLlmPhase(db, stepDef, current, ctx, detected, null, params);
+          if (!followup.resolved) return followup.result;
+          throw new Error('Pre-form continuation did not dispatch a fresh invocation');
+        }
+      }
+
+      // --- Form ---
+      // Auto-continue flag + gate-1 pre-answers for this step. One indexed PK
+      // lookup; a missing row (unit-test fixtures) behaves like autoContinue=true
+      // with no pre-answers, i.e. today's behavior.
+      const taskFlags = await db.query.tasks.findFirst({
+        where: eq(schema.tasks.id, taskId),
+        columns: { autoContinue: true, preAnswers: true, repositoryId: true, type: true },
+      });
+      const autoContinue = taskFlags?.autoContinue ?? true;
+      const insightApprovalRequired =
+        (meta.id === '09-gate-2-verify-approval' &&
+          ((await pendingInsightApproval(db, taskId)) !== null ||
+            (await insightGate2QaKept(db, current)))) ||
+        (meta.id === '10-gate-3-commit' && (await insightGate3ReviewRequired(db, current)));
+      const insightHumanSubmission =
+        insightApprovalRequired && (await freshInsightGateSubmission(db, params.userId, current));
+      // A queue payload is delivery, never proof of a person. Only the submit route's
+      // atomic saved answer/event can satisfy the failed-insight approval requirement.
+      if (insightApprovalRequired && !insightHumanSubmission && current.formValues) {
+        current = await updateRow(db, current.id, { formValues: null });
+      }
+      const rawPreAnswer = insightApprovalRequired
+        ? undefined
+        : withoutHumanOnlyFields(
+            (taskFlags?.preAnswers ?? {})[meta.id],
+            stepDef.humanOnlyFormFields,
+          );
+      const normalizedPreAnswer = rawPreAnswer && normalizeStepFormValues(meta.id, rawPreAnswer);
+      if (normalizedPreAnswer && !normalizedPreAnswer.success)
+        throw new Error(normalizedPreAnswer.issues.join('; '));
+      const normalizedAnswers = normalizedPreAnswer?.data;
+      // 06 used to generate this exact empty 08e preset. It is not a human decision.
+      // Saved answers and deliberate submits are handled separately below and remain valid.
+      const stepPreAnswer =
+        meta.id === '08e-insights-triage' &&
+        normalizedAnswers &&
+        Object.keys(normalizedAnswers).length === 1 &&
+        Array.isArray(normalizedAnswers.selectedInsights) &&
+        normalizedAnswers.selectedInsights.length === 0
+          ? undefined
+          : normalizedAnswers;
+
+      let persistedSchema: FormSchema | null = (current.formSchema as FormSchema | null) ?? null;
+      const safeExistingSchema = normalizeStepSchemaDefaults(meta.id, persistedSchema);
+      if (safeExistingSchema !== persistedSchema) {
+        persistedSchema = safeExistingSchema;
+        current = await updateRow(db, current.id, { formSchema: persistedSchema });
+      }
+      // A parked schema may have been built by an older worker with a preset overlay.
+      // Rebuild an unanswered latched form from detect so its own recommendations win.
+      if (
+        (!persistedSchema || (insightApprovalRequired && !insightHumanSubmission)) &&
+        stepDef.form
+      ) {
+        // Post-llm / pre-form seam: let the step produce any artifact the form's
+        // web viewer will reference (form() itself is sync). Awaited once, here,
+        // only when the form is first built.
+        if (stepDef.prepareForm) {
+          await stepDef.prepareForm(ctx, detected, llmOutput);
+        }
+        persistedSchema = stepDef.form(ctx, detected, llmOutput);
+        // Pre-answers render as pre-filled defaults whenever this form DOES stop
+        // (manual mode, or auto mode falling back after a validation miss).
+        if (persistedSchema && stepPreAnswer) {
+          persistedSchema = overlayPreAnswerDefaults(persistedSchema, stepPreAnswer);
+        }
+        persistedSchema = normalizeStepSchemaDefaults(meta.id, persistedSchema);
+        if (persistedSchema && reopenNotice) {
+          persistedSchema.fields.unshift({
+            type: 'note',
+            id: 'reopenedFormNotice',
+            label: 'Review before continuing',
+            body: reopenNotice,
+            variant: 'warning',
+          });
+        }
+        current = await updateRow(db, current.id, {
+          formSchema: persistedSchema ?? null,
+          statusMessage: null,
+        });
+      }
+
+      if (insightApprovalRequired && persistedSchema) {
+        // Keep the form's evidence-based defaults; only an attested owner submit
+        // may apply them. Task/type presets and prior-task reuse stay suppressed.
+        persistedSchema = { ...persistedSchema, autoSubmit: false };
+        if (meta.id === '10-gate-3-commit' && !insightHumanSubmission) {
+          persistedSchema = {
+            ...persistedSchema,
+            fields: [
+              {
+                type: 'note',
+                id: 'reopenedFormNotice',
+                label: 'Review before continuing',
+                body: 'The changes were refreshed after your review. Review them and confirm whether to commit.',
+                variant: 'warning',
+              },
+              ...persistedSchema.fields.filter((field) => field.id !== 'reopenedFormNotice'),
+            ],
+          };
+        }
+        current = await updateRow(db, current.id, { formSchema: persistedSchema });
+      }
+
+      // A form held by a Retry or a reopen (pauseFormOnRetry) has not been offered since the hold was
+      // set, so values a job carries can only be a submit sent before it: the form parks instead.
+      const submitted =
+        redetected || current.pauseFormOnRetry || insightApprovalRequired
+          ? undefined
+          : params.formValues;
+
+      // Manual mode: EVERY step pauses before apply. Formless steps get a
+      // synthesized confirm-only schema so the existing waiting_form plumbing
+      // (submit endpoint, events, idle bookkeeping, web renderer) works
+      // unchanged; submitting it posts {} which validates against zero fields.
+      if (!persistedSchema && !autoContinue && !current.formValues && !submitted) {
+        persistedSchema = synthesizeConfirmSchema(meta.title, meta.description);
+        current = await updateRow(db, current.id, { formSchema: persistedSchema });
+      }
+
+      const answersForPersistence = (validated: FormValues, input: FormValues): FormValues =>
+        stepDef.preserveOmittedFormFields
+          ? Object.fromEntries(
+              Object.entries(validated).filter(
+                ([key]) => input[key] !== undefined && input[key] !== null && input[key] !== '',
+              ),
+            )
+          : validated;
+      let formValues = current.formValues as FormValues | null;
+      if (formValues) {
+        const normalized = normalizeStepFormValues(meta.id, formValues);
+        if (!normalized.success) throw new Error(normalized.issues.join('; '));
+        if (normalized.data !== formValues) {
+          formValues = normalized.data;
+          // A saved continuation keeps its waiting_cli status; only its copied answer changes.
+          current = await updateRow(db, current.id, { formValues });
+        }
+      }
+      if (persistedSchema && !formValues && !submitted) {
+        // Auto mode: (a) a gate-1 pre-answer for this step, else (b) {} for
+        // zero-field info forms → try to auto-submit. A validation failure falls
+        // through to waiting_form (never fails the step) — e.g. a pre-answered
+        // browser mode that the runtime schema no longer offers. submitAction
+        // 'retry' forms signal a broken precondition and are never auto-passed.
+        // A form may opt to auto-submit even in manual mode (autoContinue off) via
+        // its own `autoSubmit` flag — for an info-only form with nothing to decide
+        // (e.g. 06b's single-agent decision).
+        // A gate decision is always the person's.
+        const isGateForm = persistedSchema.fields.some((f) => f.id === FIX_LOOP_ACTION_FIELD);
         if (
-          applyErr instanceof MiningRetryError &&
-          miningRetry &&
-          !stepDef.loop &&
-          applyArgs.isFinalMiningAttempt !== true
+          // A plain manual Retry set pauseFormOnRetry to force this step to STOP at
+          // its form even under auto-continue — suppress every auto-submit variant
+          // (pre-answer / reuse / zero-field / step defaults / form autoSubmit) so the
+          // user can inspect and edit. Cleared on park below (one-shot).
+          !isGateForm &&
+          !insightApprovalRequired &&
+          !current.pauseFormOnRetry &&
+          !meta.alwaysWaitForUser &&
+          (autoContinue || persistedSchema.autoSubmit === true) &&
+          (persistedSchema.submitAction ?? 'submit') === 'submit'
         ) {
-          const {
-            sent: requeued,
-            lost,
-            refused,
-          } = await retryMiningAgents(
+          // A step may reuse a prior completed task's exact answers for this form
+          // (env-replicate's declare-deps / generate-dockerfile, whose values are
+          // stable per project). Strictly auto-continue gated — never fires in manual
+          // mode, even for a form that set its own autoSubmit. undefined when not
+          // opted in, the task has no repository, or no prior completed task has this
+          // form filled.
+          const reusedValues =
+            autoContinue &&
+            !stepPreAnswer &&
+            meta.reuseLastCompletedFormValues &&
+            taskFlags?.repositoryId
+              ? withoutHumanOnlyFields(
+                  await loadLastCompletedFormValues(db, {
+                    repositoryId: taskFlags.repositoryId,
+                    userId: params.userId,
+                    type: taskFlags.type,
+                    stepId: meta.id,
+                  }),
+                  stepDef.humanOnlyFormFields,
+                )
+              : undefined;
+          // Those answers are a snapshot of the repo as it was when the prior task ran.
+          // A step whose answers can go stale (declare-deps: the repo gained a DDEV
+          // project since) refreshes them against this task's detect() output before
+          // they are auto-submitted, so the reuse path cannot replay a value the fresh
+          // scan already contradicts.
+          const reuseCandidate =
+            reusedValues && stepDef.reconcileReusedFormValues
+              ? await stepDef.reconcileReusedFormValues(ctx, detected, reusedValues)
+              : reusedValues;
+          // Candidate precedence: a gate pre-answer wins; else a prior completed
+          // task's reused values; else a zero-field info form auto-passes with {};
+          // else a step that opts in via metadata.autoSubmitDefaults (or the form's
+          // own autoSubmit) auto-submits its declared field defaults.
+          const candidate =
+            stepPreAnswer ??
+            reuseCandidate ??
+            (persistedSchema.fields.length === 0
+              ? {}
+              : meta.autoSubmitDefaults || persistedSchema.autoSubmit
+                ? extractFormDefaults(persistedSchema)
+                : undefined);
+          if (candidate !== undefined) {
+            const expanded = validateFormValues(persistedSchema, candidate);
+            const validation = expanded.success
+              ? normalizeStepFormValues(meta.id, expanded.data)
+              : expanded;
+            if (validation.success) {
+              formValues = answersForPersistence(validation.data, candidate);
+              current = await updateRow(db, current.id, { formValues, status: 'running' });
+              ctx.logger.info(
+                {
+                  source: stepPreAnswer
+                    ? 'pre_answer'
+                    : reuseCandidate
+                      ? 'prior_task'
+                      : persistedSchema.fields.length === 0
+                        ? 'zero_field'
+                        : 'step_defaults',
+                },
+                'auto-continue: form auto-submitted',
+              );
+            } else {
+              ctx.logger.warn(
+                { issues: validation.issues },
+                'auto-continue: pre-answer failed validation; waiting for user',
+              );
+            }
+          }
+        }
+        if (!formValues) {
+          current = await updateRow(db, current.id, {
+            status: 'waiting_form',
+            // Stamped with the park rather than after it, so a submit redelivered before the task is
+            // marked waiting is still older than the park (isStaleSubmit).
+            waitingStartedAt: new Date(),
+            // One-shot: a manual Retry set pauseFormOnRetry to force this park instead
+            // of auto-submitting. Clear it here so the pause never leaks into a later
+            // automatic re-run (fix-loop / revise / gate loop-back) of this same step.
+            ...(current.pauseFormOnRetry ? { pauseFormOnRetry: false } : {}),
+          });
+          return {
+            status: 'waiting_form',
+            row: current,
+            formSchema: persistedSchema,
+          };
+        }
+      }
+
+      // A continuation re-enters a step parked on its CLI with its answers already saved: they were
+      // validated when they were saved, and the row stays `waiting_cli` while apply runs, so a worker
+      // that dies here leaves a parked step that boot recovery re-drives instead of one it resets.
+      // Values carried by the job can then only be a submit redelivered after it was applied.
+      const continuing = row.status === 'waiting_cli' && current.formValues != null;
+      // A latched owner answer comes from the attested saved values, never the job.
+      // Validate it and close the form through the ordinary submitted-answer path.
+      const submittedAnswer = insightHumanSubmission ? formValues : submitted;
+      if (persistedSchema && submittedAnswer && !continuing) {
+        const expanded = validateFormValues(persistedSchema, submittedAnswer);
+        const validation = expanded.success
+          ? normalizeStepFormValues(meta.id, expanded.data)
+          : expanded;
+        if (!validation.success) {
+          const failed = await updateRow(db, current.id, {
+            status: 'failed',
+            errorMessage: `validation failed: ${validation.issues.join('; ')}`,
+            endedAt: new Date(),
+          });
+          return {
+            status: 'failed',
+            row: failed,
+            error: validation.issues.join('; '),
+          };
+        }
+        formValues = answersForPersistence(validation.data, submittedAnswer);
+        current = await updateRow(db, current.id, {
+          formValues,
+          status: 'running',
+        });
+      }
+
+      params.validateResolvedForm?.(formValues);
+
+      // --- AI-fix phase (retry_ai recovery) ---
+      // When retry_ai set a fix marker, run a diagnose-and-fix agent once, then
+      // re-run apply against the fixed workspace. The DAG executor is exempt: it
+      // owns aiFixContext to resolve a merge conflict inside the integration
+      // worktree (the generic agent would run at the repo root and would also
+      // mis-consume a completed coder invocation). See resolveDagPhase.
+      if (current.aiFixContext && !stepDef.dagExecute && !stepDef.mergeResolve) {
+        const fixResult = await resolveAiFixPhase(db, stepDef, current, ctx, params);
+        if (!fixResult.resolved) return fixResult.result;
+        current = fixResult.current;
+      }
+
+      // --- Post-form LLM phase (default) ---
+      if (stepDef.llm && !stepDef.llm.preForm) {
+        const skip =
+          stepDef.llm.skipIf?.({
+            detected,
+            formValues: formValues ?? {},
+            iteration: stepIterationsAsRecords(current).length,
+          }) ?? false;
+        if (skip) {
+          ctx.logger.info({ phase: 'llm.postForm' }, 'skipping llm phase via skipIf predicate');
+        } else {
+          const llmResult = await resolveLlmPhase(
             db,
             stepDef,
             current,
             ctx,
             detected,
             formValues,
-            llmOutput,
             params,
-            applyErr.agentIds,
-            miningRetry.maxAttempts,
           );
-          if (requeued > 0) {
-            const parked = await updateRow(db, current.id, {
-              status: 'waiting_cli',
-              statusMessage: `Re-running ${requeued} agent(s) whose output could not be read...`,
-            });
-            return { status: 'waiting_cli', row: parked };
-          }
-          if ((lost > 0 || refused > 0) && !reread) {
-            const settled = await rereadMiningBarrier();
-            if (settled) return settled;
-            continue;
-          }
-          if (await hasLiveMiningAgents(db, current.id)) {
-            return { status: 'waiting_cli', row: current };
-          }
-          // Every NAMED agent is spent, but isFinalMiningAttempt was false because some
-          // OTHER agent still had budget (peer exhausted on its re-roll, security fine on
-          // its first). apply() cannot see that, so it threw. Re-run it as final and let
-          // it degrade: failing the step here would discard a review that mostly worked.
-          // Both MiningRetryError throw sites gate on isFinalMiningAttempt === false, so
-          // the guard above can only bite a step in breach of that contract.
-          ctx.logger.warn(
-            { stepId: meta.id, agentIds: applyErr.agentIds },
-            'no re-roll budget left for the named agents; degrading',
-          );
-          applyArgs.isFinalMiningAttempt = true;
-          continue;
+          if (!llmResult.resolved) return llmResult.result;
+          llmOutput = llmResult.llmOutput;
+          llmInvocationId = llmResult.llmInvocationId;
+          current = llmResult.current;
         }
-        // llm.retry: a flaky model (e.g. a cloud Ollama model whose agentic tool-loop
-        // intermittently ends with no JSON, or emits unparseable/truncated JSON) often
-        // succeeds on a fresh roll. On a retryable apply throw, re-enqueue a NEW cli
-        // invocation (consume the bad one) up to maxAttempts TOTAL, parking the step in
-        // waiting_cli; once attempts are exhausted, rethrow so the outer catch fails the
-        // step. Skipped for loop steps (they own their own re-dispatch counting).
-        const retry = stepDef.llm?.retry;
-        if (retry && !stepDef.loop && (retry.retryOn?.(applyErr) ?? true)) {
-          const attempt = await countLlmAttempts(db, current.id);
-          if (attempt < retry.maxAttempts) {
-            const reason = applyErr instanceof Error ? applyErr.message : String(applyErr);
-            ctx.logger.warn(
-              { stepId: meta.id, attempt, maxAttempts: retry.maxAttempts, err: reason },
-              'llm apply failed; retrying with a fresh invocation',
-            );
-            await updateRow(db, current.id, {
-              warningMessage: stepWarningAppend(retryWarning(attempt, retry.maxAttempts, reason)),
-            });
-            await markLatestInvocationConsumed(db, current.id);
-            const retryLlm = await resolveLlmPhase(
-              db,
-              stepDef,
-              current,
-              ctx,
-              detected,
-              formValues,
-              params,
-            );
-            // A fresh enqueue always parks in waiting_cli (resolved:false); return it
-            // so the orchestrator re-enters when the retry invocation completes. If it
-            // somehow resolved synchronously, fall through and rethrow.
-            if (!retryLlm.resolved) return retryLlm.result;
-          }
-        }
-        throw applyErr;
       }
-    }
 
-    // A Stop/Cancel that landed DURING apply() must win over every routing decision
-    // below, not just over the `done` write. The check further down guards only that
-    // one exit; the loop hook, fixLoop, restartLoop and revise all return earlier, so a
-    // stopped task could be handed a fresh CLI pass and put straight back to `running`.
-    // MEASURED on task 681f0f99: a Stop landed inside 08b's ~10-minute test run, apply
-    // finished, loop.shouldContinue saw red tests and dispatched the next pass — three
-    // times in a row, so the user could not stop the task at all. One call here covers
-    // every exit, because nothing between this point and them awaits anything that could
-    // clear the flag. The pre-`done` check stays as the narrower backstop it always was.
-    throwIfCancelled();
-
-    output = finalizeCanonicalCheckResult(
-      stepDef.metadata.id,
-      output,
-      detected,
-      current.iterations ?? [],
-    );
-
-    // Only new successful apply returns are validated. Throws and parks above, and
-    // terminal-row recovery, retain their existing semantics. Check ownership before
-    // diagnostics too: a Retry/Skip/Stop that took the row must win over this result.
-    if (stepDef.outputContract || stepDef.providesRoles?.length) {
-      const taskPin = stepDef.replaces?.length
-        ? await db.query.tasks.findFirst({
-            where: eq(schema.tasks.id, taskId),
-            columns: { derivedRunPlan: true, executionPath: true, runListSnapshot: true },
-          })
-        : undefined;
-      await assertOwnsStep(db, current.id);
-      throwIfCancelled();
-      const replacedRole =
-        taskPin?.derivedRunPlan == null
-          ? undefined
-          : Object.values(STEP_ROLES).find((role) =>
-              readStepRole(
-                taskPin,
-                role,
-                (binding) =>
-                  binding.state === 'active' &&
-                  binding.stepId === stepDef.metadata.id &&
-                  binding.stepId !== role,
-              ),
-            );
-      validateSuccessfulStepOutput(stepDef, output, ctx.logger, replacedRole);
-    }
-
-    // Curated per-step recap for the "What the agent did" panel. LLM steps that
-    // already emit a summary field get it for free here; steps that ran an agent
-    // but emit no summary field are left null for the async LLM summarizer
-    // (handleResult) to fill. Deterministic steps stay null (no panel).
-    const curatedSummary =
-      stepDef.llm || stepDef.agentMining || stepDef.dagExecute
-        ? resolveCuratedSummary(output)
-        : null;
-
-    // Non-fatal: surface when a step silently fell back to a stub because the model's
-    // output was unparseable (a weak-but-alive model). Persisted on the done finalize.
-    const degradedNote = computeDegradedNote(stepDef, llmOutput, agentMiningResults, output);
-
-    // --- Loop hook: decide whether another LLM pass is warranted ---
-    if (stepDef.loop) {
-      const budget = (await resolveLoopBudget(db, taskId, current, stepDef)) ?? 1;
-      const continueRequested = await stepDef.loop.shouldContinue({
-        ctx,
-        applyOutput: output,
-        llmOutput,
-        iteration,
-        previousIterations,
-      });
-      const nextIteration = iteration + 1;
-      const exhaustedBudget = continueRequested && nextIteration >= budget;
-      // Mark this pass's invocation consumed so the next resolveLlmPhase
-      // (whether triggered now for the next pass or later for retries)
-      // enqueues a fresh CLI run instead of replaying the same output.
-      await markLatestInvocationConsumed(db, current.id);
-      const newEntry: StepIterationEntry = {
-        iteration,
-        llmOutput,
-        applyOutput: output,
-        continueRequested,
-        recordedAt: new Date().toISOString(),
-        ...(exhaustedBudget ? { exhaustedBudget: true } : {}),
-      };
-      const newIterations = [...(current.iterations ?? []), newEntry] as StepIterationEntry[];
-      current = await updateRow(db, current.id, {
-        iterations: newIterations,
-        iterationCount: newIterations.length,
-        statusMessage: null,
-      });
-      output = finalizeCanonicalCheckResult(stepDef.metadata.id, output, detected, newIterations);
-      ctx.logger.info(
-        { iteration, continueRequested, budget, exhaustedBudget },
-        'loop pass completed',
-      );
-      if (continueRequested && !exhaustedBudget) {
-        // Re-enter LLM phase to enqueue iteration N+1. This single
-        // recursive resolveLlmPhase call (a) inserts a fresh
-        // cli_invocations row, (b) flips status to waiting_cli, and
-        // (c) returns. The orchestrator picks up where we left off when
-        // that invocation completes.
-        const llmResult = await resolveLlmPhase(
+      // --- Agent mining phase (fan-out N CLI jobs, wait for all) ---
+      let agentMiningResults: AgentMiningResult[] | undefined;
+      let newAgentMiningResults: AgentMiningResult[] | undefined;
+      if (stepDef.agentMining) {
+        const miningResult = await resolveAgentMiningPhase(
           db,
           stepDef,
           current,
           ctx,
           detected,
           formValues,
+          llmOutput,
           params,
         );
-        if (!llmResult.resolved) return llmResult.result;
-        // Shouldn't reach here — resolveLlmPhase always returns
-        // unresolved (waiting_cli) for fresh enqueues.
-        ctx.logger.warn(
-          { iteration: nextIteration },
-          'loop re-enter resolved synchronously; falling through to done',
-        );
+        if (!miningResult.resolved) return miningResult.result;
+        agentMiningResults = miningResult.results;
+        newAgentMiningResults = miningResult.newResults;
+        current = miningResult.current;
+        // Barrier: every agent of this fan-out has ended, so any tab still open is one
+        // nobody is coming back for.
+        await reapAgentBrowserTabs(ctx.taskId, ctx.logger);
       }
-    }
 
-    // Every agent step's recap reaches the task ledger, by one of two routes.
-    //
-    // A step that emits its OWN summary field (07, 07b, 08a, and the spec steps) never
-    // ran the async summarizer, so slice 4's mirror had nothing to copy and those steps
-    // were invisible to later prompts. Mirror the curated text directly instead — it is
-    // already in hand at finalize, so this costs no LLM call.
-    //
-    // Otherwise fall back to the best-effort async summarizer, whose completion handler
-    // mirrors its result. We are past the loop hook here, so this runs once per step
-    // finalization (not per loop pass) and never blocks it.
-    //
-    // Called only once the pass's outcome has landed: a pass a Retry replaced must leave no
-    // recap for the rerun's prompts, nor a recap run that writes onto the retried row.
-    const recordRecap = async (): Promise<void> => {
-      if (curatedSummary) {
-        await recordLedgerEntry(
+      // --- DAG execution phase (multi-level coder fan-out; parks waiting_cli per
+      // level until every level checkpoints, then apply finalizes the step) ---
+      if (stepDef.dagExecute) {
+        const dagResult = await resolveDagPhase(db, stepDef, current, ctx, params);
+        if (!dagResult.resolved) return dagResult.result;
+        current = dagResult.current;
+        // Same barrier property as the mining fan-out: reached only once every level has
+        // checkpointed, i.e. no coder/reviewer of this step is still running. Tabs from an
+        // earlier level therefore survive until the whole step ends — accepted; a per-level
+        // reap belongs in dag-executor.ts if it ever matters.
+        await reapAgentBrowserTabs(ctx.taskId, ctx.logger);
+      }
+
+      // --- Merge-resolution phase (12-worktree-cleanup): merge the feature branch
+      // into its base with an LLM conflict-resolution loop, parking waiting_cli (fix
+      // agent) / waiting_form (user clarification) until the merge commits, then apply
+      // removes the worktree. Mutually exclusive with dagExecute. ---
+      if (stepDef.mergeResolve) {
+        const mergeResult = await resolveMergePhase(db, stepDef, current, ctx, params);
+        if (!mergeResult.resolved) return mergeResult.result;
+        current = mergeResult.current;
+      }
+
+      const previousIterations = stepIterationsAsRecords(current);
+      const iteration = previousIterations.length;
+      // For llm.retry steps, tell apply whether this is the final attempt so it can
+      // degrade (return its stub) instead of throwing a RetryableParseError once the
+      // re-roll budget is spent. Non-retry steps are always "final" (degrade now).
+      // Bypass (smoke) enqueues no invocation, so treat it as the final attempt
+      // (degrade, never throw-to-retry). Non-retry steps are always final.
+      const llmRetry = stepDef.llm?.retry;
+      const isFinalLlmAttempt =
+        process.env.HAIVE_TEST_BYPASS_LLM === '1' || !llmRetry
+          ? true
+          : (await countLlmAttempts(db, current.id)) >= llmRetry.maxAttempts;
+      // Same contract for mining agents: final once NO agent has a re-roll left, so
+      // apply() degrades (surfaces the reviewer as non-approving) instead of throwing.
+      const miningRetry = stepDef.agentMining?.retry;
+      const isFinalMiningAttempt =
+        process.env.HAIVE_TEST_BYPASS_LLM === '1' || !miningRetry || stepDef.loop
+          ? true
+          : !(await miningAgentsWithBudget(db, current.id, miningRetry.maxAttempts));
+      // EVERY apply() pass runs inside this loop, not just the first. apply() states its
+      // needs by THROWING — MiningRetryError to re-roll an agent, MiningWaveError to fan out
+      // a wave whose prompts depend on the first one's findings — and the degrade passes
+      // below can raise a signal of their own: a reviewer that burned its re-roll budget
+      // still leaves blocking findings to refute. Running those passes nested inside the
+      // catch left their signals with nobody to catch them, so a step (and a task that had
+      // been running for a day) died on "second mining wave requested" with every one of its
+      // CLI invocations exited 0. Each arm sets a monotone flag its own guard requires
+      // unset, so a signal is honored at most once and the loop is bounded at three passes.
+      const applyArgs: StepApplyArgs = {
+        detected,
+        formValues: formValues ?? {},
+        llmOutput,
+        llmInvocationId,
+        agentMiningResults,
+        // Only the rows no previous apply() pass folded. Undefined for non-mining
+        // steps; identical to agentMiningResults until a MiningWaveError stamps
+        // consumed_at, so steps that ignore it are unaffected.
+        newAgentMiningResults,
+        iteration,
+        previousIterations,
+        isFinalLlmAttempt,
+        isFinalMiningAttempt,
+      };
+      // A dispatch below that lost agents to another pass leaves the results apply() was handed
+      // possibly stale, so the barrier is read again, once, and apply() re-run on what it finds.
+      let reread = false;
+      const rereadMiningBarrier = async (): Promise<AdvanceStepResult | null> => {
+        reread = true;
+        const fresh = await resolveAgentMiningPhase(
           db,
-          params.taskId,
-          current.id,
-          {
-            stepId: stepDef.metadata.id,
-            round: current.round,
-            // Capped: a curated summary field is not always short (discovery's is its whole
-            // findings document), and one oversized entry survives the drop loop and rides
-            // into every later prompt.
-            text: capSummaryForLedger(curatedSummary),
-            kind: 'summary',
-          },
-          { whileStepDone: true },
+          stepDef,
+          current,
+          ctx,
+          detected,
+          formValues,
+          llmOutput,
+          params,
+          true,
         );
-      } else if (stepDef.llm || stepDef.agentMining || stepDef.dagExecute) {
-        await maybeEnqueueStepSummary(db, stepDef, current, params, output, ctx.logger);
+        if (!fresh.resolved) return fresh.result;
+        applyArgs.agentMiningResults = fresh.results;
+        applyArgs.newAgentMiningResults = fresh.newResults;
+        current = fresh.current;
+        return null;
+      };
+      let output: unknown;
+      for (;;) {
+        try {
+          output = await stepDef.apply(ctx, { ...applyArgs });
+          if (stepDef.dagExecute?.failurePolicy === 'record-and-continue') {
+            output = {
+              ...(output as Record<string, unknown>),
+              dagOutcomes: await loadDagOutcomeCounts(db, ctx.taskId),
+            };
+          }
+          break;
+        } catch (applyErr) {
+          if (applyErr instanceof ReopenStepFormError && applyErr.rerunPreForm) {
+            validatePreFormReopen(stepDef, applyErr);
+            if (!reenteredPreForm) {
+              current = await checkpointPreFormContinuation(
+                db,
+                ctx,
+                applyArgs.llmInvocationId ?? null,
+                reopenFormNotice(applyErr),
+              );
+              reenteredPreForm = true;
+              reopenNotice = reopenFormNotice(applyErr);
+              return runPipeline();
+            }
+            // No invocation or decision park ended this synchronous pass. Offer a
+            // boundary decision instead of recursively requesting unbounded work.
+          }
+          // A bounded, user-approved apply batch completed but produced another
+          // decision for the same step. Refresh detection and the form instead of
+          // finalizing, and consume all mining rows so none of their patches are
+          // folded a second time after the next submission.
+          if (
+            applyErr instanceof ReopenStepFormError &&
+            stepDef.detect &&
+            stepDef.form &&
+            !stepDef.loop
+          ) {
+            // Consumed and cleared together, with the form held: a worker that dies before the park
+            // below re-detects and stops at the form rather than re-sending the answered items. Only
+            // while the pass owns the row, so a Retry's reset keeps its own hold and the agent rows are
+            // left as the reset left them.
+            const nextGeneration = applyErr.newAttempt
+              ? (current.rerunGeneration ?? 0) + 1
+              : undefined;
+            await holdReopenedForm(
+              db,
+              current.id,
+              applyArgs.agentMiningResults,
+              new Date(),
+              nextGeneration,
+              ctx,
+            );
+            if (nextGeneration != null) {
+              current = { ...current, rerunGeneration: nextGeneration };
+              ctx.rerunGeneration = nextGeneration;
+            }
+            const refreshedDetected = await stepDef.detect(ctx);
+            if (stepDef.prepareForm) {
+              await stepDef.prepareForm(ctx, refreshedDetected, llmOutput);
+            }
+            const refreshedSchema = normalizeStepSchemaDefaults(
+              meta.id,
+              stepDef.form(ctx, refreshedDetected, llmOutput),
+            );
+            if (!refreshedSchema && applyErr.rerunPreForm) {
+              const boundary = synthesizeConfirmSchema(meta.title, meta.description);
+              current = await updateRow(db, current.id, {
+                status: 'waiting_form',
+                detectOutput: refreshedDetected,
+                detectCliProviderId: ctx.cliProviderId ?? null,
+                formSchema: boundary,
+                formValues: null,
+                pauseFormOnRetry: false,
+                waitingStartedAt: new Date(),
+                statusMessage: null,
+                errorMessage: null,
+              });
+              return { status: 'waiting_form', row: current, formSchema: boundary };
+            }
+            if (!refreshedSchema) {
+              throw new Error(
+                `${meta.id} requested another form, but refreshed detection produced no form`,
+              );
+            }
+            const notice = reopenFormNotice(applyErr);
+            if (notice !== undefined) {
+              refreshedSchema.fields.unshift({
+                type: 'note',
+                id: 'reopenedFormNotice',
+                label: 'Review before continuing',
+                body: notice,
+                variant: 'warning',
+              });
+            }
+            current = await updateRow(db, current.id, {
+              status: 'waiting_form',
+              detectOutput: refreshedDetected,
+              detectCliProviderId: ctx.cliProviderId ?? null,
+              formSchema: refreshedSchema,
+              formValues: null,
+              pauseFormOnRetry: false,
+              waitingStartedAt: new Date(),
+              statusMessage: null,
+              errorMessage: null,
+            });
+            ctx.logger.info({ stepId: meta.id }, 'apply batch completed; reopened step form');
+            return { status: 'waiting_form', row: current, formSchema: refreshedSchema };
+          }
+          // A second mining wave: agents whose prompts depend on what the first wave found.
+          // Fresh rows, so the fan-out barrier re-parks the step; apply() runs again with
+          // both waves in agentMiningResults. See MiningWaveError for why no other phase
+          // can express this.
+          if (
+            applyErr instanceof MiningWaveError &&
+            stepDef.agentMining &&
+            !stepDef.loop &&
+            params.providers &&
+            params.deps &&
+            applyArgs.miningWaveExhausted !== true
+          ) {
+            if (meta.id === INSIGHT_STEP && process.env.HAIVE_TEST_BYPASS_LLM === '1') {
+              params.validateMiningDispatch?.(applyErr.dispatches);
+              const synthetic: AgentMiningResult[] = applyErr.dispatches.map((d) => ({
+                agentId: d.agentId,
+                agentTitle: d.agentTitle,
+                status: 'done',
+                output: null,
+                rawOutput: syntheticInsightReply(d, detected),
+                errorMessage: null,
+              }));
+              applyArgs.agentMiningResults = [
+                ...(applyArgs.agentMiningResults ?? []),
+                ...synthetic,
+              ];
+              continue;
+            }
+            // Mark every row apply() has just folded, BEFORE the wave's fresh rows
+            // exist: the next apply() pass asks for the unconsumed set via
+            // newAgentMiningResults, so a step whose fold is not idempotent (temp-ref
+            // creation, e.g. the plan builder) folds each wave exactly once. Steps
+            // that fold idempotently (08c, by fingerprint) never read it back.
+            await consumeFoldedMiningRows(db, current.id, applyArgs.agentMiningResults, new Date());
+            const { sent: dispatched, lost } = await dispatchMiningAgents(
+              db,
+              stepDef,
+              current,
+              ctx,
+              params,
+              applyErr.dispatches,
+              null,
+            );
+            if (dispatched > 0) {
+              ctx.logger.info(
+                { stepId: meta.id, agentIds: applyErr.dispatches.map((d) => d.agentId) },
+                'second mining wave dispatched',
+              );
+              const parked = await updateRow(db, current.id, {
+                status: 'waiting_cli',
+                statusMessage: `Running ${dispatched} follow-up agent(s)...`,
+              });
+              return { status: 'waiting_cli', row: parked };
+            }
+            if (lost > 0 && !reread) {
+              const settled = await rereadMiningBarrier();
+              if (settled) return settled;
+              continue;
+            }
+            if (await hasLiveMiningAgents(db, current.id)) {
+              return { status: 'waiting_cli', row: current };
+            }
+            // Nothing went out: every agent already had a row, or no provider could take
+            // them (dispatchMiningAgents wrote those rows as failed). Parking would hang the
+            // step on a barrier with nothing pending, so run apply() again and tell it the
+            // wave is not coming. It must not ask a second time — the guard above is what
+            // stops a step that asks anyway from spinning here forever.
+            ctx.logger.warn(
+              { stepId: meta.id, agentIds: applyErr.dispatches.map((d) => d.agentId) },
+              'second mining wave dispatched no agents; continuing without it',
+            );
+            applyArgs.miningWaveExhausted = true;
+            continue;
+          }
+          // agentMining.retry: a reviewer that ran but emitted prose instead of its JSON
+          // contract is re-rolled on its own, leaving the other agents' completed rows
+          // alone. Re-running one agent is far cheaper than the alternatives: a fix round
+          // through implementation, or a developer reject at the gate.
+          if (
+            applyErr instanceof MiningRetryError &&
+            miningRetry &&
+            !stepDef.loop &&
+            applyArgs.isFinalMiningAttempt !== true
+          ) {
+            const {
+              sent: requeued,
+              lost,
+              refused,
+            } = await retryMiningAgents(
+              db,
+              stepDef,
+              current,
+              ctx,
+              detected,
+              formValues,
+              llmOutput,
+              params,
+              applyErr.agentIds,
+              miningRetry.maxAttempts,
+            );
+            if (requeued > 0) {
+              const parked = await updateRow(db, current.id, {
+                status: 'waiting_cli',
+                statusMessage: `Re-running ${requeued} agent(s) whose output could not be read...`,
+              });
+              return { status: 'waiting_cli', row: parked };
+            }
+            if ((lost > 0 || refused > 0) && !reread) {
+              const settled = await rereadMiningBarrier();
+              if (settled) return settled;
+              continue;
+            }
+            if (await hasLiveMiningAgents(db, current.id)) {
+              return { status: 'waiting_cli', row: current };
+            }
+            // Every NAMED agent is spent, but isFinalMiningAttempt was false because some
+            // OTHER agent still had budget (peer exhausted on its re-roll, security fine on
+            // its first). apply() cannot see that, so it threw. Re-run it as final and let
+            // it degrade: failing the step here would discard a review that mostly worked.
+            // Both MiningRetryError throw sites gate on isFinalMiningAttempt === false, so
+            // the guard above can only bite a step in breach of that contract.
+            ctx.logger.warn(
+              { stepId: meta.id, agentIds: applyErr.agentIds },
+              'no re-roll budget left for the named agents; degrading',
+            );
+            applyArgs.isFinalMiningAttempt = true;
+            continue;
+          }
+          // llm.retry: a flaky model (e.g. a cloud Ollama model whose agentic tool-loop
+          // intermittently ends with no JSON, or emits unparseable/truncated JSON) often
+          // succeeds on a fresh roll. On a retryable apply throw, re-enqueue a NEW cli
+          // invocation (consume the bad one) up to maxAttempts TOTAL, parking the step in
+          // waiting_cli; once attempts are exhausted, rethrow so the outer catch fails the
+          // step. Skipped for loop steps (they own their own re-dispatch counting).
+          const retry = stepDef.llm?.retry;
+          if (retry && !stepDef.loop && (retry.retryOn?.(applyErr) ?? true)) {
+            const attempt = await countLlmAttempts(db, current.id);
+            if (attempt < retry.maxAttempts) {
+              const reason = applyErr instanceof Error ? applyErr.message : String(applyErr);
+              ctx.logger.warn(
+                { stepId: meta.id, attempt, maxAttempts: retry.maxAttempts, err: reason },
+                'llm apply failed; retrying with a fresh invocation',
+              );
+              await updateRow(db, current.id, {
+                warningMessage: stepWarningAppend(retryWarning(attempt, retry.maxAttempts, reason)),
+              });
+              await markLatestInvocationConsumed(db, current.id);
+              const retryLlm = await resolveLlmPhase(
+                db,
+                stepDef,
+                current,
+                ctx,
+                detected,
+                formValues,
+                params,
+              );
+              // A fresh enqueue always parks in waiting_cli (resolved:false); return it
+              // so the orchestrator re-enters when the retry invocation completes. If it
+              // somehow resolved synchronously, fall through and rethrow.
+              if (!retryLlm.resolved) return retryLlm.result;
+            }
+          }
+          throw applyErr;
+        }
       }
-    };
 
-    // The row is still done; handleResult turns loop_back into a new round at implement and
-    // revise into a reset of its target.
-    const finalize = (patch: UpdatePatch) =>
-      (meta.id === INSIGHT_STEP || meta.id === '10-gate-3-commit') &&
-      ((output as { continuation?: unknown } | null)?.continuation ||
-        (output as { insightCheckpoint?: unknown } | null)?.insightCheckpoint)
-        ? publishInsightStep(ctx, patch)
-        : updateRow(db, current.id, patch);
-    if (
-      (meta.id === '08-phase-5-verify' &&
-        (output as { passed?: boolean } | null)?.passed === false) ||
-      (meta.id === '09-gate-2-verify-approval' &&
-        (output as { decision?: string } | null)?.decision === 'approve')
-    ) {
-      await recordGate3Check(
-        db,
-        { taskId: ctx.taskId, userId: ctx.userId, orchestrationEpoch: ctx.epoch ?? 0 },
-        current,
-        meta.id === '08-phase-5-verify' ? 'verify_failed' : 'gate2_approved',
+      // A Stop/Cancel that landed DURING apply() must win over every routing decision
+      // below, not just over the `done` write. The check further down guards only that
+      // one exit; the loop hook, fixLoop, restartLoop and revise all return earlier, so a
+      // stopped task could be handed a fresh CLI pass and put straight back to `running`.
+      // MEASURED on task 681f0f99: a Stop landed inside 08b's ~10-minute test run, apply
+      // finished, loop.shouldContinue saw red tests and dispatched the next pass — three
+      // times in a row, so the user could not stop the task at all. One call here covers
+      // every exit, because nothing between this point and them awaits anything that could
+      // clear the flag. The pre-`done` check stays as the narrower backstop it always was.
+      throwIfCancelled();
+
+      output = finalizeCanonicalCheckResult(
+        stepDef.metadata.id,
+        output,
+        detected,
+        current.iterations ?? [],
       );
-    }
-    const verdict = await finishedRoutingVerdict(db, taskId, stepDef, output);
-    if (verdict) {
-      const finished = await finalize({
+
+      // Only new successful apply returns are validated. Throws and parks above, and
+      // terminal-row recovery, retain their existing semantics. Check ownership before
+      // diagnostics too: a Retry/Skip/Stop that took the row must win over this result.
+      if (stepDef.outputContract || stepDef.providesRoles?.length) {
+        const taskPin = stepDef.replaces?.length
+          ? await db.query.tasks.findFirst({
+              where: eq(schema.tasks.id, taskId),
+              columns: { derivedRunPlan: true, executionPath: true, runListSnapshot: true },
+            })
+          : undefined;
+        await assertOwnsStep(db, current.id);
+        throwIfCancelled();
+        const replacedRole =
+          taskPin?.derivedRunPlan == null
+            ? undefined
+            : Object.values(STEP_ROLES).find((role) =>
+                readStepRole(
+                  taskPin,
+                  role,
+                  (binding) =>
+                    binding.state === 'active' &&
+                    binding.stepId === stepDef.metadata.id &&
+                    binding.stepId !== role,
+                ),
+              );
+        validateSuccessfulStepOutput(stepDef, output, ctx.logger, replacedRole);
+      }
+
+      // Curated per-step recap for the "What the agent did" panel. LLM steps that
+      // already emit a summary field get it for free here; steps that ran an agent
+      // but emit no summary field are left null for the async LLM summarizer
+      // (handleResult) to fill. Deterministic steps stay null (no panel).
+      const curatedSummary =
+        stepDef.llm || stepDef.agentMining || stepDef.dagExecute
+          ? resolveCuratedSummary(output)
+          : null;
+
+      // Non-fatal: surface when a step silently fell back to a stub because the model's
+      // output was unparseable (a weak-but-alive model). Persisted on the done finalize.
+      const degradedNote = computeDegradedNote(stepDef, llmOutput, agentMiningResults, output);
+
+      // --- Loop hook: decide whether another LLM pass is warranted ---
+      if (stepDef.loop) {
+        const budget = (await resolveLoopBudget(db, taskId, current, stepDef)) ?? 1;
+        const continueRequested = await stepDef.loop.shouldContinue({
+          ctx,
+          applyOutput: output,
+          llmOutput,
+          iteration,
+          previousIterations,
+        });
+        const nextIteration = iteration + 1;
+        const exhaustedBudget = continueRequested && nextIteration >= budget;
+        // Mark this pass's invocation consumed so the next resolveLlmPhase
+        // (whether triggered now for the next pass or later for retries)
+        // enqueues a fresh CLI run instead of replaying the same output.
+        await markLatestInvocationConsumed(db, current.id);
+        const newEntry: StepIterationEntry = {
+          iteration,
+          llmOutput,
+          applyOutput: output,
+          continueRequested,
+          recordedAt: new Date().toISOString(),
+          ...(exhaustedBudget ? { exhaustedBudget: true } : {}),
+        };
+        const newIterations = [...(current.iterations ?? []), newEntry] as StepIterationEntry[];
+        current = await updateRow(db, current.id, {
+          iterations: newIterations,
+          iterationCount: newIterations.length,
+          statusMessage: null,
+        });
+        output = finalizeCanonicalCheckResult(stepDef.metadata.id, output, detected, newIterations);
+        ctx.logger.info(
+          { iteration, continueRequested, budget, exhaustedBudget },
+          'loop pass completed',
+        );
+        if (continueRequested && !exhaustedBudget) {
+          // Re-enter LLM phase to enqueue iteration N+1. This single
+          // recursive resolveLlmPhase call (a) inserts a fresh
+          // cli_invocations row, (b) flips status to waiting_cli, and
+          // (c) returns. The orchestrator picks up where we left off when
+          // that invocation completes.
+          const llmResult = await resolveLlmPhase(
+            db,
+            stepDef,
+            current,
+            ctx,
+            detected,
+            formValues,
+            params,
+          );
+          if (!llmResult.resolved) return llmResult.result;
+          // Shouldn't reach here — resolveLlmPhase always returns
+          // unresolved (waiting_cli) for fresh enqueues.
+          ctx.logger.warn(
+            { iteration: nextIteration },
+            'loop re-enter resolved synchronously; falling through to done',
+          );
+        }
+      }
+
+      // Every agent step's recap reaches the task ledger, by one of two routes.
+      //
+      // A step that emits its OWN summary field (07, 07b, 08a, and the spec steps) never
+      // ran the async summarizer, so slice 4's mirror had nothing to copy and those steps
+      // were invisible to later prompts. Mirror the curated text directly instead — it is
+      // already in hand at finalize, so this costs no LLM call.
+      //
+      // Otherwise fall back to the best-effort async summarizer, whose completion handler
+      // mirrors its result. We are past the loop hook here, so this runs once per step
+      // finalization (not per loop pass) and never blocks it.
+      //
+      // Called only once the pass's outcome has landed: a pass a Retry replaced must leave no
+      // recap for the rerun's prompts, nor a recap run that writes onto the retried row.
+      const recordRecap = async (): Promise<void> => {
+        if (curatedSummary) {
+          await recordLedgerEntry(
+            db,
+            params.taskId,
+            current.id,
+            {
+              stepId: stepDef.metadata.id,
+              round: current.round,
+              // Capped: a curated summary field is not always short (discovery's is its whole
+              // findings document), and one oversized entry survives the drop loop and rides
+              // into every later prompt.
+              text: capSummaryForLedger(curatedSummary),
+              kind: 'summary',
+            },
+            { whileStepDone: true },
+          );
+        } else if (stepDef.llm || stepDef.agentMining || stepDef.dagExecute) {
+          await maybeEnqueueStepSummary(db, stepDef, current, params, output, ctx.logger);
+        }
+      };
+
+      // The row is still done; handleResult turns loop_back into a new round at implement and
+      // revise into a reset of its target.
+      const finalize = (patch: UpdatePatch) => {
+        if ((reenteredPreForm || heldAtStart) && persistedSchema === null)
+          patch = { ...patch, pauseFormOnRetry: false };
+        return (meta.id === INSIGHT_STEP || meta.id === '10-gate-3-commit') &&
+          ((output as { continuation?: unknown } | null)?.continuation ||
+            (output as { insightCheckpoint?: unknown } | null)?.insightCheckpoint)
+          ? publishInsightStep(ctx, patch)
+          : updateRow(db, current.id, patch);
+      };
+      if (
+        (meta.id === '08-phase-5-verify' &&
+          (output as { passed?: boolean } | null)?.passed === false) ||
+        (meta.id === '09-gate-2-verify-approval' &&
+          (output as { decision?: string } | null)?.decision === 'approve')
+      ) {
+        await recordGate3Check(
+          db,
+          { taskId: ctx.taskId, userId: ctx.userId, orchestrationEpoch: ctx.epoch ?? 0 },
+          current,
+          meta.id === '08-phase-5-verify' ? 'verify_failed' : 'gate2_approved',
+        );
+      }
+      const verdict = await finishedRoutingVerdict(db, taskId, stepDef, output);
+      if (verdict) {
+        const finished = await finalize({
+          status: 'done',
+          output,
+          summary: curatedSummary,
+          statusMessage: null,
+          // Ends successfully => carries no error; see the main done write below.
+          errorMessage: null,
+          endedAt: new Date(),
+        });
+        await recordRecap();
+        await recordFinishedUsage(db, finished, meta.id);
+        if (verdict.kind === 'revise') {
+          ctx.logger.info(
+            { stepId: meta.id, targetStepId: verdict.targetStepId },
+            'revise-loop: apply requested revising an earlier step',
+          );
+          return {
+            status: 'revise',
+            row: finished,
+            targetStepId: verdict.targetStepId,
+            sourceStepId: meta.id,
+            ...(verdict.continuation ? { continuation: verdict.continuation } : {}),
+          };
+        }
+        ctx.logger.info(
+          { stepId: meta.id, round },
+          verdict.uncapped
+            ? 'restart-loop: human gate requested restart from implementation (uncapped)'
+            : 'fix-loop: blocking defect found; routing back to implementation',
+        );
+        return {
+          status: 'loop_back',
+          row: finished,
+          diagnosis: verdict.diagnosis,
+          sourceStepId: meta.id,
+          ...(verdict.guidance ? { guidance: verdict.guidance } : {}),
+          ...(verdict.unfencedLegacy ? { unfencedLegacy: true } : {}),
+          ...(verdict.uncapped ? { uncapped: true } : {}),
+        };
+      }
+
+      // A Stop/Cancel that landed during apply() (task set failed/cancelled -> poll
+      // aborted the signal) must win over this completion: honor it before the done
+      // write so a finished step cannot clobber the stopped state back to 'done' and
+      // advance. Long deterministic steps (RAG sync) also poll the signal internally;
+      // this closes the return-race generically for every step.
+      throwIfCancelled();
+      const done = await finalize({
         status: 'done',
         output,
         summary: curatedSummary,
+        degradedNote,
         statusMessage: null,
-        // Ends successfully => carries no error; see the main done write below.
+        // A row that ends successfully carries no error. The step may have failed on an earlier
+        // attempt (an orphaned CLI, a transient dispatch failure) and error_message survived the
+        // retry, so a DONE row kept rendering a red "cli invocation failed…" banner — reading as a
+        // failed step, in parallel with whatever the task was really doing. degradedNote /
+        // warningMessage are the channels for "succeeded, with caveats".
         errorMessage: null,
         endedAt: new Date(),
       });
       await recordRecap();
-      await recordFinishedUsage(db, finished, meta.id);
-      if (verdict.kind === 'revise') {
-        ctx.logger.info(
-          { stepId: meta.id, targetStepId: verdict.targetStepId },
-          'revise-loop: apply requested revising an earlier step',
-        );
-        return {
-          status: 'revise',
-          row: finished,
-          targetStepId: verdict.targetStepId,
-          sourceStepId: meta.id,
-          ...(verdict.continuation ? { continuation: verdict.continuation } : {}),
-        };
-      }
-      ctx.logger.info(
-        { stepId: meta.id, round },
-        verdict.uncapped
-          ? 'restart-loop: human gate requested restart from implementation (uncapped)'
-          : 'fix-loop: blocking defect found; routing back to implementation',
-      );
-      return {
-        status: 'loop_back',
-        row: finished,
-        diagnosis: verdict.diagnosis,
-        sourceStepId: meta.id,
-        ...(verdict.guidance ? { guidance: verdict.guidance } : {}),
-        ...(verdict.unfencedLegacy ? { unfencedLegacy: true } : {}),
-        ...(verdict.uncapped ? { uncapped: true } : {}),
-      };
-    }
 
-    // A Stop/Cancel that landed during apply() (task set failed/cancelled -> poll
-    // aborted the signal) must win over this completion: honor it before the done
-    // write so a finished step cannot clobber the stopped state back to 'done' and
-    // advance. Long deterministic steps (RAG sync) also poll the signal internally;
-    // this closes the return-race generically for every step.
-    throwIfCancelled();
-    const done = await finalize({
-      status: 'done',
-      output,
-      summary: curatedSummary,
-      degradedNote,
-      statusMessage: null,
-      // A row that ends successfully carries no error. The step may have failed on an earlier
-      // attempt (an orphaned CLI, a transient dispatch failure) and error_message survived the
-      // retry, so a DONE row kept rendering a red "cli invocation failed…" banner — reading as a
-      // failed step, in parallel with whatever the task was really doing. degradedNote /
-      // warningMessage are the channels for "succeeded, with caveats".
-      errorMessage: null,
-      endedAt: new Date(),
-    });
-    await recordRecap();
+      await recordFinishedUsage(db, done, meta.id);
 
-    await recordFinishedUsage(db, done, meta.id);
-
-    return { status: 'done', row: done, output };
+      return { status: 'done', row: done, output };
+    };
+    return await runPipeline();
   } catch (err) {
     if (superseded || err instanceof StepSupersededError) return supersededPass(row);
     // Missing pinned code is a dead task; the queue owns that durable state and its recovery.

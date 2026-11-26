@@ -83,6 +83,60 @@ generation and keeps earlier rows. Recording failures only warn and never block 
 a failed finalization may leave a running record. No recovery sweep invents a successful
 check or zero duration.
 
+**An approved pre-form continuation has a durable checkpoint before fresh work.**
+`ReopenStepFormError({ rerunPreForm: true })` commits one short transaction in run → step → task
+order: consume only the exact ended, unsuperseded invocation supplied to apply, verify the owned
+step's expected generation, clear detection/provider/schema/answers, set `waiting_cli` and the
+`pause_form_on_retry` old-answer hold, fold the prior wait with the host timing helper, and set
+the task `running`. The task fence verifies owner, epoch, live/nondead status, current step and
+round; any loss rolls consumption and clearing back. It moves no pointer, epoch or generation,
+resets no downstream row, and retains spend and accepted history. The same transaction appends
+`step.pre_form_continuation` with version 1 and the rerun generation. A fresh dispatch requires
+both the held row and this opt-in event for its current generation: an ordinary Retry can produce
+the same row shape before its first pre-form invocation. Recovery's epoch takeover preserves the
+event's authority; Retry advances generation and cannot inherit that policy.
+The guarded-row Resume reset is an accepted exception: `preserveGuards` keeps a guarded row's
+generation and hold, so its existing opt-in event still qualifies once the fresh pass returns to
+`waiting_cli`. This retains continuation-only pause deferral and fenced insertion for a step that
+already opted in; it grants no new approval, extra dispatch or module work allowance. The module
+must still derive authority and its finite work bound from durable state.
+
+A crash after commit but before preparation, reservation or enqueue leaves `running` +
+`waiting_cli`, no live invocation, cleared answers and the hold. Boot's waiting-cli reader and
+the stalled sweep's `idleWaitingCliRow` both take this exact shape, preserving generation and
+hold while their epoch takeover fences older jobs. Before pickup/checkpoint, the saved answered
+form is still owned by the existing answered-form sweep; the queue handler marks the task running
+before apply. Replay of approved module publication must be idempotent across either cut.
+An inserted invocation whose queue acknowledgement was lost is reused; an unqueued orphan
+remains the existing run recovery's responsibility, never a reason for an immediate duplicate.
+
+The current advance immediately re-enters the shared detect/pre-form/prepareForm/form/apply
+pipeline, with all local old inputs discarded. It permits only one synchronous re-entry; a second
+request without an invocation park returns a boundary form. The hold ignores old job payloads
+before the fresh park, then the ordinary stale-submit timestamp guard protects that park.
+A null form after prepare returns false is allowed; manual Continue policy still applies.
+A synchronous opt-in re-entry or boot/sweep-recovered held continuation that finishes with a null
+form clears the old-answer hold only in the owned done write after apply succeeds. The hold remains through apply and any crash before it.
+
+On this held continuation only, each fresh pre-form dispatch rechecks pause, including follow-ups
+requested by `completePreForm`. Completed results may still be accepted idempotently. A pause
+or unreadable state returns `deferred` with the pause poll delay, preserving the checkpoint and
+recording CLI idle time; the queue only adds a normal same-step advance. Resume runs once without
+Retry. The canonical `StepPrepareDeferredError` handles a pause race in prepare/prepareWorkspace:
+the host verifies pause and, under the same lock order and ownership/generation/task fences,
+releases only this pass's unqueued, unstarted reservation. Outside this hold the signal is a
+configuration failure. Resume between the module's read and the host recheck re-invokes `prepare`
+once; a repeated signal without pause fails loudly. For `prepareWorkspace`, the released
+reservation requires a fresh pass: defer one second, recording the latest
+`step.pre_form_continuation` event id and generation in `step.pre_form_workspace_resume_deferred`.
+Each later checkpoint gets its own allowance; another workspace refusal for the same checkpoint
+without pause fails rather than polling forever. `StepPrepareParkError` keeps its separate live-winner
+contract. Ordinary module-schema deferrals retain their original delay.
+
+Rollback removes module opt-ins and imports of the new signal first. Keep capable workers until
+all resumable held continuations settle or park safely. No migration is added or reversed;
+retain invocation, acceptance, consent and spend history. Downgrading under live work is unsafe.
+
 **A running task that nothing drives is taken over.** A `running` task whose current step row is
 missing, `pending` and not parked, parked with a heartbeat older than the cutoff, `running` with no
 run left to wait for, or finished (`done`/`skipped`) with nothing after it, while the task queue holds
