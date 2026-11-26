@@ -297,6 +297,11 @@ isolates `DerivedRunPlanError` per task, returning valid counts plus `incomplete
 `invalidTasks: [{id, code}]`; its dialog labels incomplete counts even at zero. The reset guard
 `loadLiveRootWriters` instead retains an invalid live task as a named 409 blocker before deletion.
 Neither scan marks tasks dead, and other failures propagate.
+The preview also lists, by id and count (`composedLspFailureTasks`), the live composed tasks whose
+lock set would have no enabled member once this provider is disabled, including tasks with no
+step binding to hold yet; the dialog warns that they fail at their next CLI step until a member
+is re-enabled, and still allows the disable. It reuses the dispatcher's membership rule
+(`composedLspAllowedSet`) and the CLI mirrors' retained-set reader.
 
 **A missing step is never filtered out.** `resolveRunList` returns the steps and the unresolved ids, and
 an unresolved step marks the task dead (`markTaskDead`). Filtering made both forward walks read "no next
