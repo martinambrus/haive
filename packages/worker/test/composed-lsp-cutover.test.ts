@@ -26,6 +26,8 @@ vi.mock('../src/queues/cli-exec/worktrees-boundary.js', () => ({
 import * as lspLayer from '../src/sandbox/lsp-layer.js';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { schema, type Database } from '@haive/database';
+import type { CliProviderName } from '@haive/shared';
+import { resolveImageTag } from '../src/sandbox/image-cache.js';
 import { createFakeDb } from '@haive/database/testing';
 import { eq, type SQL } from 'drizzle-orm';
 import { PgDialect } from 'drizzle-orm/pg-core';
@@ -68,7 +70,10 @@ vi.mock('../src/repo/worktree-git-boundary.js', async (original) => ({
   ...(await original<typeof import('../src/repo/worktree-git-boundary.js')>()),
   resolveInvocationWorkerTree: async () => '/repo',
 }));
-vi.mock('../src/sandbox/sandbox-core-image.js', () => ({ ensureSandboxCoreImage: async () => {} }));
+vi.mock('../src/sandbox/sandbox-core-image.js', async (original) => ({
+  ...(await original<object>()),
+  ensureSandboxCoreImage: async () => {},
+}));
 const ids = {
   task: '11111111-1111-4111-8111-111111111111',
   env: '22222222-2222-4222-8222-222222222222',
@@ -272,6 +277,49 @@ beforeEach(() => {
   vi.clearAllMocks();
   phpFiles.read.mockImplementation(async () => ({ data: Buffer.from('{}'), truncated: false }));
 });
+
+it.each(['pending', 'skipped'] as const)(
+  'without a retained image, bootstrap %s controls launch without claiming readiness',
+  async (status) => {
+    const f = fixture();
+    await f.write(schema.taskSteps, ids.bootstrap, { status });
+    const launch = () =>
+      resolveSandboxImageTag(f.db, ids.task, f.f.rows(schema.cliProviders)[0] as never, f.runner);
+    expect(
+      await hasReadyLspBridge(f.db, ids.task, { providerId: ids.provider, runner: f.runner }),
+    ).toBe(false);
+    // A skipped 04 keeps the provider-image fallback (owner-visible decision on T709 (h)):
+    // Skip is explicit and readiness stays false, so LSP is never claimed.
+    const row = f.f.rows(schema.cliProviders)[0] as typeof schema.cliProviders.$inferSelect;
+    const providerTag = resolveImageTag({
+      name: row.name as CliProviderName,
+      cliVersion: row.cliVersion || null,
+      providerId: row.id,
+      sandboxDockerfileExtra: row.sandboxDockerfileExtra,
+    })?.tag;
+    // The provider image (with the CLI installed), never the bare sandbox core image.
+    expect(providerTag).toBeTruthy();
+    expect(await launch()).toBe(providerTag);
+    expect(f.run).not.toHaveBeenCalled();
+  },
+);
+
+it('an unready Go plugin gets language-neutral recovery guidance', async () => {
+  const f = fixture();
+  await f.write(schema.taskSteps, ids.plugin, { output: { skipped: true } });
+  const step = createVerifyComposedLspStep(f.runner);
+  const detected = await step.detect!(f.ctx);
+  const result = await step.apply(f.ctx, {
+    detected,
+    formValues: {},
+    iteration: 0,
+    previousIterations: [],
+  });
+  expect(result.bridgeReady).toBe(false);
+  expect(result.guidance).toMatch(/plugin.*Retry 01b/);
+  expect(result.guidance).not.toContain('PHP');
+});
+
 describe('composed LSP identity and readiness', () => {
   it('requires only matching composed evidence, and pins its immutable image at execution', async () => {
     const f = fixture();

@@ -120,6 +120,26 @@ describe('a step action on a task that has ended', () => {
     },
   );
 
+  it.each(['workflow', 'custom-lsp-check'])(
+    '%s Retry requires leaving completed and preserves its pinned run list',
+    async (type) => {
+      const fake = setup('completed');
+      const snapshot = [STEP];
+      fake.patch(schema.tasks, TASK, { type, runListSnapshot: snapshot });
+      fake.patch(schema.taskSteps, STEP_ROW, { status: 'done' });
+      expect(await act('retry')).toBe(409);
+      expect(h.add).not.toHaveBeenCalled();
+      expect(h.kill).not.toHaveBeenCalled();
+      fake.patch(schema.tasks, TASK, { status: 'failed' });
+      expect(await act('retry')).toBe(200);
+      expect(fake.rows(schema.tasks)[0]).toMatchObject({
+        status: 'running',
+        runListSnapshot: snapshot,
+      });
+      expect(h.add).toHaveBeenCalledTimes(1);
+    },
+  );
+
   it('answers 2xx, never 503, when the queue never answers after the row moved', async () => {
     const fake = setup('failed');
     h.add.mockImplementationOnce(() => new Promise(() => undefined));
