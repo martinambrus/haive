@@ -410,6 +410,23 @@ source task and its user, refuses an entry carrying an enforcement approval, and
 active and archived articles alone. A disabled store or another task type does nothing; store
 failures keep the existing best-effort teardown behaviour.
 
+Both callers use the same settlement fence as resource teardown. After reading settings,
+the helper takes the task row FOR NO KEY UPDATE through `withTaskSettlementTransaction`,
+with the 60 s LOCAL transaction timeout, and rechecks its type, user and exact ending status
+(`failed` or `cancelled`). A Retry that committed first leaves the entry alone; a Retry arriving
+during the store write waits before publishing revival. The store call receives the section's
+abort signal, so expiry destroys its pool, and the callback checks the signal immediately before
+the mutation. No step/run row, repository lock or CLI auth lock is taken while the task is held.
+The global store is a separate database: a mutation already committed there cannot be rolled
+back if the main transaction subsequently fails or expires. As with external resource removal,
+the fence cannot retract an operation already issued. The existing catch still warns and lets
+teardown finish. `global-kb-task-end-db.test.ts`, registered in the CI GATED list and run locally
+with `pnpm test:gated worker/test/global-kb-task-end-db.test.ts`, exercises both Retry orders on
+Postgres; entry ownership/status filters and best-effort failures remain unit controls.
+
+Rollback reverts the helper and its controls; no schema or data rollback is needed. An entry
+already marked failed or deleted in the separate store is not restored by reverting code.
+
 ## Facets
 
 An entry's facets RESTRICT: each dimension it names must overlap the project's values, and a

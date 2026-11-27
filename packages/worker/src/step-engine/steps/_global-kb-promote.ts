@@ -1,6 +1,11 @@
 import { and, desc, eq, inArray, isNull, ne, sql } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
 import {
+  setTaskSettlementTimeout,
+  taskWriteTarget,
+  withTaskSettlementTransaction,
+} from '@haive/shared';
+import {
   globalKbEntries,
   globalKbTopicKey,
   resolveGlobalKbSettings,
@@ -756,32 +761,53 @@ export async function reconcileKbAuthorEntryOnTaskEnd(
     if (task?.type !== 'kb_author') return;
     const settings = await resolveGlobalKbSettings();
     if (!settings.enabled) return;
-    await withGlobalKb(db, async ({ db: gdb }) => {
-      const where = and(
-        eq(globalKbEntries.sourceTaskId, taskId),
-        eq(globalKbEntries.userId, task.userId),
-        isNull(globalKbEntries.enforcedHash),
-        inArray(
-          globalKbEntries.status,
-          outcome === 'cancelled' ? ['skeleton', 'enriching', 'failed'] : ['skeleton', 'enriching'],
-        ),
+    await withTaskSettlementTransaction(db, async (tx, signal) => {
+      await setTaskSettlementTimeout(tx);
+      const [settled] = await tx
+        .select({ type: schema.tasks.type, userId: schema.tasks.userId })
+        .from(schema.tasks)
+        .where(and(taskWriteTarget(taskId, { settled: true }), eq(schema.tasks.status, outcome)))
+        .for('no key update');
+      if (settled?.type !== 'kb_author') return;
+      // Retry writes this row last. Keep it held through the separate store's mutation,
+      // without acquiring step/run rows, repository locks or CLI auth locks.
+      await withGlobalKb(
+        db,
+        async ({ db: gdb }) => {
+          const where = and(
+            eq(globalKbEntries.sourceTaskId, taskId),
+            eq(globalKbEntries.userId, settled.userId),
+            isNull(globalKbEntries.enforcedHash),
+            inArray(
+              globalKbEntries.status,
+              outcome === 'cancelled'
+                ? ['skeleton', 'enriching', 'failed']
+                : ['skeleton', 'enriching'],
+            ),
+          );
+          signal.throwIfAborted();
+          if (outcome === 'cancelled') {
+            const removed = await gdb
+              .delete(globalKbEntries)
+              .where(where)
+              .returning({ id: globalKbEntries.id });
+            if (removed.length)
+              log.info(
+                { taskId, removed: removed.length },
+                'kb_author entry removed on task cancel',
+              );
+          } else {
+            const updated = await gdb
+              .update(globalKbEntries)
+              .set({ status: 'failed', updatedAt: new Date() })
+              .where(where)
+              .returning({ id: globalKbEntries.id });
+            if (updated.length)
+              log.info({ taskId, updated: updated.length }, 'kb_author entry marked failed');
+          }
+        },
+        { settings, signal },
       );
-      if (outcome === 'cancelled') {
-        const removed = await gdb
-          .delete(globalKbEntries)
-          .where(where)
-          .returning({ id: globalKbEntries.id });
-        if (removed.length)
-          log.info({ taskId, removed: removed.length }, 'kb_author entry removed on task cancel');
-      } else {
-        const updated = await gdb
-          .update(globalKbEntries)
-          .set({ status: 'failed', updatedAt: new Date() })
-          .where(where)
-          .returning({ id: globalKbEntries.id });
-        if (updated.length)
-          log.info({ taskId, updated: updated.length }, 'kb_author entry marked failed');
-      }
     });
   } catch (err) {
     log.warn({ err, taskId, outcome }, 'kb_author entry reconcile on task end failed (skipped)');

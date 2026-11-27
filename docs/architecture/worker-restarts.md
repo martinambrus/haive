@@ -720,6 +720,31 @@ holding a row lock. The summary's deferred auth cleanup repeats the terminal che
 this fence after sync-back, before invalidating preparations. The superseded pass also
 refuses to initiate a settlement at a newer task epoch.
 
+The kb-author sibling (`reconcileKbAuthorEntryOnTaskEnd`, shared by failed settlement and
+Cancel) now takes that same bounded task-row fence through its separate-store mutation,
+rechecking the exact ending status and forwarding the section signal to the store call.
+A Retry that already revived the task keeps its enriching entry. See
+[Author task failure and cancellation](global-kb.md#author-task-failure-and-cancellation)
+for the cross-database commit limitation and the real-Postgres controls for both lock orders.
+
+Two other settlement siblings have different contracts. `defaultContainerCleanup` remains
+unfenced but dormant in shipped production: its `ContainerManager.getByTask` reads only
+task-bound `containers` rows, `ContainerManager.create` has no production caller (modules
+included), and the other production insert (`sandbox/login-container.ts`) records `taskId: null`.
+The fallback would destroy a revived task's container if a consumer began creating those rows;
+such a consumer must add a settlement fence before enabling it. The injectable cleanup runner
+has test callers only; neither API is removed here.
+
+`resyncAfterTaskEnd` is safe to repeat after revival: it handles only onboarding and upgrade
+repositories and delegates to the ordinary projection reconciliation, without ending a task,
+deleting its KB entry, removing a worktree or releasing its runtime. Project-state import
+rechecks live checkout holders (including the revived task; `endingTaskId` does not exclude
+it), and background record writes use `refuseWhileHeld` under the normal creation/project-state
+locks. The plan half uses its own locked three-way reconciliation, byte comparisons and dirty
+revision protocol; it never treats the stale task-end call as permission to delete task state.
+Git-operation and interrupted-write guards and the durable sweeps remain authoritative.
+Neither sibling needs a code change for the shipped Retry race.
+
 Auth-volume audit appends use the existing append-once helper under that task row lock,
 keyed by completion stamp, epoch and removal/failure counts. Identical observations of
 one failure record one event; changed counts record a new event so a successful retry is
