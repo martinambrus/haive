@@ -235,7 +235,8 @@ function deriveTopLevelPaths(fileTree: string[] | null): string[] {
  *  nothing to move it off `cloning`. The worker's boot reconciler cannot cover that case in
  *  bounded time: it deliberately ignores rows younger than its cutoff, because a young row is
  *  indistinguishable from one whose enqueue is still in flight. So it is closed here, where the
- *  failure actually happens and no race is involved.
+ *  failure actually happens. Refresh enqueue failures compare the admission
+ *  job id too, since a lost acknowledgement can outlive that job and a newer admission.
  *
  *  Rethrows, because the caller's request really did fail and must say so. The status write is
  *  best-effort: if the database is unreachable too there is nothing to be done, and masking the
@@ -245,6 +246,7 @@ export async function addRepoJobOrMarkError(
   repositoryId: string,
   add: () => Promise<unknown>,
   errorCode: RepositoryErrorCode | null = null,
+  refreshJobId?: string,
 ): Promise<void> {
   try {
     await add();
@@ -253,13 +255,18 @@ export async function addRepoJobOrMarkError(
       .update(schema.repositories)
       .set({
         status: 'error',
-        refreshPending: false,
+        ...(refreshJobId ? { refreshPending: false, refreshJobId: null } : {}),
         errorCode,
         statusMessage:
           'Could not queue the job that prepares this repository. Retry if available; otherwise delete the repository and add it again.',
         updatedAt: new Date(),
       })
-      .where(eq(schema.repositories.id, repositoryId))
+      .where(
+        and(
+          eq(schema.repositories.id, repositoryId),
+          refreshJobId ? eq(schema.repositories.refreshJobId, refreshJobId) : undefined,
+        ),
+      )
       .catch(() => undefined);
     throw err;
   }
@@ -3784,6 +3791,7 @@ async function refreshRepository(c: Context<AppEnv>, recovery = false) {
       throw new HttpError(409, 'Repository preparation is already queued or running.');
     }
   }
+  const refreshJobId = randomUUID();
   await db.transaction(async (tx) => {
     await admitNewWork(tx);
     const changed = await tx
@@ -3794,6 +3802,7 @@ async function refreshRepository(c: Context<AppEnv>, recovery = false) {
           ? {}
           : { status: 'cloning' as const }),
         refreshPending: true,
+        refreshJobId,
         statusMessage: null,
         // Keep the repair signal until recovery settles: even before enqueue, another refresh
         // must remain check-only rather than rebuild without restoring this install's data.
@@ -3849,11 +3858,13 @@ async function refreshRepository(c: Context<AppEnv>, recovery = false) {
         payload,
         retryUpload || recovery
           ? {
+              jobId: refreshJobId,
               attempts: 1,
               removeOnComplete: 100,
               removeOnFail: 100,
             }
           : {
+              jobId: refreshJobId,
               attempts: 3,
               backoff: { type: 'exponential', delay: 5000 },
             },
@@ -3863,6 +3874,7 @@ async function refreshRepository(c: Context<AppEnv>, recovery = false) {
       : checkCheckoutOnly
         ? repairErrorCode
         : null,
+    refreshJobId,
   );
 
   return c.json({ ok: true });

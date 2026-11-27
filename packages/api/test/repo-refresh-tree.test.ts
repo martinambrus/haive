@@ -245,7 +245,7 @@ describe('retrying an upload', () => {
         branch: 'topic/retry',
         credentialsId,
       },
-      { attempts: 3, backoff: { type: 'exponential', delay: 5000 } },
+      { jobId: expect.any(String), attempts: 3, backoff: { type: 'exponential', delay: 5000 } },
     );
     expect(h.getJobs).not.toHaveBeenCalled();
     expect(JSON.stringify(h.add.mock.calls)).not.toContain('fixture-password');
@@ -323,7 +323,10 @@ describe('retrying an upload', () => {
     h.add.mockRejectedValue(new Error('Redis unavailable'));
     expect((await refresh()).status).toBe(500);
     expect(status(fake)).toBe('error');
-    expect(fake.rows(schema.repositories)[0]!.refreshPending).toBe(false);
+    expect(fake.rows(schema.repositories)[0]).toMatchObject({
+      refreshPending: false,
+      refreshJobId: null,
+    });
   });
 
   it('keeps refreshing an upload linked to a remote, without re-extracting it', async () => {
@@ -558,4 +561,56 @@ describe('rebuild admission for task worktrees and repaired sources', () => {
       );
     },
   );
+});
+
+it.each(['refresh', 'scan', 'extract', 'recovery'])(
+  'records the enqueued job id with the %s admission marker',
+  async (kind) => {
+    const fake =
+      kind === 'extract'
+        ? upload()
+        : setup(
+            kind === 'scan'
+              ? { source: 'local_path', localPath: '/host-fs/r', writable: false }
+              : {
+                  source: 'git_https',
+                  remoteUrl: 'https://example.com/r.git',
+                  ...(kind === 'recovery'
+                    ? { status: 'error', errorCode: 'checkout_repair_needed' }
+                    : {}),
+                },
+          );
+    const response =
+      kind === 'recovery'
+        ? await app.request(`/${REPO}/recover-checkout`, { method: 'POST' })
+        : await refresh();
+    expect(response.status).toBe(200);
+    const jobId = (h.add.mock.calls[0]![2] as { jobId: string }).jobId;
+    expect(jobId).toMatch(/^[0-9a-f-]{36}$/);
+    expect(fake.rows(schema.repositories)[0]).toMatchObject({
+      refreshPending: true,
+      refreshJobId: jobId,
+    });
+  },
+);
+
+it('a late enqueue rejection cannot clear a newer admission', async () => {
+  const fake = upload();
+  const newerJobId = '00000000-0000-4000-8000-0000000000f1';
+  h.add.mockImplementationOnce(async () => {
+    // The first add was accepted, its job finished, then another refresh was admitted
+    // before the original add lost its acknowledgement.
+    fake.patch(schema.repositories, REPO, {
+      status: 'ready',
+      refreshPending: true,
+      refreshJobId: newerJobId,
+    });
+    throw new Error('enqueue acknowledgement lost');
+  });
+  expect((await refresh()).status).toBe(500);
+  expect(fake.rows(schema.repositories)[0]).toMatchObject({
+    status: 'ready',
+    refreshPending: true,
+    refreshJobId: newerJobId,
+  });
 });

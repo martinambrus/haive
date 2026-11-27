@@ -283,7 +283,7 @@ it('Check repair resumes an ordinary refresh once the checkout is usable', async
 
 async function runRefresh(payload: RepoJobPayload) {
   startRepoWorker(root);
-  return h.processor!({ name: REPO_JOB_NAMES.REFRESH, data: payload } as Job);
+  return h.processor!({ id: 'refresh-job', name: REPO_JOB_NAMES.REFRESH, data: payload } as Job);
 }
 
 it.each(['usable', 'unusable', 'unknown', 'holding', 'refused'] as const)(
@@ -1033,6 +1033,7 @@ it('T594 R1: keeps pending refresh work through backoff, then clears it on final
   row.refreshPending = true;
   startRepoWorker(root);
   const job = {
+    id: 'refresh-job',
     name: REPO_JOB_NAMES.REFRESH,
     data: payload,
     opts: { attempts: 3 },

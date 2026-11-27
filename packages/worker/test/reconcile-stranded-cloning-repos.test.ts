@@ -100,6 +100,7 @@ describe('reconcileStrandedCloningRepos', () => {
       id: '00000000-0000-4000-8000-0000000000b1',
       status: 'ready',
       refreshPending: true,
+      refreshJobId: 'old-refresh',
       errorCode: 'checkout_repair_needed',
       updatedAt: new Date(Date.now() - 10 * 60_000),
       rootClaimedAt: null,
@@ -108,6 +109,7 @@ describe('reconcileStrandedCloningRepos', () => {
     expect(fake.rows(schema.repositories)[0]).toMatchObject({
       status: 'error',
       refreshPending: false,
+      refreshJobId: null,
       errorCode: 'checkout_repair_needed',
     });
   });
@@ -209,6 +211,7 @@ describe('T594 L3: stale healthy refresh marker', () => {
       id: '00000000-0000-4000-8000-0000000000b1',
       status: 'ready',
       refreshPending: true,
+      refreshJobId: 'old-refresh',
       errorCode: null,
       statusMessage: null,
       updatedAt: new Date(Date.now() - 10 * 60_000),
@@ -221,6 +224,7 @@ describe('T594 L3: stale healthy refresh marker', () => {
       expect(fake.rows(schema.repositories)[0]).toMatchObject({
         status: 'ready',
         refreshPending: false,
+        refreshJobId: null,
         errorCode: null,
         statusMessage: null,
       });

@@ -103,10 +103,14 @@ its Terminal, Plan and task links available. If the worker proves that checkout 
 escalates to a rebuild, it commits `cloning` before the rename transaction moves the old checkout
 aside, so archive downloads, new Terminal connections and repository Editor starts refuse the
 unfinished checkout. Detection restores `ready` after verification. A genuine preparation or
-recovery also uses `cloning`. `refresh_pending` (0250, declared last) is set in the admission transaction so the
+recovery also uses `cloning`. `refresh_pending` and its owning `refresh_job_id` (0250, declared last) are set in the admission transaction so the
 maintenance page and updater still count queued and running refresh work, including delayed
 retries, independently of availability. A second admission refuses while it is set. A successful
-handler, final failure or failed enqueue clears it; the ordinary stranded-preparation sweep also
+handler, final failure or failed enqueue clears it only when its BullMQ job id still matches
+`refresh_job_id`, clearing both columns together. Admission chooses that UUID before enqueue for
+refresh, read-only rescan and upload retry alike. An initial scan may publish `ready` before its
+mirror imports finish and holds no root claim; finishing or failing that older job must not erase
+a refresh admitted during those imports. The ordinary stranded-preparation sweep also
 releases an old marker whose queue has no live job, preserving any repair code. A `ready` row
 without a repair code keeps its status and display copy: the sweep clears only the stale marker
 and logs that release once. The maintenance blocking list labels pending refreshes `refreshing`. Root claims, holding tasks and
@@ -119,7 +123,7 @@ enqueuing extraction, so a failed preparation can use Retry. The unused single-s
 Retry sources, and archive retention is unchanged.
 
 T594 rollback: revert the code commits after active rebuilds and cancellation teardowns settle.
-Keep additive migration 0250 and its column on rollback; never remove an applied file.
+Keep additive migration 0250 and both columns on rollback; never remove an applied file.
 Settle every pending refresh before downgrading the API/worker/updater. Deploy all three together:
 an older updater cannot count a new API's ready refresh. The new updater detects the marker's
 presence before counting so it can drain a source schema that predates 0250. Keep existing `.aside-*` and `.rebuild-*` siblings;

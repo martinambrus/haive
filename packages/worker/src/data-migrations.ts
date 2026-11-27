@@ -587,7 +587,7 @@ export async function reconcileStrandedCloningRepos(db: Database): Promise<void>
     // alone cannot diagnose a broken checkout. Recheck health and age in the write too.
     const cleared = await db
       .update(schema.repositories)
-      .set({ refreshPending: false, updatedAt: new Date() })
+      .set({ refreshPending: false, refreshJobId: null, updatedAt: new Date() })
       .where(
         and(
           inArray(schema.repositories.id, healthy),
@@ -615,6 +615,7 @@ export async function reconcileStrandedCloningRepos(db: Database): Promise<void>
     .set({
       status: 'error',
       refreshPending: false,
+      refreshJobId: null,
       // Keep a repair signal (check-only or recovery preparation), just as the processor's catch does.
       statusMessage:
         'Preparing this repository did not finish — the worker stopped while it was running. Retry if available; otherwise delete the repository and add it again.',

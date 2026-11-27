@@ -2,7 +2,7 @@ import { CheckoutRepairNeededError } from '../repo/repair-needed.js';
 import { scrubErrorPaths } from '@haive/shared/logger';
 import { safeProcessor } from './safe-processor.js';
 import { Worker, UnrecoverableError, type Job } from 'bullmq';
-import { eq } from 'drizzle-orm';
+import { and, eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import {
   QUEUE_NAMES,
@@ -28,6 +28,20 @@ export function startRepoWorker(repoStorageRoot: string): Worker {
     safeProcessor(async (job: Job<RepoJobPayload>) => {
       const db = getDb();
       const payload = job.data;
+      const clearRefreshPending = async () => {
+        if (!job.id) return;
+        // An initial scan can publish ready before its imports finish. Only the job named
+        // by refresh admission owns its marker, even if an older handler finishes later.
+        await db
+          .update(schema.repositories)
+          .set({ refreshPending: false, refreshJobId: null })
+          .where(
+            and(
+              eq(schema.repositories.id, payload.repositoryId),
+              eq(schema.repositories.refreshJobId, job.id),
+            ),
+          );
+      };
       try {
         if (job.name === REPO_JOB_NAMES.CLONE) {
           await handleClone(payload, db, repoStorageRoot);
@@ -44,10 +58,7 @@ export function startRepoWorker(repoStorageRoot: string): Worker {
         } else {
           throw new Error(`Unknown repo job: ${job.name}`);
         }
-        await db
-          .update(schema.repositories)
-          .set({ refreshPending: false })
-          .where(eq(schema.repositories.id, payload.repositoryId));
+        await clearRefreshPending();
       } catch (err) {
         const message = scrubErrorPaths(err);
         logger.error(
@@ -58,11 +69,6 @@ export function startRepoWorker(repoStorageRoot: string): Worker {
           .update(schema.repositories)
           .set({
             status: 'error',
-            // A delayed retry still owes work; only its final failure releases the drain.
-            ...((job.attemptsMade ?? 0) + 1 >= (job.opts?.attempts ?? 1) ||
-            err instanceof UnrecoverableError
-              ? { refreshPending: false }
-              : {}),
             // A check-only job runs for a repair code and keeps it whatever failed, so its
             // Retry stays a check and a rebuild still needs the explicit recovery.
             ...(payload.checkCheckoutOnly
@@ -79,6 +85,12 @@ export function startRepoWorker(repoStorageRoot: string): Worker {
             updatedAt: new Date(),
           })
           .where(eq(schema.repositories.id, payload.repositoryId));
+        // A delayed retry still owes work; only its final failure releases its own marker.
+        if (
+          (job.attemptsMade ?? 0) + 1 >= (job.opts?.attempts ?? 1) ||
+          err instanceof UnrecoverableError
+        )
+          await clearRefreshPending();
         throw err;
       }
     }),
