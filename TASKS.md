@@ -914,7 +914,7 @@ Notes from the #1309 driver:
 
 ### T740 · FNF[agent-description-render] · agent descriptions render wrong for some inputs
 
-status: open for follow-ups 3-8; items 1-2 DONE in #1310 (70ce4c200, deployed 2026-11-21 18:56Z; a bundle item holding a NUL is now dropped on its own; full TOML and YAML escape sets, first-word case rule, renderer v4) · kind: fix · found: #1302 driver 2026-11-21, checked against the code · priority: P4
+status: DONE 2026-11-27: items 3-8 merged #1369 (87d648801, live via worker reload: escape-aware TOML decoder, shared TOML encoder for MCP config with quoted keys, YAML scalar for every skill description, control collapse in both index tables, name mutants pinned; no version bump, existing installs keep their bytes until a re-render, see onboarding-upgrades.md); items 1-2 DONE in #1310 (70ce4c200, deployed 2026-11-21 18:56Z; a bundle item holding a NUL is now dropped on its own; full TOML and YAML escape sets, first-word case rule, renderer v4) · kind: fix · found: #1302 driver 2026-11-21, checked against the code · priority: P4
 
 Either fix changes the rendered body, so the renderer pin (#1302) forces a renderer version bump with it.
 
