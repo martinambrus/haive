@@ -1242,7 +1242,7 @@ Runs of a single-agent step show only "Run 1", "Run 2" (`web/src/components/term
 
 ### T774 · Translator review: an ignored correction stays ignored; explicit "later"
 
-status: open, in work, design confirmed by owner 2026-11-26 · kind: ux · found: owner task ae8fb29c 2026-11-26 · priority: P1
+status: done 2026-11-27, translator #26 (178eee6) live, migration 0014 applied 01:05:31Z; design confirmed by owner 2026-11-26 · kind: ux · found: owner task ae8fb29c 2026-11-26 · priority: P1
 
 Unticked corrections are recorded as rejected, but every re-review of a unit stores its corrections as new proposals with no comparison to earlier decisions, so a rejected correction returns whenever its unit is reviewed again (ae8fb29c: 17 proposals, 17 distinct fingerprints; unit 1 block b3 proposed twice, b8 four times as reworded variants, so an exact-fingerprint match would not catch them).
 
