@@ -1,3 +1,4 @@
+import { tomlBasicString, tomlKey } from '../toml-strings.js';
 import { isDeepStrictEqual } from 'node:util';
 import {
   assertVersionToken,
@@ -542,12 +543,15 @@ function codexTomlBlock(
   args: string[],
   env?: Record<string, string>,
 ): string {
-  const lines: string[] = [`[mcp_servers.${name}]`];
-  lines.push(`command = ${tomlString(command)}`);
-  lines.push(`args = [${args.map(tomlString).join(', ')}]`);
+  const serverKey = tomlKey(name);
+  const lines: string[] = [`[mcp_servers.${serverKey}]`];
+  lines.push(`command = ${tomlBasicString(command)}`);
+  lines.push(`args = [${args.map(tomlBasicString).join(', ')}]`);
   if (env && Object.keys(env).length > 0) {
-    const envLines = Object.entries(env).map(([key, val]) => `${key} = ${tomlString(val)}`);
-    lines.push('', `[mcp_servers.${name}.env]`, ...envLines);
+    const envLines = Object.entries(env).map(
+      ([key, val]) => `${tomlKey(key)} = ${tomlBasicString(val)}`,
+    );
+    lines.push('', `[mcp_servers.${serverKey}.env]`, ...envLines);
   }
   return lines.join('\n');
 }
@@ -616,10 +620,6 @@ export function buildMcpAddArgv(cliProvider: CliProviderName, server: McpServerS
   for (const [key, value] of env) argv.push('--env', `${key}=${value}`);
   argv.push(server.name, '--', server.command, ...server.args);
   return argv;
-}
-
-function tomlString(value: string): string {
-  return `"${value.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`;
 }
 
 /** Haive's own starting `.claude/mcp_settings.json`: the managed servers and nothing else. */

@@ -18,6 +18,7 @@ import {
 import { workspaceAnchor } from '../../../repo/worktree-paths.js';
 import { extractFencedJsonObjects, parseJsonLoose } from '../_fenced-json.js';
 import { yamlScalar } from '../_yaml-scalar.js';
+import { markdownTableCell } from './_markdown-table-cell.js';
 import { jsonrepair } from 'jsonrepair';
 import type { KbFileSummary } from './09-qa.js';
 import { buildSkillContractBlocks } from './_skill-prompt.js';
@@ -648,10 +649,7 @@ function renderRelatedSkills(items: SkillRelated[]): string[] {
 }
 
 function yamlDescription(desc: string): string {
-  const clean = desc.trim();
-  if (clean.length <= 120 && !clean.includes('\n')) return `description: ${yamlScalar(clean)}`;
-  const wrapped = clean.replace(/\s+/g, ' ').match(/.{1,78}(?:\s|$)/g) ?? [clean];
-  return ['description: >', ...wrapped.map((line) => `  ${line.trim()}`)].join('\n');
+  return `description: ${yamlScalar(desc.trim())}`;
 }
 
 export function skillToMarkdown(entry: SkillEntry): string {
@@ -779,14 +777,7 @@ export function skillsReadmeMarkdown(
     '|-------|---------|',
   ];
   for (const r of rows) {
-    // Backslashes escape first: escaping only `|` turns an input `\|` into
-    // `\\|`, which Markdown reads as an escaped backslash followed by a live
-    // cell separator, splitting the row.
-    const desc = r.description
-      .replace(/\\/g, '\\\\')
-      .replace(/\|/g, '\\|')
-      .replace(/\s+/g, ' ')
-      .trim();
+    const desc = markdownTableCell(r.description);
     lines.push(`| [${r.id}](./${r.id}/SKILL.md) | ${desc} |`);
   }
   lines.push('');

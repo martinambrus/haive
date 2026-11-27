@@ -38,6 +38,8 @@ export interface FlatTomlFields {
 }
 
 const TOML_SHORT_ESCAPES: Record<string, string> = {
+  '"': '"',
+  '\\': '\\',
   b: '\b',
   t: '\t',
   n: '\n',
@@ -45,15 +47,20 @@ const TOML_SHORT_ESCAPES: Record<string, string> = {
   r: '\r',
 };
 
-/** Decode TOML 1.0 string escapes. A malformed or non-scalar \u / \U keeps the
- *  character after the backslash, as does any unknown escape. */
-function decodeTomlEscapes(raw: string): string {
-  return raw.replace(/\\(?:u([0-9A-Fa-f]{4})|U([0-9A-Fa-f]{8})|([\s\S]))/g, (m, u4, u8, ch) => {
-    if (ch !== undefined) return TOML_SHORT_ESCAPES[ch] ?? ch;
-    const code = parseInt(u4 ?? u8, 16);
-    const isScalar = code <= 0x10ffff && !(code >= 0xd800 && code <= 0xdfff);
-    return isScalar ? String.fromCodePoint(code) : m.slice(1);
-  });
+/** Imports and persona reads are lenient, not TOML validation: preserve malformed,
+ *  non-scalar and unknown escapes verbatim instead of silently losing a backslash.
+ *  Continuations are decoded in this same pass so an escaped backslash cannot start one. */
+function decodeTomlEscapes(raw: string, multiline = false): string {
+  return raw.replace(
+    /\\(?:([ \t]*\r?\n[ \t\r\n]*)|u([0-9A-Fa-f]{4})|U([0-9A-Fa-f]{8})|([\s\S]))/g,
+    (m, continuation, u4, u8, ch) => {
+      if (continuation !== undefined) return multiline ? '' : m;
+      if (ch !== undefined) return TOML_SHORT_ESCAPES[ch] ?? m;
+      const code = parseInt(u4 ?? u8, 16);
+      const isScalar = code <= 0x10ffff && !(code >= 0xd800 && code <= 0xdfff);
+      return isScalar ? String.fromCodePoint(code) : m;
+    },
+  );
 }
 
 /** Hand-rolled TOML parser that handles the three keys Haive's emitter
@@ -82,10 +89,29 @@ export function parseFlatToml(text: string): FlatTomlFields {
     let value: string | null = null;
     if (text.startsWith('"""', pos)) {
       pos += 3;
-      const endIdx = text.indexOf('"""', pos);
-      if (endIdx < 0) break;
-      value = decodeTomlEscapes(text.slice(pos, endIdx).replace(/^\n/, ''));
-      pos = endIdx + 3;
+      let raw = '';
+      let closed = false;
+      while (pos < text.length) {
+        // An escaped quote is content, even immediately before two more quotes.
+        if (text[pos] === '\\' && text[pos + 1] !== undefined) {
+          raw += text.slice(pos, pos + 2);
+          pos += 2;
+          continue;
+        }
+        if (text.startsWith('"""', pos)) {
+          let quotes = 3;
+          while (quotes < 5 && text[pos + quotes] === '"') quotes += 1;
+          // TOML permits one or two content quotes before the closing three.
+          raw += '"'.repeat(quotes - 3);
+          pos += quotes;
+          closed = true;
+          break;
+        }
+        raw += text[pos]!;
+        pos += 1;
+      }
+      if (!closed) break;
+      value = decodeTomlEscapes(raw.replace(/^\r?\n/, '').replace(/\r\n/g, '\n'), true);
     } else if (text[pos] === '"') {
       pos += 1;
       let raw = '';

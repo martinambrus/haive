@@ -77,3 +77,21 @@ U+007F as `\uXXXX`), the body a multi-line basic string with control characters 
 `parseFlatToml` decodes the same set. MEASURED with Python `tomllib` over U+0000 to U+00FF. The
 body sentence "a specialized agent that <description>" lowercases the description's first character
 unless its first word has a later capital or a digit (`API gateway`, `S3 bucket auditor`).
+
+Generated skill descriptions, including long and multi-line descriptions and sub-skills, use
+`yamlScalar` too. The old folded-block branch wrote controls raw (PyYAML rejected U+0001),
+folded away line breaks and could lose the start of a long unbroken word. The scalar keeps the
+trimmed description intact. These generated skills are refreshed by generation/repair/sync;
+custom-bundle skill upgrade identities still follow their IR hash, not the agent renderer version.
+
+Agent TOML and MCP TOML share `worker/src/toml-strings.ts` for basic-string escaping. MCP server
+names and environment keys are single key segments: only `[A-Za-z0-9_-]+` stays bare; everything
+else is quoted with that encoder, so a dot never creates an unintended nested table. The flat
+agent reader scans escaped quotes and closing runs of three to five quotes, trims the initial
+LF/CRLF and handles line-ending backslash continuations (TOML whitespace only). It remains a
+lenient bundle/persona reader: an unknown, malformed or non-scalar escape stays verbatim,
+including its backslash, rather than throwing or silently changing the instructions. This is
+not full TOML validation; a strict parser rejects those escapes. The valid cases are compared
+with Python `tomllib` against the [TOML 1.0 string rules](https://toml.io/en/v1.0.0#string).
+`agent-render-escapes.test.ts` varies names separately from descriptions; name-escaping mutants
+that passed the old description controls fail these controls.

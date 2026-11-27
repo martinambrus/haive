@@ -129,15 +129,19 @@ describe('parseFlatToml decodes the TOML 1.0 escape set', () => {
     expect(parseFlatToml(toml).developer_instructions).toBe(`first ${DECODED}\n`);
   });
 
-  it('keeps the character after the backslash for a malformed or non-scalar \\u', () => {
-    expect(parseFlatToml(String.raw`description = "x\u12G4y"` + '\n').description).toBe('xu12G4y');
-    expect(parseFlatToml(String.raw`description = "x\uD800y"` + '\n').description).toBe('xuD800y');
+  it('keeps a malformed or non-scalar \\u escape verbatim', () => {
+    expect(parseFlatToml(String.raw`description = "x\u12G4y"` + '\n').description).toBe(
+      String.raw`x\u12G4y`,
+    );
+    expect(parseFlatToml(String.raw`description = "x\uD800y"` + '\n').description).toBe(
+      String.raw`x\uD800y`,
+    );
     expect(parseFlatToml(String.raw`description = "x\U00110000y"` + '\n').description).toBe(
-      'xU00110000y',
+      String.raw`x\U00110000y`,
     );
     expect(
       parseFlatToml('developer_instructions = """\nx\\u12G4y\n"""\n').developer_instructions,
-    ).toBe('xu12G4y\n');
+    ).toBe('x\\u12G4y\n');
   });
 });
 

@@ -1,3 +1,4 @@
+import { tomlBasicString, tomlMultilineBasicString } from '../../../toml-strings.js';
 import { KB_DIR, LEARNINGS_DIR } from '@haive/shared/knowledge-paths';
 import type { AgentColor, AgentExpertise, AgentKbRefs, AgentModel, AgentSpec } from '@haive/shared';
 import { QA_LENS_NUMBERED } from '../_qa-lenses.js';
@@ -200,33 +201,6 @@ export function buildAgentFileForTarget(spec: AgentSpec, target: AgentRenderTarg
   if (target.format === 'toml') return buildAgentFileToml(spec, { supportsLsp });
   if (target.dir === '.gemini/agents') return buildAgentFileMarkdownGemini(spec, { supportsLsp });
   return buildAgentFileMarkdown(spec, { supportsLsp });
-}
-
-const TOML_SHORT_ESCAPES: Record<string, string> = {
-  '\\': '\\\\',
-  '"': '\\"',
-  '\b': '\\b',
-  '\t': '\\t',
-  '\n': '\\n',
-  '\f': '\\f',
-  '\r': '\\r',
-};
-
-function tomlEscape(ch: string): string {
-  return (
-    TOML_SHORT_ESCAPES[ch] ?? `\\u${ch.charCodeAt(0).toString(16).toUpperCase().padStart(4, '0')}`
-  );
-}
-
-function tomlBasicString(value: string): string {
-  return `"${value.replace(/[\\"\u0000-\u001F\u007F]/g, tomlEscape)}"`;
-}
-
-function tomlMultilineBasicString(value: string): string {
-  const escaped = value.replace(/[\\\u0000-\u0008\u000B-\u001F\u007F]|"""/g, (m) =>
-    m === '"""' ? '\\"\\"\\"' : tomlEscape(m),
-  );
-  return `"""\n${escaped}\n"""`;
 }
 
 /** Emit a Codex-compatible agent definition as TOML.

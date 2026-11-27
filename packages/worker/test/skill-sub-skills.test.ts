@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { parse } from 'yaml';
 import {
   sanitizeSubSkills,
   type SkillEntry,
@@ -75,13 +76,23 @@ describe('subSkillToMarkdown', () => {
     expect(md.indexOf('Function')).toBeLessThan(md.indexOf('Parent'));
   });
 
-  it('uses YAML folded form when description is long or multi-line', () => {
+  it('preserves a long description through the shared YAML scalar encoding', () => {
     const longDesc =
       'Long activation description that runs well past the single-line threshold ' +
-      'so the renderer should switch to the YAML folded scalar form for readability.';
+      'keeps its complete text in the frontmatter, including these additional words beyond the former limit.';
+    expect(longDesc.length).toBeGreaterThan(120);
     const md = subSkillToMarkdown('task-tracking', { ...goodSub, description: longDesc });
-    expect(md).toContain('description: >');
+    expect(parse(md.split('\n---\n')[0]!.slice(4)).description).toBe(longDesc);
   });
+
+  it.each([120, 121])(
+    'preserves a description of %i characters at the former boundary',
+    (length) => {
+      const description = 'x'.repeat(length);
+      const md = subSkillToMarkdown('task-tracking', { ...goodSub, description });
+      expect(parse(md.split('\n---\n')[0]!.slice(4)).description).toBe(description);
+    },
+  );
 });
 
 describe('skillToMarkdown with sub-skills', () => {
@@ -151,6 +162,15 @@ describe('skillToMarkdown with sub-skills', () => {
 });
 
 describe('skillsReadmeMarkdown', () => {
+  it('collapses controls and line breaks while escaping pipes after backslashes', () => {
+    const description = 'before\u0001after\u007fDEL\u0085NEL\u2028LS\u2029PS\r\nlast\\|cell';
+    const md = skillsReadmeMarkdown([{ id: 'synthetic', title: 'Synthetic', description }]);
+    expect(md).not.toMatch(/[\u0000-\u0009\u000b-\u001f\u007f-\u009f\u2028\u2029]/);
+    expect(md.split('\n').filter((line) => line.startsWith('| ['))).toEqual([
+      '| [synthetic](./synthetic/SKILL.md) | before after DEL NEL LS PS last\\\\\\|cell |',
+    ]);
+  });
+
   it('renders index header, table, and directory layout block', () => {
     const md = skillsReadmeMarkdown([
       { id: 'task-tracking', title: 'Task Tracking', description: 'Per-task attribution.' },
