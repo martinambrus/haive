@@ -62,7 +62,8 @@ import {
 import { INSIGHTS_INSTRUCTION } from './08e-insights-triage.js';
 import { PROMPT_DEFECT_INSTRUCTION } from './_prompt-defect.js';
 import { isStepGuidanceEnabled } from '../../guidance-context.js';
-import { CONFIG_KEYS, configService, rethrowIfConfigUnavailable } from '@haive/shared';
+import { CONFIG_KEYS, configService } from '@haive/shared';
+import { readTolerant } from './_read-tolerant.js';
 import { resolveSpecView } from './_spec-artifact.js';
 import {
   coerceReviewSeverity,
@@ -124,17 +125,6 @@ interface CodeReviewDetect {
   refuteLensCount?: number;
   /** Whether the refutation pass runs; resolved and absent exactly like `refuteLensCount`. */
   refuteEnabled?: boolean;
-}
-
-/** One config read for detect(): an outage propagates, any other failure leaves the value
- *  unset so apply() reads it live as it always did. */
-async function readTolerant<T>(read: () => Promise<T>): Promise<T | undefined> {
-  try {
-    return await read();
-  } catch (err) {
-    rethrowIfConfigUnavailable(err);
-    return undefined;
-  }
 }
 
 type PeerFinding = CodeReviewOutput['peer']['findings'][number];

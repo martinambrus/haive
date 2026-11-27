@@ -155,7 +155,12 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
       code?: string;
       issues?: { path?: string; message?: string }[];
     };
-    const baseMsg = body.error ?? `HTTP ${res.status}`;
+    const isOutage =
+      res.status === 503 &&
+      (body.code === 'config_unavailable' || body.code === 'redis_unavailable');
+    const baseMsg = isOutage
+      ? 'Temporary service outage. Please try again in a moment.'
+      : (body.error ?? `HTTP ${res.status}`);
     const messaged = (body.issues ?? []).filter((i) => typeof i.message === 'string');
     const issuesMsg =
       messaged.length > 0
@@ -1656,6 +1661,7 @@ export interface AdminCreateUserResponse {
 }
 
 export interface AdminHealthResponse {
+  redis: 'up' | 'down';
   users: { total: number; active: number; deactivated: number; admins: number };
   tasks: Record<string, number>;
   containers: Record<string, number>;

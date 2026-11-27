@@ -49,6 +49,7 @@ const GETS: Record<string, unknown> = {
     passwordSet: false,
   },
   '/admin/health': {
+    redis: 'up',
     users: { total: 1, active: 1, deactivated: 0, admins: 1 },
     tasks: {},
     containers: {},
@@ -152,6 +153,7 @@ const net = vi.hoisted(() => ({
   calls: [] as Array<{ method: string; path: string; body: unknown }>,
   unstubbed: [] as string[],
   refused: {} as Record<string, string>,
+  getRefused: {} as Record<string, { status: number; body: unknown }>,
 }));
 
 const reply = (status: number, body: unknown) => ({
@@ -165,6 +167,10 @@ async function fakeFetch(input: unknown, init?: { method?: string; body?: string
   const method = init?.method ?? 'GET';
   const body: unknown = init?.body === undefined ? undefined : JSON.parse(init.body);
   net.calls.push({ method, path, body });
+  if (method === 'GET' && path in net.getRefused) {
+    const failure = net.getRefused[path]!;
+    return reply(failure.status, failure.body);
+  }
   if (method === 'GET' && path in net.gets) return reply(200, net.gets[path]);
   if (method === 'PUT' && path in net.refused) return reply(400, { error: net.refused[path] });
   if (method === 'PUT' && path.startsWith('/admin/config/')) return reply(200, body);
@@ -179,6 +185,7 @@ beforeEach(() => {
   net.calls = [];
   net.unstubbed = [];
   net.refused = {};
+  net.getRefused = {};
 });
 
 const CODEX_APP_SERVER_PATH = '/admin/config/codex-app-server';
@@ -186,8 +193,14 @@ const CODEX_APP_SERVER_PATH = '/admin/config/codex-app-server';
 async function mount(
   customTools: unknown,
   codexAppServer: unknown = GETS[CODEX_APP_SERVER_PATH],
+  health: unknown = GETS['/admin/health'],
 ): Promise<Renderer> {
-  net.gets = { ...GETS, [CUSTOM_TOOLS_PATH]: customTools, [CODEX_APP_SERVER_PATH]: codexAppServer };
+  net.gets = {
+    ...GETS,
+    [CUSTOM_TOOLS_PATH]: customTools,
+    [CODEX_APP_SERVER_PATH]: codexAppServer,
+    '/admin/health': health,
+  };
   const view = createRenderer(() => <AdminPage />);
   for (let i = 0; i < 5; i += 1) await view.flush();
   expect(net.unstubbed, 'requests the page made that this test does not stub').toEqual([]);
@@ -249,6 +262,34 @@ const taskLinks = (view: Renderer): string[] =>
   findAll(view.tree(), (host) => host.tag === 'a')
     .map((host) => String(host.props.href))
     .filter((href) => href.startsWith('/tasks/'));
+
+describe('admin page: Redis health', () => {
+  it.each(['up', 'down'])('shows Redis %s beside the other health cards', async (redis) => {
+    const view = await mount({ enabled: true }, undefined, {
+      ...(GETS['/admin/health'] as object),
+      redis,
+    });
+    const section = findAll(view.tree(), (host) => host.tag === 'section')[0]!;
+    expect(section).toBeDefined();
+    expect(textOf(section)).toContain(`Redis${redis}`);
+    expect(textOf(section)).toContain('Containers');
+  });
+
+  it('still shows Redis down when a configuration request reports an outage', async () => {
+    net.getRefused['/admin/config/concurrency'] = {
+      status: 503,
+      body: { error: 'Service temporarily unavailable', code: 'config_unavailable' },
+    };
+    const view = await mount({ enabled: true }, undefined, {
+      ...(GETS['/admin/health'] as object),
+      redis: 'down',
+    });
+    expect(textOf(view.tree())).toContain('Redisdown');
+    expect(textOf(view.tree())).toContain(
+      'Temporary service outage. Please try again in a moment.',
+    );
+  });
+});
 
 describe('admin page: Codex app-server failure card', () => {
   const own = failure('task-own', 'admin-1', 'My task');

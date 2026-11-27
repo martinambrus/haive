@@ -4,7 +4,8 @@ import { createHash } from 'node:crypto';
 import { z } from 'zod';
 import { eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
-import { CONFIG_KEYS, configService, rethrowIfConfigUnavailable } from '@haive/shared';
+import { CONFIG_KEYS, configService } from '@haive/shared';
+import { readTolerant } from './_read-tolerant.js';
 import { MiningRetryError, MiningWaveError } from '../../step-definition.js';
 import type {
   StepContext,
@@ -137,17 +138,6 @@ interface AdversarialDetect {
   verifyLensCount?: number;
   /** Whether the verification pass runs; resolved and absent exactly like `verifyLensCount`. */
   verifyEnabled?: boolean;
-}
-
-/** One config read for detect(): an outage propagates, any other failure leaves the value
- *  unset so apply() reads it live as it always did. */
-async function readTolerant<T>(read: () => Promise<T>): Promise<T | undefined> {
-  try {
-    return await read();
-  } catch (err) {
-    rethrowIfConfigUnavailable(err);
-    return undefined;
-  }
 }
 
 interface AdversarialFinding {

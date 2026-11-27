@@ -317,7 +317,7 @@ function AdminPageInner() {
   const load = useCallback(async () => {
     try {
       const [
-        healthData,
+        ,
         concurrencyData,
         steeringData,
         codexAppServerData,
@@ -359,7 +359,8 @@ function AdminPageInner() {
         houseRulesData,
         customToolsData,
       ] = await Promise.all([
-        api.get<AdminHealthResponse>('/admin/health'),
+        // Health stays visible even when the config requests in this batch fail.
+        api.get<AdminHealthResponse>('/admin/health').then(setHealth),
         api.get<{ maxParallelAgents: number }>('/admin/config/concurrency'),
         api.get<{ enabled: boolean }>('/admin/config/steering'),
         api.get<{ enabled: boolean; viewerId: string; recentFailures: CodexAppServerFailure[] }>(
@@ -407,7 +408,6 @@ function AdminPageInner() {
         api.get<{ enabled: boolean }>('/admin/config/house-rules'),
         getCustomToolsSwitch(),
       ]);
-      setHealth(healthData);
       setMaxParallel(concurrencyData.maxParallelAgents);
       setMaxParallelInput(String(concurrencyData.maxParallelAgents));
       setSteeringEnabled(steeringData.enabled);
@@ -1266,7 +1266,7 @@ function AdminPageInner() {
       />
 
       {tab === 'overview' && health && (
-        <section className="grid gap-3 md:grid-cols-4">
+        <section className="grid gap-3 md:grid-cols-5">
           <Link href="/admin/users" className="block">
             <Card className="h-full transition-colors hover:border-neutral-700">
               <CardHeader>
@@ -1311,6 +1311,12 @@ function AdminPageInner() {
                 <span className="text-neutral-500">None</span>
               )}
             </div>
+          </Card>
+          <Card>
+            <CardHeader>
+              <CardTitle>Redis</CardTitle>
+            </CardHeader>
+            <Badge variant={health.redis === 'up' ? 'success' : 'error'}>{health.redis}</Badge>
           </Card>
           <Card>
             <CardHeader>
