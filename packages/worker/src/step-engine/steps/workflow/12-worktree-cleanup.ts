@@ -3,7 +3,7 @@ import {
   commitProjectStatePush,
   projectionPushIdentity,
 } from '../../../project-state/push.js';
-import { desc, eq } from 'drizzle-orm';
+import { and, desc, eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import {
   CONFIG_KEYS,
@@ -85,7 +85,10 @@ interface BranchLeftover {
     | 'unreadable-squash'
     | 'unreadable-branch'
     | 'checked-out'
-    | 'delete-refused';
+    | 'delete-refused'
+    | 'unreadable-worktrees'
+    | 'symbolic-ref'
+    | 'config-cleanup-refused';
 }
 
 /** Compare-and-delete only commits contained in the feature head the squash actually landed. */
@@ -93,20 +96,55 @@ async function deleteSquashedBranch(
   repoPath: string,
   branch: string,
   mergedFeature: string | null,
-): Promise<BranchLeftover['reason'] | null> {
-  if (!mergedFeature) return 'unreadable-squash';
+): Promise<{ reason: BranchLeftover['reason'] | null; tip: string | null }> {
+  let sha: string | null = null;
+  const result = (reason: BranchLeftover['reason'] | null) => ({ reason, tip: sha });
+  const cleanConfig = async () => {
+    const config = await gitRun(repoPath, ['config', '--remove-section', `branch.${branch}`]);
+    // Git exits 128 when there is no section, including Retry after config cleanup.
+    return result(config.code === 0 || config.code === 128 ? null : 'config-cleanup-refused');
+  };
   const ref = `refs/heads/${branch}`;
+  const symbolic = await gitRun(repoPath, ['symbolic-ref', '-q', ref]);
+  if (symbolic.code !== 0 && symbolic.code !== 1) return result('unreadable-branch');
   const tip = await gitRun(repoPath, ['rev-parse', '-q', '--verify', ref]);
-  if (tip.code === 1) return null; // Already deleted on a prior pass.
-  if (tip.code !== 0) return 'unreadable-branch';
-  const sha = tip.stdout.trim();
+  if (symbolic.code === 0) {
+    sha = tip.code === 0 ? tip.stdout.trim() : null;
+    return result('symbolic-ref');
+  }
+  if (tip.code === 1) {
+    // rev-parse also exits 1 for a junk loose ref; show-ref refuses that with 128.
+    const exists = await gitRun(repoPath, ['show-ref', '--verify', '--quiet', ref]);
+    return exists.code === 1 ? cleanConfig() : result('unreadable-branch');
+  }
+  if (tip.code !== 0) return result('unreadable-branch');
+  sha = tip.stdout.trim();
+  if (!mergedFeature) return result('unreadable-squash');
   const contained = await gitRun(repoPath, ['merge-base', '--is-ancestor', sha, mergedFeature]);
-  if (contained.code === 1) return 'not-contained-in-squash';
-  if (contained.code !== 0) return 'unreadable-branch';
-  // update-ref does not enforce branch -D's checkout check, so retain it explicitly.
-  if ((await worktreesHoldingBranch(repoPath, ref)).length) return 'checked-out';
-  const del = await gitRun(repoPath, ['update-ref', '-d', ref, sha]);
-  return del.code === 0 ? null : 'delete-refused';
+  if (contained.code === 1) return result('not-contained-in-squash');
+  if (contained.code !== 0) return result('unreadable-branch');
+  // update-ref has no branch -D holder checks, including detached rebase/bisect state.
+  try {
+    if ((await worktreesHoldingBranch(repoPath, ref, true)).length) return result('checked-out');
+  } catch {
+    return result('unreadable-worktrees');
+  }
+  const del = await gitRun(repoPath, ['update-ref', '-d', ref, sha, '--no-deref']);
+  return del.code === 0 ? cleanConfig() : result('delete-refused');
+}
+
+function branchLeftoverMessage(branch: string, reason: BranchLeftover['reason']): string {
+  const explanation: Record<BranchLeftover['reason'], string> = {
+    'not-contained-in-squash': 'it contains commits outside the recorded squash',
+    'unreadable-squash': 'the recorded merge evidence is missing or unreadable',
+    'unreadable-branch': 'Git could not verify its tip or ancestry',
+    'checked-out': 'another worktree is using it, possibly for a rebase or bisect',
+    'delete-refused': 'Git refused the compare-and-delete, possibly because its tip changed',
+    'unreadable-worktrees': 'Haive could not check which worktrees are using it',
+    'symbolic-ref': 'it is a symbolic ref pointing to another branch',
+    'config-cleanup-refused': 'its ref is gone but Git refused to remove its branch configuration',
+  };
+  return `Branch ${branch} needs cleanup because ${explanation[reason]}. Inspect the branch in the repository terminal, finish any rebase or bisect, then Retry; delete it manually only after checking its commits are safe.`;
 }
 
 interface WorktreeCleanupApply {
@@ -195,7 +233,7 @@ export function branchOutcomeParts(o: {
   const parts: string[] = [];
   if (o.branchDeleted) parts.push(`deleted branch ${o.branchName}`);
   else if (o.branchLeftoverReason)
-    parts.push(`kept branch ${o.branchName} (${o.branchLeftoverReason})`);
+    parts.push(branchLeftoverMessage(o.branchName ?? '', o.branchLeftoverReason));
   else if (o.action === 'remove_only') parts.push(`kept branch ${o.branchName}`);
   // A requested delete that git refused must not read as a silent success.
   else if (o.deleteRequested && o.branchName)
@@ -808,10 +846,14 @@ export const worktreeCleanupStep: StepDefinition<WorktreeCleanupDetect, Worktree
         : null;
     const mergedFeature = featureParent?.code === 0 ? featureParent.stdout.trim() : null;
     const branchLeftovers: BranchLeftover[] = [];
+    const branchTips: Record<string, string | null> = Object.create(null);
     const deleteBranch = async (branch: string): Promise<boolean> => {
       if (squashCommitSha) {
-        const reason = await deleteSquashedBranch(ctx.repoPath, branch, mergedFeature);
-        if (reason) branchLeftovers.push({ branch, reason });
+        const { reason, tip } = await deleteSquashedBranch(ctx.repoPath, branch, mergedFeature);
+        if (reason) {
+          branchLeftovers.push({ branch, reason });
+          branchTips[branch] = tip;
+        }
         return reason === null;
       }
       const del = await gitRun(ctx.repoPath, ['branch', '-d', branch]);
@@ -848,18 +890,42 @@ export const worktreeCleanupStep: StepDefinition<WorktreeCleanupDetect, Worktree
     }
     if (branchLeftovers.length) {
       ctx.logger.warn({ branches: branchLeftovers }, 'branch leftovers kept after squash');
-      await ctx.db.insert(schema.taskEvents).values({
-        taskId: ctx.taskId,
-        eventType: 'worktree.branch_leftovers',
-        payload: {
-          branches: branchLeftovers,
-          squashCommitSha,
-          squashMergeSha: squashMergeSha ?? null,
-        },
+      const prior = await ctx.db.query.taskEvents.findMany({
+        where: and(
+          eq(schema.taskEvents.taskId, ctx.taskId),
+          eq(schema.taskEvents.eventType, 'worktree.branch_leftovers'),
+        ),
+        columns: { payload: true },
       });
+      const seen = new Set<string>();
+      for (const { payload } of prior) {
+        const p = payload as {
+          branches?: BranchLeftover[];
+          tips?: Record<string, string | null>;
+        } | null;
+        if (!Array.isArray(p?.branches) || !p.tips) continue;
+        for (const { branch } of p.branches) {
+          if (Object.hasOwn(p.tips, branch)) seen.add(JSON.stringify([branch, p.tips[branch]]));
+        }
+      }
+      const fresh = branchLeftovers.filter(
+        ({ branch }) => !seen.has(JSON.stringify([branch, branchTips[branch]])),
+      );
+      if (fresh.length) {
+        await ctx.db.insert(schema.taskEvents).values({
+          taskId: ctx.taskId,
+          eventType: 'worktree.branch_leftovers',
+          payload: {
+            branches: fresh,
+            tips: Object.fromEntries(fresh.map(({ branch }) => [branch, branchTips[branch]])),
+            squashCommitSha,
+            squashMergeSha: squashMergeSha ?? null,
+          },
+        });
+      }
       await warnStep(
         ctx,
-        branchLeftovers.map(({ branch, reason }) => `Kept branch ${branch}: ${reason}.`),
+        branchLeftovers.map(({ branch, reason }) => branchLeftoverMessage(branch, reason)),
       );
     }
 
@@ -871,10 +937,9 @@ export const worktreeCleanupStep: StepDefinition<WorktreeCleanupDetect, Worktree
           : `merged ${d.branchName} into ${mergeTarget}`,
       );
     if (squashSkipReason) parts.push(squashSkipReason);
-    if (branchLeftovers.length)
-      parts.push(
-        `kept branch leftovers: ${branchLeftovers.map(({ branch }) => branch).join(', ')}`,
-      );
+    for (const { branch, reason } of branchLeftovers) {
+      if (branch !== d.branchName) parts.push(branchLeftoverMessage(branch, reason));
+    }
     parts.push(`removed worktree ${d.worktreePath}`);
     parts.push(
       ...branchOutcomeParts({

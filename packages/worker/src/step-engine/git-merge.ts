@@ -1509,6 +1509,7 @@ export async function squashMergeCommit(
       recoveryCommits.length === 3 &&
       recoveryCommits[1] === baseShaBefore) ||
     (squashMergeSha !== undefined && headParents.code === 0 && headCommits[0] === squashMergeSha);
+  // Resolver capture excludes X1 (feature in base, personal commit atop M) and X2 (feature in base, HEAD == base, staged tree == M, M^1 != base).
   if (feature && !recoveringSquash) {
     const contained = await gitRun(worktreePath, [
       'merge-base',

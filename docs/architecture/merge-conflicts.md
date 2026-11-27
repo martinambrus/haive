@@ -122,11 +122,25 @@ left. The following rules keep it that way, each MEASURED on git 2.43 and 2.54:
   omit `merge.landed`, and leave the wrong undo base; the replay control pins content exactly once.
   After a squash, cleanup deletes a feature or DAG issue branch only when its current tip is
   contained in the recorded merge's second parent, using compare-and-delete against that tip.
-  A moved or unreadable branch, missing recorded evidence, a checkout holder or a refused delete
-  keeps the branch, with structured `branchLeftovers` output, a `worktree.branch_leftovers` event
-  and a step warning. A branch checked out elsewhere is retained; Git has no atomic checkout-and-ref
-  check, so a checkout started after the final holder read can still race deletion. Legacy squash
-  rows without a recorded merge keep their branches. No decision reads message text.
+  A moved or unreadable branch, missing recorded evidence, a symbolic ref, a checkout holder or a
+  refused delete keeps the branch, with structured `branchLeftovers` output, a
+  `worktree.branch_leftovers` event and a step warning. Cleanup checks detached worktrees' own
+  `rebase-merge/head-name`, `rebase-apply/head-name` and `BISECT_START` through fs-safe under the
+  repository anchor, preserving `branch -D`'s rebase/bisect refusal. An unreadable worktree listing
+  or operation state retains the branch as `unreadable-worktrees`; it never throws out of apply
+  after the merge landed. Git has no atomic checkout-and-ref check, so a checkout or operation
+  started after the final holder read can still race deletion. Symbolic refs are refused before
+  deletion, and `update-ref --no-deref` also prevents following one introduced after that check.
+  Ref absence is checked before requiring recorded merge evidence: Retry after pruning the merge
+  object succeeds for an already-gone branch, while a junk loose ref (`rev-parse` exit 1 but
+  `show-ref --verify --quiet` exit 128) stays as `unreadable-branch`. After deletion, including an
+  already-absent ref on Retry, `git config --remove-section branch.<name>` removes upstream config;
+  exit 128 means no section and succeeds idempotently. Other config failures are reported as
+  `config-cleanup-refused`, even though the ref is gone. Leftover copy gives a human explanation
+  and repository-terminal recovery guidance; structured reason slugs stay in fields. Events record
+  observed tips and Retry appends no duplicate for the same branch and tip (legacy events without
+  tips cannot deduplicate). Legacy squash rows without a recorded merge keep existing branches.
+  No decision reads message text.
   The pre-push fetch also runs outside a section, into a ref only that pass names
   (`refs/haive/pre-push/<step>/<uuid>`, no `FETCH_HEAD`, no tags); the section then records
   `origin/<base>` from it and counts how far the base is behind, so a pass that lost the claim moves
