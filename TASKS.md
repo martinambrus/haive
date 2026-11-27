@@ -55,7 +55,7 @@ Owner decision: a consumed `db_uploads` row is deleted once 90 days have passed 
 
 ### T594 · FNF[repo-recovery-followups] · checkout recovery and revival follow-ups (+7)
 
-status: open · kind: fix · found: F2 (#1065) reviews 2026-11-10/11 · priority: P3
+status: done 2026-11-27, merged #1353 854a785b5 and live (`pnpm docker libs`, migration 0250 applied 02:52:54Z): recovery starts fenced, escalated rebuilds hidden behind `cloning`, 7-day legacy cancel bound, root-claim refusals retry, refresh drain markers bound to their job; leftovers in T780 · kind: fix · found: F2 (#1065) reviews 2026-11-10/11 · priority: P3
 All PRE-EXISTING.
 
 1. C1: a recovery that fails after `moveAside` leaves `dest` missing or partial with the code set; each further recovery moves it aside again, accumulating `.aside-*` siblings (`worker/src/repo/refresh.ts` ~:427-442). Fix: reuse or clean the failed destination before moving aside again.
@@ -139,7 +139,7 @@ status: open · kind: fix · found: F2 (#460, #512) reviews 2026-11-10/11 · pri
 Low unless marked. Code in `worker/src/project-state/refresh.ts`, `worker/src/queues/repo-queue.ts`, `api/src/routes/repos.ts`, `shared/src/repo-rebuild.ts` and `worker/src/project-state/write.ts`.
 
 1. CONSEQUENTIAL, PRE-EXISTING: bases advance before publication of the rebuilt checkout.
-2. CONSEQUENTIAL, PRE-EXISTING: a task start after the move-aside can overlap the rebuild's clone (documented window in `repository-refresh.md`).
+2. CONSEQUENTIAL, PRE-EXISTING: a task start after the move-aside can overlap the rebuild's clone (documented window in `repository-refresh.md`). RESOLVED by T594 (#1353): starts take the repository tasks key and the rebuild recounts under it through the rename and publication.
 3. A non-recovery rebuild never settles a pending project-state write intent (PRE-EXISTING).
 4. `.rebuild-*` and `.aside-*` folders are never cleaned (see T486).
 5. A check-only job queued during a recovery fails on the root claim and flips the row to `error` while the recovery still runs (a second recovery is still refused).
