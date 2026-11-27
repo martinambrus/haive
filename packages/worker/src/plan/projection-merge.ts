@@ -453,7 +453,37 @@ export async function resolveHaiveProjectionConflicts(
     }
   } else if (conflicted.has(mdPath)) {
     const res = await gitRun(worktreePath, ['cat-file', 'blob', `:${jsonPath}`], undefined, BYTES);
-    plan = res.code === 0 ? parsePayload(Buffer.from(res.stdout, 'latin1')) : null;
+    if (res.code === 0) {
+      plan = parsePayload(Buffer.from(res.stdout, 'latin1'));
+    } else {
+      // cat-file uses the same failure status for a missing index entry and an unreadable
+      // object. Require a successful listing, and inspect the exact entry's mode:
+      // a directory's children and a gitlink are not a plan blob.
+      const listing = await gitRun(worktreePath, [
+        'ls-files',
+        '--stage',
+        '-z',
+        '--',
+        literal(jsonPath),
+      ]);
+      const entries = listing.stdout
+        .split('\0')
+        .filter(Boolean)
+        .map((entry) => /^(\d{6}) [0-9a-f]+ [0-3]\t([\s\S]+)$/.exec(entry));
+      const unreadablePlan = entries.some(
+        (entry) =>
+          entry === null ||
+          (entry[2] === jsonPath && entry[1] !== '040000' && entry[1] !== '160000'),
+      );
+      if (listing.code !== 0 || unreadablePlan || listing.stderr !== '') {
+        throw Object.assign(
+          new Error(
+            `the indexed plan.json could not be read (cat-file exit ${res.code}, ls-files exit ${listing.code})`,
+          ),
+          { code: 'PLAN_INDEX_UNREADABLE' },
+        );
+      }
+    }
   }
 
   // plan.md follows a resolved plan.json even where git merged it cleanly: it renders that file.
