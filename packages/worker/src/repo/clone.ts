@@ -1,3 +1,4 @@
+import { withPlanCheckoutAccess } from './checkout-access-scope.js';
 import { suspendCheckoutSessions } from './interactive-checkout.js';
 import { RootClaimBusyError } from './root-claim-busy.js';
 import { assertRepoJobOwner, ObsoleteRepoJobError, repoJobPredicate } from './job-owner.js';
@@ -323,9 +324,7 @@ export async function restoreProjectData(
   } else {
     await removeNoFollow(replacementPath, HAIVE_DATA_FILES.plan);
     await removeNoFollow(replacementPath, HAIVE_DATA_FILES.planMarkdown);
-    await writePlanMirror(db, repositoryId, replacementPath, undefined, {
-      recoveredCheckout: true,
-    });
+    await writePlanMirror(db, repositoryId, replacementPath);
   }
 }
 
@@ -479,7 +478,7 @@ export async function withRootClaim<T>(
     throw new RootClaimBusyError(held?.kind ?? null);
   }
   try {
-    return await run();
+    return await withPlanCheckoutAccess({ mode: 'preparation', owner: claim }, run);
   } finally {
     await claim.release().catch(() => undefined);
     // Not thrown: the tree has already been rewritten, and failing here hands the job back to

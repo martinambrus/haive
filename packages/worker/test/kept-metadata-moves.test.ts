@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { cleanup, h, payload, REPO, setup } from './support/plan-mirror-failure.js';
 import { pull, save } from '../src/queues/plan-mirror-queue.js';
 import { planMergeStep } from '../src/step-engine/steps/plan/01-plan-merge.js';
+import type { Database } from '@haive/database';
 import type { StepContext } from '../src/step-engine/step-definition.js';
 
 beforeEach(() => {
@@ -69,9 +70,12 @@ describe('move callers retain metadata when re-sync does not finish', () => {
         ),
       ).toBe(false);
       warning.mockRestore();
+      // Plan operations pass the callback-draining facade over this same database.
+      const expectedDb =
+        site === 'confirm' ? h.db : expect.objectContaining({ query: (h.db as Database).query });
       if (site === 'pull')
-        expect(h.resettle).toHaveBeenCalledWith(h.db, REPO, '/repo', kept, 'plan_pull');
-      else expect(h.resettle).toHaveBeenCalledWith(h.db, REPO, '/repo', kept);
+        expect(h.resettle).toHaveBeenCalledWith(expectedDb, REPO, '/repo', kept, 'plan_pull');
+      else expect(h.resettle).toHaveBeenCalledWith(expectedDb, REPO, '/repo', kept);
       expect(h.metadata).not.toHaveBeenCalled();
       expect(kept.get('.haive-data/plan.json')?.mode).toBe(0o600);
     },

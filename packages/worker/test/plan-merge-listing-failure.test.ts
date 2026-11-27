@@ -1,3 +1,4 @@
+import { createPlanCheckoutDb, PLAN_REPO_ID, PLAN_USER_ID } from './support/plan-checkout-db.js';
 import { fixtureBase, networkGitArgs, httpOrigin } from './support/git-http.js';
 import { execFileSync } from 'node:child_process';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
@@ -108,18 +109,8 @@ const hasScratch = () =>
 
 beforeEach(() => {
   h.recovered = [];
-  const db = {
-    query: {
-      repositories: {
-        findFirst: async () => ({ id: 'r1', userId: 'u1', credentialsSecretId: null }),
-      },
-      planMirrorState: { findFirst: async () => ({ revision: 1, writtenRevision: 1 }) },
-    },
-    transaction: async (fn: (conn: unknown) => Promise<unknown>) => fn(db),
-    select: () => ({ from: () => ({ where: () => ({ limit: async () => [] }) }) }),
-  };
-  h.db = db;
   conflictingFixture();
+  h.db = createPlanCheckoutDb(h.repo);
 });
 
 afterEach(async () => {
@@ -134,10 +125,10 @@ describe('a Save or Pull merge whose unmerged listing fails', () => {
     shim = await failGit(LISTING);
     await expect(
       integrateOrigin({
-        repositoryId: 'r1',
+        repositoryId: PLAN_REPO_ID,
         repoPath: h.repo,
         branch: 'main',
-        userId: 'u1',
+        userId: PLAN_USER_ID,
         identity: COMMIT_ENV,
         kept: new Map(),
       }),
@@ -152,7 +143,9 @@ describe('a Save or Pull merge whose unmerged listing fails', () => {
     const before = git(h.repo, 'rev-parse', 'HEAD');
     shim = await failGit(LISTING);
     await expect(
-      save({ repositoryId: 'r1', userId: 'u1', push: true } as Parameters<typeof save>[0]),
+      save({ repositoryId: PLAN_REPO_ID, userId: PLAN_USER_ID, push: true } as Parameters<
+        typeof save
+      >[0]),
     ).rejects.toThrow(/git diff .* failed in /);
     await shim.restore();
     shim = null;
