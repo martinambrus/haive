@@ -2892,7 +2892,7 @@ From the T480 reviews (2026-10-31). PRE-EXISTING and minor unless stated (each n
 
 ### T495 · FNF[failed-read-answers-2] · more git reads read a failure as "absent" (+14)
 
-status: open (items 1, 3, 5, 10 done 2026-11-13 #1129 (8e53558ba): absence needs a positive answer; rules staging and refresh use `provesUnbornHead`, baselines a quiet verify exit 1, projections a tree listing; any other failure is unknown) · gate: bounded verification · priority: P2
+status: open (items 6, 7, 8 done 2026-11-27 #1374 (5419185cd): strict hand-back throws MERGE_HAND_BACK_FAILED on a failed stat, the fixer refuses with MERGE_OWNER_UNREADABLE before any move, a plan.md-only conflict needs a positive empty index listing or PLAN_INDEX_UNREADABLE; items 1, 3, 5, 10 done 2026-11-13 #1129 (8e53558ba): absence needs a positive answer; rules staging and refresh use `provesUnbornHead`, baselines a quiet verify exit 1, projections a tree listing; any other failure is unknown) · gate: bounded verification · priority: P2
 From the T397 review (2026-10-31). Same class as T397 (git's exit code, never its wording); PRE-EXISTING, minor. See also T379 (git-tree readers).
 
 1. 03-upgrade-commit.ts ~:91 (`headLacksImport`) and ~:114 (`agentsRulesVerdict`): any non-zero `rev-parse --verify -q HEAD` except no-answer reads as "no HEAD" and stages the whole file, taking unrelated edits; only exit 1 means no HEAD.
