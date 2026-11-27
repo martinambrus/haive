@@ -1222,6 +1222,14 @@ In `martinambrus/haive-module-translator`. The owner's English-to-Slovak run fai
 
 1. Accept a declined form (same stem, up to 2 trailing letters changed on words of 5+ letters) at every keep-term check; a translated name still fails; codes and short words stay exact. Then the owner Retries the step.
 
+### T781 · new-work-fence-db revival tests race a 5 s lock bound against a 5 s observer
+
+status: open · kind: test-flake · found: PR #1354 CI (T308 fix-3 analysis) 2026-11-27 · priority: P3
+
+`api/test/new-work-fence-db.test.ts` "a revival beside a repository lock another transaction holds" cases assert the request is not still pending after 5 s while the route's lock wait is also bounded at about 5 s. On origin/main four local runs gave 56/56, 54/56, 55/56, 55/56; CI run 45921364127 failed the submit case. Evidence: `.claude/tmp/codex-run/T308-S/fix-3/ci-verdicts.txt` and `postgres-main-new-work-repeat*.log`.
+
+1. Make the observer bound derive from the route's lock bound with margin (or inject a shorter lock bound in the test), never a second equal literal; control: 20 repeated runs green.
+
 ### T779 · Multi-call steps show a false "earlier attempts could not be used" banner
 
 status: open · kind: bug · found: session live check e06ad873 2026-11-27 · priority: P2
