@@ -1591,7 +1591,15 @@ an explicit fs-safe mutation. Generic parks retain their age policy. Details and
 
 ## Interactive checkout replacement recovery
 
-A rebuild stops and verifies interactive containers before its first rename. On worker death,
+A rebuild stops and verifies interactive containers before its first rename. Its private restore
+and publication share one database commit: state and plan bases cannot commit
+before the replacement's rename. Death before that rename leaves the old bases and retained
+private output; death after it but before commit leaves complete public output with old bases.
+Once the dead root claim expires, the next owned Retry rebuilds the absent checkout or imports
+the usable one respectively. Worker and enqueue failures preserve the exact
+repair code admitted for recovery. No new recovery marker or migration is needed.
+
+On worker death,
 committed checkout availability and Docker root device/inode labels are the recovery evidence;
 in-memory boot/session maps and matching path strings grant no reuse permission. Legacy unstamped
 containers are always kept; stamped labels compare inode only across device remounts.

@@ -3929,11 +3929,7 @@ async function refreshRepository(c: Context<AppEnv>, recovery = false) {
               backoff: { type: 'exponential', delay: 5000 },
             },
       ),
-    recovery
-      ? REPOSITORY_ERROR_CODES.CHECKOUT_REPAIR_NEEDED
-      : checkCheckoutOnly
-        ? repairErrorCode
-        : null,
+    repairErrorCode,
     refreshJobId,
   );
 

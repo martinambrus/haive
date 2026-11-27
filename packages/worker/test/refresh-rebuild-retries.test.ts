@@ -388,6 +388,7 @@ describe.skipIf(!redisUrl)('a source folder that needs repair', () => {
 describe.skipIf(!redisUrl)('failed explicit recovery', () => {
   it('keeps recovery explicit after a build failure, without importing mirrors on Retry', async () => {
     const { dest, payload } = await fixture();
+    row.errorCode = 'checkout_repair_needed';
     failBuilding('copy', new Error('copy failed'));
     const job = await refreshJob({ ...payload, recoverCheckout: true });
     expect(await job.getState()).toBe('failed');

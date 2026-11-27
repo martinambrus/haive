@@ -432,21 +432,24 @@ describe('explicit checkout recovery', () => {
   });
 });
 
-it('keeps the recovery action available when its enqueue fails', async () => {
-  const fake = setup({
-    source: 'git_https',
-    remoteUrl: 'https://example.com/r.git',
-    status: 'error',
-    errorCode: 'checkout_repair_needed',
-  });
-  h.add.mockRejectedValueOnce(new Error('queue unavailable'));
-  expect((await app.request(`/${REPO}/recover-checkout`, { method: 'POST' })).status).toBe(500);
-  expect(fake.rows(schema.repositories)[0]).toMatchObject({
-    status: 'error',
-    errorCode: 'checkout_repair_needed',
-    refreshPending: false,
-  });
-});
+it.each(['checkout_repair_needed', 'source_repair_needed'])(
+  'keeps %s unchanged when recovery enqueue fails',
+  async (errorCode) => {
+    const fake = setup({
+      source: 'git_https',
+      remoteUrl: 'https://example.com/r.git',
+      status: 'error',
+      errorCode,
+    });
+    h.add.mockRejectedValueOnce(new Error('queue unavailable'));
+    expect((await app.request(`/${REPO}/recover-checkout`, { method: 'POST' })).status).toBe(500);
+    expect(fake.rows(schema.repositories)[0]).toMatchObject({
+      status: 'error',
+      errorCode,
+      refreshPending: false,
+    });
+  },
+);
 
 describe('rebuild admission for task worktrees and repaired sources', () => {
   const recover = () => app.request(`/${REPO}/recover-checkout`, { method: 'POST' });

@@ -16,13 +16,7 @@ import { safeProcessor } from './safe-processor.js';
 import { Worker, DelayedError, UnrecoverableError, type Job } from 'bullmq';
 import { and, eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
-import {
-  QUEUE_NAMES,
-  REPO_JOB_NAMES,
-  REPOSITORY_ERROR_CODES,
-  logger,
-  type RepoJobPayload,
-} from '@haive/shared';
+import { QUEUE_NAMES, REPO_JOB_NAMES, logger, type RepoJobPayload } from '@haive/shared';
 import { getDb } from '../db.js';
 import { getBullRedis } from '../redis.js';
 import {
@@ -131,17 +125,12 @@ export function startRepoWorker(repoStorageRoot: string): Worker {
             .set({
               status: 'error',
               checkoutSessionReason: sessionFailure ? err.reason : null,
-              // A check-only job runs for a repair code and keeps it whatever failed, so its
-              // Retry stays a check and a rebuild still needs the explicit recovery.
-              ...(payload.checkCheckoutOnly
+              // Checks and recoveries keep the admitted repair cause through every failure.
+              // Detection alone clears it after success; a failed rebuild proves no new cause.
+              ...(payload.checkCheckoutOnly || payload.recoverCheckout
                 ? {}
                 : {
-                    errorCode:
-                      err instanceof CheckoutRepairNeededError
-                        ? err.code
-                        : payload.recoverCheckout
-                          ? REPOSITORY_ERROR_CODES.CHECKOUT_REPAIR_NEEDED
-                          : null,
+                    errorCode: err instanceof CheckoutRepairNeededError ? err.code : null,
                   }),
               statusMessage: message,
               updatedAt: new Date(),

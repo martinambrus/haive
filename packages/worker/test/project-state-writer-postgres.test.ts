@@ -79,6 +79,7 @@ import { sweepKeptProjectionMetadata } from '../src/project-state/kept-metadata-
 import { writePlanMirror, reconcilePlanFromCheckout } from '../src/plan/mirror.js';
 import { persistDetection } from './support/repo-preparation.js';
 import { handleRefresh } from './support/repo-preparation.js';
+import { restoreProjectData } from '../src/repo/clone.js';
 import {
   putBackProjections,
   resyncAfterTaskEnd,
@@ -95,11 +96,16 @@ const seam = vi.hoisted(() => ({
   beforeDirRemove: null as null | (() => Promise<void>),
   afterDirRemove: null as null | (() => Promise<void>),
   afterSetAside: null as null | (() => Promise<void>),
+  beforePublication: null as null | (() => Promise<void>),
 }));
 vi.mock('@haive/shared/fs-safe', async (original) => {
   const real = await original<typeof import('@haive/shared/fs-safe')>();
   return {
     ...real,
+    renameNoFollow: async (...args: Parameters<typeof real.renameNoFollow>) => {
+      if (args[1].includes('.rebuild-')) await seam.beforePublication?.();
+      return real.renameNoFollow(...args);
+    },
     rewriteFileIfNoFollow: async (...args: Parameters<typeof real.rewriteFileIfNoFollow>) => {
       await seam.beforeRewrite?.();
       const result = await real.rewriteFileIfNoFollow(...args);
@@ -165,6 +171,7 @@ afterEach(async () => {
   seam.beforeDirRemove = null;
   seam.afterDirRemove = null;
   seam.afterSetAside = null;
+  seam.beforePublication = null;
   delete restoreFaults.afterBase;
   delete restoreFaults.beforeResync;
   delete restoreFaults.beforeRestore;
@@ -1212,6 +1219,151 @@ describe.skipIf(!url)('T266 real PostgreSQL record writer', () => {
     };
     return { s, source, storage, dest, git, payload, refresh, snapshot, leaveIntent };
   };
+  it('T602 member 1: publication failure rolls back private state and plan bases', async () => {
+    const m = await moveFixture();
+    await applyPlanPatch(
+      db!,
+      { ops: [{ op: 'upsert', nodeRef: 'root', parentRef: null, title: 'Saved plan' }] },
+      { repositoryId: m.s.repo.id, origin: 'llm' },
+    );
+    await writePlanMirror(db!, m.s.repo.id, m.dest);
+    await db!
+      .update(schema.planMirrorState)
+      .set({
+        syncedSnapshot: JSON.parse(await readFile(join(m.dest, '.haive-data/plan.json'), 'utf8')),
+      })
+      .where(eq(schema.planMirrorState.repositoryId, m.s.repo.id));
+    const snapshot = async () => ({
+      state: await db!
+        .select()
+        .from(schema.projectStateSync)
+        .where(eq(schema.projectStateSync.repositoryId, m.s.repo.id)),
+      plan: await db!
+        .select()
+        .from(schema.planMirrorState)
+        .where(eq(schema.planMirrorState.repositoryId, m.s.repo.id)),
+      outbox: await m.s.outbox(),
+    });
+    const before = await snapshot();
+    await db!
+      .update(schema.repositories)
+      .set({ renderContext: { ...context('pending local'), rtkChoiceRecorded: false } })
+      .where(eq(schema.repositories.id, m.s.repo.id));
+    await writeFile(join(m.dest, '.git/config'), '[core\n');
+    seam.beforePublication = async () => {
+      throw new Error('publication refused');
+    };
+    await expect(
+      handleRefresh({ ...m.payload, recoverCheckout: true }, db!, m.storage),
+    ).rejects.toThrow('publication refused');
+    expect(await snapshot()).toEqual(before);
+    expect(await stat(m.dest).catch(() => null)).toBeNull();
+    seam.beforePublication = null;
+    await handleRefresh({ ...m.payload, recoverCheckout: true }, db!, m.storage);
+    expect(
+      JSON.parse(await readFile(join(m.dest, '.haive-data/state/project/render.json'), 'utf8'))
+        .projectInfo.name,
+    ).toBe('pending local');
+    expect((await snapshot()).state[0]!.baseSnapshot).toMatchObject({
+      render: context('pending local'),
+    });
+    expect((await snapshot()).outbox!.writeIntent).toBeNull();
+  });
+
+  it.each(['before', 'after'] as const)(
+    'T602 member 1: SIGKILL %s publication leaves old bases and a repairable checkout',
+    async (boundary) => {
+      const m = await moveFixture();
+      const syncRows = () =>
+        db!
+          .select()
+          .from(schema.projectStateSync)
+          .where(eq(schema.projectStateSync.repositoryId, m.s.repo.id));
+      const before = await syncRows();
+      await db!
+        .update(schema.repositories)
+        .set({ renderContext: { ...context('pending local'), rtkChoiceRecorded: false } })
+        .where(eq(schema.repositories.id, m.s.repo.id));
+      await writeFile(join(m.dest, '.git/config'), '[core\n');
+      const child = spawn(
+        process.execPath,
+        [
+          '--import',
+          'tsx',
+          fileURLToPath(new URL('./support/rebuild-publication-crash-child.ts', import.meta.url)),
+        ],
+        {
+          cwd: fileURLToPath(new URL('..', import.meta.url)),
+          env: {
+            ...process.env,
+            T602_REPOSITORY_ID: m.s.repo.id,
+            T602_USER_ID: m.s.userId,
+            T602_SOURCE: m.source,
+            T602_STORAGE: m.storage,
+            T602_BOUNDARY: boundary,
+          },
+          stdio: ['ignore', 'pipe', 'pipe'],
+        },
+      );
+      let error = '';
+      child.stderr.on('data', (chunk) => {
+        error = (error + chunk.toString()).slice(-2000);
+      });
+      const closed = new Promise<NodeJS.Signals | null>((resolve) =>
+        child.once('close', (_code, signal) => resolve(signal)),
+      );
+      try {
+        await new Promise<void>((resolve, reject) => {
+          const timer = setTimeout(
+            () => reject(new Error(`publication boundary missing: ${error}`)),
+            15000,
+          );
+          child.stdout.on('data', (chunk) => {
+            if (chunk.toString().includes('T602_PUBLICATION')) {
+              clearTimeout(timer);
+              resolve();
+            }
+          });
+          child.once('error', (err) => {
+            clearTimeout(timer);
+            reject(err);
+          });
+          void closed.then(() => {
+            clearTimeout(timer);
+            reject(new Error(`publication child exited: ${error}`));
+          });
+        });
+        child.kill('SIGKILL');
+        expect(await closed).toBe('SIGKILL');
+        expect(await syncRows()).toEqual(before);
+        expect(
+          await stat(join(m.dest, '.git/HEAD')).then(
+            () => true,
+            () => false,
+          ),
+        ).toBe(boundary === 'after');
+        // Model expiry of the dead worker's lease; no production row or clock participates.
+        await db!
+          .update(schema.repositories)
+          .set({ rootClaimedAt: null, rootClaimOwner: null, rootClaimKind: null })
+          .where(eq(schema.repositories.id, m.s.repo.id));
+        await handleRefresh({ ...m.payload, recoverCheckout: true }, db!, m.storage);
+        expect(
+          JSON.parse(await readFile(join(m.dest, '.haive-data/state/project/render.json'), 'utf8'))
+            .projectInfo.name,
+        ).toBe('pending local');
+        expect((await syncRows())[0]!.baseSnapshot).toMatchObject({
+          render: context('pending local'),
+        });
+        expect((await m.s.outbox())!.writeIntent).toBeNull();
+      } finally {
+        child.kill('SIGKILL');
+        await closed;
+      }
+    },
+    30000,
+  );
+
   it.each(['state', 'plan', 'earlier plan base'] as const)(
     'recovery keeps the database %s through a boot sweep and imports a later genuine edit',
     async (area) => {
@@ -1515,9 +1667,15 @@ describe.skipIf(!url)('T266 real PostgreSQL record writer', () => {
           };
         },
       }) as Database;
-      await expect(
-        handleRefresh({ ...m.payload, recoverCheckout: true }, stoppedWorker, m.storage),
-      ).rejects.toThrow('worker stopped');
+      // Compatibility fixture for a private intent committed by the pre-T602 worker. New
+      // rebuilds keep these writer transactions as savepoints until publication commits.
+      await rename(m.dest, `${m.dest}.aside-legacy`);
+      const legacyReplacement = `${m.s.repo.id}.rebuild-${randomUUID()}`;
+      const legacyPath = join(m.storage, m.s.userId, legacyReplacement);
+      await fsPromises.cp(m.source, legacyPath, { recursive: true });
+      await expect(restoreProjectData(stoppedWorker, m.s.repo.id, legacyPath)).rejects.toThrow(
+        'worker stopped',
+      );
       expect(stopped).toBe(true);
       const intent = (await m.s.outbox())!.writeIntent as {
         privateReplacement?: string;
