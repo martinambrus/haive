@@ -282,6 +282,69 @@ it.each([null, { version: 1, guardedSpans: [] }])(
   },
 );
 
+it('uses the production 250 ms wait for a guard addition when no wait is injected', async () => {
+  const { schema } = await import('@haive/database');
+  const fake = createFakeDb({
+    tasks: schema.tasks,
+    taskSteps: schema.taskSteps,
+    cliInvocations: schema.cliInvocations,
+    taskStepAgentMinings: schema.taskStepAgentMinings,
+    taskDagPlans: schema.taskDagPlans,
+  });
+  const executionContract = {
+    version: 1,
+    guardedSpans: [
+      {
+        id: 'tail',
+        firstStepId: 'tail',
+        lastStepId: 'tail',
+        predicateId: 'module.test.check',
+        args: {},
+      },
+    ],
+  };
+  const task = fake.insert(schema.tasks, { executionContract, orchestrationEpoch: 3 });
+  fake.insert(schema.taskSteps, {
+    taskId: task.id,
+    stepId: 'target',
+    status: 'failed',
+    round: 0,
+    runSeq: 1,
+    stepIndex: 1,
+  });
+  const tail = fake.insert(schema.taskSteps, {
+    taskId: task.id,
+    stepId: 'tail',
+    status: 'pending',
+    round: 0,
+    runSeq: 2,
+    stepIndex: 2,
+  });
+  const { handle, statements } = captureStatements(fake.db);
+  const db = {
+    ...handle,
+    transaction: async (fn: (tx: unknown) => unknown) => {
+      // A decision lands after the pre-read, making this pending row a late addition.
+      fake.patch(schema.taskSteps, tail.id as string, { guardState: { decision: true } });
+      return fn(handle);
+    },
+  } as unknown as Database;
+
+  await expect(
+    resetStepAndDownstream(db, task.id as string, 'target', 0, 3, false, [], executionContract),
+  ).resolves.toEqual({ downstreamReset: 1, newEpoch: 4 });
+
+  expect(statements.filter((s) => s.kind === 'execute').map((s) => s.query)).toEqual([
+    { sql: "SET LOCAL lock_timeout = '250ms'", params: [] },
+    { sql: 'SET LOCAL lock_timeout = DEFAULT', params: [] },
+  ]);
+  expect(fake.rows(schema.taskSteps).find((r) => r.id === tail.id)).toMatchObject({
+    status: 'pending',
+    guardState: null,
+    rerunGeneration: 1,
+  });
+});
+
 /** Capture every statement, including relational reads and non-step tables. */
 function captureStatements(db: ReturnType<typeof createFakeDb>['db']) {
   const statements: Record<string, unknown>[] = [];
@@ -346,7 +409,11 @@ function captureStatements(db: ReturnType<typeof createFakeDb>['db']) {
       },
     }),
     execute: (query: unknown) => {
-      statements.push({ kind: 'execute', query: condition(query) });
+      const captured = condition(query);
+      statements.push({ kind: 'execute', query: captured });
+      // Statement capture proves timeout SQL; server timeout semantics live in
+      // step-row-lock-order-db.test.ts, not this in-memory fixture.
+      if (captured.sql.startsWith('SET LOCAL lock_timeout = ')) return Promise.resolve([]);
       return db.execute(query);
     },
     insert: (table: Parameters<typeof db.insert>[0]) => {

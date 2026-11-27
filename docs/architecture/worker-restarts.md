@@ -858,9 +858,14 @@ The late sweeps use the database's `boundedLockWait` with the shared, injectable
 additions in both reset helpers, and retained Resume rows under an existing batch.
 The helper sets LOCAL `lock_timeout` and restores DEFAULT on success; timeout aborts
 roll back the whole transaction. SQLSTATE 55P03 maps to HTTP 503 in the API and a
-retryable `RevivalBusy` hold in the worker. Longer benign holds still refuse.
-The bound is below the default 1 s `deadlock_timeout`, leaving a 750 ms lag margin
-for a peer that started waiting earlier. This is not an absolute deadlock guarantee:
+`RevivalBusy` hold in the worker: job callers delay for 30 s without spending an
+attempt, then re-drive the handoff; boot reconcile logs the failure and leaves it
+to the stalled sweep. Longer benign holds still refuse.
+The bound is below the default 1 s `deadlock_timeout`, allowing up to 750 ms of
+earlier waiting before a reverse-tier wait begins. Earlier benign waits in the same
+transaction consume that budget: each bounded block can run several statements,
+each with its own 250 ms lock timeout, and an action can run several blocks.
+The remaining margin can approach zero. This is not an absolute deadlock guarantee:
 if a pass or Stop has already waited 750–1000 ms when the reverse-tier wait begins,
 its detector can fire first and choose that peer as the 40P01 victim. Deployments
 must retain the timeout ordering; increasing the late bound shrinks that margin.

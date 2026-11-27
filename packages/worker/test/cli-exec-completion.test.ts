@@ -595,32 +595,39 @@ describe('a login failure', () => {
     'hands back the original CLI failure when its best-effort hint fails (%s)',
     async (code) => {
       const warn = vi.spyOn(log, 'warn').mockImplementation(() => undefined);
-      const original = new CliLoginRequiredError('log in first', hint);
-      const hintError = new DrizzleQueryError(
-        'update task_steps set error_hint = $1',
-        ['private-bound-value'],
-        Object.assign(new Error('hint write failed'), { code }),
-      );
-      stubs.executeByKind.mockRejectedValue(original);
-      const { db, writes } = fakeDb({ lockedRun: { supersededAt: null }, hintError });
-      const failed = await handleCliExecJob(db, base).catch((err: unknown) => err);
+      try {
+        const original = new CliLoginRequiredError('log in first', hint);
+        const hintError = new DrizzleQueryError(
+          'update task_steps set error_hint = $1',
+          ['private-bound-value'],
+          Object.assign(new Error('hint write failed'), { code }),
+        );
+        stubs.executeByKind.mockRejectedValue(original);
+        const { db, writes } = fakeDb({ lockedRun: { supersededAt: null }, hintError });
+        const failed = await handleCliExecJob(db, base).catch((err: unknown) => err);
 
-      expect(stubs.markCliParkBegin).toHaveBeenCalledWith(db, STEP);
-      expect(stubs.resumeStepIfLinked).toHaveBeenCalledExactlyOnceWith(base, false, 'log in first');
-      expect(failed).toBe(original);
-      expect(runWrites(writes).find((w) => w.set.exitCode === -1)?.set.errorMessage).toBe(
-        'log in first',
-      );
-      expect(miningWrites(writes).find((w) => w.set.status === 'failed')?.set.errorMessage).toBe(
-        'log in first',
-      );
-      expect(hintWrites(writes)).toEqual([]);
-      expect(warn).toHaveBeenCalledExactlyOnceWith(
-        { err: hintError, invocationId: base.invocationId },
-        'failed to record CLI login hint',
-      );
-      expect((warn.mock.calls[0]![0] as { err: unknown }).err).toBe(hintError);
-      warn.mockRestore();
+        expect(stubs.markCliParkBegin).toHaveBeenCalledWith(db, STEP);
+        expect(stubs.resumeStepIfLinked).toHaveBeenCalledExactlyOnceWith(
+          base,
+          false,
+          'log in first',
+        );
+        expect(failed).toBe(original);
+        expect(runWrites(writes).find((w) => w.set.exitCode === -1)?.set.errorMessage).toBe(
+          'log in first',
+        );
+        expect(miningWrites(writes).find((w) => w.set.status === 'failed')?.set.errorMessage).toBe(
+          'log in first',
+        );
+        expect(hintWrites(writes)).toEqual([]);
+        expect(warn).toHaveBeenCalledExactlyOnceWith(
+          { err: hintError, invocationId: base.invocationId },
+          'failed to record CLI login hint',
+        );
+        expect((warn.mock.calls[0]![0] as { err: unknown }).err).toBe(hintError);
+      } finally {
+        warn.mockRestore();
+      }
     },
   );
 

@@ -228,8 +228,9 @@ export async function resetStepAndDownstream(
             lateLockWaitMs,
           );
         } catch (err) {
-          // A timeout aborted the transaction. The queue retries this hold without
-          // failing the task, as it does for contention on revival admission.
+          // A timeout aborted the transaction. Job callers delay for 30 s without
+          // failing the task or spending an attempt, then re-drive the handoff.
+          // Boot reconcile logs the failure and leaves recovery to the stalled sweep.
           if (isLockNotAvailable(err)) throw new RevivalBusy(err);
           throw err;
         }

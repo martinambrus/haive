@@ -1,4 +1,4 @@
-import type { Job } from 'bullmq';
+import { DelayedError, type Job } from 'bullmq';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ConfigUnavailableError, configService, logger, TASK_JOB_NAMES } from '@haive/shared';
 import {
@@ -10,6 +10,7 @@ import {
   setContainerCleanupRunner,
 } from '../src/queues/task-queue.js';
 import { resetStepAndDownstream } from '../src/queues/_step-reset.js';
+import { RevivalBusy } from '../src/queues/_revive-check.js';
 import * as runList from '../src/queues/run-list.js';
 import * as stepOwnership from '../src/step-engine/step-ownership.js';
 import { advanceStep } from '../src/step-engine/index.js';
@@ -836,6 +837,86 @@ describe('a job that resets steps itself', () => {
     sourceStepId: 'epoch-job-step',
     uncapped: true,
   };
+
+  it('delays a busy revise reset without spending an attempt, then re-drives the saved verdict', async () => {
+    vi.useFakeTimers();
+    const source = stepRegistry.require('epoch-job-step');
+    const evaluate = vi.fn((output: unknown) =>
+      (output as { rejected?: boolean })?.rejected ? { targetStepId: 'epoch-job-target' } : null,
+    );
+    stepRegistry.override({ ...source, reviseLoop: { evaluate } });
+    h.state.readsAnswer = true;
+    h.state.existingRow = {
+      id: 'ts-1',
+      stepId: source.metadata.id,
+      round: 0,
+      status: 'done',
+      endedAt: new Date(),
+      output: { rejected: true },
+      errorMessage: null,
+      formValues: null,
+    };
+    const reset = vi.mocked(resetStepAndDownstream);
+    reset.mockClear();
+    const busy = new RevivalBusy(Object.assign(new Error('opaque'), { code: '55P03' }));
+    reset.mockRejectedValueOnce(busy).mockImplementationOnce(async () => {
+      h.state.taskEpoch = 7;
+      return { downstreamReset: 1, newEpoch: 7 };
+    });
+    const job = {
+      id: 'busy-revise',
+      name: TASK_JOB_NAMES.ADVANCE_STEP,
+      data: { taskId: 'task-1', userId: 'user-1', stepId: source.metadata.id, round: 0, epoch: 5 },
+      timestamp: Date.now(),
+      opts: { attempts: 1 },
+      attemptsMade: 0,
+      moveToDelayed: vi.fn(async () => undefined),
+    };
+    try {
+      // BullMQ's DelayedError follows moveToDelayed without counting a failed attempt.
+      await expect(processTaskJob(job as unknown as Job, 'tok')).rejects.toBeInstanceOf(
+        DelayedError,
+      );
+      expect(job.moveToDelayed).toHaveBeenCalledExactlyOnceWith(Date.now() + 30_000, 'tok');
+      expect(job.attemptsMade).toBe(0);
+      expect(reset).toHaveBeenCalledTimes(1);
+      expect(h.state.taskWrites).toEqual([]);
+      expect(h.state.events).toEqual([]);
+      expect(h.state.add).not.toHaveBeenCalled();
+      expect(h.state.currentStepId).toBe(source.metadata.id);
+      expect(h.state.existingRow.status).toBe('done');
+
+      await vi.advanceTimersByTimeAsync(30_000);
+      await expect(processTaskJob(job as unknown as Job, 'tok')).resolves.toBeUndefined();
+      expect(reset).toHaveBeenCalledTimes(2);
+      expect(reset.mock.calls.map((call) => call.slice(1, 5))).toEqual([
+        ['task-1', 'epoch-job-target', 1, 5],
+        ['task-1', 'epoch-job-target', 1, 5],
+      ]);
+      expect(evaluate.mock.calls).toEqual([[{ rejected: true }], [{ rejected: true }]]);
+      expect(advanceStep).not.toHaveBeenCalled();
+      expect(h.state.landedTaskPatches).toEqual([
+        expect.objectContaining({
+          status: 'running',
+          currentStepId: 'epoch-job-target',
+          currentRound: 1,
+        }),
+      ]);
+      expect(h.state.events).toEqual(['step.revise']);
+      expect(h.state.add).toHaveBeenCalledTimes(1);
+      expect(h.state.add.mock.lastCall?.[1]).toMatchObject({
+        stepId: 'epoch-job-target',
+        round: 1,
+        epoch: 7,
+      });
+      expect(job.moveToDelayed).toHaveBeenCalledTimes(1);
+      expect(job.attemptsMade).toBe(0);
+    } finally {
+      stepRegistry.override(source);
+      reset.mockReset().mockResolvedValue({ downstreamReset: 0, newEpoch: 7 });
+      vi.useRealTimers();
+    }
+  });
 
   it('keeps the original epoch when the revise transaction throws', async () => {
     const ctx = workflowTaskContext();
