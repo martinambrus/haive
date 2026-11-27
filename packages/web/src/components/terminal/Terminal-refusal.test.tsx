@@ -1,10 +1,10 @@
 // @vitest-environment jsdom
-import { act, cleanup, render, screen } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { Terminal } from './Terminal';
 import { InteractiveShell } from './InteractiveShell';
 
-const h = vi.hoisted(() => ({ writeln: vi.fn() }));
+const h = vi.hoisted(() => ({ writeln: vi.fn(), get: vi.fn() }));
 
 vi.mock('@xterm/xterm', () => ({
   Terminal: class {
@@ -31,7 +31,7 @@ vi.mock('@xterm/addon-fit', () => ({
 vi.mock('@xterm/addon-web-links', () => ({ WebLinksAddon: class {} }));
 vi.mock('@xterm/addon-clipboard', () => ({ ClipboardAddon: class {} }));
 vi.mock('@/lib/api-client', () => ({
-  api: {},
+  api: { get: h.get },
   apiWebSocketUrl: (path: string) => `ws://localhost${path}`,
 }));
 vi.mock('@/lib/terminal-wheel', () => ({ attachWheelScroll: () => () => {} }));
@@ -57,6 +57,7 @@ class FakeWebSocket {
 }
 beforeEach(() => {
   FakeWebSocket.instances = [];
+  h.get.mockResolvedValue({ status: 'ready' });
   vi.stubGlobal('WebSocket', FakeWebSocket);
   vi.stubGlobal(
     'ResizeObserver',
@@ -71,6 +72,7 @@ beforeEach(() => {
 afterEach(() => {
   cleanup();
   vi.unstubAllGlobals();
+  vi.useRealTimers();
 });
 
 const messages: Array<[number, string]> = [
@@ -82,6 +84,10 @@ const messages: Array<[number, string]> = [
     'Terminals are unavailable for read-only local repositories. Import a writable copy to use a terminal.',
   ],
   [4424, 'The repository is not ready. Wait until it is ready before opening the terminal.'],
+  [
+    4426,
+    'Repository sessions stopped for a checkout rebuild. Reopen after the repository is ready.',
+  ],
   [4425, 'The CLI provider is disabled. Enable it before opening a terminal.'],
 ];
 describe.each([
@@ -122,4 +128,19 @@ describe.each([
     act(() => ws.onclose?.({ code: 4420, reason: '' }));
     expect(h.writeln).not.toHaveBeenCalled();
   });
+});
+
+it('offers explicit terminal reopen only after ready and never reconnects automatically after rebuild', async () => {
+  vi.useFakeTimers();
+  h.get.mockResolvedValue({ status: 'cloning' });
+  render(<InteractiveShell scope="repo" repositoryId="repo" cliProviderId="provider" />);
+  await act(async () => FakeWebSocket.instances[0]!.onclose?.({ code: 4426, reason: 'untrusted' }));
+  expect(
+    (screen.getByRole('button', { name: 'Reopen terminal' }) as HTMLButtonElement).disabled,
+  ).toBe(true);
+  h.get.mockResolvedValue({ status: 'ready' });
+  await act(() => vi.advanceTimersByTimeAsync(2500));
+  expect(FakeWebSocket.instances).toHaveLength(1);
+  fireEvent.click(screen.getByRole('button', { name: 'Reopen terminal' }));
+  expect(FakeWebSocket.instances).toHaveLength(2);
 });

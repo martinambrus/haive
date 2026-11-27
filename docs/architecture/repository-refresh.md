@@ -373,8 +373,8 @@ and close it in `finally`; they do not read kernel wait-channel names.
 
 Retry preparation and Rebuild checkout use the shared Escape-dismissable Dialog before posting.
 It warns that replacement stops running terminal, Editor and runtime commands and retains
-Editor unsaved buffers for review. Check repair remains an in-place check. This warning must
-ship before the worker stop barrier; it changes no session lifecycle on its own.
+Editor unsaved buffers for review. Check repair remains an in-place check. The warning
+requires confirmation before submitting a preparation that can replace the checkout.
 
 Each confirmation owns its sending state by request object identity. Dismissing a slow
 request and opening another warning (including one for the same repository) leaves the new
@@ -387,22 +387,21 @@ scroll regions and height limits; caller classes can override the shared default
 ## Interactive attach fencing
 
 Editor grants/cookies and HTTP/WebSocket admission bind the repository's Redis epoch; Browser
-attach repeats checkout admission, and Terminal understands close code 4426. Before the worker
-stop layer ships, no replacement epoch is written and legacy cookies remain valid. This API
-layer starts no stop or rebuild of its own. The authenticated interactive-status endpoint is
-passive. Migration 0254 adds only nullable checkout_session_reason, declared last; it ships
-here because Retry now clears that column. Keep the additive migration on rollback. Ship this
-API layer after the warning and before the worker suspension layer.
+attach repeats checkout admission, and Terminal understands close code 4426. Before the first
+replacement, the current epoch is null, so legacy cookies with a null epoch remain valid.
+Attach admission starts no stop or rebuild. The authenticated interactive-status endpoint is
+passive and returns the owned target's status and epoch with `Cache-Control: no-store`.
+Migration 0254 adds only nullable checkout_session_reason, declared last; Retry clears that
+column. Keep the additive migration on rollback.
 
-The VNC epoch sender and the Editor/VNC session boundary ship with these API guards,
-before any worker writes epochs. A fresh pane obtains its accepted epoch through the
+The VNC epoch sender and the Editor/VNC session boundary use the same epoch as API admission.
+A fresh pane obtains its accepted epoch through the
 passive status endpoint; a changed epoch requires explicit reopen. An absent epoch is
 still a null expectation and refuses a non-null current epoch. Terminal and shell clients
 never automatically reconnect after replacement; Editor grants bind the epoch on the
 server and each proxied request rechecks it (database lookups and one Redis GET; task targets also resolve their repository).
 Apply `0254_checkout_session_reason.sql` before reloading API/worker with the new schema.
-The warning alone precedes the stop layer, so its promised stops become active only when
-the worker layer is deployed. DDEV replacement discards changes since the saved snapshot.
+DDEV replacement discards changes since the saved snapshot.
 A failed status poll closes admission until a successful poll, then requires explicit reopen.
 
 ## Interactive mounts at replacement
@@ -489,8 +488,8 @@ The lifecycle fence is a per-process Map and relies on **one worker per install*
 runs. Two workers can admit a boot in one process past the other's drain; horizontal worker
 scaling needs a shared lifecycle fence before it is supported.
 
-Deploy the warning web and API attach guards before this worker layer. Drain preparations,
-interactive boots and task work through maintenance. Apply migration 0254 first and rebuild database/shared libraries.
+Deploy API, worker and web together after draining preparations, interactive boots and task
+work through maintenance. Apply migration 0254 first and rebuild database/shared libraries.
 Use `pnpm docker restart api worker web` for deployment after that drain; never restart live
 services as a test. Legacy unstamped containers survive deployment and ordinary next ensures
 regardless of replacement history. A worker recreation still interrupts PTYs.
@@ -498,11 +497,21 @@ Rollback settles work, reverts packages together and rebuilds libraries, **keepi
 0254's file and its column applied**, all aside/staging directories and named Editor/auth/cache
 volumes. Reverting cannot revive stopped commands and restores the older mount-reuse hazard.
 
-The warning Dialog and API epoch/attach guards must already be deployed before this worker
-stop layer. Existing surfaces close or refuse stale attachment; the explicit reopen controls
-already accompany Editor/VNC attachment; terminal reopen controls follow in the final web
-layer. Reopening a session remains a user action.
+Existing surfaces close or refuse stale attachment. Editor, VNC and terminal reopen controls
+require a ready checkout and an explicit user action, so a surviving pane cannot silently
+resume work against a replacement checkout.
 
 Unreadable Docker identity labels preserve app/Editor runners. DDEV wraps that probe failure
 in `RunnerProbeError`, retaining its transient retry classification. Filesystem identity failures
 still refuse admission; the pre-swap stop/absence barrier remains the replacement guarantee.
+
+The web's Retry preparation and Rebuild checkout actions open the shared Escape-dismissable
+Dialog before posting. It warns that commands in terminals, Editors and runtimes stop and that
+Editor buffers survive for review; Check repair remains an in-place check. Editor/Browser panels
+poll the authenticated `interactive-status` endpoint, whose structural status and replacement
+epoch drive `checkoutSessionBanner`. A changed epoch is noticed even if cloning and ready both
+happened between polls. The old surface unmounts and stays closed until **Reopen session** is
+clicked after ready. Terminal code 4426 keeps its output visible and offers **Reopen terminal**
+once that same endpoint reports ready. Neither path reconnects automatically for a rebuild.
+The replacement banner asks users to review retained buffers before saving. Error or
+status-message copy alone never drives a replacement banner.

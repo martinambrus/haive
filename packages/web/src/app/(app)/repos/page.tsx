@@ -1,5 +1,6 @@
 'use client';
 
+import { checkoutPreparationBanner } from '@/lib/step-banners';
 import { LinkButton } from '@/components/ui';
 import { Dialog } from '@/components/dialog';
 import { MarkdownView } from '@/components/markdown/markdown-view';
@@ -395,6 +396,7 @@ function RepoCard(props: RepoCardProps) {
   const canCheckRepair = repo.source === 'local_path' ? !!repo.localPath : !!repo.remoteUrl;
   const retryUnavailableReason =
     repo.status === 'error' && repo.canRetry === false ? repo.retryUnavailableReason : null;
+  const sessionBanner = checkoutPreparationBanner(repo);
   const statusMessage = repairNeeded
     ? repo.statusMessage
     : (retryUnavailableReason ?? repo.statusMessage);
@@ -514,7 +516,13 @@ function RepoCard(props: RepoCardProps) {
           <p className="mt-1 break-all text-xs text-neutral-500">
             {repo.localPath ?? repo.remoteUrl ?? '(no path)'}
           </p>
-          {statusMessage && (
+          {sessionBanner && (
+            <InlineMarkdown
+              body={sessionBanner.text}
+              className={`mt-1 text-xs ${sessionBanner.waiting ? 'text-amber-300' : 'text-red-400'}`}
+            />
+          )}
+          {!sessionBanner && statusMessage && (
             <InlineMarkdown body={statusMessage} className="mt-1 text-xs text-red-400" />
           )}
         </div>
