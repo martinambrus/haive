@@ -1,3 +1,4 @@
+import { isRecordReadLog } from './support/record-read-log.js';
 import { fixtureBase, httpOrigin, networkGitArgs } from './support/smoke-git-http.js';
 /**
  * A refresh fast-forwards a checkout to its source and never deletes one, against a database and
@@ -2010,14 +2011,10 @@ async function main(): Promise<void> {
         }
         const lines = (await readFile(gitLog, 'utf8')).split('\n');
         const at = (m: string) => lines.indexOf(`MARK ${m}`);
-        // The pinned record read lists only state at a commit id. Batched projection metadata
-        // lists HEAD plus the plan pair, and restore batches legitimately read HEAD blobs in-tx.
+        // Count any recursive record listing (HEAD or a pinned ref, any flag order),
+        // and legacy per-object reads. Only the fixed-root projection metadata is exempt.
         const recordReads = (from: number, to: number) =>
-          lines
-            .slice(from, to)
-            .filter((l) =>
-              /ls-tree -r -l -z (?:[0-9a-f]{40}|[0-9a-f]{64}) -- \.haive-data\/state$/.test(l),
-            ).length;
+          lines.slice(from, to).filter(isRecordReadLog).length;
         check(
           "K4: a set-aside reads HEAD's record before its first transaction and none inside either one",
           (k4Out as { outcome?: string }).outcome === 'set-aside' &&

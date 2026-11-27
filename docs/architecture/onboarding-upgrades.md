@@ -1121,6 +1121,24 @@ and writes still use fs-safe. A staged entry that must move keeps the per-path p
 protocol above, including its immediate read-back and blend undo. Only ordinary read observations
 are constant in process count, not the writes and their contention checks.
 
+An observation is a snapshot for the whole path loop, not a lock on HEAD, the index or the
+working tree. A later path can therefore use HEAD bytes/mode and index/mode evidence sampled
+before the preceding paths were read or restored; a fingerprint's mode listing also precedes
+its per-file read. The per-path parked byte/mode/owner CAS remains the authority for each file
+write, and index swaps retain their fresh entry check, patch preimage check and immediate
+read-back. The final complete index recheck catches a concurrent stage even on paths that
+needed no index swap. No snapshot bypasses those write guards. A person's commit during the
+loop can still leave a path restored from the earlier HEAD; the final check detects it only
+when the index differs from that earlier HEAD. This residual race existed with the per-path
+reads, but batching lengthens its window to the loop's duration. The snapshot does not freeze
+a concurrent writer or make a fingerprint an atomic byte-and-mode observation.
+
+Missing staged objects and non-blob batch-check responses yield no staged blob and take the
+ordinary per-path ownership refusal; a staged oid equal to HEAD's is accepted by that comparison,
+including a gitlink. HEAD listings retain non-blobs and unreadable (`BAD`/`-` size) entries as
+present. Attempting to restore their blob bytes fails before filesystem writes, rather than
+mistaking a tracked entry for an untracked file eligible for removal.
+
 MEASURED for T319 on generated repositories (Node 26.5.0, Git 2.43.0, Linux/WSL2; one sample under
 concurrent host/test load), with database and sync/import/rebase work stubbed and real hardened Git
 and fs-safe I/O: 32/512 unstaged dirty projection paths used 829/12,829 Git processes before and

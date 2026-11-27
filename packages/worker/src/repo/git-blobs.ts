@@ -55,7 +55,8 @@ export async function readGitBlobs(
   return blobs;
 }
 
-/** Inspect sizes without reading content, so an oversized staged entry is refused before allocation. */
+/** Inspect sizes without reading content, so an oversized staged entry is refused before allocation.
+ * Missing objects and non-blobs have no blob size: callers refuse those paths normally. */
 export async function gitBlobSizes(
   repoPath: string,
   oids: readonly string[],
@@ -72,13 +73,15 @@ export async function gitBlobSizes(
   const lines = result.stdout.split('\n');
   if (lines.pop() !== '' || lines.length !== unique.length)
     throw new Error('invalid Git size batch');
-  return new Map(
-    unique.map((oid, i) => {
-      const match = /^([0-9a-f]+) blob (\d+)$/.exec(lines[i]!);
-      const size = Number(match?.[2]);
-      if (!match || match[1] !== oid || !Number.isSafeInteger(size) || size < 0)
-        throw new Error('invalid Git size batch entry');
-      return [oid, size];
-    }),
-  );
+  const sizes = new Map<string, number>();
+  for (const [i, oid] of unique.entries()) {
+    const line = lines[i]!;
+    if (line === `${oid} missing`) continue;
+    const match = /^([0-9a-f]+) (blob|tree|commit|tag) (\d+)$/.exec(line);
+    const size = Number(match?.[3]);
+    if (!match || match[1] !== oid || !Number.isSafeInteger(size) || size < 0)
+      throw new Error('invalid Git size batch entry');
+    if (match[2] === 'blob') sizes.set(oid, size);
+  }
+  return sizes;
 }

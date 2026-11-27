@@ -1,5 +1,5 @@
 import { expect, it, vi } from 'vitest';
-import { projectionEntries } from '../src/project-state/projection-git.js';
+import { projectionEntries, projectionHeadBlobs } from '../src/project-state/projection-git.js';
 const git = vi.hoisted(() => vi.fn());
 vi.mock('../src/repo/git-exec.js', () => ({
   gitRun: git,
@@ -40,3 +40,24 @@ it('parses NUL paths, preserves tabs and newlines, and never aliases an invalid 
   expect(entries.sizes).toEqual(new Map([[oid, 4]]));
   expect(git).toHaveBeenCalledTimes(2);
 });
+
+it.each(['blob BAD', 'blob -', 'commit -'])(
+  'retains an unreadable HEAD entry (%s) instead of treating it as absent',
+  async (kind) => {
+    const oid = 'a'.repeat(40);
+    const rel = '.haive-data/state/sub';
+    const [type, size] = kind.split(' ');
+    git.mockReset();
+    git.mockResolvedValueOnce({ code: 0, stderr: '', stdout: '' }).mockResolvedValueOnce({
+      code: 0,
+      stderr: '',
+      stdout: `100644 ${type} ${oid} ${size}\t${rel}\0`,
+    });
+    const entries = await projectionEntries('/repo');
+    expect(entries.head.get(rel)).toBe(`100644 ${oid}`);
+    expect(entries.sizes.has(oid)).toBe(false);
+    expect(() => projectionHeadBlobs('/repo', [rel], entries, 1024)).toThrow(
+      `${rel} HEAD blob could not be read`,
+    );
+  },
+);

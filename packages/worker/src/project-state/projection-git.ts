@@ -55,12 +55,14 @@ export async function projectionEntries(repoPath: string): Promise<ProjectionEnt
     }
   }
   for (const entry of tree.stdout.split('\0')) {
-    const m = /^(\d+) blob ([0-9a-f]+) +(\d+)\t([\s\S]*)$/.exec(entry);
+    const m = /^(\d+) (blob|commit|tree) ([0-9a-f]+) +(\d+|BAD|-)\t([\s\S]*)$/.exec(entry);
     if (!m) continue;
-    const bytes = Buffer.from(m[4]!, 'latin1');
+    const bytes = Buffer.from(m[5]!, 'latin1');
     if (!isUtf8(bytes)) continue;
-    out.head.set(bytes.toString('utf8'), `${m[1]} ${m[2]}`);
-    out.sizes.set(m[2]!, Number(m[3]));
+    // Presence and oid equality do not depend on blob readability. In particular a HEAD
+    // gitlink can equal the staged oid, and a missing HEAD blob must never look untracked.
+    out.head.set(bytes.toString('utf8'), `${m[1]} ${m[3]}`);
+    if (m[2] === 'blob' && /^\d+$/.test(m[4]!)) out.sizes.set(m[3]!, Number(m[4]));
   }
   return out;
 }
@@ -89,8 +91,8 @@ export async function stagedProjectionBlobs(
   return readGitBlobs(
     repoPath,
     candidates.flatMap(({ oid, path }) => {
-      const size = sizes.get(oid)!;
-      return size <= cap(path) ? [{ oid, size }] : [];
+      const size = sizes.get(oid);
+      return size !== undefined && size <= cap(path) ? [{ oid, size }] : [];
     }),
     totalCap,
   );
@@ -141,7 +143,8 @@ export function projectionHeadBlobs(
     paths.flatMap((path) => {
       const oid = entryOid(entries.head.get(path));
       if (oid === null) return [];
-      const size = entries.sizes.get(oid)!;
+      const size = entries.sizes.get(oid);
+      if (size === undefined) throw new Error(`${path} HEAD blob could not be read`);
       if (size > GIT_MAX_BUFFER) throw new Error(`${path} is larger than the projection allows`);
       return [{ oid, size }];
     }),

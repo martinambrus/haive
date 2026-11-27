@@ -53,6 +53,21 @@ it('uses one size batch and validates every object', async () => {
     input: Buffer.from(`${oid}\n`),
     maxBuffer: 128,
   });
-  git.mockResolvedValue(answer(`${oid} missing\n`));
+});
+
+it.each(['missing', 'commit 123', 'tree 0', 'tag 42'])(
+  'omits a structurally valid non-blob size response: %s',
+  async (entry) => {
+    git.mockResolvedValue(answer(`${oid} ${entry}\n`));
+    expect(await gitBlobSizes('/repo', [oid])).toEqual(new Map());
+  },
+);
+it.each([
+  `${oid} blob BAD\n`,
+  `${oid} missing extra\n`,
+  `${'b'.repeat(40)} missing\n`,
+  `${oid} unknown 1\n`,
+])('still rejects malformed or mismatched size output', async (stdout) => {
+  git.mockResolvedValue(answer(stdout));
   await expect(gitBlobSizes('/repo', [oid])).rejects.toThrow();
 });
