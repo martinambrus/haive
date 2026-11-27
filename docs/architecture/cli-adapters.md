@@ -212,7 +212,10 @@ the save before Rebuild image, so usage authorization and Disconnect scope follo
 mode and isolation without reloading. A later secret-write or image-build failure does not undo
 that settings save.
 The usage API excludes frozen API-key Claude snapshots, and the task header also filters on
-the provider's auth mode, so neither header surface keeps prompting an impossible reconnect.
+the provider's auth mode when its row is known, so neither header surface keeps prompting an
+impossible reconnect for a known API-key row. If the provider list fails to load or omits a row,
+the header keeps the API-filtered snapshot and renders its own provider name, like the task-list
+strip; an unknown row is not evidence that usage is ineligible.
 The task header's empty-meter fallback is also suppressed on API-key Claude rows.
 An API-key Claude clone holds
 its source auth scope lock through the secret copy, but never copies the usage grant, whether

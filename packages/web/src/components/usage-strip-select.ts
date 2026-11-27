@@ -69,11 +69,11 @@ export function selectMetersForProviderIds(
   const deadByAllowance = new Map<string, UsageWindowSnapshot>();
   const pendingByAllowance = new Map<string, UsageWindowSnapshot>();
   for (const snap of snapshots) {
-    // Without provider rows the task-list strip trusts the API's eligibility filter.
-    // The header has those rows and applies the same predicate to retained snapshots.
+    // Unknown rows (including a failed provider-list fetch) trust the API's eligibility
+    // filter and keep the snapshot's own name. Known rows gate retained snapshots by auth.
     if (providers) {
       const provider = providers.find((p) => p.id === snap.providerId);
-      if (!provider || !hasUsageWindow(provider.name, provider.authMode)) continue;
+      if (provider && !hasUsageWindow(provider.name, provider.authMode)) continue;
     }
     const key = allowanceKeyOf(snap.providerId, allowanceKeys);
     if (!visible.has(key)) continue;
