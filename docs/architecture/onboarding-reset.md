@@ -292,6 +292,12 @@ leaves the window where a handler has already passed it and the reset claims the
 task type now refuse a live claim too, under the task-creation key, so they cannot enter after a
 rebuild has renamed the checkout and released that short key. See [Repository refresh](repository-refresh.md).
 
+A repository job must also own the pending admission UUID (`refresh_job_id`) at pickup and
+again after taking its root claim, before touching files. The lease excludes concurrent root
+writers; it does not authorize an old delayed retry to remove a checkout a newer job prepared.
+Completed/null owners and obsolete or legacy ownerless payloads do no work. The deployment and
+recoverable refusal policy are documented in [Repository refresh](repository-refresh.md).
+
 `DELETE /repos/:id` refuses while a claim is live, reading it on the repository row it locks: a
 delete during a clone used to let the resource cleanup it queues run before the clone finished
 writing, which left the checkout on disk with no row to find it by. A writer that claims after the

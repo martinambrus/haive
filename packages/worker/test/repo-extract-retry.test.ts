@@ -6,7 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { schema } from '@haive/database';
 import { createFakeDb } from '@haive/database/testing';
 import type { RepoJobPayload } from '@haive/shared';
-import { handleExtract } from '../src/repo/clone.js';
+import { handleExtract } from './support/repo-preparation.js';
 
 const claim = vi.hoisted(() => ({ release: vi.fn(async () => {}) }));
 

@@ -68,7 +68,11 @@ import type { AppEnv } from '../src/context.js';
 
 // Runtime cross-package seam: keep worker sources outside the API's tsc root.
 const refreshSource = new URL('../../worker/src/repo/refresh.ts', import.meta.url).pathname;
-const { handleRefresh } = await import(refreshSource);
+const refresh = await import(refreshSource);
+const ownerSource = new URL('../../worker/src/repo/job-owner.ts', import.meta.url).pathname;
+const { withRepoJobOwner } = await import(ownerSource);
+const handleRefresh = (...args: any[]) =>
+  withRepoJobOwner(REPO, 'archive-fixture-job', () => refresh.handleRefresh(...args));
 const app = new Hono<AppEnv>().onError(errorHandler).route('/repos', repoRoutes);
 const archive = () => app.request(`/repos/${REPO}/archive`);
 let root: string;
@@ -111,6 +115,8 @@ beforeEach(async () => {
     userId: USER,
     name: 'repo',
     status: 'ready',
+    refreshPending: true,
+    refreshJobId: 'archive-fixture-job',
     storagePath: dest,
   });
   h.db = fake.db;

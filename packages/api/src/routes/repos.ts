@@ -235,7 +235,7 @@ function deriveTopLevelPaths(fileTree: string[] | null): string[] {
  *  nothing to move it off `cloning`. The worker's boot reconciler cannot cover that case in
  *  bounded time: it deliberately ignores rows younger than its cutoff, because a young row is
  *  indistinguishable from one whose enqueue is still in flight. So it is closed here, where the
- *  failure actually happens. Refresh enqueue failures compare the admission
+ *  failure actually happens. All enqueue failures compare the admission
  *  job id too, since a lost acknowledgement can outlive that job and a newer admission.
  *
  *  Rethrows, because the caller's request really did fail and must say so. The status write is
@@ -245,8 +245,8 @@ export async function addRepoJobOrMarkError(
   db: ReturnType<typeof getDb>,
   repositoryId: string,
   add: () => Promise<unknown>,
-  errorCode: RepositoryErrorCode | null = null,
-  refreshJobId?: string,
+  errorCode: RepositoryErrorCode | null,
+  refreshJobId: string,
 ): Promise<void> {
   try {
     await add();
@@ -255,7 +255,8 @@ export async function addRepoJobOrMarkError(
       .update(schema.repositories)
       .set({
         status: 'error',
-        ...(refreshJobId ? { refreshPending: false, refreshJobId: null } : {}),
+        refreshPending: false,
+        refreshJobId: null,
         errorCode,
         statusMessage:
           'Could not queue the job that prepares this repository. Retry if available; otherwise delete the repository and add it again.',
@@ -264,7 +265,8 @@ export async function addRepoJobOrMarkError(
       .where(
         and(
           eq(schema.repositories.id, repositoryId),
-          refreshJobId ? eq(schema.repositories.refreshJobId, refreshJobId) : undefined,
+          eq(schema.repositories.refreshJobId, refreshJobId),
+          eq(schema.repositories.refreshPending, true),
         ),
       )
       .catch(() => undefined);
@@ -546,6 +548,7 @@ repoRoutes.post('/', requireNewWorkAllowed, async (c) => {
     localPath: body.localPath,
   });
 
+  const refreshJobId = randomUUID();
   const inserted = await db.transaction(async (tx) => {
     await admitNewWork(tx);
     return tx
@@ -558,6 +561,8 @@ repoRoutes.post('/', requireNewWorkAllowed, async (c) => {
         remoteUrl: body.remoteUrl ?? null,
         branch: body.branch ?? 'main',
         status: 'cloning',
+        refreshPending: true,
+        refreshJobId,
         credentialsSecretId: body.credentialsId ?? null,
         writable: body.source === 'local_path' ? (body.writable ?? false) : false,
       })
@@ -583,13 +588,19 @@ repoRoutes.post('/', requireNewWorkAllowed, async (c) => {
           ? REPO_JOB_NAMES.COPY
           : REPO_JOB_NAMES.SCAN
         : REPO_JOB_NAMES.CLONE;
-  await addRepoJobOrMarkError(db, repo.id, () =>
-    queue.add(jobName, payload, {
-      attempts: 3,
-      backoff: { type: 'exponential', delay: 5000 },
-      removeOnComplete: 100,
-      removeOnFail: 100,
-    }),
+  await addRepoJobOrMarkError(
+    db,
+    repo.id,
+    () =>
+      queue.add(jobName, payload, {
+        jobId: refreshJobId,
+        attempts: 3,
+        backoff: { type: 'exponential', delay: 5000 },
+        removeOnComplete: 100,
+        removeOnFail: 100,
+      }),
+    null,
+    refreshJobId,
   );
 
   const {
@@ -814,6 +825,7 @@ repoRoutes.post('/upload/:id/complete', requireNewWorkAllowed, async (c) => {
 
   // The claim is a write, so a drain that began after the early check refuses before it.
   await assertNewWorkAllowed();
+  const refreshJobId = randomUUID();
   const repo = await withCompleteClaim(db, schema.repoUploads, row.id, async (claim) => {
     const size = Number(row.totalSize);
     const staged = await isWholeFile(storageRoot, archiveRel, size);
@@ -835,6 +847,8 @@ repoRoutes.post('/upload/:id/complete', requireNewWorkAllowed, async (c) => {
           remoteUrl: null,
           branch,
           status: 'cloning',
+          refreshPending: true,
+          refreshJobId,
           credentialsSecretId: null,
         })
         .returning();
@@ -855,12 +869,18 @@ repoRoutes.post('/upload/:id/complete', requireNewWorkAllowed, async (c) => {
   // One attempt only: a bad archive will fail the same way on retry, and the
   // worker deletes the archive on success, so retrying would run against a
   // missing file and mask the real error.
-  await addRepoJobOrMarkError(db, repo.id, () =>
-    queue.add(REPO_JOB_NAMES.EXTRACT, payload, {
-      attempts: 1,
-      removeOnComplete: 100,
-      removeOnFail: 100,
-    }),
+  await addRepoJobOrMarkError(
+    db,
+    repo.id,
+    () =>
+      queue.add(REPO_JOB_NAMES.EXTRACT, payload, {
+        jobId: refreshJobId,
+        attempts: 1,
+        removeOnComplete: 100,
+        removeOnFail: 100,
+      }),
+    null,
+    refreshJobId,
   );
 
   const {

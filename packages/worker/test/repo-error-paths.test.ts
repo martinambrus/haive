@@ -35,12 +35,17 @@ afterEach(() => vi.restoreAllMocks());
 it('stores a repository failure without the server path and rethrows the original error', async () => {
   const fake = createFakeDb({ repositories: schema.repositories });
   const id = '00000000-0000-4000-8000-000000000001';
-  fake.insert(schema.repositories, { id, status: 'cloning' });
+  fake.insert(schema.repositories, {
+    id,
+    status: 'cloning',
+    refreshPending: true,
+    refreshJobId: 'error-path-job',
+  });
   h.db = fake.db;
   vi.spyOn(logger, 'error').mockImplementation(() => undefined);
   startRepoWorker('/unused');
   await expect(
-    h.processor!({ name: REPO_JOB_NAMES.CLONE, data: { repositoryId: id } }),
+    h.processor!({ id: 'error-path-job', name: REPO_JOB_NAMES.CLONE, data: { repositoryId: id } }),
   ).rejects.toThrow("EACCES: mkdir '/srv/private/repo'");
   expect(fake.rows(schema.repositories)[0]).toMatchObject({
     status: 'error',

@@ -95,7 +95,8 @@ vi.mock('bullmq', async (original) => ({
 vi.mock('../src/db.js', () => ({ getDb: () => db }));
 vi.mock('../src/redis.js', () => ({ getBullRedis: () => ({}) }));
 import { startRepoWorker } from '../src/queues/repo-queue.js';
-import { handleRefresh, usableCheckout } from '../src/repo/refresh.js';
+import { usableCheckout } from '../src/repo/refresh.js';
+import { handleRefresh } from './support/repo-preparation.js';
 
 const exec = promisify(execFile);
 const git = async (cwd: string, args: string[]) =>
@@ -118,6 +119,7 @@ const row: {
   statusMessage?: string;
   errorCode?: string | null;
   refreshPending?: boolean;
+  refreshJobId?: string | null;
 } = {
   status: 'ready',
 };
@@ -136,11 +138,25 @@ const db = {
   transaction: async (fn: (tx: unknown) => unknown) => fn(db),
   select: () => ({
     from: (table: unknown) => ({
-      where: () => ({ limit: async () => (table === schema.planNodes ? [{ id: 'node' }] : []) }),
+      where: () => ({
+        limit: async () =>
+          table === schema.planNodes
+            ? [{ id: 'node' }]
+            : table === schema.repositories
+              ? [row]
+              : [],
+      }),
     }),
   }),
   insert: () => ({ values: () => ({ onConflictDoUpdate: async () => {} }) }),
-  update: () => ({ set: (values: object) => ({ where: async () => Object.assign(row, values) }) }),
+  update: () => ({
+    set: (values: object) => ({
+      where: () =>
+        Object.assign(Promise.resolve(Object.assign(row, values)), {
+          returning: async () => [row],
+        }),
+    }),
+  }),
 } as unknown as Database;
 beforeEach(async () => {
   vi.clearAllMocks();
@@ -282,6 +298,8 @@ it('Check repair resumes an ordinary refresh once the checkout is usable', async
 });
 
 async function runRefresh(payload: RepoJobPayload) {
+  row.refreshPending = true;
+  row.refreshJobId = 'refresh-job';
   startRepoWorker(root);
   return h.processor!({ id: 'refresh-job', name: REPO_JOB_NAMES.REFRESH, data: payload } as Job);
 }
@@ -1039,6 +1057,7 @@ it('T594 R1: keeps pending refresh work through backoff, then clears it on final
     opts: { attempts: 3 },
     attemptsMade: 0,
   } as Job<RepoJobPayload>;
+  row.refreshJobId = job.id;
   await expect(h.processor!(job, 'token')).rejects.toThrow();
   expect(row.refreshPending).toBe(true);
   job.attemptsMade = 2;

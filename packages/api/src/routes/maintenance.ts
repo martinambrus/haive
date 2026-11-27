@@ -107,7 +107,7 @@ const jobOwner = {
 };
 
 /** The background jobs the updater counts beside the tasks; a provider with two in progress is one row. */
-async function listBlockingJobs(db: ReturnType<typeof getDb>) {
+export async function listBlockingJobs(db: ReturnType<typeof getDb>) {
   const [repositories, bundles, providers] = await Promise.all([
     db
       .select({

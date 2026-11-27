@@ -89,6 +89,62 @@ describe.skipIf(!url)('upload retry against Postgres', () => {
     ).repositories[0]!;
   }
 
+  it.each(['ready', 'cloning', 'completed'] as const)(
+    'initial enqueue acknowledgement lost during %s cannot overwrite its row',
+    async (phase) => {
+      const status = phase === 'completed' ? 'ready' : phase;
+      const newerId = randomUUID();
+      let id = '';
+      h.add.mockImplementationOnce(async (_name, raw) => {
+        id = (raw as { repositoryId: string }).repositoryId;
+        await h.db
+          .update(schema.repositories)
+          .set({
+            status,
+            statusMessage: 'newer outcome',
+            errorCode: null,
+            detectedFramework: 'new-framework',
+            refreshPending: phase !== 'completed',
+            refreshJobId: phase === 'completed' ? null : newerId,
+          })
+          .where(eq(schema.repositories.id, id));
+        throw new Error('enqueue acknowledgement lost');
+      });
+      const res = await app.request('/', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ source: 'blank', name: 'ack loss' }),
+      });
+      expect(res.status).toBe(500);
+      expect(
+        await h.db.query.repositories.findFirst({ where: eq(schema.repositories.id, id) }),
+      ).toMatchObject({
+        status,
+        statusMessage: 'newer outcome',
+        errorCode: null,
+        detectedFramework: 'new-framework',
+        refreshPending: phase !== 'completed',
+        refreshJobId: phase === 'completed' ? null : newerId,
+      });
+    },
+  );
+  it('initial create commits the exact queue UUID and pending marker before enqueue', async () => {
+    h.add.mockImplementationOnce(async (_name, raw, opts) => {
+      const id = (raw as { repositoryId: string }).repositoryId;
+      const jobId = (opts as { jobId: string }).jobId;
+      expect(jobId).toMatch(/^[0-9a-f-]{36}$/);
+      expect(
+        await h.db.query.repositories.findFirst({ where: eq(schema.repositories.id, id) }),
+      ).toMatchObject({ status: 'cloning', refreshPending: true, refreshJobId: jobId });
+    });
+    const res = await app.request('/', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ source: 'blank', name: 'owned create' }),
+    });
+    expect(res.status).toBe(201);
+  });
+
   it('does not promise Retry without an archive record, even with stale Retry copy', async () => {
     await h.db
       .update(schema.repositories)
@@ -196,6 +252,14 @@ describe.skipIf(!url)('upload retry against Postgres', () => {
         body: bytes,
       });
       expect(chunk.status).toBe(200);
+      h.add.mockImplementationOnce(async (_name, raw, opts) => {
+        const id = (raw as { repositoryId: string }).repositoryId;
+        const jobId = (opts as { jobId: string }).jobId;
+        expect(jobId).toMatch(/^[0-9a-f-]{36}$/);
+        expect(
+          await h.db.query.repositories.findFirst({ where: eq(schema.repositories.id, id) }),
+        ).toMatchObject({ status: 'cloning', refreshPending: true, refreshJobId: jobId });
+      });
       const res = await app.request(`/upload/${session.id}/complete`, { method: 'POST' });
       expect(res.status).toBe(201);
       const { repository } = (await res.json()) as { repository: { id: string } };
@@ -227,7 +291,7 @@ describe.skipIf(!url)('upload retry against Postgres', () => {
       );
       await h.db
         .update(schema.repositories)
-        .set({ status: 'error' })
+        .set({ status: 'error', refreshPending: false, refreshJobId: null })
         .where(eq(schema.repositories.id, repository.id));
       h.add.mockClear();
       expect((await app.request(`/${repository.id}/refresh-tree`, { method: 'POST' })).status).toBe(

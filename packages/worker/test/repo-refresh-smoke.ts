@@ -46,8 +46,9 @@ import {
 import { markProjectStateDirty } from '@haive/shared/project-state-outbox';
 import { initDatabase, getDb } from '../src/db.js';
 import { StepSupersededError } from '../src/step-engine/step-ownership.js';
-import { handleClone, handleCopyLocal } from '../src/repo/clone.js';
-import { checkoutHoldingTasks, handleRefresh } from '../src/repo/refresh.js';
+import { handleClone, handleCopyLocal } from './support/repo-preparation.js';
+import { checkoutHoldingTasks } from '../src/repo/refresh.js';
+import { handleRefresh } from './support/repo-preparation.js';
 import {
   MOVE_ATTEMPTS,
   putBackProjections,

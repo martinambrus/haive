@@ -54,11 +54,11 @@ import { applyPlanPatch, lockPlanMerge } from '@haive/shared/plan';
 import { upgradeAdmission } from '@haive/shared/onboarding-admission';
 import { markProjectStateDirty } from '@haive/shared/project-state-outbox';
 import { initDatabase } from '../src/db.js';
-import { handleClone, handleScan, handleInit } from '../src/repo/clone.js';
+import { handleClone, handleScan, handleInit } from './support/repo-preparation.js';
 import { landPlanMerge } from '../src/plan/merge.js';
 import { reconcilePlanFromCheckout, writePlanMirror } from '../src/plan/mirror.js';
 import { pull, save } from '../src/queues/plan-mirror-queue.js';
-import { handleRefresh } from '../src/repo/refresh.js';
+import { handleRefresh } from './support/repo-preparation.js';
 import {
   markProjectStatesDirtyAtBoot,
   sweepDirtyProjectStates as runProjectStateSweep,

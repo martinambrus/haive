@@ -1,3 +1,4 @@
+import { assertRepoJobOwner, ObsoleteRepoJobError, repoJobPredicate } from './job-owner.js';
 import { auditRepositorySettings, logAuditEvent, type AuditEvent } from '../audit.js';
 import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
@@ -334,8 +335,9 @@ export async function persistDetection(
   statusMessage?: string | null,
   options?: { preserveProjectData: true },
 ): Promise<void> {
+  await assertRepoJobOwner(db, repositoryId);
   const detection = await detectFromDirectory(storagePath);
-  await db
+  const published = await db
     .update(schema.repositories)
     .set({
       fileTree: detection.fileTree,
@@ -350,7 +352,9 @@ export async function persistDetection(
       statusMessage: statusMessage ?? null,
       updatedAt: new Date(),
     })
-    .where(eq(schema.repositories.id, repositoryId));
+    .where(repoJobPredicate(repositoryId))
+    .returning({ id: schema.repositories.id });
+  if (published.length === 0) throw new ObsoleteRepoJobError();
 
   // Recovery has already restored the private replacement before publishing it.
   if (options?.preserveProjectData) return;
@@ -492,6 +496,7 @@ export async function handleCopyLocal(
   if (!payload.localPath) throw new Error('localPath required for copy job');
   const localPath = payload.localPath;
   return withRootClaim(db, payload.repositoryId, async () => {
+    await assertRepoJobOwner(db, payload.repositoryId);
     const dest = path.join(repoStorageRoot, payload.userId, payload.repositoryId);
     await mkdir(path.dirname(dest), { recursive: true });
     // Clean dest first so a retry (or a refresh re-copy) starts from scratch
@@ -814,6 +819,7 @@ export async function handleExtract(
   // its place. Keying the audit on `rm(dest)` missed this one — the property that matters is
   // "replaces the repository root", not which call does it.
   return withRootClaim(db, payload.repositoryId, async () => {
+    await assertRepoJobOwner(db, payload.repositoryId);
     const dest = path.join(repoStorageRoot, payload.userId, payload.repositoryId);
     const holding = await db.query.tasks.findMany({
       where: and(
@@ -901,6 +907,7 @@ export async function handleInit(
   repoStorageRoot: string,
 ): Promise<void> {
   return withRootClaim(db, payload.repositoryId, async () => {
+    await assertRepoJobOwner(db, payload.repositoryId);
     const [row] = await db
       .select({ name: schema.repositories.name })
       .from(schema.repositories)
@@ -958,6 +965,7 @@ export async function handleClone(
   const remoteUrl = redactGitUrl(payload.remoteUrl, true);
   assertCloneUrl(remoteUrl);
   return withRootClaim(db, payload.repositoryId, async () => {
+    await assertRepoJobOwner(db, payload.repositoryId);
     const dest = path.join(repoStorageRoot, payload.userId, payload.repositoryId);
     await mkdir(path.dirname(dest), { recursive: true });
     await rm(dest, { recursive: true, force: true });

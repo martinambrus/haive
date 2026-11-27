@@ -20,7 +20,7 @@ import {
 import { emptyProjectState, renderProjectState } from '@haive/shared/project-state';
 import { initDatabase, getDb } from '../src/db.js';
 import { holdImportedMcpServerLists } from '../src/data-migrations.js';
-import { handleScan } from '../src/repo/clone.js';
+import { handleScan } from './support/repo-preparation.js';
 import { DEFAULT_MCP_SETTINGS_JSON } from '../src/sandbox/mcp-config.js';
 import { resolveMcpSurface } from '../src/sandbox/mcp-surface.js';
 

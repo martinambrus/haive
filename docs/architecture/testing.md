@@ -127,3 +127,12 @@ relies on `CI=true` and `localhost:5432`), and `CI` is not set.
 The CI setup steps are not repeated: run `pnpm install`, build `@haive/shared`, `@haive/database` and
 `@haive/web-kit`, build the modules and, for api and worker rows, run `node scripts/gen-modules.mjs` (see Running
 one package). Docker must be running.
+
+Repository preparation fixtures that call a handler directly use
+`worker/test/support/repo-preparation.ts`: it models API admission with a fresh UUID and enters
+the same invocation ownership scope as the queue. It is test-only and never grants production
+jobs ownership. Queue/SQL race controls instead use the real queue processor and explicit
+admission tokens (`refresh-checkout-holders-db.test.ts`), with promise barriers at detection,
+root-claim acquisition and post-ready import; no timed sleeps. That gated file also calls the
+actual maintenance list and updater count while the initial import is held. Its cross-package
+imports are test-only; the worker runtime imports neither API nor updater code.

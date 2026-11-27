@@ -37,7 +37,7 @@ import { HAIVE_DATA_FILES, PLAN_MIRROR_SCHEMA_VERSION, type PlanMirror } from '@
 import { initDatabase, getDb } from '../src/db.js';
 import { gitRun } from '../src/repo/git-exec.js';
 import { sweepDirtyPlanMirrors } from '../src/queues/plan-mirror-queue.js';
-import { persistDetection } from '../src/repo/clone.js';
+import { persistDetection } from './support/repo-preparation.js';
 import {
   advancePlanBaseFromCommit,
   advancePlanBaseToPushed,

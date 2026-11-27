@@ -7,7 +7,7 @@ import { createFakeDb } from '@haive/database/testing';
 import { HAIVE_DATA_FILES } from '@haive/shared';
 import { syncProjectStateFromCheckout } from '../src/project-state/sync.js';
 import { importPlanMirror } from '../src/plan/mirror.js';
-import { persistDetection } from '../src/repo/clone.js';
+import { persistDetection } from './support/repo-preparation.js';
 
 vi.mock('../src/project-state/sync.js', () => ({ syncProjectStateFromCheckout: vi.fn() }));
 

@@ -34,7 +34,13 @@ describe('addRepoJobOrMarkError', () => {
   it('writes nothing when the enqueue succeeds', async () => {
     const recorded: RecordedUpdate[] = [];
 
-    await addRepoJobOrMarkError(makeDb(recorded), 'repo-1', async () => undefined);
+    await addRepoJobOrMarkError(
+      makeDb(recorded),
+      'repo-1',
+      async () => undefined,
+      null,
+      'initial-job',
+    );
 
     expect(recorded).toHaveLength(0);
   });
@@ -43,9 +49,15 @@ describe('addRepoJobOrMarkError', () => {
     const recorded: RecordedUpdate[] = [];
 
     await expect(
-      addRepoJobOrMarkError(makeDb(recorded), 'repo-1', async () => {
-        throw new Error('redis is down');
-      }),
+      addRepoJobOrMarkError(
+        makeDb(recorded),
+        'repo-1',
+        async () => {
+          throw new Error('redis is down');
+        },
+        null,
+        'initial-job',
+      ),
       // Rethrown, because the caller's request really did fail and must say so.
     ).rejects.toThrow('redis is down');
 
@@ -61,9 +73,15 @@ describe('addRepoJobOrMarkError', () => {
     const recorded: RecordedUpdate[] = [];
 
     await expect(
-      addRepoJobOrMarkError(makeDb(recorded, true), 'repo-1', async () => {
-        throw new Error('redis is down');
-      }),
+      addRepoJobOrMarkError(
+        makeDb(recorded, true),
+        'repo-1',
+        async () => {
+          throw new Error('redis is down');
+        },
+        null,
+        'initial-job',
+      ),
     ).rejects.toThrow('redis is down');
 
     expect(recorded).toHaveLength(0);
@@ -75,6 +93,7 @@ it('an initial enqueue failure cannot clear a newer refresh marker', async () =>
   fake.insert(schema.repositories, {
     id: '00000000-0000-4000-8000-0000000000b1',
     status: 'ready',
+    statusMessage: 'newer outcome',
     refreshPending: true,
     refreshJobId: 'newer-job',
   });
@@ -85,9 +104,13 @@ it('an initial enqueue failure cannot clear a newer refresh marker', async () =>
       async () => {
         throw new Error('initial enqueue acknowledgement lost');
       },
+      null,
+      'initial-job',
     ),
   ).rejects.toThrow('initial enqueue acknowledgement lost');
   expect(fake.rows(schema.repositories)[0]).toMatchObject({
+    status: 'ready',
+    statusMessage: 'newer outcome',
     refreshPending: true,
     refreshJobId: 'newer-job',
   });

@@ -13,8 +13,8 @@ vi.mock('../src/plan/mirror.js', async (original) => ({
 import { schema, type Database } from '@haive/database';
 import { createFakeDb } from '@haive/database/testing';
 import { gitRun } from '../src/repo/git-exec.js';
-import { handleClone } from '../src/repo/clone.js';
-import { handleRefresh } from '../src/repo/refresh.js';
+import { handleClone } from './support/repo-preparation.js';
+import { handleRefresh } from './support/repo-preparation.js';
 const USER = '00000000-0000-4000-8000-000000000001';
 const REPO = '00000000-0000-4000-8000-000000000002';
 const dirs: string[] = [];

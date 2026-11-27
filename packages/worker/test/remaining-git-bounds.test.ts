@@ -3,7 +3,8 @@ import { chmod, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { gitClone, handleInit } from '../src/repo/clone.js';
+import { gitClone } from '../src/repo/clone.js';
+import { handleInit } from './support/repo-preparation.js';
 import { gitTimeoutLimits } from '../src/repo/git-exec.js';
 import { scanForCredentials } from '../src/step-engine/steps/onboarding/_credential-scan.js';
 import { runGit as advanceGit } from '../scripts/advance-bundle-items.js';
@@ -84,6 +85,7 @@ else { process.stdout.write('ordinary output\\n'); process.stderr.write(process.
         handleInit(
           { repositoryId: 'repo', userId: 'user', source: 'blank' },
           {
+            update: () => ({ set: () => ({ where: async () => {} }) }),
             select: () => ({
               from: () => ({ where: () => ({ limit: async () => [{ name: 'fixture' }] }) }),
             }),

@@ -39,8 +39,9 @@ import {
 import { reconcileDeadTasks } from '../src/queues/dead-task-boot.js';
 import { pull } from '../src/queues/plan-mirror-queue.js';
 import type { ResolvedTaskContext } from '../src/queues/run-list.js';
-import { handleClone } from '../src/repo/clone.js';
-import { checkoutHoldingTasks, handleRefresh } from '../src/repo/refresh.js';
+import { handleClone } from './support/repo-preparation.js';
+import { checkoutHoldingTasks } from '../src/repo/refresh.js';
+import { handleRefresh } from './support/repo-preparation.js';
 import { sweepDirtyProjectStates } from '../src/project-state/refresh.js';
 import { resolveProjectStateConflict } from '../src/project-state/resolve.js';
 import { syncProjectStateFromCheckout } from '../src/project-state/sync.js';

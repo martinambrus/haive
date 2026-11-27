@@ -103,14 +103,36 @@ its Terminal, Plan and task links available. If the worker proves that checkout 
 escalates to a rebuild, it commits `cloning` before the rename transaction moves the old checkout
 aside, so archive downloads, new Terminal connections and repository Editor starts refuse the
 unfinished checkout. Detection restores `ready` after verification. A genuine preparation or
-recovery also uses `cloning`. `refresh_pending` and its owning `refresh_job_id` (0250, declared last) are set in the admission transaction so the
-maintenance page and updater still count queued and running refresh work, including delayed
-retries, independently of availability. A second admission refuses while it is set. A successful
-handler, final failure or failed enqueue clears it only when its BullMQ job id still matches
-`refresh_job_id`, clearing both columns together. Admission chooses that UUID before enqueue for
-refresh, read-only rescan and upload retry alike. An initial scan may publish `ready` before its
-mirror imports finish and holds no root claim; finishing or failing that older job must not erase
-a refresh admitted during those imports. The ordinary stranded-preparation sweep also
+recovery also uses `cloning`. `refresh_pending` and its owning `refresh_job_id` (0250, declared last) cover **every**
+repository preparation: initial create/clone/copy/init, completed upload extraction, read-only
+scan, refresh and recovery. Each admission chooses a UUID before its transaction, stores it
+with the pending marker, and enqueues that exact BullMQ `jobId`. Availability and owed work
+are separate: detection may publish `ready`, while the marker remains through all mirror,
+project-state, RTK and plan imports, so maintenance and the updater still count the job.
+A second admission refuses while it is set.
+
+The repo queue installs an invocation-local ownership scope (`repo/job-owner.ts`) from the
+repository ID and BullMQ job ID. Its predicate requires both that ID and a pending marker;
+null is never authority. Pickup refuses an obsolete, completed or ownerless job before calling
+a handler. Every root-writing handler rechecks after acquiring its renewing root claim,
+before its first filesystem mutation. Detection rechecks before reading and qualifies its
+ready/detection/storage UPDATE, skipping imports when that UPDATE no longer owns a row.
+Cloning escalation and the queue's late error UPDATE use the same predicate. Success and
+final failure clear both marker columns only for their owner; retryable failure keeps them
+through backoff. Enqueue failure cleanup also compares the admission ID, so a lost/late
+acknowledgement cannot overwrite a completed job or a newer admission.
+
+**Legacy jobs are refused, never adopted.** Deploy API and worker together after draining old
+preparations, including delayed retries. If an ownerless legacy payload is nevertheless
+redelivered, it completes as a logged no-op, without detection, imports or checkout writes.
+An ownerless `cloning` row remains recoverable: once no live queue job/claim remains and the
+five-minute age guard expires, run the existing stranded-preparation sweep at the next controlled worker restart; it changes
+that row to `error`. This sweep runs at boot, not on a periodic timer.
+Retry then admits a new owned job where a durable source exists; an initial blank project
+without a source needs delete-and-create. A legacy ready row stays ready. Never backfill an
+owner from an arbitrary payload or grant a null owner permission to rebuild.
+
+The ordinary stranded-preparation sweep also
 releases an old marker whose queue has no live job, preserving any repair code. A `ready` row
 without a repair code keeps its status and display copy: the sweep clears only the stale marker
 and logs that release once. The maintenance blocking list labels pending refreshes `refreshing`. Root claims, holding tasks and
@@ -121,6 +143,11 @@ then `POST /repos/upload/:id/complete`. Completion persists its `repo_uploads` s
 enqueuing extraction, so a failed preparation can use Retry. The unused single-shot
 `POST /repos/upload` route is retired (404). Existing completed upload records remain valid
 Retry sources, and archive retention is unchanged.
+
+T780 PR1 rollback: drain **all** preparation work, including initial post-ready imports and
+delayed retries, before rolling API and worker back together. Leave migration 0250 and its
+columns applied; this change adds no migration. A rollback restores the older ownership gaps.
+Do not alter `.aside-*` or `.rebuild-*` siblings as part of this rollback.
 
 T594 rollback: revert the code commits after active rebuilds and cancellation teardowns settle.
 Keep additive migration 0250 and both columns on rollback; never remove an applied file.
