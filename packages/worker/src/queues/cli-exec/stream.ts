@@ -47,6 +47,8 @@ interface StreamJsonCollector {
   hadAuthFailure: () => boolean;
   /** The `error` string of the last top-level assistant event, or null. Call after getResult(). */
   getAssistantErrorCode: () => string | null;
+  /** Text of the latest top-level assistant event or result, never raw protocol. */
+  getFailureText: () => string;
   /** Concatenation of every text block from assistant events. Lets us cross-check
    *  the result event's payload against the deltas claude-code actually streamed. */
   getAssistantText: () => string;
@@ -136,6 +138,7 @@ export function createStreamJsonCollector(
   // `error` of the last top-level assistant event. Every top-level assistant event overwrites it,
   // so a run that hit the error and then recovered does not carry it; a sub-agent turn is ignored.
   let lastAssistantError: string | null = null;
+  let failureText = '';
   let resultUsage: CliTokenUsage | null = null;
   let resultCount = 0;
   let strictWholeRun: RequestUsage | null = null;
@@ -174,6 +177,16 @@ export function createStreamJsonCollector(
     overageDisabledReason?: string;
     isUsingOverage?: boolean;
   } | null = null;
+
+  function clearResultFailure(): void {
+    lastResultSubtype = null;
+    lastResultError = null;
+    lastResultStopReason = null;
+    lastResultErrors = [];
+    resultIsError = false;
+    resultErrorText = null;
+    resultTerminalReason = null;
+  }
 
   function processLine(line: string): void {
     const trimmed = line.trim();
@@ -214,7 +227,7 @@ export function createStreamJsonCollector(
       onRetryResolved?.();
     }
 
-    if (type === 'rate_limit_event') {
+    if (type === 'rate_limit_event' && event.parent_tool_use_id == null) {
       const info = event.rate_limit_info as typeof lastRateLimit;
       if (info) lastRateLimit = info;
     }
@@ -269,8 +282,43 @@ export function createStreamJsonCollector(
       });
     }
 
+    // Failure diagnostics are scoped to the latest top-level reply. Never let protocol fields,
+    // tool payloads, sub-agent output or a recovered assistant message reach the text fallback.
+    if (event.parent_tool_use_id == null) {
+      if (type === 'system' && subtype === 'init') {
+        clearResultFailure();
+        lastRateLimit = null;
+        lastAssistantError = null;
+        failureText = '';
+      } else if (type === 'assistant') {
+        // A later assistant reply supersedes an earlier turn's failed result as a diagnosis.
+        if (lastResultSubtype !== null) lastRateLimit = null;
+        clearResultFailure();
+        const content = record(event.message)?.content;
+        failureText = Array.isArray(content)
+          ? content
+              .map((block) => {
+                const b = record(block);
+                return b?.type === 'text' && typeof b.text === 'string' ? b.text : '';
+              })
+              .join('')
+          : '';
+      } else if (type === 'result') {
+        failureText =
+          typeof event.result === 'string' && event.result.trim()
+            ? event.result
+            : typeof event.error === 'string' && event.error.trim()
+              ? event.error
+              : Array.isArray(event.errors)
+                ? event.errors.filter((e): e is string => typeof e === 'string').join('; ') ||
+                  failureText
+                : failureText;
+      }
+    }
+
     // Extract final result
-    if (type === 'result') {
+    if (type === 'result' && event.parent_tool_use_id == null) {
+      clearResultFailure();
       resultCount++;
       const strictResult = claudeRequestUsage(event.usage, 'result', null);
       strictWholeRun = strictResult;
@@ -551,6 +599,9 @@ export function createStreamJsonCollector(
     },
     getAssistantErrorCode(): string | null {
       return lastAssistantError;
+    },
+    getFailureText(): string {
+      return failureText;
     },
     getAssistantText(): string {
       return assistantText;

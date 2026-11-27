@@ -87,16 +87,16 @@ export interface ExecutionOutcome {
    *  prose: a transcript is the only thing the viewer renders once present, so one holding
    *  user turns alone would hide an answer that only rawOutput carries. */
   cleanTranscript?: CleanTranscript | null;
-  /** Raw CLI stdout+stderr tail (NO header/prompt) used ONLY to classify
+  /** CLI failure text+stderr tail (NO header/prompt) used ONLY to classify
    *  provider-fatal failures (rate-limit/auth/5xx). rawOutput is sanitized for
    *  the Clean tab and may be prose or empty, so it can no longer carry the API
    *  error the classifier needs; this carries it. Excludes the header/prompt
    *  (which streamLog includes) so a task spec mentioning "rate limit"/"401"
-   *  cannot false-positive. Set on failure-capable branches only. */
+   *  cannot false-positive. Stream-json uses only the latest top-level reply and its result
+   *  reason, excluding raw protocol, tool payloads and earlier replies. */
   providerErrorScan?: string;
-  /** The CLI's own stream reported an authentication failure; the classifier reads it before any
-   *  text rule. Set only when true. */
-  authFailure?: boolean;
+  /** Exact top-level assistant error code, used for account-action guidance. */
+  streamErrorCode?: string;
   /** The fatal class the CLI's own stream error code names; read before any text rule. */
   streamFailureClass?: ProviderFatalClass;
   /** antigravity only: the tail of agy's own `--log-file`, captured out of the

@@ -110,7 +110,7 @@ describe('a run with no usable login is classified as an authentication failure'
     '%s: claude-code gets the auth headline and its login hint',
     async (_n, file, text) => {
       const { outcome, message } = await run(recording(file), 1, 'claude-code');
-      expect(outcome.authFailure).toBe(true);
+      expect(outcome.streamFailureClass).toBe('auth');
       expect(message?.startsWith(PROVIDER_FATAL_HEADLINES.auth)).toBe(true);
       expect(message).toContain('claude /login');
       expect(message).toContain(text);
@@ -137,7 +137,7 @@ describe('only the structural field makes a run an authentication failure', () =
       1,
       'claude-code',
     );
-    expect(outcome.authFailure).toBeUndefined();
+    expect(outcome.streamFailureClass).toBeUndefined();
     expect(fatalClassFromMessage(message)).toBeNull();
   });
 
@@ -149,7 +149,7 @@ describe('only the structural field makes a run an authentication failure', () =
       okResult('all good');
     expect(collect(stdout).hadAuthFailure()).toBe(false);
     const { outcome, message } = await run(stdout, 0, 'claude-code');
-    expect(outcome.authFailure).toBeUndefined();
+    expect(outcome.streamFailureClass).toBeUndefined();
     expect(message).toBe(outcome.errorMessage ?? null);
     expect(fatalClassFromMessage(message)).toBeNull();
   });
@@ -162,7 +162,7 @@ describe('only the structural field makes a run an authentication failure', () =
       failedResult('something else broke');
     expect(collect(stdout).hadAuthFailure()).toBe(false);
     const { outcome, message } = await run(stdout, 1, 'claude-code');
-    expect(outcome.authFailure).toBeUndefined();
+    expect(outcome.streamFailureClass).toBeUndefined();
     expect(fatalClassFromMessage(message)).toBeNull();
   });
 
@@ -174,7 +174,7 @@ describe('only the structural field makes a run an authentication failure', () =
       failedResult('something else broke');
     expect(collect(stdout).hadAuthFailure()).toBe(false);
     const { outcome, message } = await run(stdout, 1, 'claude-code');
-    expect(outcome.authFailure).toBeUndefined();
+    expect(outcome.streamFailureClass).toBeUndefined();
     expect(fatalClassFromMessage(message)).toBeNull();
   });
 
@@ -198,7 +198,7 @@ describe('only the structural field makes a run an authentication failure', () =
       1,
       'claude-code',
     );
-    expect(outcome.authFailure).toBeUndefined();
+    expect(outcome.streamFailureClass).toBe(code);
     expect(fatalClassFromMessage(message)).not.toBe('auth');
   });
 });
