@@ -245,7 +245,9 @@ describe.skipIf(!url)('Retry over a fix-loop gate row on Postgres', () => {
 
       expect(res.status).toBe(200);
       const after = await rowOf(row.id);
-      expect(after.status).toBe('pending');
+      // Closed wait + saved non-gate values is an accepted submit awaiting worker pickup.
+      expect(after.status).toBe('waiting_form');
+      expect(after.rerunGeneration).toBe(row.rerunGeneration);
       expect(after.formValues).toEqual(values);
       expect(after.pauseFormOnRetry).toBe(false);
     },

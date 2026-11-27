@@ -232,7 +232,8 @@ async function hasGuardedPin(tx: DbHandle, taskId: string, executionContract: un
 
 /** Put a restarting task's parked rows, other than `exclude`, back to `pending` with what they
  *  held: a form keeps its schema and answers, a runtime park its detection. A fix-loop gate loses
- *  its saved decision and stops at its form, so the gate asks again. */
+ *  its saved decision and stops at its form, so the gate asks again. An accepted form whose
+ *  wait is closed stays waiting_form at its attested generation for the worker to apply. */
 export async function reofferParkedSteps(
   tx: DbHandle,
   taskId: string,
@@ -244,7 +245,16 @@ export async function reofferParkedSteps(
   const parked = and(
     eq(schema.taskSteps.taskId, taskId),
     or(
-      eq(schema.taskSteps.status, 'waiting_form'),
+      and(
+        eq(schema.taskSteps.status, 'waiting_form'),
+        // A closed marker plus saved values is an accepted submit awaiting pickup. Keep its
+        // generation and attestation. Ambiguous legacy rows and fix-loop decisions re-offer.
+        or(
+          isNotNull(schema.taskSteps.waitingStartedAt),
+          isNull(schema.taskSteps.formValues),
+          holdsGateAnswer,
+        ),
+      ),
       and(eq(schema.taskSteps.status, 'pending'), isNotNull(schema.taskSteps.waitingStartedAt)),
     ),
     ...(exclude.length > 0 ? [notInArray(schema.taskSteps.id, [...exclude])] : []),

@@ -689,7 +689,12 @@ A task Retry re-runs the step the task stopped on, at its round (`retryTaskAtSte
 replaying the task from START, which re-derives every stored loop_back and pays each fix round
 again. One transaction ends the task's live runs, re-offers a parked row as it was (a form keeps its
 schema and answers except a fix-loop gate's, which loses its saved answer and asks again; a runtime
-park its detection), resets the failed or live row, its downstream
+park its detection). Re-offer leaves an accepted `waiting_form` answer alone when its
+`waiting_started_at` is NULL and `form_values` is non-NULL: the row and its attested
+`rerun_generation` survive until worker pickup, and the answer applies once. An open marker,
+missing values or a fix-loop decision still re-offers as before; message text grants nothing.
+A step Retry explicitly resets the clicked row and its generation, so the next fresh park still
+needs a new submit. A task Retry then resets the failed or live row, its downstream
 and any other live row, and moves the task back through `moveTaskToStep` under a bump fenced on
 `failed`, so a Cancel that landed first stands (409) and nothing is reset. A `done` or `skipped`
 row is left as it is: its advance re-drives the hand-off it finished with. A park's wait is booked
@@ -1384,7 +1389,8 @@ gate-3 insight cycle and a gate 2 kept for deferred QA findings inside one: the 
 `commit` or `decision`, owner and rerun generation must match its submit event, newer than the
 approval and than the cycle's `insight.continuation` event.
 The durable approval and cycle events hold that pass across Retry, Resume and epoch takeover;
-synthetic saved values or a job payload repark through the existing approval guard.
+a task Retry's re-offer preserves an accepted answer awaiting pickup at that same generation.
+Synthetic saved values or a job payload repark through the existing approval guard.
 Gate-3 batch intents carry a bounded SHA-256 digest plus an incomplete flag; outcomes carry
 the unchanged comparison. The continuation's original gate-3 intent remains the baseline
 across 08e Retry, so an interrupted writer's unchecked edits cannot become a fresh baseline.
@@ -1396,6 +1402,10 @@ its batch and check shortcut settle. Finishing a batch alone does not make an ol
 reader compatible, since journal loading reads historical records too.
 Report snapshots stay immutable
 per source generation and readable after completion.
+
+Rollback of the accepted-answer re-offer fix needs no data change or migration. Reverting it can
+ask again if task Retry lands between submit and worker pickup; retain the owner-attestation
+guard, which fails closed on that older generation.
 
 Rollback stops offering new gate-3 picks and automatic batches, then retains capable
 workers until active continuations and pending new gate forms are settled. Retain check
