@@ -1222,6 +1222,12 @@ In `martinambrus/haive-module-translator`. The owner's English-to-Slovak run fai
 
 1. Accept a declined form (same stem, up to 2 trailing letters changed on words of 5+ letters) at every keep-term check; a translated name still fails; codes and short words stay exact. Then the owner Retries the step.
 
+### T784 · FNF[clarify-advance-epoch] · the clarification reply queues an advance with no epoch, like submit
+
+status: open · kind: fix · found: T515 review 1 (found-not-fixed) 2026-11-27 · priority: P4
+
+T515 stamped every automatic advance producer with the task epoch; submit and clarification stay unstamped on purpose. The T515 reviewer noted that the clarification reply can hit the same Retry race as T515 item 1 (a Retry in the narrow window between the reply's read and its enqueue lets the unstamped advance consume the Retry's form hold). Not reproduced. Fix direction (only after a red control on main): read the epoch under the clarification's own lock and stamp it, as T515 did for the auto-continue toggle.
+
 ### T783 · worktree-alias-sweep-db assumes one tick finishes inside the 100 ms batch budget
 
 status: done 2026-11-27, merged #1375 (5b0b6e8dc; test only: step-bounded tests inject an unlimited maxBatchMs, fake-clock budget control kept; 20/20 green under CPU contention) · kind: test-flake · found: PR #1372 CI run 45991584063 (shard 1) 2026-11-27 · priority: P3
