@@ -946,8 +946,15 @@ answer cleared. The answer routes compare the row's status and original marker u
 (`stillParkedAsRead`); a real re-park is refused with `step_form_not_waiting`. A legacy NULL
 marker with NULL `form_values` remains answerable by status. A NULL marker with saved `form_values` is an already accepted
 answer even while the row stays `waiting_form`: the submit route locks and reads the row,
-returns success (`queued: false`) for an identical normalized JSON answer without any write,
-event or enqueue, and refuses a conflicting replacement with 409 `step_form_not_waiting`.
+retries the advance enqueue for an identical normalized JSON answer without any values,
+event or task-state write, and refuses a conflicting replacement with 409 `step_form_not_waiting`.
+The retry carries the task epoch read FOR SHARE while the accepted step row is still locked,
+so a later Retry/reset makes it stale. It carries no form values, so it never reopens a failed
+task at pickup either. The first enqueue and
+identical retries share a live-job deduplication id bound to the step row, its accepted
+`updated_at` and that epoch; another accepted park or epoch gets a new id. `queued` reports
+whether this enqueue attempt succeeded (including deduplication); a refusal leaves the saved
+answer for another retry or the stalled sweep.
 Object key order does not change answer identity, and an empty object is a saved answer.
 This also covers a second submit whose pre-read saw the wait still open. Clarification keeps
 its separate event-based contract; it does not replace `form_values`. Idle folds use the held
@@ -964,23 +971,24 @@ poller stamps that returned epoch directly: reading it back after commit could a
 concurrent Retry's epoch or lose the stamp on a read failure. A failed transaction retains
 the old epoch and watch, and its caller queues nothing.
 
-A form submit carries no epoch on purpose, so it cannot be fenced. `isStaleSubmit` drops one that
+A first form submit carries no epoch on purpose, so it cannot be fenced. `isStaleSubmit` drops one that
 lands on a form parked after the job was queued, such as a form a `ReopenStepFormError` reopened,
 which would otherwise answer the new form with what was typed into the old one.
 
 A latched insight gate (gate 2 while a failed insight check awaits re-approval or inside a gate-3
 insight cycle where it is kept for deferred QA findings, gate 3 after that re-approval or after any
 gate-3 insight cycle) also binds its answer to the form it was rendered for. The body carries
-`stepRowId` and `waitingStartedAt`; unless both equal the row the route found, and that row's
-marker is still set (an answered wait has none), the route answers 409 `step_form_stale` and
-writes nothing. The latch is read from the latest `insight.check` event and, for both gates, from
+`stepRowId` and `waitingStartedAt`. For an unanswered park, both must equal the row id and
+live marker the route found; otherwise the route answers 409 `step_form_stale` and writes
+nothing. A closed wait has no marker: an identical retry of its saved normalized answer
+instead requires the same row id and a string timestamp, and may retry the enqueue without
+any mutation. A conflicting answer does not qualify for this exception.
+The latch is read from the latest `insight.check` event and, for both gates, from
 the task's `insight.continuation` events, and fails closed: an event it cannot read counts as
 latched, and the worker's settled exemption is not repeated, so gate 2 and gate 3 of a task that
 ever had a gate-3 insight cycle need the fields. Only these two steps require the fields; every
 other step ignores them, so older tabs and automation keep working there. The web sends them on
-every step submit and reloads the steps on this code. An identical retry of a saved answer
-may succeed without mutation when the same row id and a string timestamp are supplied; it
-never grants permission to replace an answer or answer a new park. A client that omits them,
+every step submit and reloads the steps on this code. A client that omits these fields,
 such as an old tab, cannot answer a latched gate until it reloads.
 
 An LLM preparation hook may return `false` when refreshed inputs make the

@@ -224,7 +224,12 @@ function gateFixture(opts: {
     taskSteps: schema.taskSteps,
     taskEvents: schema.taskEvents,
   });
-  fake.insert(schema.tasks, { id: TASK, userId: USER, status: 'waiting_user' });
+  fake.insert(schema.tasks, {
+    id: TASK,
+    userId: USER,
+    status: 'waiting_user',
+    orchestrationEpoch: 6,
+  });
   fake.insert(schema.taskSteps, {
     taskId: TASK,
     stepId: opts.stepId,
@@ -317,7 +322,7 @@ it('accepts a latched gate-2 answer that carries the form it was rendered for', 
 });
 
 it.each([GATE2, GATE3])(
-  'accepts an identical retry of the saved latched %s answer without another advance',
+  'requeues an identical retry of the saved latched %s answer without another write',
   async (stepId) => {
     const { fake, stepRowId } = gateFixture({
       stepId,
@@ -329,13 +334,16 @@ it.each([GATE2, GATE3])(
       steps: fake.rows(schema.taskSteps).map((row) => ({ ...row })),
       events: [...fake.rows(schema.taskEvents)],
     };
+    const firstId = h.add.mock.calls[0]![2].deduplication.id;
     h.add.mockClear();
     const response = await postGate(stepId, binding);
     expect(response.status).toBe(200);
-    expect(await response.json()).toEqual({ ok: true, queued: false });
+    expect(await response.json()).toEqual({ ok: true, queued: true });
     expect(fake.rows(schema.taskSteps)).toEqual(before.steps);
     expect(fake.rows(schema.taskEvents)).toEqual(before.events);
-    expect(h.add).not.toHaveBeenCalled();
+    expect(h.add).toHaveBeenCalledOnce();
+    expect(h.add.mock.calls[0]![2].deduplication.id).toBe(firstId);
+    expect(h.add.mock.calls[0]![1].epoch).toBe(6);
   },
 );
 

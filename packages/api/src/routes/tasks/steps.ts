@@ -1174,7 +1174,12 @@ stepRoutes.post('/:id/steps/:stepId/submit', async (c) => {
     // held row so two submissions cannot both replace the accepted answer. A legacy
     // unmarked park with no values still accepts its first answer.
     const [held] = await tx
-      .select()
+      .select({
+        status: schema.taskSteps.status,
+        waitingStartedAt: schema.taskSteps.waitingStartedAt,
+        formValues: schema.taskSteps.formValues,
+        updatedAt: schema.taskSteps.updatedAt,
+      })
       .from(schema.taskSteps)
       .where(eq(schema.taskSteps.id, step.id))
       .for('no key update');
@@ -1182,7 +1187,7 @@ stepRoutes.post('/:id/steps/:stepId/submit', async (c) => {
     if (held.waitingStartedAt === null && held.formValues !== null) {
       if (!isDeepStrictEqual(held.formValues, values))
         throw formNotWaiting('form submission', stepId);
-      return false;
+      return { accepted: false, answeredAt: held.updatedAt };
     }
     const answered = await tx
       .update(schema.taskSteps)
@@ -1226,27 +1231,42 @@ stepRoutes.post('/:id/steps/:stepId/submit', async (c) => {
           ? { userId, generation: step.rerunGeneration, commit: values.commit }
           : {}),
     });
-    return true;
+    return { accepted: true, answeredAt: now };
   };
-  const accepted = await db.transaction(async (tx) => {
-    if (!(await admitAnswer(tx, id))) return writeAnswer(tx);
-    await refuseReviveBesideLive(tx, id);
-    if (!(await writeAnswer(tx))) return false;
-    await reopenFailedTask(tx, id, now);
-    return true;
+  const answer = await db.transaction(async (tx) => {
+    const revive = await admitAnswer(tx, id);
+    if (revive) await refuseReviveBesideLive(tx, id);
+    const written = await writeAnswer(tx);
+    if (revive && written.accepted) await reopenFailedTask(tx, id, now);
+    // Keep the accepted step row locked through this read, step before task as
+    // Retry does. A takeover after commit makes an identical retry's wakeup stale.
+    const [heldTask] = await tx
+      .select({ epoch: schema.tasks.orchestrationEpoch })
+      .from(schema.tasks)
+      .where(eq(schema.tasks.id, id))
+      .for('share');
+    if (!heldTask) throw new HttpError(404, 'Task not found');
+    return { ...written, epoch: heldTask.epoch };
   });
-  if (!accepted) return c.json({ ok: true, queued: false });
 
   const payload: TaskJobPayload = {
     taskId: id,
     userId,
     stepId,
     round: step.round,
-    formValues: values,
+    // A first answer retains the ordinary submit timestamp guard. An identical
+    // retry only wakes its saved answer: carrying values would also let it reopen
+    // a failed task at pickup. It must not survive a newer Retry/reset either.
+    ...(answer.accepted ? { formValues: values } : { epoch: answer.epoch }),
   };
   const queued = await addBestEffort(
     () =>
       getTaskQueue().add(TASK_JOB_NAMES.ADVANCE_STEP, payload, {
+        // Collapse a repeated enqueue (including a lost acknowledgement) while
+        // its job is live. A new park's accepted timestamp or epoch gets a new id.
+        deduplication: {
+          id: `form-submit-${step.id}-${answer.answeredAt.getTime()}-${answer.epoch}`,
+        },
         attempts: 3,
         backoff: { type: 'exponential', delay: 5000 },
         removeOnComplete: 100,

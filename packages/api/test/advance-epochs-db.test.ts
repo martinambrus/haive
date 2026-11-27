@@ -5,8 +5,11 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vites
 import { createDatabase, schema, type Database } from '@haive/database';
 import { TASK_JOB_NAMES, type TaskJobPayload } from '@haive/shared';
 import type { StepDefinition } from '@haive/shared/step';
+import type { JobsOptions, Queue } from 'bullmq';
+import { createBullRedisConnection } from '@haive/shared';
 
 const url = process.env.ADVANCE_EPOCHS_TEST_URL;
+const redisUrl = process.env.ADVANCE_EPOCHS_TEST_REDIS_URL;
 if (url && !new URL(url).pathname.startsWith('/advance_epochs_test'))
   throw new Error('Use a dedicated advance_epochs_test database');
 
@@ -16,11 +19,22 @@ const h = vi.hoisted(() => ({
   jobs: [] as TaskJobPayload[],
   detect: 0,
   apply: 0,
+  refuseEnqueue: false,
+  queue: undefined as Queue | undefined,
 }));
 vi.mock('../src/db.js', () => ({ getDb: () => h.db }));
 vi.mock('../../worker/src/db.js', () => ({ getDb: () => h.db }));
 vi.mock('../src/queues.js', () => ({
-  getTaskQueue: () => ({ add: async (_name: string, data: TaskJobPayload) => h.jobs.push(data) }),
+  getTaskQueue: () => ({
+    add: async (name: string, data: TaskJobPayload, options: JobsOptions) => {
+      if (h.refuseEnqueue) {
+        h.refuseEnqueue = false;
+        throw new Error('first enqueue refused');
+      }
+      if (h.queue) return h.queue.add(name, data, options);
+      return h.jobs.push(data);
+    },
+  }),
 }));
 vi.mock('../../worker/src/redis.js', () => ({
   getBullRedis: () => ({}),
@@ -61,10 +75,6 @@ import { errorHandler } from '../src/middleware/error-handler.js';
 import type { AppEnv } from '../src/context.js';
 // Runtime cross-package controls keep worker source outside the API tsc root.
 const workerSource = (rel: string) => new URL(`../../worker/src/${rel}`, import.meta.url).pathname;
-const { processTaskJob } = await import(workerSource('queues/task-queue.ts'));
-const { autoResumeFailedStep } = await import(workerSource('queues/_step-reset.ts'));
-const { runPrPollTick } = await import(workerSource('queues/pr-poll-queue.ts'));
-const { stepRegistry } = await import(workerSource('step-engine/registry.ts'));
 
 const TYPE = 'advance_epochs_test';
 const STEP = 'advance-epochs-step';
@@ -74,9 +84,15 @@ const app = new Hono<AppEnv>();
 app.route('/tasks', taskRoutes);
 app.onError(errorHandler);
 
-describe.skipIf(!url)('advance producers and accepted answers on Postgres', () => {
+describe.skipIf(!url || !redisUrl)('advance producers and accepted answers on Postgres', () => {
+  let processTaskJob: (job: unknown, token: string) => Promise<unknown>;
+  let autoResumeFailedStep: (db: Database, input: Record<string, unknown>) => Promise<unknown>;
+  let runPrPollTick: (db: Database) => Promise<void>;
+  let stepRegistry: { override: (step: StepDefinition) => void };
   let db: Database;
   let repositoryId: string;
+  let queue: Queue;
+  let connection: ReturnType<typeof createBullRedisConnection>;
   const request = (path: string, body: unknown, method = 'POST') =>
     app.request(path, {
       method,
@@ -139,7 +155,15 @@ describe.skipIf(!url)('advance producers and accepted answers on Postgres', () =
     expect(res.status, await res.text()).toBe(200);
     expect((await readTask(taskId))!.orchestrationEpoch).toBe(EPOCH + 1);
   };
+  // Gated runs compile the worker graph here; allow its cold transform time.
   beforeAll(async () => {
+    ({ processTaskJob } = await import(workerSource('queues/task-queue.ts')));
+    ({ autoResumeFailedStep } = await import(workerSource('queues/_step-reset.ts')));
+    ({ runPrPollTick } = await import(workerSource('queues/pr-poll-queue.ts')));
+    ({ stepRegistry } = await import(workerSource('step-engine/registry.ts')));
+    const { Queue } = await vi.importActual<typeof import('bullmq')>('bullmq');
+    connection = createBullRedisConnection(redisUrl!);
+    queue = new Queue(`advance-epochs-${randomUUID()}`, { connection });
     db = createDatabase(url!);
     h.db = db;
     await db.insert(schema.users).values({
@@ -184,15 +208,25 @@ describe.skipIf(!url)('advance producers and accepted answers on Postgres', () =
           return {};
         },
       } as StepDefinition);
-  });
+  }, 30_000);
   beforeEach(async () => {
     await db.delete(schema.tasks).where(eq(schema.tasks.userId, USER));
     h.jobs.length = h.detect = h.apply = 0;
+    h.refuseEnqueue = false;
+    h.queue = undefined;
+    await queue.obliterate({ force: true });
   });
   afterAll(async () => {
-    await db.delete(schema.users).where(eq(schema.users.id, USER));
-    await db.delete(schema.taskTypeDefinitions).where(eq(schema.taskTypeDefinitions.slug, TYPE));
-    await db.$client.end({ timeout: 5 });
+    if (db) {
+      await db.delete(schema.users).where(eq(schema.users.id, USER));
+      await db.delete(schema.taskTypeDefinitions).where(eq(schema.taskTypeDefinitions.slug, TYPE));
+      await db.$client.end({ timeout: 5 });
+    }
+    if (queue) {
+      await queue.obliterate({ force: true });
+      await queue.close();
+    }
+    await connection?.quit();
   });
 
   it('1: a toggle advance queued before same-step Retry cannot claim its new pass', async () => {
@@ -242,7 +276,8 @@ describe.skipIf(!url)('advance producers and accepted answers on Postgres', () =
     expect(h.jobs).toHaveLength(1);
   });
 
-  it('3: an identical retry succeeds without another write, event or advance', async () => {
+  it('3: an identical retry succeeds without another write, event or queued job', async () => {
+    h.queue = queue;
     const taskId = await seed();
     const path = `/tasks/${taskId}/steps/${STEP}/submit`;
     const body = { values: { answer: 'first', nested: { a: 1, b: 2 } } };
@@ -254,7 +289,63 @@ describe.skipIf(!url)('advance producers and accepted answers on Postgres', () =
     expect
       .soft(await db.query.taskEvents.findMany({ where: eq(schema.taskEvents.taskId, taskId) }))
       .toHaveLength(1);
-    expect(h.jobs).toHaveLength(1);
+    expect(await queue.getWaitingCount()).toBe(1);
+  });
+
+  it.each(['waiting_user', 'failed'] as const)(
+    'L2: an identical retry recovers a refused enqueue at the held epoch without reopening %s, and deduplicates the next retry',
+    async (status) => {
+      h.queue = queue;
+      h.refuseEnqueue = true;
+      const taskId = await seed();
+      const path = `/tasks/${taskId}/steps/${STEP}/submit`;
+      const body = { values: { answer: 'first' } };
+      expect(await (await request(path, body)).json()).toEqual({ ok: true, queued: false });
+      const before = await readStep(taskId);
+      // A takeover after acceptance must not make the retry reuse the pre-read epoch.
+      await db
+        .update(schema.tasks)
+        .set({ orchestrationEpoch: EPOCH + 1, status })
+        .where(eq(schema.tasks.id, taskId));
+      const taskBeforeRetry = await readTask(taskId);
+      expect(await (await request(path, body)).json()).toEqual({ ok: true, queued: true });
+      const jobs = await queue.getWaiting();
+      expect(jobs).toHaveLength(1);
+      expect(jobs[0]!.data).toMatchObject({ taskId, epoch: EPOCH + 1 });
+      expect(await (await request(path, body)).json()).toEqual({ ok: true, queued: true });
+      expect((await queue.getWaiting()).map((job) => job.id)).toEqual(jobs.map((job) => job.id));
+      expect(await readStep(taskId)).toEqual(before);
+      expect(await readTask(taskId)).toEqual(taskBeforeRetry);
+      expect(
+        await db.query.taskEvents.findMany({ where: eq(schema.taskEvents.taskId, taskId) }),
+      ).toHaveLength(1);
+      expect(jobs[0]!.data).not.toHaveProperty('formValues');
+      await pickup(jobs[0]!.data);
+      if (status === 'failed') {
+        expect(h.apply).toBe(0);
+        expect(await readStep(taskId)).toEqual(before);
+        expect(await readTask(taskId)).toEqual(taskBeforeRetry);
+      } else {
+        expect(h.apply).toBe(1);
+      }
+    },
+  );
+
+  it('L2: another accepted park at the same epoch gets its own live job', async () => {
+    h.queue = queue;
+    const taskId = await seed();
+    const path = `/tasks/${taskId}/steps/${STEP}/submit`;
+    const body = { values: { answer: 'first' } };
+    expect(await (await request(path, body)).json()).toEqual({ ok: true, queued: true });
+    await db
+      .update(schema.taskSteps)
+      .set({
+        waitingStartedAt: new Date(),
+        formValues: null,
+      })
+      .where(eq(schema.taskSteps.taskId, taskId));
+    expect(await (await request(path, body)).json()).toEqual({ ok: true, queued: true });
+    expect(await queue.getWaitingCount()).toBe(2);
   });
 
   it('4: an auto-finalize advance queued before same-step Retry cannot claim its new pass', async () => {
