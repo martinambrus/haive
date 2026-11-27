@@ -9,6 +9,7 @@ const h = vi.hoisted(() => ({
   events: [] as string[],
   lockFails: false,
   readFails: false,
+  readError: null as unknown,
   settingsReads: 0,
   gate: null as Promise<void> | null,
   commitGate: null as Promise<void> | null,
@@ -47,6 +48,7 @@ const h = vi.hoisted(() => ({
             unsafe: async (text: string) => {
               if (text.startsWith('SET')) return [];
               h.events.push('read');
+              if (h.readError) throw h.readError;
               if (h.readFails) throw new Error('statement timeout');
               return rows(text);
             },
@@ -292,6 +294,7 @@ beforeEach(() => {
   h.events = [];
   h.lockFails = false;
   h.readFails = false;
+  h.readError = null;
   h.checks = [];
   h.role = 'admin';
   h.flags = new Map();
@@ -1097,6 +1100,19 @@ describe('PUT /global-kb/config with a different embedding width', () => {
     expect(h.set).not.toHaveBeenCalled();
     expect(h.setSecret).not.toHaveBeenCalled();
     expect(h.events).not.toContain('commit');
+  });
+
+  it('hands a failed width check to the connection, so a dropped database is created again next time', async () => {
+    const dropped = Object.assign(new Error('database does not exist'), { code: '3D000' });
+    h.readError = dropped;
+    const onError = vi.fn();
+    const open = h.connect.getMockImplementation()!;
+    h.connect.mockImplementationOnce(async (...args) => ({ ...(await open(...args)), onError }));
+    const res = await put(widen);
+
+    expect(res.status).toBeGreaterThanOrEqual(500);
+    expect(onError).toHaveBeenCalledWith(dropped);
+    expect(h.set).not.toHaveBeenCalled();
   });
 
   it('answers a coded store timeout during the width check as retryable, without driver text', async () => {

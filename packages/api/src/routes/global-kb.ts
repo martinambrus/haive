@@ -426,6 +426,9 @@ async function withVectorWidthLock(
   try {
     await Promise.race([locked, deadline]);
   } catch (err) {
+    // As withGlobalKbConnection does: a 3D000 here must clear the "database exists" memo,
+    // or every later width check skips creation and fails until the api restarts.
+    conn?.onError?.(err);
     destroy();
     // Main-db audit/Redis writes are outside this read-only store transaction. Losing its
     // confirmation cannot turn published settings into an invitation to repeat the save.
