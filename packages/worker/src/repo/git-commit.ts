@@ -1,3 +1,4 @@
+import { FS_RECOVERY_EXCLUDES } from './git-stage.js';
 import { gitRun } from './git-exec.js';
 
 /** Stage the safe on-disk roots plus tracked deletions, and return the commit scope.
@@ -36,7 +37,7 @@ export async function gitStageScopedPaths(
     }
   }
   if (stage.length > 0) {
-    const add = await gitRun(cwd, ['add', '--', ...stage]);
+    const add = await gitRun(cwd, ['add', '--', ...stage, ...FS_RECOVERY_EXCLUDES]);
     if (add.code !== 0) throw new Error(`git add failed: ${add.stderr || add.stdout}`);
   }
   return scope;

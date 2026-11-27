@@ -1,7 +1,8 @@
 import { WORKTREE_SUBDIR } from '@haive/shared';
 import {
   copyReplaceFileIfIdentityNoFollow,
-  isResourceLimitError,
+  worktreeAliasSkipKind,
+  syncDirectoryNoFollow,
   lstatNoFollow,
   readdirNoFollow,
   recoverWorktreeAliasArtifactsNoFollow,
@@ -64,7 +65,6 @@ function comparePaths(a: string, b: string): number {
   }
   return left.length - right.length;
 }
-const codeOf = (err: unknown): string | undefined => (err as { code?: string })?.code;
 // A park-like directory is untrusted content, never a directory the sweep should enter.
 export const isAliasArtifact = (name: string): boolean =>
   /\.haive-(?:alias-(?:park|kept|tmp)|park|tmp)-/.test(name);
@@ -162,6 +162,7 @@ export async function* sweepWorktreeAliases(
           maxEntries: limits.maxDirectoryEntries,
         });
         if (entries === null) {
+          if (depth === 0) throw new Error('Worktrees root vanished during listing');
           skip('vanished');
           yield snapshot();
           return;
@@ -182,13 +183,15 @@ export async function* sweepWorktreeAliases(
             maxEntries: limits.maxDirectoryEntries,
           });
         if (entries === null) {
+          if (depth === 0) throw new Error('Worktrees root vanished during listing');
           skip('vanished');
           yield snapshot();
           return;
         }
       } catch (err) {
-        if (isResourceLimitError(err)) throw err;
-        skip(codeOf(err) === 'EDIRENTRYLIMIT' ? 'oversized_directory' : 'unreadable_directory');
+        const kind = worktreeAliasSkipKind(err);
+        if (depth === 0 || !kind) throw err;
+        skip(kind);
         yield snapshot();
         return;
       }
@@ -210,39 +213,49 @@ export async function* sweepWorktreeAliases(
           if (!behind) yield snapshot();
           continue;
         }
+        let info;
         try {
           // Do not trust d_type: DT_UNKNOWN must still descend toward a durable cursor.
-          const info = await lstatNoFollow(anchor, child, { strict: true, bigint: true });
-          if (info === null) {
-            skip('vanished');
+          info = await lstatNoFollow(anchor, child, { strict: true, bigint: true });
+        } catch (err) {
+          const kind = worktreeAliasSkipKind(err);
+          if (!kind) throw err;
+          skip(kind);
+          yield snapshot();
+          continue;
+        }
+        if (info === null) {
+          skip('vanished');
+          yield snapshot();
+          continue;
+        }
+        if (info.kind === 'directory') {
+          if (depth >= limits.maxDepth) {
+            skip('depth_limit');
             yield snapshot();
             continue;
           }
-          if (info.kind === 'directory') {
-            if (depth >= limits.maxDepth) {
-              skip('depth_limit');
-              yield snapshot();
-              continue;
-            }
-            if (!behind) yield snapshot();
-            yield* visit(child, depth + 1);
-          } else if (!behind) {
-            let discovered: AliasName | undefined;
-            if (info.kind === 'file' && info.stats.nlink > 1n) {
-              const candidate = {
-                path: child,
-                dev: info.stats.dev.toString(),
-                ino: info.stats.ino.toString(),
-              };
-              if (remember(candidate)) discovered = candidate;
-            }
-            yield snapshot(discovered);
+          if (!behind) yield snapshot();
+          yield* visit(child, depth + 1);
+        } else if (!behind) {
+          let discovered: AliasName | undefined;
+          if (info.kind === 'file' && info.stats.nlink > 1n) {
+            const candidate = {
+              path: child,
+              dev: info.stats.dev.toString(),
+              ino: info.stats.ino.toString(),
+            };
+            if (remember(candidate)) discovered = candidate;
           }
-        } catch (err) {
-          if (isResourceLimitError(err)) throw err;
-          skip('unreadable_entry');
-          yield snapshot();
+          yield snapshot(discovered);
         }
+      }
+      try {
+        await syncDirectoryNoFollow(anchor, rel);
+      } catch (err) {
+        const kind = worktreeAliasSkipKind(err);
+        if (depth === 0 || !kind) throw err;
+        skip(kind);
       }
     }
     if (!scan.complete) {
@@ -263,8 +276,9 @@ export async function* sweepWorktreeAliases(
             names.push(name);
           else skip(current === null ? 'vanished' : 'changed_entry');
         } catch (err) {
-          if (isResourceLimitError(err)) throw err;
-          skip('unreadable_entry');
+          const kind = worktreeAliasSkipKind(err);
+          if (!kind) throw err;
+          skip(kind);
         }
         yield snapshot();
       }
@@ -284,8 +298,9 @@ export async function* sweepWorktreeAliases(
             remaining--;
           }
         } catch (err) {
-          if (isResourceLimitError(err)) throw err;
-          skip(err instanceof RangeError ? 'oversized_file' : 'unreadable_file');
+          const kind = worktreeAliasSkipKind(err);
+          if (!kind) throw err;
+          skip(kind);
         }
         yield snapshot();
       }

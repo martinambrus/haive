@@ -31,3 +31,20 @@ it('a root add excludes the atomic projection writer temp names at every depth',
     'a.txt',
   ]);
 });
+
+it('L-b scoped directory adds exclude sweep artifacts at every depth', async () => {
+  const { gitStageScopedPaths } = await import('../src/repo/git-commit.js');
+  const { repo, cleanup: clean } = await repoFixture();
+  cleanup = clean;
+  for (const name of [
+    'knowledge_base/.f.haive-alias-tmp-123-abcdef',
+    'knowledge_base/nested/.f.haive-tmp-123-abcdef',
+    'knowledge_base/.f.haive-park-123-abcdef',
+  ])
+    await writeFileNoFollow(repo, name, 'private', { createParents: true });
+  await writeFileNoFollow(repo, 'knowledge_base/real.md', 'public');
+  await gitStageScopedPaths(repo, ['knowledge_base'], []);
+  expect((await git(repo, ['diff', '--cached', '--name-only'])).trim()).toBe(
+    'knowledge_base/real.md',
+  );
+});

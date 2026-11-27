@@ -14,7 +14,7 @@ copies into every new worktree.
 The shared `stageAllArgs` pathspecs also exclude atomic `.haive-tmp`, `.haive-alias-*` and
 `.haive-park-*` artifacts at every depth (including companion name records). Gate 3 and DAG issue
 commits use that argv for the real and scratch adds; Run app uses the same exclusions in its
-preview scope. These partial copies and retained versions never become task deliverables while
+preview scope. Scoped KB and skill directory adds use the same exclusions. These partial copies and retained versions never become task deliverables while
 waiting for the legacy alias sweep's explicit recovery. Recovered old bytes live under the existing
 ignored `.haive/alias-recovery/` directory.
 

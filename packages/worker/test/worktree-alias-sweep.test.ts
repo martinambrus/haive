@@ -8,13 +8,16 @@ import {
   rm,
   rename,
   symlink,
+  open,
 } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import * as fsSafe from '@haive/shared/fs-safe';
 import { sweepWorktreeAliases, WORKTREE_ALIAS_LIMITS } from '../src/repo/worktree-alias-sweep.js';
 const roots: string[] = [];
 afterEach(async () => {
+  vi.restoreAllMocks();
   for (const root of roots.splice(0)) await rm(root, { recursive: true, force: true });
 });
 async function fixture() {
@@ -261,4 +264,67 @@ it('M2 counts foreign park-like names that do not match any recovery namespace',
     'foreign',
   );
   expect((await drain(root)).at(-1)).toMatchObject({ skipped: { foreign_park: 1 } });
+});
+
+// Exercise actual FileHandle operations: these errors must reach the repository backoff.
+it.each(['write', 'read', 'readdir'] as const)(
+  'M-A propagates a systemic %s failure and never certifies completion',
+  async (operation) => {
+    const root = await fixture();
+    await writeFile(path.join(root, 'outside'), 'original');
+    await link(path.join(root, 'outside'), path.join(root, '.haive/worktrees/task/f'));
+    const sample = await open(path.join(root, 'outside'));
+    const proto = Object.getPrototypeOf(sample);
+    await sample.close();
+    const code = operation === 'write' ? 'ENOSPC' : 'EIO';
+    if (operation === 'readdir')
+      vi.spyOn(fsSafe, 'readdirNoFollow').mockRejectedValue(
+        Object.assign(new Error('injected'), { code }),
+      );
+    else
+      vi.spyOn(proto, operation).mockRejectedValue(Object.assign(new Error('injected'), { code }));
+    await expect(drain(root)).rejects.toMatchObject({ code });
+    const { WorktreeAliasSweeper } = await import('../src/repo/worktree-alias-background.js');
+    const complete = vi.fn();
+    const fail = vi.fn(async () => undefined);
+    const checkpoint = vi.fn(async () => undefined);
+    const worker = new WorktreeAliasSweeper({
+      next: async () => ({ id: 'r', anchor: root }),
+      complete,
+      fail,
+      checkpoint,
+    });
+    await worker.tick();
+    await worker.stop();
+    expect(complete).not.toHaveBeenCalled();
+    expect(fail).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ attempts: 1 }));
+    if (operation !== 'readdir') expect(checkpoint).toHaveBeenCalled();
+    expect((await lstat(path.join(root, 'outside'))).nlink).toBe(2);
+  },
+);
+it('L-f preserves internal pairs beside mixed links spanning three worktrees, the root and checkout', async () => {
+  const root = await fixture();
+  const base = path.join(root, '.haive/worktrees');
+  for (const name of ['b', 'c']) await mkdir(path.join(base, name));
+  await writeFile(path.join(root, 'outside'), 'shared');
+  const shared = ['task/a1', 'task/a2', 'b/b1', 'c/c1', 'root-file'];
+  for (const name of shared) await link(path.join(root, 'outside'), path.join(base, name));
+  await writeFile(path.join(base, 'task/internal1'), 'internal');
+  await link(path.join(base, 'task/internal1'), path.join(base, 'task/internal2'));
+  const internal = await lstat(path.join(base, 'task/internal1'), { bigint: true });
+  // A second group has only cross-task aliases, with two names in its first owner.
+  await writeFile(path.join(base, 'task/cross1'), 'cross');
+  for (const name of ['task/cross2', 'b/cross', 'c/cross'])
+    await link(path.join(base, 'task/cross1'), path.join(base, name));
+  await drain(root);
+  expect((await lstat(path.join(root, 'outside'))).nlink).toBe(1);
+  for (const name of shared) {
+    expect((await lstat(path.join(base, name))).nlink).toBe(1);
+    expect(await readFile(path.join(base, name), 'utf8')).toBe('shared');
+  }
+  await writeFile(path.join(base, 'task/cross1'), 'changed');
+  for (const name of ['b/cross', 'c/cross'])
+    expect(await readFile(path.join(base, name), 'utf8')).toBe('cross');
+  expect((await lstat(path.join(base, 'task/internal2'), { bigint: true })).ino).toBe(internal.ino);
+  expect((await lstat(path.join(base, 'task/internal1'))).nlink).toBe(2);
 });

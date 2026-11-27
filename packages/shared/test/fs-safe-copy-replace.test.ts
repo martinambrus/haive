@@ -182,3 +182,55 @@ it('L3 directory reads never recover parks', async () => {
   expect(entries?.map((e) => e.name)).toContain(parked);
   await expect(lstat(path.join(root, 'tree/file'))).rejects.toMatchObject({ code: 'ENOENT' });
 });
+
+it('I2 syncs the containing directory after publication, before reporting success', async () => {
+  const { root, identity } = await fixture();
+  const sample = await open(path.join(root, 'outside'));
+  const proto = Object.getPrototypeOf(sample);
+  const sync = proto.sync;
+  await sample.close();
+  const synced: string[] = [];
+  vi.spyOn(proto, 'sync').mockImplementation(async function (
+    this: import('node:fs/promises').FileHandle,
+  ) {
+    const st = await this.stat();
+    synced.push(st.isDirectory() ? 'directory' : 'file');
+    if (st.isDirectory())
+      expect((await lstat(path.join(root, 'tree/file'), { bigint: true })).ino).not.toBe(
+        identity.ino,
+      );
+    return sync.call(this);
+  });
+  await safe.copyReplaceFileIfIdentityNoFollow(root, 'tree/file', identity, { internalNames: 1 });
+  expect(synced).toEqual(['file', 'directory']);
+});
+
+it('I1 still syncs and closes every held descriptor if closing the original rejects', async () => {
+  const { root, identity } = await fixture();
+  const sample = await open(path.join(root, 'outside'));
+  const proto = Object.getPrototypeOf(sample);
+  const stat = proto.stat;
+  await sample.close();
+  let injected = false;
+  vi.spyOn(proto, 'stat').mockImplementation(async function (
+    this: import('node:fs/promises').FileHandle,
+    ...args: unknown[]
+  ) {
+    const result = await stat.apply(this, args);
+    if (!injected && result.ino === identity.ino) {
+      injected = true;
+      const close = this.close.bind(this);
+      vi.spyOn(this, 'close').mockImplementation(async () => {
+        await close();
+        throw new Error('close rejected');
+      });
+    }
+    return result;
+  });
+  const descriptors = (await readdir('/proc/self/fd')).length;
+  await expect(
+    safe.copyReplaceFileIfIdentityNoFollow(root, 'tree/file', identity, { internalNames: 1 }),
+  ).resolves.toBe('replaced');
+  expect(injected).toBe(true);
+  expect((await readdir('/proc/self/fd')).length).toBe(descriptors);
+});

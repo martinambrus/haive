@@ -9,11 +9,12 @@ import {
   rm,
   rename,
   readdir,
+  open,
 } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { eq } from 'drizzle-orm';
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createDatabase, schema, type Database } from '@haive/database';
 import { WorktreeAliasSweeper, worktreeAliasStore } from '../src/repo/worktree-alias-background.js';
 
@@ -47,6 +48,7 @@ describe.skipIf(!url)('legacy worktree alias sweep on Postgres', () => {
     });
   });
   afterEach(async () => {
+    vi.restoreAllMocks();
     await db.delete(schema.users).where(eq(schema.users.id, userId));
   });
   afterAll(async () => {
@@ -74,7 +76,7 @@ describe.skipIf(!url)('legacy worktree alias sweep on Postgres', () => {
     expect((await lstat(path.join(anchor, 'outside'))).nlink).toBe(2);
     const resumed = new WorktreeAliasSweeper(store, { maxSteps: 16 });
     await resumed.tick();
-    expect((await row()).worktreeAliasesSweptAt).toBeNull();
+    expect((await row()).worktreeAliasesSweptAt).toBeInstanceOf(Date);
     await resumed.tick();
     await resumed.stop();
     const finished = await row();
@@ -87,6 +89,31 @@ describe.skipIf(!url)('legacy worktree alias sweep on Postgres', () => {
     expect(await readFile(path.join(anchor, '.haive/worktrees/task/a'), 'utf8')).toBe('original');
     expect(await store.complete({ id: repoId, anchor })).toBe(false);
     expect((await row()).worktreeAliasesSweptAt).toEqual(finished.worktreeAliasesSweptAt);
+  });
+  it('M-A retains the durable cursor and journal without stamping completion after ENOSPC', async () => {
+    const anchor = path.join(root, userId, repoId);
+    await mkdir(path.join(anchor, '.haive/worktrees/task'), { recursive: true });
+    await writeFile(path.join(anchor, 'outside'), 'original');
+    await link(path.join(anchor, 'outside'), path.join(anchor, '.haive/worktrees/task/f'));
+    const sample = await open(path.join(anchor, 'outside'));
+    const proto = Object.getPrototypeOf(sample);
+    await sample.close();
+    vi.spyOn(proto, 'write').mockRejectedValue(
+      Object.assign(new Error('injected'), { code: 'ENOSPC' }),
+    );
+    const store = worktreeAliasStore(db, root);
+    const worker = new WorktreeAliasSweeper(store);
+    await worker.tick();
+    await worker.stop();
+    const failed = await row();
+    expect(failed.worktreeAliasesSweptAt).toBeNull();
+    expect(failed.worktreeAliasScan).toMatchObject({
+      cursor: '.haive/worktrees/task/f',
+      retry: { attempts: 1 },
+    });
+    expect((await store.load!({ id: repoId, anchor }))?.names).toHaveLength(1);
+    expect(await store.next('')).toBeNull();
+    expect((await lstat(path.join(anchor, 'outside'))).nlink).toBe(2);
   });
   it('rolls a checkpoint back with its failed inode insert and fences completion during root changes', async () => {
     const store = worktreeAliasStore(db, root);
@@ -170,6 +197,17 @@ describe.skipIf(!url)('legacy worktree alias sweep on Postgres', () => {
     expect((await store.load!(repo))?.names).toHaveLength(1);
     await store.checkpoint!(repo, { ...scan, examined: 3 }, []);
     expect((await row()).worktreeAliasScan).toMatchObject({ retry, examined: 3 });
+  });
+  it('L-e clears persisted retries on progress without erasing scan state or names', async () => {
+    const store = worktreeAliasStore(db, root);
+    const repo = (await store.next(''))!;
+    const scan = { cursor: '.haive/worktrees/task/a', examined: 2, complete: false };
+    await store.checkpoint!(repo, scan, [{ path: scan.cursor, dev: '1', ino: '2' }]);
+    await store.fail!(repo, { attempts: 5, retryAt: Date.now() + 3600_000 });
+    await store.progress!(repo);
+    expect((await store.load!(repo))?.scan).toEqual(scan);
+    expect((await store.load!(repo))?.names).toHaveLength(1);
+    expect(await store.next('')).toMatchObject({ id: repoId, retry: undefined });
   });
   it('M2 records a counted done-with-skips result and clears the name journal', async () => {
     const anchor = path.join(root, userId, repoId);

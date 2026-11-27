@@ -38,6 +38,7 @@ export interface AliasRepository {
 export interface AliasSweepStore {
   next(after: string): Promise<AliasRepository | null>;
   complete(repo: AliasRepository, progress?: AliasProgress): Promise<boolean>;
+  progress?(repo: AliasRepository): Promise<void>;
   fail?(repo: AliasRepository, retry: AliasRetry): Promise<void>;
   load?(repo: AliasRepository): Promise<AliasCheckpoint | undefined>;
   checkpoint?(repo: AliasRepository, scan: AliasScanState, names: AliasName[]): Promise<void>;
@@ -133,6 +134,14 @@ export function worktreeAliasStore(db: Database, storageRoot: string): AliasSwee
               set: { dev: sql`excluded.dev`, ino: sql`excluded.ino` },
             });
       });
+    },
+    async progress(repo) {
+      await db
+        .update(repos)
+        .set({
+          worktreeAliasScan: sql`${repos.worktreeAliasScan} - 'retry'`,
+        })
+        .where(and(eq(repos.id, repo.id), isNull(repos.worktreeAliasesSweptAt)));
     },
     async fail(repo, retry) {
       await db
@@ -241,11 +250,16 @@ export class WorktreeAliasSweeper {
     let repo = this.active?.repo;
     let scan: AliasScanState | undefined;
     let names: AliasName[] = [];
-    const flush = async () => {
+    const flush = async (resetFailure = false) => {
       if (scan && repo) {
         await this.store.checkpoint?.(repo, scan, names);
         scan = undefined;
         names = [];
+        if (resetFailure && (this.failures.has(repo.id) || repo.retry)) {
+          await this.store.progress?.(repo);
+          this.failures.delete(repo.id);
+          repo.retry = undefined;
+        }
       }
     };
     try {
@@ -271,7 +285,6 @@ export class WorktreeAliasSweeper {
       }
       const active = this.active;
       const started = Date.now();
-      const replacedBefore = active.progress?.replaced ?? 0;
       for (
         let i = 0;
         i < (this.opts.maxSteps ?? WORKTREE_ALIAS_BATCH_STEPS) && !this.stopped;
@@ -285,7 +298,11 @@ export class WorktreeAliasSweeper {
               code: 'alias_completion_refused',
             });
           this.failures.delete(active.repo.id);
-          logger.info(
+          // Only vanished/replaced entries are known benign; unknown classes fail toward warning.
+          const exposure = Object.entries(active.progress?.skipped ?? {}).some(
+            ([kind, count]) => count > 0 && kind !== 'vanished' && kind !== 'changed_entry',
+          );
+          (exposure ? logger.warn.bind(logger) : logger.info.bind(logger))(
             {
               repositoryId: active.repo.id,
               examined: active.progress?.examined,
@@ -302,17 +319,13 @@ export class WorktreeAliasSweeper {
           return;
         }
         // Commit the old pass's names before resetting the journal for the next pass.
-        if (scan && (result.value.scan?.pass ?? 1) !== (scan.pass ?? 1)) await flush();
+        if (scan && (result.value.scan?.pass ?? 1) !== (scan.pass ?? 1)) await flush(true);
         active.progress = result.value;
         if (result.value.scan) scan = result.value.scan;
         if (result.value.discovered) names.push(result.value.discovered);
-        if (
-          result.value.replaced > replacedBefore ||
-          Date.now() - started >= (this.opts.maxBatchMs ?? WORKTREE_ALIAS_BATCH_MS)
-        )
-          break;
+        if (Date.now() - started >= (this.opts.maxBatchMs ?? WORKTREE_ALIAS_BATCH_MS)) break;
       }
-      await flush();
+      await flush(true);
     } catch (err) {
       // Even a generator fault after several yielded entries must retain this batch's cursor.
       await flush().catch(() => undefined);

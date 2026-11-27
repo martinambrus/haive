@@ -26,9 +26,7 @@ describe('worktree alias background batches', () => {
     await worker.stop();
     const restarted = new WorktreeAliasSweeper({ next, complete }, { walk, maxSteps: 8 });
     await restarted.tick();
-    expect(complete).toHaveBeenCalledTimes(1); // A batch stops after its first copy.
-    await restarted.tick();
-    expect(complete).toHaveBeenCalledTimes(2);
+    expect(complete).toHaveBeenCalledTimes(2); // Copies share the batch while time remains.
     expect(walk).toHaveBeenCalledTimes(2);
     await restarted.stop();
   });
@@ -122,5 +120,101 @@ it('M1 caps retry delay, and polls an empty install only at the idle cadence', a
   now += WORKTREE_ALIAS_IDLE_MS;
   await worker.tick();
   expect(next).toHaveBeenCalledTimes(2);
+  await worker.stop();
+});
+
+it('L-c batches multiple replacements up to the time cap', async () => {
+  let now = 0;
+  vi.spyOn(Date, 'now').mockImplementation(() => now);
+  const complete = vi.fn(async () => true);
+  const walk = async function* () {
+    for (let n = 1; n <= 6; n++) {
+      now += 30;
+      yield { examined: n, replaced: n };
+    }
+  };
+  const worker = new WorktreeAliasSweeper(
+    { next: async () => ({ id: 'r', anchor: '/owned' }), complete },
+    { walk, maxBatchMs: 100 },
+  );
+  await worker.tick();
+  expect(now).toBe(120); // Four copies, checking the deadline between operations.
+  expect(complete).not.toHaveBeenCalled();
+  await worker.tick();
+  expect(complete).toHaveBeenCalledOnce();
+  await worker.stop();
+});
+it.each([
+  [{ vanished: 2, changed_entry: 1 }, false],
+  [{ oversized_file: 1, vanished: 2 }, true],
+  [{ foreign_park: 1 }, true],
+  [{ non_utf8_name: 1 }, true],
+  [{ pass_limit: 1 }, true],
+  [{ source_changed: 1 }, true],
+])('L-d reports counted skips at the appropriate severity (%j)', async (skipped, exposure) => {
+  const warn = vi.spyOn(logger, 'warn').mockImplementation(() => undefined);
+  const info = vi.spyOn(logger, 'info').mockImplementation(() => undefined);
+  const walk = async function* () {
+    yield { examined: 1, replaced: 0, skipped };
+  };
+  const worker = new WorktreeAliasSweeper(
+    { next: async () => ({ id: 'r', anchor: '/owned' }), complete: async () => true },
+    { walk },
+  );
+  await worker.tick();
+  expect(exposure ? warn : info).toHaveBeenCalledWith(
+    expect.objectContaining({ outcome: 'done-with-skips', skipped }),
+    'legacy worktree alias sweep completed',
+  );
+  expect(exposure ? info : warn).not.toHaveBeenCalled();
+  await worker.stop();
+});
+it('L-e resets a persisted failure streak after a successful progress batch', async () => {
+  const now = 1_000_000;
+  vi.spyOn(Date, 'now').mockReturnValue(now);
+  const warn = vi.spyOn(logger, 'warn').mockImplementation(() => undefined);
+  const repo = { id: 'r', anchor: '/owned', retry: { attempts: 5, retryAt: now } };
+  const progress = vi.fn(async () => undefined);
+  const fail = vi.fn(async () => undefined);
+  const walk = async function* () {
+    yield {
+      examined: 1,
+      replaced: 0,
+      scan: { cursor: '.haive/worktrees/task/a', examined: 1, complete: false },
+    };
+    throw new Error('second failure');
+  };
+  const worker = new WorktreeAliasSweeper(
+    { next: async () => repo, complete: vi.fn(), progress, fail },
+    { walk, maxSteps: 1 },
+  );
+  await worker.tick();
+  expect(progress).toHaveBeenCalledWith(repo);
+  await worker.tick();
+  expect(fail).toHaveBeenCalledWith(repo, { attempts: 1, retryAt: now + 60_000 });
+  expect(warn).toHaveBeenCalledOnce();
+  await worker.stop();
+});
+
+it('L-e retains escalation when a faulted batch only repeats discovery before the same copy failure', async () => {
+  vi.spyOn(Date, 'now').mockReturnValue(1_000_000);
+  const repo = { id: 'r', anchor: '/owned', retry: { attempts: 3, retryAt: 1_000_000 } };
+  const fail = vi.fn(async () => undefined);
+  const progress = vi.fn(async () => undefined);
+  const walk = async function* () {
+    yield {
+      examined: 1,
+      replaced: 0,
+      scan: { cursor: '.haive/worktrees/task/f', examined: 1, complete: true },
+    };
+    throw Object.assign(new Error('disk full'), { code: 'ENOSPC' });
+  };
+  const worker = new WorktreeAliasSweeper(
+    { next: async () => repo, complete: vi.fn(), fail, progress },
+    { walk },
+  );
+  await worker.tick();
+  expect(progress).not.toHaveBeenCalled();
+  expect(fail).toHaveBeenCalledWith(repo, { attempts: 4, retryAt: 1_480_000 });
   await worker.stop();
 });
