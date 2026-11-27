@@ -14,7 +14,7 @@ const USER = '00000000-0000-4000-8000-0000000000a1';
 
 afterEach(() => {
   vi.restoreAllMocks();
-  h.add.mockReset();
+  h.add.mockReset().mockResolvedValue({ waitUntilFinished: h.wait });
   h.wait.mockReset();
   vi.useRealTimers();
 });

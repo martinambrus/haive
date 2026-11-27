@@ -1,3 +1,4 @@
+import { addBestEffort } from '../lib/queue-bounded.js';
 import { safeErrorMessage } from '@haive/shared/logger';
 import { assertUserPostgresDsn, userPostgresErrorMessage } from '@haive/shared/egress';
 import { randomUUID } from 'node:crypto';
@@ -135,10 +136,14 @@ async function enqueueSync(
   namespace: string,
   reason: 'upsert' | 'delete',
 ): Promise<void> {
-  await getGlobalKbSyncQueue().add(
-    GLOBAL_KB_JOB_NAMES.SYNC_ENTRY,
-    { entryId, namespace, reason } satisfies GlobalKbSyncJobPayload,
-    { removeOnComplete: true, removeOnFail: 20 },
+  await addBestEffort(
+    () =>
+      getGlobalKbSyncQueue().add(
+        GLOBAL_KB_JOB_NAMES.SYNC_ENTRY,
+        { entryId, namespace, reason } satisfies GlobalKbSyncJobPayload,
+        { removeOnComplete: true, removeOnFail: 20 },
+      ),
+    'global KB sync wake-up failed; pending entries will be reconciled',
   );
 }
 

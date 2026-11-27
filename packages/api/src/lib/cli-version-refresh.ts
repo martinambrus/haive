@@ -1,3 +1,4 @@
+import { addOrRefuse, boundedAdd } from './queue-bounded.js';
 import {
   CLI_EXEC_JOB_NAMES,
   CLI_POLLABLE_JOB_OPTS,
@@ -15,7 +16,9 @@ export async function enqueueCliVersionRefresh() {
   try {
     // Read at most 100 jobs per state (300 total), comfortably beyond normal active slots,
     // to bound loading INVOKE prompts on each click. Missing an older refresh only duplicates it.
-    const inFlight = await queue.getJobs(['active', 'wait', 'prioritized'], 0, 99);
+    const inFlight = await boundedAdd(() =>
+      queue.getJobs(['active', 'wait', 'prioritized'], 0, 99),
+    );
     const job = inFlight.find(
       (candidate) => candidate?.name === CLI_EXEC_JOB_NAMES.REFRESH_VERSIONS,
     );
@@ -24,9 +27,13 @@ export async function enqueueCliVersionRefresh() {
     // Like the worker's boot check, fail open: a duplicate is cheaper than no refresh.
     log.warn({ err }, 'version-refresh in-flight check failed; enqueueing anyway');
   }
-  return queue.add(
-    CLI_EXEC_JOB_NAMES.REFRESH_VERSIONS,
-    { trigger: 'manual' } satisfies RefreshCliVersionsJobPayload,
-    CLI_POLLABLE_JOB_OPTS,
+  return addOrRefuse(
+    () =>
+      queue.add(
+        CLI_EXEC_JOB_NAMES.REFRESH_VERSIONS,
+        { trigger: 'manual' } satisfies RefreshCliVersionsJobPayload,
+        CLI_POLLABLE_JOB_OPTS,
+      ),
+    'CLI version refresh',
   );
 }

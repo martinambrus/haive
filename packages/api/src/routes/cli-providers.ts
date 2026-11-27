@@ -1,3 +1,10 @@
+import {
+  boundedAdd,
+  addBestEffort,
+  addOrRefuse,
+  QueueAddTimeoutError,
+  QueueOutcomeUnknownError,
+} from '../lib/queue-bounded.js';
 import { CLI_SIGN_OUT_AUTH_WAIT_MS, CLI_SIGN_OUT_EXPIRED_MESSAGE } from '@haive/shared/constants';
 import { randomUUID } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
@@ -227,14 +234,82 @@ export function assertAuthModeSupported(
   }
 }
 
+/** A lost enqueue has no periodic outbox here. Keep the saved provider, but release its
+ * pending status so the form offers a retry. A late worker result can still settle it.
+ * Each kind has its own attempt id: metadata edits and the other kind's enqueue
+ * must not invalidate this compensation, and a newer attempt must not be failed. */
+async function recordProviderEnqueueFailure(
+  providerId: string,
+  kind: 'image' | 'model',
+  attemptId: string,
+) {
+  const columns = schema.cliProviders;
+  await getDb()
+    .update(columns)
+    .set(
+      kind === 'image'
+        ? {
+            sandboxImageBuildStatus: 'failed',
+            sandboxImageBuildError:
+              'Could not confirm the sandbox image build was queued. Retry the build.',
+            updatedAt: new Date(),
+          }
+        : {
+            modelProvisionStatus: 'failed',
+            modelProvisionError:
+              'Could not confirm model provisioning was queued. Save the provider to retry.',
+            updatedAt: new Date(),
+          },
+    )
+    .where(
+      and(
+        eq(columns.id, providerId),
+        kind === 'image'
+          ? eq(columns.sandboxImageEnqueueId, attemptId)
+          : eq(columns.modelProvisionEnqueueId, attemptId),
+        kind === 'image'
+          ? eq(columns.sandboxImageBuildStatus, 'building')
+          : eq(columns.modelProvisionStatus, 'provisioning'),
+      ),
+    );
+}
+
+/** Attempt both owed jobs, even if one enqueue fails. Neither pending status may be
+ * stranded just because the other transport call rejected first. */
+async function enqueueProviderSetup(
+  providerId: string,
+  userId: string,
+  attempts: { image?: string; model?: string },
+) {
+  const outcomes = await Promise.allSettled([
+    ...(attempts.image ? [enqueueBuildForProvider(providerId, userId, attempts.image)] : []),
+    ...(attempts.model
+      ? [enqueueOllamaProvisionForProvider(providerId, userId, attempts.model)]
+      : []),
+  ]);
+  for (const outcome of outcomes) if (outcome.status === 'rejected') throw outcome.reason;
+}
+
 /** The caller has already written `building`, in the transaction that admitted the build. */
-async function enqueueBuildForProvider(providerId: string, userId: string): Promise<void> {
+async function enqueueBuildForProvider(
+  providerId: string,
+  userId: string,
+  attemptId: string,
+): Promise<void> {
   const payload: SandboxImageBuildJobPayload = { providerId, userId };
   const queue = getCliExecQueue();
-  await queue.add(CLI_EXEC_JOB_NAMES.BUILD_SANDBOX_IMAGE, payload, {
-    removeOnComplete: true,
-    removeOnFail: CLI_POLLABLE_JOB_OPTS.removeOnFail,
-  });
+  try {
+    await boundedAdd(() =>
+      queue.add(CLI_EXEC_JOB_NAMES.BUILD_SANDBOX_IMAGE, payload, {
+        jobId: attemptId,
+        removeOnComplete: true,
+        removeOnFail: CLI_POLLABLE_JOB_OPTS.removeOnFail,
+      }),
+    );
+  } catch (err) {
+    await recordProviderEnqueueFailure(providerId, 'image', attemptId);
+    throw err;
+  }
 }
 
 /** Cloud models are never provisioned. External endpoints retain their queued
@@ -270,13 +345,22 @@ async function assertOllamaSaveAllowed(
 async function enqueueOllamaProvisionForProvider(
   providerId: string,
   userId: string,
+  attemptId: string,
 ): Promise<void> {
   const payload: OllamaProvisionJobPayload = { providerId, userId };
   const queue = getCliExecQueue();
-  await queue.add(CLI_EXEC_JOB_NAMES.PROVISION_OLLAMA_MODEL, payload, {
-    removeOnComplete: true,
-    removeOnFail: CLI_POLLABLE_JOB_OPTS.removeOnFail,
-  });
+  try {
+    await boundedAdd(() =>
+      queue.add(CLI_EXEC_JOB_NAMES.PROVISION_OLLAMA_MODEL, payload, {
+        jobId: attemptId,
+        removeOnComplete: true,
+        removeOnFail: CLI_POLLABLE_JOB_OPTS.removeOnFail,
+      }),
+    );
+  } catch (err) {
+    await recordProviderEnqueueFailure(providerId, 'model', attemptId);
+    throw err;
+  }
 }
 
 export const cliProviderRoutes = new Hono<AppEnv>();
@@ -460,9 +544,11 @@ const PROVIDER_SECURITY_FIELDS = [
 
 /** Kick an immediate usage poll so a changed grant shows within seconds, not at the next tick. */
 const requestUsagePollTick = () =>
-  getUsagePollQueue()
-    .add('usage-poll-tick', {}, { removeOnComplete: true, removeOnFail: 10 })
-    .catch(() => {});
+  addBestEffort(
+    () =>
+      getUsagePollQueue().add('usage-poll-tick', {}, { removeOnComplete: true, removeOnFail: 10 }),
+    'usage poll wake-up failed; repeatable poll will retry',
+  );
 
 cliProviderRoutes.post('/', requireNewWorkAllowed, async (c) => {
   const userId = c.get('userId');
@@ -535,7 +621,10 @@ cliProviderRoutes.post('/', requireNewWorkAllowed, async (c) => {
             disableThinking: body.disableThinking ?? false,
             rulesContent: body.rulesContent ?? DEFAULT_AGENT_RULES,
             sandboxImageBuildStatus: 'building',
-            ...(provisioningModel ? { modelProvisionStatus: 'provisioning' } : {}),
+            sandboxImageEnqueueId: randomUUID(),
+            ...(provisioningModel
+              ? { modelProvisionStatus: 'provisioning', modelProvisionEnqueueId: randomUUID() }
+              : {}),
           })
           .returning();
         // First lock on an existing provider row; the new row is invisible until commit.
@@ -617,8 +706,10 @@ cliProviderRoutes.post('/', requireNewWorkAllowed, async (c) => {
   if (secretEvent) logAuditEvent(secretEvent);
   for (const e of setEvents) logAuditEvent(e);
   if (usageSeeded) await requestUsagePollTick();
-  await enqueueBuildForProvider(created.id, userId);
-  if (provisioningModel) await enqueueOllamaProvisionForProvider(created.id, userId);
+  await enqueueProviderSetup(created.id, userId, {
+    image: created.sandboxImageEnqueueId!,
+    model: provisioningModel ? created.modelProvisionEnqueueId! : undefined,
+  });
   return c.json(
     {
       provider: {
@@ -730,8 +821,21 @@ cliProviderRoutes.patch('/:id', async (c) => {
   ) {
     modelInputsChanged = true;
   }
-  // Relabels and unchanged form inputs grant no pull authority. Only changed
-  // model/base inputs or a move into the shared daemon need the save policy.
+  // The form echoes model fields even for metadata edits. Only an otherwise
+  // unchanged model save on an enabled provider retries a failed enqueue;
+  // metadata edits and disabling must not require model policy or admission.
+  const otherInputsChanged =
+    Object.entries(updates).some(
+      ([field, value]) =>
+        !['updatedAt', 'model', 'modelfile', 'enabled'].includes(field) &&
+        !isDeepStrictEqual(value, existing[field as keyof typeof existing]),
+    ) || Object.keys(split?.secrets ?? {}).length > 0;
+  const retryModel =
+    candidate.enabled &&
+    (body.model !== undefined || body.modelfile !== undefined) &&
+    !otherInputsChanged &&
+    existing.modelProvisionStatus === 'failed' &&
+    shouldProvisionOllamaModel(candidate);
   const from = (modelfile: string | null) =>
     modelfile ? parseModelfile(modelfile).from : undefined;
   const policyInputsChanged =
@@ -740,18 +844,22 @@ cliProviderRoutes.patch('/:id', async (c) => {
     !!candidate.modelfile !== !!existing.modelfile ||
     (!isInStackOllamaBaseUrl(existing.envVars?.ANTHROPIC_BASE_URL) &&
       isInStackOllamaBaseUrl(candidate.envVars?.ANTHROPIC_BASE_URL));
-  if (policyInputsChanged) await assertOllamaSaveAllowed(c.get('userRole'), candidate);
-  const provisioningModel = modelInputsChanged && shouldProvisionOllamaModel(candidate);
+  if (policyInputsChanged || retryModel)
+    await assertOllamaSaveAllowed(c.get('userRole'), candidate);
+  const provisioningModel =
+    (modelInputsChanged || retryModel) && shouldProvisionOllamaModel(candidate);
   const startsJob = imageInputsChanged || provisioningModel;
   if (startsJob) {
     await assertNewWorkAllowed();
     if (imageInputsChanged) {
       updates.sandboxImageBuildStatus = 'building';
       updates.sandboxImageBuildError = null;
+      updates.sandboxImageEnqueueId = randomUUID();
     }
     if (provisioningModel) {
       updates.modelProvisionStatus = 'provisioning';
       updates.modelProvisionError = null;
+      updates.modelProvisionEnqueueId = randomUUID();
     }
   }
 
@@ -921,13 +1029,15 @@ cliProviderRoutes.patch('/:id', async (c) => {
   for (const e of setEvents) logAuditEvent(e);
   if (usageSeeded) await requestUsagePollTick();
 
-  if (provisioningModel) await enqueueOllamaProvisionForProvider(id, userId);
+  await enqueueProviderSetup(id, userId, {
+    image: imageInputsChanged ? updates.sandboxImageEnqueueId! : undefined,
+    model: provisioningModel ? updates.modelProvisionEnqueueId! : undefined,
+  });
   const modelStatusOverride = provisioningModel
     ? { modelProvisionStatus: 'provisioning' as const, modelProvisionError: null }
     : {};
 
   if (imageInputsChanged) {
-    await enqueueBuildForProvider(id, userId);
     return c.json({
       provider: {
         ...withRulesState(updatedRow),
@@ -966,15 +1076,16 @@ cliProviderRoutes.delete('/:id', async (c) => {
   if (imageTag) {
     const payload: SandboxImageRemoveJobPayload = { providerId: id, imageTag };
     // The provider is gone either way, and a removal never queued only leaves its image behind.
-    // Not awaited: the queue waits for redis rather than failing, which would hold this answer.
-    void getCliExecQueue()
-      .add(CLI_EXEC_JOB_NAMES.REMOVE_SANDBOX_IMAGE, payload, {
-        removeOnComplete: true,
-        removeOnFail: CLI_POLLABLE_JOB_OPTS.removeOnFail,
-      })
-      .catch((err: unknown) =>
-        log.warn({ err, providerId: id, imageTag }, 'could not queue the sandbox image removal'),
-      );
+    // Not awaited: removal is optional; its bounded wait must not hold the delete answer.
+    void addBestEffort(
+      () =>
+        getCliExecQueue().add(CLI_EXEC_JOB_NAMES.REMOVE_SANDBOX_IMAGE, payload, {
+          removeOnComplete: true,
+          removeOnFail: CLI_POLLABLE_JOB_OPTS.removeOnFail,
+        }),
+      'could not queue the sandbox image removal',
+      { providerId: id, imageTag },
+    );
   }
   return c.json({ ok: true });
 });
@@ -989,6 +1100,7 @@ cliProviderRoutes.post('/:id/sandbox-image/build', requireNewWorkAllowed, async 
   });
   if (!provider) throw new HttpError(404, 'CLI provider not found');
 
+  const attemptId = randomUUID();
   await db.transaction(async (tx) => {
     await admitNewWork(tx);
     await tx
@@ -996,6 +1108,7 @@ cliProviderRoutes.post('/:id/sandbox-image/build', requireNewWorkAllowed, async 
       .set({
         sandboxImageBuildStatus: 'building',
         sandboxImageBuildError: null,
+        sandboxImageEnqueueId: attemptId,
         updatedAt: new Date(),
       })
       .where(eq(schema.cliProviders.id, provider.id));
@@ -1008,11 +1121,18 @@ cliProviderRoutes.post('/:id/sandbox-image/build', requireNewWorkAllowed, async 
   };
 
   const queue = getCliExecQueue();
-  await queue.add(CLI_EXEC_JOB_NAMES.BUILD_SANDBOX_IMAGE, payload, {
-    removeOnComplete: true,
-    removeOnFail: CLI_POLLABLE_JOB_OPTS.removeOnFail,
-  });
-
+  try {
+    await boundedAdd(() =>
+      queue.add(CLI_EXEC_JOB_NAMES.BUILD_SANDBOX_IMAGE, payload, {
+        jobId: attemptId,
+        removeOnComplete: true,
+        removeOnFail: CLI_POLLABLE_JOB_OPTS.removeOnFail,
+      }),
+    );
+  } catch (err) {
+    await recordProviderEnqueueFailure(id, 'image', attemptId);
+    throw err;
+  }
   return c.json({ ok: true, status: 'building' }, 202);
 });
 
@@ -1032,7 +1152,10 @@ cliProviderRoutes.post('/:id/test', async (c) => {
   };
 
   const queue = getCliExecQueue();
-  const job = await queue.add(CLI_EXEC_JOB_NAMES.PROBE, payload, CLI_POLLABLE_JOB_OPTS);
+  const job = await addOrRefuse(
+    () => queue.add(CLI_EXEC_JOB_NAMES.PROBE, payload, CLI_POLLABLE_JOB_OPTS),
+    'CLI probe',
+  );
   if (!job.id) throw new HttpError(500, 'probe was not queued', 'probe_enqueue_failed');
 
   return c.json({ jobId: job.id }, 202);
@@ -1105,12 +1228,19 @@ cliProviderRoutes.post('/:id/sign-out', async (c) => {
   };
   const auditId = randomUUID();
   await db.transaction((tx) => insertAuditEvent(tx, event, { id: auditId }));
-  // Redis can wait indefinitely: keep the required row committed without holding a connection.
+  // Commit the launch audit before the bounded Redis wait, without holding a connection.
   let job: Awaited<ReturnType<typeof queue.add>>;
   try {
-    job = await queue.add(CLI_EXEC_JOB_NAMES.SIGN_OUT, payload, CLI_POLLABLE_JOB_OPTS);
+    job = await boundedAdd(() =>
+      queue.add(CLI_EXEC_JOB_NAMES.SIGN_OUT, payload, CLI_POLLABLE_JOB_OPTS),
+    );
     if (!job.id) throw new HttpError(500, 'sign-out was not queued', 'sign_out_enqueue_failed');
   } catch (err) {
+    if (err instanceof QueueAddTimeoutError) {
+      // The launch may still land. Its committed audit must remain available.
+      logAuditEvent(event);
+      throw new QueueOutcomeUnknownError();
+    }
     try {
       await db.delete(schema.auditEvents).where(eq(schema.auditEvents.id, auditId));
     } catch (cleanupError) {
@@ -1220,7 +1350,10 @@ cliProviderRoutes.post('/:id/clone', requireNewWorkAllowed, async (c) => {
             disableThinking: source.disableThinking,
             rulesContent: source.rulesContent,
             sandboxImageBuildStatus: 'building',
-            ...(provisioningModel ? { modelProvisionStatus: 'provisioning' } : {}),
+            sandboxImageEnqueueId: randomUUID(),
+            ...(provisioningModel
+              ? { modelProvisionStatus: 'provisioning', modelProvisionEnqueueId: randomUUID() }
+              : {}),
           })
           .returning();
         const row = inserted[0]!;
@@ -1298,8 +1431,10 @@ cliProviderRoutes.post('/:id/clone', requireNewWorkAllowed, async (c) => {
   logAuditEvent(cloneEvent!);
   for (const e of setEvents) logAuditEvent(e);
   if (usageSeeded) await requestUsagePollTick();
-  await enqueueBuildForProvider(created.id, userId);
-  if (provisioningModel) await enqueueOllamaProvisionForProvider(created.id, userId);
+  await enqueueProviderSetup(created.id, userId, {
+    image: created.sandboxImageEnqueueId!,
+    model: provisioningModel ? created.modelProvisionEnqueueId! : undefined,
+  });
   return c.json(
     {
       provider: {

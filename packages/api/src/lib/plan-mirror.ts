@@ -1,3 +1,4 @@
+import { boundedAdd, addBestEffort } from './queue-bounded.js';
 import { randomUUID } from 'node:crypto';
 import {
   PLAN_MIRROR_JOB_NAMES,
@@ -22,16 +23,18 @@ export async function observeCheckoutBranchForReset(
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
     const observe = async () => {
-      const job = await getPlanMirrorQueue().add(
-        PLAN_MIRROR_JOB_NAMES.OBSERVE_CHECKOUT_BRANCH,
-        { repositoryId, userId } satisfies PlanMirrorJobPayload,
-        {
-          jobId: `reset-checkout-${repositoryId}-${randomUUID()}`,
-          // Keep the result a while: a job that finishes before the events listener is ready
-          // (first reset after api start) is recovered from its stored state, not from an event.
-          removeOnComplete: { age: 300 },
-          removeOnFail: { age: 300 },
-        },
+      const job = await boundedAdd(() =>
+        getPlanMirrorQueue().add(
+          PLAN_MIRROR_JOB_NAMES.OBSERVE_CHECKOUT_BRANCH,
+          { repositoryId, userId } satisfies PlanMirrorJobPayload,
+          {
+            jobId: `reset-checkout-${repositoryId}-${randomUUID()}`,
+            // Keep the result a while: a job that finishes before the events listener is ready
+            // (first reset after api start) is recovered from its stored state, not from an event.
+            removeOnComplete: { age: 300 },
+            removeOnFail: { age: 300 },
+          },
+        ),
       );
       const result: unknown = await job.waitUntilFinished(getPlanMirrorQueueEvents(), timeoutMs);
       if (typeof result !== 'object' || result === null || !('branch' in result))
@@ -59,14 +62,20 @@ export async function observeCheckoutBranchForReset(
 export async function enqueueCheckoutSync(repositoryId: string, userId: string): Promise<void> {
   try {
     if (!(await configService.getBoolean(CONFIG_KEYS.PROJECT_STATE_SYNC_ENABLED, true))) return;
-    await getPlanMirrorQueue().add(
-      PLAN_MIRROR_JOB_NAMES.SYNC_CHECKOUT,
-      { repositoryId, userId } satisfies PlanMirrorJobPayload,
-      { jobId: `checkout-sync-${repositoryId}`, removeOnComplete: true, removeOnFail: true },
-    );
   } catch (err) {
     logger.warn({ err, repositoryId }, 'checkout sync hint not queued; sweep will retry');
+    return;
   }
+  await addBestEffort(
+    () =>
+      getPlanMirrorQueue().add(
+        PLAN_MIRROR_JOB_NAMES.SYNC_CHECKOUT,
+        { repositoryId, userId } satisfies PlanMirrorJobPayload,
+        { jobId: `checkout-sync-${repositoryId}`, removeOnComplete: true, removeOnFail: true },
+      ),
+    'checkout sync hint not queued; sweep will retry',
+    { repositoryId },
+  );
 }
 
 /** Wake the worker after an API-side plan mutation. The database revision row
@@ -76,22 +85,23 @@ export async function enqueuePlanMirrorRefresh(
   repositoryId: string,
   userId: string,
 ): Promise<void> {
-  try {
-    await getPlanMirrorQueue().add(
-      PLAN_MIRROR_JOB_NAMES.REFRESH,
-      { repositoryId, userId } satisfies PlanMirrorJobPayload,
-      {
-        // UUIDs contain no colon (BullMQ reserves it in custom ids). While one
-        // refresh is queued/active, later mutations only need to dirty the DB
-        // revision; that job or the scheduled sweep will read the newest state.
-        jobId: `plan-mirror-${repositoryId}`,
-        removeOnComplete: true,
-        removeOnFail: true,
-      },
-    );
-  } catch (err) {
-    logger.warn({ err, repositoryId }, 'plan mirror refresh enqueue failed; sweep will retry');
-  }
+  await addBestEffort(
+    () =>
+      getPlanMirrorQueue().add(
+        PLAN_MIRROR_JOB_NAMES.REFRESH,
+        { repositoryId, userId } satisfies PlanMirrorJobPayload,
+        {
+          // UUIDs contain no colon (BullMQ reserves it in custom ids). While one
+          // refresh is queued/active, later mutations only need to dirty the DB
+          // revision; that job or the scheduled sweep will read the newest state.
+          jobId: `plan-mirror-${repositoryId}`,
+          removeOnComplete: true,
+          removeOnFail: true,
+        },
+      ),
+    'plan mirror refresh enqueue failed; sweep will retry',
+    { repositoryId },
+  );
 }
 
 /** Pull is synchronous for the same reason Save is, and for one more: it is the
@@ -102,10 +112,12 @@ export async function pullPlanMirror(args: {
   userId: string;
 }): Promise<PlanMirrorJobResult> {
   const queue = getPlanMirrorQueue();
-  const job = await queue.add(
-    PLAN_MIRROR_JOB_NAMES.PULL,
-    { repositoryId: args.repositoryId, userId: args.userId } satisfies PlanMirrorJobPayload,
-    { removeOnComplete: 100, removeOnFail: 100 },
+  const job = await boundedAdd(() =>
+    queue.add(
+      PLAN_MIRROR_JOB_NAMES.PULL,
+      { repositoryId: args.repositoryId, userId: args.userId } satisfies PlanMirrorJobPayload,
+      { removeOnComplete: 100, removeOnFail: 100 },
+    ),
   );
   return job.waitUntilFinished(getPlanMirrorQueueEvents(), 180_000) as Promise<PlanMirrorJobResult>;
 }
@@ -119,15 +131,17 @@ export async function savePlanMirror(args: {
   commitMessage?: string;
 }): Promise<PlanMirrorJobResult> {
   const queue = getPlanMirrorQueue();
-  const job = await queue.add(
-    PLAN_MIRROR_JOB_NAMES.SAVE,
-    {
-      repositoryId: args.repositoryId,
-      userId: args.userId,
-      push: args.push,
-      ...(args.commitMessage ? { commitMessage: args.commitMessage } : {}),
-    } satisfies PlanMirrorJobPayload,
-    { removeOnComplete: 100, removeOnFail: 100 },
+  const job = await boundedAdd(() =>
+    queue.add(
+      PLAN_MIRROR_JOB_NAMES.SAVE,
+      {
+        repositoryId: args.repositoryId,
+        userId: args.userId,
+        push: args.push,
+        ...(args.commitMessage ? { commitMessage: args.commitMessage } : {}),
+      } satisfies PlanMirrorJobPayload,
+      { removeOnComplete: 100, removeOnFail: 100 },
+    ),
   );
   return job.waitUntilFinished(getPlanMirrorQueueEvents(), 120_000) as Promise<PlanMirrorJobResult>;
 }
@@ -137,15 +151,17 @@ export async function savePlanMirror(args: {
  *  a payload it cannot read or an error nobody expected. */
 export async function saveHaiveData(payload: HaiveDataSavePayload): Promise<HaiveDataSaveResult> {
   const queue = getPlanMirrorQueue();
-  const job = await queue.add(
-    PLAN_MIRROR_JOB_NAMES.SAVE_HAIVE_DATA,
-    {
-      repositoryId: payload.repositoryId,
-      userId: payload.userId,
-      push: payload.push,
-      ...(payload.commitMessage ? { commitMessage: payload.commitMessage } : {}),
-    } satisfies HaiveDataSavePayload,
-    { removeOnComplete: 100, removeOnFail: 100 },
+  const job = await boundedAdd(() =>
+    queue.add(
+      PLAN_MIRROR_JOB_NAMES.SAVE_HAIVE_DATA,
+      {
+        repositoryId: payload.repositoryId,
+        userId: payload.userId,
+        push: payload.push,
+        ...(payload.commitMessage ? { commitMessage: payload.commitMessage } : {}),
+      } satisfies HaiveDataSavePayload,
+      { removeOnComplete: 100, removeOnFail: 100 },
+    ),
   );
   return job.waitUntilFinished(getPlanMirrorQueueEvents(), 120_000) as Promise<HaiveDataSaveResult>;
 }

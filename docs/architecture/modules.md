@@ -32,7 +32,9 @@ with mode `urgent` in the transaction that stamps the module, before stopping de
 the subsequent Stop rows remain best-effort. Teardown commits its `module.teardown` row before
 it enqueues the job, with no transaction open during the enqueue: an audit refusal queues nothing,
 and a rejected or id-less enqueue deletes that one row by id (a failed delete is logged). A Redis
-reply lost after the job was added also deletes the row, so that rare teardown runs without one. The
+reply lost after the job was added also deletes the row, so that rare teardown runs without one.
+An enqueue deadline instead keeps the audit and answers 503 `queue_outcome_unknown`, saying the
+action may still complete and is safe to retry. The
 partial-purge row after an irreversible database drop remains best-effort.
 
 ## The four states

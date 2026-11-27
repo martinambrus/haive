@@ -387,7 +387,7 @@ it('does not audit a network policy whose object key order differs', async () =>
   expect(fake.rows(schema.auditEvents)).toEqual([]);
 });
 
-it('keeps a committed sign-out row while enqueue waits without a transaction', async () => {
+it('keeps a committed sign-out row after a bounded enqueue timeout without a transaction', async () => {
   const fake = setup(true);
   vi.useFakeTimers();
   let release!: (value: never) => void;
@@ -407,16 +407,20 @@ it('keeps a committed sign-out row while enqueue waits without a transaction', a
     expect(h.transactionOpen).toBe(false);
     expect(fake.rows(schema.auditEvents)).toHaveLength(1);
     expect(h.auditLog).not.toHaveBeenCalled();
-    await vi.advanceTimersByTimeAsync(60_000);
+    await vi.advanceTimersByTimeAsync(2_000);
     expect(fake.rows(schema.auditEvents)).toHaveLength(1);
     expect(h.transactionOpen).toBe(false);
-    expect(h.auditLog).not.toHaveBeenCalled();
+    expect(h.auditLog).toHaveBeenCalledOnce();
   } finally {
     release({ id: 'late-job' } as never);
     await request;
     vi.useRealTimers();
   }
-  expect((await request).status).toBe(202);
+  expect((await request).status).toBe(503);
+  expect(await (await request).json()).toEqual({
+    code: 'queue_outcome_unknown',
+    error: 'The action may still complete. It is safe to retry.',
+  });
   expect(fake.rows(schema.auditEvents)).toHaveLength(1);
   expect(h.auditLog).toHaveBeenCalledOnce();
 });

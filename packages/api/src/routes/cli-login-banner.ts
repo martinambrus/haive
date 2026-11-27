@@ -1,3 +1,4 @@
+import { boundedAdd, addBestEffort } from '../lib/queue-bounded.js';
 import { startCliLoginLease, type CliLoginLease } from '@haive/shared/cli-login-lease';
 import { getRedis } from '../redis.js';
 import {
@@ -1540,10 +1541,12 @@ async function enqueueLoginCreate(
 ): Promise<CliLoginCreateResult> {
   const queue = getCliExecQueue();
   const payload: CliLoginCreateJobPayload = { providerId, userId, leaseId };
-  const job = await queue.add(CLI_EXEC_JOB_NAMES.LOGIN_CREATE, payload, {
-    removeOnComplete: true,
-    removeOnFail: true,
-  });
+  const job = await boundedAdd(() =>
+    queue.add(CLI_EXEC_JOB_NAMES.LOGIN_CREATE, payload, {
+      removeOnComplete: true,
+      removeOnFail: true,
+    }),
+  );
   pending.job = job;
   return awaitQueuedJob<CliLoginCreateResult>(job, abort, ws);
 }
@@ -1564,10 +1567,12 @@ async function enqueueProbe(
     targetMode: 'cli',
     ...(oauthCandidate ? { oauthCandidate } : {}),
   };
-  const job = await queue.add(CLI_EXEC_JOB_NAMES.PROBE, payload, {
-    removeOnComplete: true,
-    removeOnFail: true,
-  });
+  const job = await boundedAdd(() =>
+    queue.add(CLI_EXEC_JOB_NAMES.PROBE, payload, {
+      removeOnComplete: true,
+      removeOnFail: true,
+    }),
+  );
   pending.job = job;
   if (abort.aborted) {
     // A close can arrive while Redis accepts the job, before pending.job was assigned.
@@ -1583,9 +1588,11 @@ async function enqueueProbe(
 }
 
 function requestUsagePoll(): void {
-  void getUsagePollQueue()
-    .add('usage-poll-tick', {}, { removeOnComplete: true, removeOnFail: 10 })
-    .catch(() => {});
+  void addBestEffort(
+    () =>
+      getUsagePollQueue().add('usage-poll-tick', {}, { removeOnComplete: true, removeOnFail: 10 }),
+    'usage poll wake-up failed; repeatable poll will retry',
+  );
 }
 
 async function cleanupSession(session: BannerSession): Promise<void> {

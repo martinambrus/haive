@@ -1,3 +1,4 @@
+import { boundedAdd } from './queue-bounded.js';
 import { PLAN_MIRROR_JOB_NAMES } from '@haive/shared';
 import type {
   ProjectStateResolvePayload,
@@ -11,10 +12,12 @@ import { getPlanMirrorQueue, getPlanMirrorQueueEvents } from '../queues.js';
 export async function resolveProjectStateConflict(
   payload: ProjectStateResolvePayload,
 ): Promise<ProjectStateResolveResult | { kind: 'pending' }> {
-  const job = await getPlanMirrorQueue().add(PLAN_MIRROR_JOB_NAMES.RESOLVE_PROJECT_STATE, payload, {
-    removeOnComplete: 100,
-    removeOnFail: 100,
-  });
+  const job = await boundedAdd(() =>
+    getPlanMirrorQueue().add(PLAN_MIRROR_JOB_NAMES.RESOLVE_PROJECT_STATE, payload, {
+      removeOnComplete: 100,
+      removeOnFail: 100,
+    }),
+  );
   try {
     return (await job.waitUntilFinished(
       getPlanMirrorQueueEvents(),

@@ -90,6 +90,8 @@ export const LSP_PROVIDER_IDENTITY_IGNORED_FIELDS = [
   'createdAt',
   'updatedAt',
   'authGeneration',
+  'sandboxImageEnqueueId',
+  'modelProvisionEnqueueId',
 ] as const satisfies readonly (keyof typeof schema.cliProviders.$inferSelect)[];
 
 export function lspProviderIdentity(provider: Record<string, unknown>): string {

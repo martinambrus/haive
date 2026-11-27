@@ -47,11 +47,27 @@ describe.skipIf(!redisUrl)('cli-job retention against isolated Redis', () => {
     function record(node: ts.CallExpression, name: ts.Expression, options?: ts.Expression) {
       const site = `${source.fileName} ${name.getText(source)}`;
       if (!options) throw new Error(`${site}: cli-exec add requires retention options`);
-      const expression =
-        ts.isIdentifier(options) && options.text !== 'CLI_POLLABLE_JOB_OPTS'
-          ? initializer(options)
-          : options;
-      const js = ts.transpileModule(`(${expression.getText(source)})`, {
+      // Retention is static; job IDs, priorities and other invocation-local values
+      // need not be. Preserve spread/override order without evaluating those fields.
+      function retentionExpression(expression: ts.Expression): string {
+        if (ts.isIdentifier(expression) && expression.text !== 'CLI_POLLABLE_JOB_OPTS')
+          return retentionExpression(initializer(expression));
+        if (!ts.isObjectLiteralExpression(expression)) return expression.getText(source);
+        const properties = expression.properties.flatMap((property) => {
+          if (ts.isSpreadAssignment(property))
+            return [`...(${retentionExpression(property.expression)})`];
+          if (ts.isComputedPropertyName(property.name))
+            throw new Error(`${site}: computed retention option keys are not supported`);
+          const key = ts.isStringLiteral(property.name)
+            ? property.name.text
+            : property.name.getText(source);
+          return ['removeOnComplete', 'removeOnFail'].includes(key)
+            ? [property.getText(source)]
+            : [];
+        });
+        return `{${properties.join(',')}}`;
+      }
+      const js = ts.transpileModule(`(${retentionExpression(options)})`, {
         compilerOptions: { target: ts.ScriptTarget.ES2024 },
       }).outputText;
       const opts = runInNewContext(js, { CLI_POLLABLE_JOB_OPTS }) as JobsOptions;
@@ -157,6 +173,37 @@ describe.skipIf(!redisUrl)('cli-job retention against isolated Redis', () => {
       true,
     );
     expect(scan(source).map(({ opts }) => opts)).toEqual([CLI_POLLABLE_JOB_OPTS]);
+  });
+
+  it('ignores runtime options while preserving retention spreads and overrides', () => {
+    const source = ts.createSourceFile(
+      'runtime-options-control.ts',
+      `
+      function enqueue(attemptId, priority) {
+        const queue = getCliExecQueue();
+        const base = { jobId: attemptId, ...CLI_POLLABLE_JOB_OPTS };
+        const opts = { ...base, priority, removeOnComplete: true };
+        queue.add(dynamicName, {}, opts);
+      }
+      `,
+      ts.ScriptTarget.Latest,
+      true,
+    );
+    expect(scan(source).map(({ opts }) => opts)).toEqual([
+      { ...CLI_POLLABLE_JOB_OPTS, removeOnComplete: true },
+    ]);
+  });
+
+  it('still rejects count-based retention overriding an age-retaining spread', () => {
+    const source = ts.createSourceFile(
+      'retention-override-control.ts',
+      `getCliExecQueue().add(dynamicName, {}, {
+        jobId: attemptId, ...CLI_POLLABLE_JOB_OPTS, removeOnFail: { count: 100 }
+      });`,
+      ts.ScriptTarget.Latest,
+      true,
+    );
+    expect(() => scan(source)).toThrow('removeOnFail must remove only itself or retain by age');
   });
 
   it.each(
