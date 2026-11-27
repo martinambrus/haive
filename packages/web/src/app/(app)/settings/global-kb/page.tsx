@@ -1,4 +1,7 @@
 'use client';
+import { TaskActionNotice } from '@/components/task-action-notice';
+import { sandboxKillNotice, type TaskActionNotice as ActionNotice } from '@/lib/task-state';
+import type { StopActivityResult } from '@/lib/api-client';
 
 import { useCallback, useEffect, useMemo, useRef, useState, type SyntheticEvent } from 'react';
 import { diffLines } from 'diff';
@@ -323,6 +326,7 @@ export default function GlobalKbPage() {
   usePageTitle('Global KB');
   const [entries, setEntries] = useState<GlobalKbEntry[] | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
+  const [retryNotice, setRetryNotice] = useState<ActionNotice | null>(null);
   const [busy, setBusy] = useState(false);
   const [q, setQ] = useState('');
   const [statusFilter, setStatusFilter] = useState('all');
@@ -1177,9 +1181,14 @@ export default function GlobalKbPage() {
   // flips the entry back to 'enriching' and the list poll picks it up.
   async function retryEnrich(e: GlobalKbEntry) {
     if (!e.sourceTaskId) return;
+    setRetryNotice(null);
     setBusy(true);
     try {
-      await api.post(`/tasks/${e.sourceTaskId}/steps/01-kb-enrich/action`, { action: 'retry' });
+      const result = await api.post<Partial<StopActivityResult>>(
+        `/tasks/${e.sourceTaskId}/steps/01-kb-enrich/action`,
+        { action: 'retry' },
+      );
+      setRetryNotice(sandboxKillNotice(result));
       await load();
     } catch (err) {
       setLoadError((err as ApiError).message ?? 'Retry failed');
@@ -2068,6 +2077,7 @@ export default function GlobalKbPage() {
       </div>
 
       <FormError message={loadError} />
+      <TaskActionNotice notice={retryNotice} />
 
       {entries === null ? (
         <p className="text-sm text-neutral-500">Loading…</p>

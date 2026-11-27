@@ -7,7 +7,9 @@ const h = vi.hoisted(() => ({
 
 vi.mock('../src/db.js', () => ({ getDb: () => h.db }));
 vi.mock('../src/queues.js', () => ({ getTaskQueue: () => ({ add: h.add }) }));
-vi.mock('../src/lib/sandbox-kill.js', () => ({ killTaskSandboxes: vi.fn(async () => 0) }));
+vi.mock('../src/lib/sandbox-kill.js', () => ({
+  killTaskSandboxes: vi.fn(async () => ({ killed: 0, killConfirmed: true })),
+}));
 
 import { Hono } from 'hono';
 import { schema } from '@haive/database';

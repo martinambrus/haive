@@ -8,7 +8,7 @@ import { Hono } from 'hono';
 const h = vi.hoisted(() => ({
   db: undefined as unknown,
   add: vi.fn(async () => undefined),
-  kill: vi.fn(async () => 0),
+  kill: vi.fn(async () => ({ killed: 0, killConfirmed: true })),
 }));
 vi.mock('../src/db.js', () => ({ getDb: () => h.db }));
 vi.mock('../src/queues.js', () => ({ getTaskQueue: () => ({ add: h.add }) }));

@@ -1,4 +1,6 @@
 'use client';
+import { TaskActionNotice } from '@/components/task-action-notice';
+import type { TaskActionNotice as ActionNotice } from '@/lib/task-state';
 
 import { PromptTierUnknownList } from '@/components/prompt-tier-unknown';
 
@@ -100,6 +102,7 @@ import {
   taskNotStarted,
   taskStoppedAt,
   stopResultNotice,
+  sandboxKillNotice,
 } from '@/lib/task-state';
 import { useGlobalPause } from '@/lib/use-global-pause';
 import {
@@ -804,7 +807,7 @@ export default function TaskDetailPage() {
   const submittedPark = useRef<string | null>(null);
   const [submitError, setSubmitError] = useState<{ stepId: string; message: string } | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
-  const [actionNotice, setActionNotice] = useState<string | null>(null);
+  const [actionNotice, setActionNotice] = useState<ActionNotice | null>(null);
   const [stepActionBusy, setStepActionBusy] = useState<string | null>(null);
   const [stepActionError, setStepActionError] = useState<{
     stepId: string;
@@ -1400,7 +1403,10 @@ export default function TaskDetailPage() {
           return;
         }
       } else {
-        await api.post(`/tasks/${id}/action`, { action });
+        const result = await api.post<Partial<StopActivityResult>>(`/tasks/${id}/action`, {
+          action,
+        });
+        setActionNotice(sandboxKillNotice(result));
       }
       await reload();
     } catch (err) {
@@ -1476,12 +1482,16 @@ export default function TaskDetailPage() {
     setStepActionError(null);
     setActionNotice(null);
     try {
-      await api.post<StepActionResponse>(`/tasks/${id}/steps/${step.stepId}/action`, {
-        action,
-        round: step.round,
-        overrideLocalModel: opts?.overrideLocalModel,
-        timeoutMinutes: opts?.timeoutMinutes,
-      });
+      const result = await api.post<StepActionResponse>(
+        `/tasks/${id}/steps/${step.stepId}/action`,
+        {
+          action,
+          round: step.round,
+          overrideLocalModel: opts?.overrideLocalModel,
+          timeoutMinutes: opts?.timeoutMinutes,
+        },
+      );
+      setActionNotice(sandboxKillNotice(result));
       await reload();
     } catch (err) {
       setStepActionError({
@@ -1518,10 +1528,14 @@ export default function TaskDetailPage() {
     setStepActionError(null);
     setActionNotice(null);
     try {
-      await api.post<StepActionResponse>(`/tasks/${id}/steps/${step.stepId}/action`, {
-        action: 'retry',
-        round: step.round,
-      });
+      const result = await api.post<StepActionResponse>(
+        `/tasks/${id}/steps/${step.stepId}/action`,
+        {
+          action: 'retry',
+          round: step.round,
+        },
+      );
+      setActionNotice(sandboxKillNotice(result));
       await reload();
     } catch (err) {
       setStepActionError({
@@ -1543,6 +1557,7 @@ export default function TaskDetailPage() {
   ) {
     setStepProviderBusy(stepId);
     setStepProviderError(null);
+    setActionNotice(null);
     // Paint the pick before the round-trip; the 2s poll reconciles either way, same as
     // the auto-continue flip above. A choice is keyed by (task, step, role) with no
     // round, so every round's row of this step moves together — matching what the
@@ -1567,13 +1582,17 @@ export default function TaskDetailPage() {
       // effortLevel omitted (a CLI-only change) clears the stored effort server-side,
       // so the dropdown resets to the new CLI's default on reload; sent (an effort
       // change) pins the effective CLI + the chosen effort for this (step, role).
-      await api.patch(`/tasks/${id}/steps/${stepId}/cli-provider`, {
-        cliProviderId,
-        round,
-        ...(role ? { role } : {}),
-        ...(effortLevel !== undefined ? { effortLevel } : {}),
-        ...(remember ? { remember: true } : {}),
-      });
+      const result = await api.patch<Partial<StopActivityResult>>(
+        `/tasks/${id}/steps/${stepId}/cli-provider`,
+        {
+          cliProviderId,
+          round,
+          ...(role ? { role } : {}),
+          ...(effortLevel !== undefined ? { effortLevel } : {}),
+          ...(remember ? { remember: true } : {}),
+        },
+      );
+      setActionNotice(sandboxKillNotice(result));
       await reload();
     } catch (err) {
       // Resync rather than restoring a captured snapshot: a poll may have landed while
@@ -2189,11 +2208,7 @@ export default function TaskDetailPage() {
         </div>
       )}
 
-      {actionNotice && (
-        <Card role="status" className="px-3 py-2 text-sm text-neutral-400">
-          <InlineMarkdown body={actionNotice} />
-        </Card>
-      )}
+      <TaskActionNotice notice={actionNotice} />
 
       {deadNote && <DeadTaskBanner text={deadNote.text} />}
 

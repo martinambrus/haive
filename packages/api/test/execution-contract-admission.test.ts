@@ -9,7 +9,7 @@ import { Hono } from 'hono';
 const h = vi.hoisted(() => ({
   db: undefined as unknown,
   add: vi.fn(async () => undefined),
-  kill: vi.fn(async () => 0),
+  kill: vi.fn(async () => ({ killed: 0, killConfirmed: true })),
 }));
 vi.mock('../src/lib/sandbox-kill.js', () => ({ killTaskSandboxes: h.kill }));
 vi.mock('../src/db.js', () => ({ getDb: () => h.db }));
@@ -562,7 +562,7 @@ it.each([null, empty, guarded])(
     const fake = stopped(contract);
     await expect(
       retryTaskAtStep(fake.db as never, TASK, USER, fake.rows(schema.taskSteps)[0]! as never),
-    ).resolves.toEqual({ epoch: 4 });
+    ).resolves.toEqual({ epoch: 4, killed: 0, killConfirmed: true });
     expect(fake.rows(schema.tasks)[0]).toMatchObject({
       status: 'running',
       executionContract: contract,

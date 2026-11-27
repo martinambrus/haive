@@ -4,7 +4,7 @@ const USER = vi.hoisted(() => '00000000-0000-4000-8000-0000000000a1');
 const h = vi.hoisted(() => ({
   db: undefined as unknown,
   add: vi.fn(async (..._args: unknown[]) => undefined),
-  kill: vi.fn(async (_taskId: string) => 0),
+  kill: vi.fn(async (_taskId: string) => ({ killed: 0, killConfirmed: true })),
 }));
 
 vi.mock('../src/db.js', () => ({ getDb: () => h.db }));

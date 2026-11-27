@@ -60,6 +60,12 @@ The workflow merge's projection-restoration hook can fail on the same identity l
 catch logs the original structured error and sanitizes before persisting the prefixed
 `Nothing was merged` failure through the existing merge halt.
 
+API sandbox cleanup returns only the fixed reasons `sandbox_listing_failed` and
+`sandbox_removal_failed` in `killError`, including the strict urgent-stop helper. Owner
+responses, task events and audit metadata never receive Docker stderr or spawn messages.
+The Docker runner logs those diagnostics through `safeErrorMessage` before conversion;
+confirmation uses exit success and structured container states, never diagnostic wording.
+
 These rules govern new writes and replies. A git or filesystem failure shown to a person also goes through `scrubErrorPaths` (`@haive/shared/logger`): an absolute POSIX, drive or UNC path becomes `[path]`, while the rest of the message and any URL are kept (the URL scheme match is bounded, since an unbounded one is quadratic on a long token). The plan snapshot error (`plan_mirror_state.last_error`), the plan Save and Pull 409 bodies, `repositories.status_message` of a failed repository job 12's plan-mirror warning the worker module report's `runtime.reason` (`failureReason`, worker `modules/loader.ts`) and the Terminal's open refusal (`terminal-session-manager.ts`) use it. Historical error columns retain their existing values unless a data repair says otherwise; two convergent boot repairs (`scrubPlanMirrorErrors`, `scrubRepositoryErrors` in `worker/src/data-migrations.ts`) rewrite stored `plan_mirror_state.last_error` and the `status_message` of repositories in `status = 'error'` through the same helper, touching only rows they change (compare-and-swap on the text and status they read) and logging the count and ids. The rewrite cannot be undone; both columns are display copy that the next failure or success overwrites. Display messages remain copy,
 not state: the structural banner rules in `web/src/lib/step-banners.ts` still apply.
 

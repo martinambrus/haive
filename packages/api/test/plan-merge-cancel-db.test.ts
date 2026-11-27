@@ -29,7 +29,7 @@ vi.mock('../src/queues.js', () => {
 vi.mock('../src/lib/sandbox-kill.js', () => ({
   killTaskSandboxes: async (taskId: string) => {
     h.killed.push(taskId);
-    return 0;
+    return { killed: 0, killConfirmed: true };
   },
 }));
 vi.mock('../src/middleware/auth.js', async (importOriginal) => ({

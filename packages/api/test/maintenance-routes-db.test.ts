@@ -26,7 +26,9 @@ vi.mock('node:child_process', async (importOriginal) => {
 });
 vi.mock('../src/db.js', () => ({ getDb: () => (h.stall ? h.stall(h.db) : h.db) }));
 vi.mock('../src/queues.js', () => ({ getTaskQueue: () => ({ add: async () => undefined }) }));
-vi.mock('../src/lib/sandbox-kill.js', () => ({ killTaskSandboxes: async () => 0 }));
+vi.mock('../src/lib/sandbox-kill.js', () => ({
+  killTaskSandboxes: async () => ({ killed: 0, killConfirmed: true }),
+}));
 vi.mock('../src/middleware/auth.js', () => ({
   requireAuth: async (c: { set: (key: string, value: string) => void }, next: () => unknown) => {
     c.set('userId', h.actor.id);
@@ -599,6 +601,7 @@ describe.skipIf(!url)('maintenance routes on Postgres', () => {
       expect(await res.json()).toEqual({
         ok: true,
         killed: 0,
+        killConfirmed: true,
         cancelled: 0,
         stopped: 0,
         failedAt: null,

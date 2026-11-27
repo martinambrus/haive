@@ -14,7 +14,9 @@ vi.mock('../src/middleware/auth.js', () => ({
   },
   requireAdmin: async (_c: unknown, next: () => unknown) => next(),
 }));
-vi.mock('../src/lib/sandbox-kill.js', () => ({ killTaskSandboxes: vi.fn(async () => 0) }));
+vi.mock('../src/lib/sandbox-kill.js', () => ({
+  killTaskSandboxes: vi.fn(async () => ({ killed: 0, killConfirmed: true })),
+}));
 
 import { Hono } from 'hono';
 import { schema } from '@haive/database';

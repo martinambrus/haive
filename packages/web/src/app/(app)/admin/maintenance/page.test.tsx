@@ -43,7 +43,11 @@ let parkedTasks: Array<Record<string, unknown>> = [];
 let parkedCapped = false;
 let predatesParked = false;
 let actions: string[] = [];
-let stopResult = { killed: 0, cancelled: 0, stopped: 0 };
+let stopResult: { killed: number; cancelled: number; stopped: number; killConfirmed?: boolean } = {
+  killed: 0,
+  cancelled: 0,
+  stopped: 0,
+};
 
 const upgradeRun = (status: string) => ({
   id: '11111111-2222-4333-8444-555555555555',
@@ -441,6 +445,19 @@ describe('maintenance Stop controls (#395)', () => {
     fire.click(stopButton(view));
     for (let i = 0; i < 5; i += 1) await view.flush();
     expect(textOf(view.tree()).includes('Nothing was running to stop.')).toBe(notice);
+  });
+
+  it('shows unconfirmed sandbox cleanup even when Stop reports zero counts', async () => {
+    stopResult = { killed: 0, cancelled: 0, stopped: 0, killConfirmed: false };
+    blockingTasks = [{ ...row, hasLiveCli: true }];
+    const view = await mount();
+    fire.click(stopButton(view));
+    for (let i = 0; i < 5; i += 1) await view.flush();
+    expect(textOf(view.tree())).toContain('Sandbox cleanup could not be confirmed.');
+    expect(textOf(view.tree())).not.toContain('Nothing was running to stop.');
+    const warning = findAll(view.tree(), (h) => h.props.role === 'status')[0]!;
+    expect(warning.props.className).toContain('text-amber-200');
+    expect(warning.props.className).toContain('bg-amber-950');
   });
 
   it('keeps the Stop notice through polling and clears it on the next action', async () => {

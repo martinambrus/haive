@@ -1604,7 +1604,7 @@ export type TaskAction = 'cancel' | 'retry' | 'pause' | 'resume' | 'start';
 
 export type StepAction = 'retry' | 'retry_ai' | 'resume' | 'skip' | 'abort';
 
-export interface StepActionResponse {
+export interface StepActionResponse extends Partial<StopActivityResult> {
   ok: boolean;
   status: string;
   nextStepId?: string | null;
@@ -2312,7 +2312,10 @@ export function endPlanChat(taskId: string): Promise<unknown> {
 
 /** Point a live conversation at a different CLI. Refused by the API while the
  *  step is running or waiting on a CLI. */
-export function setPlanChatProvider(taskId: string, cliProviderId: string): Promise<unknown> {
+export function setPlanChatProvider(
+  taskId: string,
+  cliProviderId: string,
+): Promise<Partial<StopActivityResult>> {
   return api.patch(`/tasks/${taskId}/steps/${PLAN_CHAT_STEP_ID}/cli-provider`, { cliProviderId });
 }
 
@@ -2553,6 +2556,9 @@ export interface AdminInviteCreated {
 export type MaintenanceState = 'normal' | 'draining' | 'maintenance';
 
 export interface StopActivityResult {
+  /** Absent from older APIs; false means Docker cleanup was not confirmed. */
+  killConfirmed?: boolean;
+  killError?: string;
   killed: number;
   cancelled: number;
   stopped: number;

@@ -75,7 +75,7 @@ vi.mock('../src/queues.js', async (importOriginal) => {
 vi.mock('../src/lib/sandbox-kill.js', () => ({
   killTaskSandboxes: async (taskId: string) => {
     h.kills.push(taskId);
-    return 0;
+    return { killed: 0, killConfirmed: true };
   },
   killTaskSandboxesOrThrow: async (taskId: string) => {
     h.kills.push(taskId);
@@ -129,8 +129,8 @@ app.onError(errorHandler);
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 const sorted = (keys: string[]) => [...keys].sort();
-const OWNER_BODY_KEYS = ['cancelled', 'killed', 'ok', 'stopped'];
-const ADMIN_BODY_KEYS = ['cancelled', 'failedAt', 'killed', 'ok', 'stopped'];
+const OWNER_BODY_KEYS = ['cancelled', 'killConfirmed', 'killed', 'ok', 'stopped'];
+const ADMIN_BODY_KEYS = ['cancelled', 'failedAt', 'killConfirmed', 'killed', 'ok', 'stopped'];
 
 describe.skipIf(!url)('settling a task right after an api Stop, on Postgres', () => {
   let db: Database;

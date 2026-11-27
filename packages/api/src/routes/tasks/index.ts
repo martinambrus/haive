@@ -1608,8 +1608,14 @@ taskRoutes.post('/:id/action', async (c) => {
             .limit(1)
         : [];
       if (target) {
-        await retryTaskAtStep(db, id, userId, target, { liftPause });
-        return c.json({ ok: true, status: 'running' });
+        const result = await retryTaskAtStep(db, id, userId, target, { liftPause });
+        return c.json({
+          ok: true,
+          status: 'running',
+          killed: result.killed,
+          killConfirmed: result.killConfirmed,
+          killError: result.killError,
+        });
       }
       // A full restart from step 0 refuses pinned custom tools that would fail at their step.
       await assertCustomToolsUsable(db, task);
@@ -1698,11 +1704,17 @@ taskRoutes.post('/:id/action', async (c) => {
       if (resumeAudit) logAuditEvent(resumeAudit);
       // Answering a parked form revives the task, so its pass can open a row between the settle
       // above and the bump. None can at the old epoch after it, so settle once more.
-      await stopActiveCliInvocations(db, id, { failTask: false });
+      const killResult = await stopActiveCliInvocations(db, id, { failTask: false });
       await settleActiveSteps(db, id, task.executionContract);
       await appendTaskEvent(db, id, null, 'task.retried', { by: userId });
       await enqueueStart(id, userId);
-      return c.json({ ok: true, status: 'queued' });
+      return c.json({
+        ok: true,
+        status: 'queued',
+        killed: killResult.killed,
+        killConfirmed: killResult.killConfirmed,
+        killError: killResult.killError,
+      });
     }
     case 'pause': {
       // Terminal tasks have nothing left to hold.
@@ -1823,12 +1835,13 @@ taskRoutes.post('/:id/cancel-active-cli', async (c) => {
 
   // Stop the running CLI (supersede its invocation, fail the step + task) and
   // force-remove only the cli sandboxes — the DDEV/app runtime is left running.
-  const { killed, cancelled, stopped, failedAt } = await stopActiveCliInvocations(db, id, {
+  const result = await stopActiveCliInvocations(db, id, {
     failTask: true,
   });
+  const { failedAt, ...activity } = result;
   await enqueueStopSettle(id, userId, failedAt);
-  logger.info({ taskId: id, killed, cancelled, stopped }, 'cancel-active-cli');
-  return c.json({ ok: true, killed, cancelled, stopped });
+  logger.info({ taskId: id, ...activity }, 'cancel-active-cli');
+  return c.json({ ok: true, ...activity });
 });
 
 /** Max steer message length. Bounds the NDJSON line written to the CLI's stdin

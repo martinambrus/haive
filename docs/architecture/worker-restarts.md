@@ -629,6 +629,7 @@ for a page of the list in one query, both reading a task's newest 50 stops), sin
 written after the kill and a Retry that failed in between would otherwise read as the stop's. The same `failedAt` goes to the
 settlement a Stop owes: after the commit and the kill, the owner's Stop, an administrator's stop and
 an urgent module deactivation each queue one `settle-stopped-task` job (`enqueueStopSettle`),
+with urgent deactivation starting all enqueues together after its Stop batch finishes,
 because a Stop that finds no pass never reaches the pass's own `settleFailedTask`. The wait is
 bounded to 2 s and the helper never throws, so a Redis outage never delays or fails the answer. A job the queue never took is not lost: the request event the Stop wrote is re-driven by the stalled sweep (above). The
 worker (`handleSettleStoppedTask`) settles only while the task still reads `failed` with a
@@ -895,6 +896,30 @@ on a task with no repository (every other Retry-family action takes the reposito
 Statements that match several runs or agent rows are not batched: each locks its rows in heap order (MEASURED at
 96,000 runs: a Seq Scan or Bitmap Heap Scan, rows locked in ctid order), the same order for all of them, so an
 id-ordered batch on some of them would be inconsistent with the rest.
+
+**API sandbox cleanup reports confirmation separately from the committed action.**
+`killTaskSandboxes` returns `killed`, `killConfirmed` and optional `killError`. A failed
+listing, unconfirmed removal, spawn or Docker deadline returns zero confirmed kills and
+`killConfirmed: false`; it does not roll back Stop or a committed recovery reset.
+An empty successful listing is confirmed with count zero. Stop, task/step Retry,
+both Resumes, Retry with AI, Skip and the step CLI switch expose that result whenever
+cleanup was attempted; recovery actions also warn on an unconfirmed result. Callers
+must use the boolean, never error wording or a zero count, to decide confirmation.
+The task page, CLI stream and maintenance Stop notices prioritize an explicit
+`killConfirmed: false` over zero counts; task and step recovery controls show the same
+warning after a committed action, including a CLI switch, the global-KB Retry and
+plan-chat CLI switch. The warning uses an amber banner distinct from the neutral empty-Stop notice;
+its tone is structural notice metadata, never inferred from copy. Older APIs without the field
+retain their existing behavior. Both API kill helpers list all container states (`docker ps -a --format` with ID and State fields), including
+created and exited sandboxes, and retain the task label AND CLI-family name filter
+so DDEV/app runners survive. Both helpers re-list after a failed removal under the same task label and CLI-family name
+filters, polling for up to three seconds. Confirmation requires no created, running,
+restarting or paused sandbox to remain, including a new id; exited, removing and dead
+leftovers cannot run a CLI. An unreadable, unknown or malformed state remains unconfirmed.
+The result and the strict helper’s rejection carry only `sandbox_listing_failed` or
+`sandbox_removal_failed`; Docker diagnostics stay in sanitized logs. Docker failures already return normally from the ordinary helper:
+controls on owner and maintenance Stop confirm 200 after commit, with maintenance's
+event and audit intact. No new event rule is introduced for those producers.
 
 **A cancel ends only the step rows it locked.** Every task cancel the api commits goes through one core
 (`cancelStillOpen`, `api/src/lib/cancel-task.ts`): the Cancel action, the step `abort` and
