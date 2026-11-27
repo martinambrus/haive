@@ -213,7 +213,9 @@ it('F4 returns extra held rows with their pre-reset liveness', async () => {
     stepIndex: 2,
     guardState: { run: true },
   });
-  const result = await resetRowsForRerun(fake.db as never, TASK, [target as never], new Date());
+  const result = await fake.db.transaction((tx) =>
+    resetRowsForRerun(tx as never, TASK, [target as never], new Date()),
+  );
   expect(result).toEqual([expect.objectContaining({ id: extra.id, status: 'running' })]);
   expect(fake.rows(schema.taskSteps).find((r) => r.id === extra.id)).toMatchObject({
     status: 'pending',

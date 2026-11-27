@@ -13,6 +13,7 @@ const stubs = vi.hoisted(() => ({
   executeByKind: vi.fn(),
   boundaryError: null as Error | null,
   resumeStepIfLinked: vi.fn(async () => {}),
+  markCliParkBegin: vi.fn(async (..._args: unknown[]) => {}),
   recordLedgerEntry: vi.fn(async (..._args: unknown[]) => {}),
   cleanupScratch: vi.fn(async (..._args: unknown[]) => false),
 }));
@@ -58,7 +59,7 @@ vi.mock('../src/queues/cli-stream-publisher.js', async (importOriginal) => ({
 }));
 vi.mock('../src/queues/cli-park-timing.js', () => ({
   foldCliParkOnResume: async () => {},
-  markCliParkBegin: async () => {},
+  markCliParkBegin: stubs.markCliParkBegin,
 }));
 vi.mock('../src/queues/cli-exec/invocation-cost.js', () => ({
   resolveInvocationCost: async () => null,
@@ -117,6 +118,7 @@ function fakeDb(opts: {
   providerSecrets?: unknown[];
   /** The step row a task_steps update lands on; unset, the update finds no row. */
   stepOwned?: boolean;
+  hintError?: unknown;
 }) {
   const writes: Write[] = [];
   let txSeq = 0;
@@ -138,6 +140,7 @@ function fakeDb(opts: {
     update: (table: unknown) => ({
       set: (set: Record<string, unknown>) => ({
         where: (where: unknown) => {
+          if ('errorHint' in set && opts.hintError) throw opts.hintError;
           writes.push({ tx, table: tableNameOf(table), set, where });
           const start = 'startedAt' in set && tableNameOf(table) === 'cli_invocations';
           const landed = start
@@ -205,6 +208,7 @@ beforeEach(() => {
   stubs.boundaryError = null;
   stubs.executeByKind.mockReset();
   stubs.resumeStepIfLinked.mockReset();
+  stubs.markCliParkBegin.mockClear();
   stubs.recordLedgerEntry.mockReset();
   stubs.cleanupScratch.mockReset().mockResolvedValue(false);
 });
@@ -585,6 +589,32 @@ describe('a login failure', () => {
     ]);
     expect(hintWrites(writes)[0]!.tx).not.toBeNull();
   });
+
+  it.each(['40P01', '08006'])(
+    'hands back the original CLI failure when its best-effort hint fails (%s)',
+    async (code) => {
+      const original = new CliLoginRequiredError('log in first', hint);
+      const hintError = new DrizzleQueryError(
+        'update task_steps set error_hint = $1',
+        ['private-bound-value'],
+        Object.assign(new Error('hint write failed'), { code }),
+      );
+      stubs.executeByKind.mockRejectedValue(original);
+      const { db, writes } = fakeDb({ lockedRun: { supersededAt: null }, hintError });
+      const failed = await handleCliExecJob(db, base).catch((err: unknown) => err);
+
+      expect(stubs.markCliParkBegin).toHaveBeenCalledWith(db, STEP);
+      expect(stubs.resumeStepIfLinked).toHaveBeenCalledExactlyOnceWith(base, false, 'log in first');
+      expect(failed).toBe(original);
+      expect(runWrites(writes).find((w) => w.set.exitCode === -1)?.set.errorMessage).toBe(
+        'log in first',
+      );
+      expect(miningWrites(writes).find((w) => w.set.status === 'failed')?.set.errorMessage).toBe(
+        'log in first',
+      );
+      expect(hintWrites(writes)).toEqual([]);
+    },
+  );
 
   it('leaves no hint for a run a Retry superseded', async () => {
     stubs.executeByKind.mockRejectedValue(new CliLoginRequiredError('log in first', hint));

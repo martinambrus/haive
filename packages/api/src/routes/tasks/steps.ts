@@ -29,6 +29,7 @@ import {
 import type { SQL } from 'drizzle-orm';
 import {
   schema,
+  boundedLockWait,
   isLockNotAvailable,
   lockStepRows,
   resetDagCurrentLevelForRetry,
@@ -210,16 +211,15 @@ async function reopenFailedTask(tx: DbHandle, taskId: string, now: Date): Promis
     .where(and(eq(schema.tasks.id, taskId), eq(schema.tasks.status, 'failed')));
 }
 
-/** Supersede the live invocations of the step rows `ids` and drop their agent minings. With
- *  `noWait`, for a caller that already holds step rows and the task row, it first locks what it will
- *  write without waiting: a pass holds a run and then wants its step row (`writeLoginHint`), so a
- *  wait for the run from there closes a cycle, and a held row is answered with a lock-not-available
- *  error instead. */
+/** Supersede the live invocations of the step rows `ids` and drop their agent minings.
+ *  `lockFirst` takes the rows at their write strength under the caller's bounded wait.
+ *  That caller already holds steps (and possibly the task), while a pass can hold a run
+ *  and want its step (`writeLoginHint`): a longer hold must refuse before deadlock detection. */
 async function sweepRunsOf(
   tx: DbHandle,
   ids: string[],
   now: Date,
-  opts: { noWait?: boolean } = {},
+  opts: { lockFirst?: boolean } = {},
 ): Promise<void> {
   // Both halves of the step's spend: its own invocations AND the recap pass, whose
   // task_step_id is deliberately NULL. Without the second arm a re-run leaves the prior
@@ -232,21 +232,21 @@ async function sweepRunsOf(
     ),
     isNull(schema.cliInvocations.supersededAt),
   );
-  if (opts.noWait) {
+  if (opts.lockFirst) {
     await tx
       .select({ id: schema.cliInvocations.id })
       .from(schema.cliInvocations)
       .where(runs)
-      .for('no key update', { noWait: true });
+      .for('no key update');
   }
   await tx.update(schema.cliInvocations).set({ supersededAt: now }).where(runs);
   const minings = inArray(schema.taskStepAgentMinings.taskStepId, ids);
-  if (opts.noWait) {
+  if (opts.lockFirst) {
     await tx
       .select({ id: schema.taskStepAgentMinings.id })
       .from(schema.taskStepAgentMinings)
       .where(minings)
-      .for('update', { noWait: true });
+      .for('update');
   }
   await tx.delete(schema.taskStepAgentMinings).where(minings);
 }
@@ -325,8 +325,9 @@ export async function resetRowsForRerun(
   if (rows.length === 0 && !anchor) return [];
   const ids = rows.map((r) => r.id);
   // The rows a pass activated meanwhile are held already (`rowsHeld`) and the task row is bumped:
-  // their runs are swept without waiting, and a held one refuses the action as a held row does.
-  if (opts.rowsHeld) await refusingWhenLocked(() => sweepRunsOf(tx, ids, now, { noWait: true }));
+  // their runs get the same bounded wait as a held row, refusing a longer hold.
+  if (opts.rowsHeld)
+    await refusingWhenLocked(tx, () => sweepRunsOf(tx, ids, now, { lockFirst: true }));
   else await sweepRunsOf(tx, ids, now);
   // Re-running 06c-dag-execute (or any step whose set includes it) must also clear the wedged
   // DAG level: resetting task_steps alone leaves task_dag_issues failed_unrecoverable, so
@@ -378,10 +379,10 @@ export async function resetRowsForRerun(
   ).filter((r) => r.id !== anchor?.id || ids.includes(r.id));
   // A guard decision (and even its first run) can land after the caller's read.
   // These extra rows were not in the first run sweep. We hold steps now, so
-  // refuse a busy run rather than wait in the reverse lock order.
+  // bound the wait for a busy run rather than wait indefinitely in reverse lock order.
   const extraIds = held.filter((r) => !ids.includes(r.id)).map((r) => r.id);
   if (extraIds.length) {
-    await refusingWhenLocked(() => sweepRunsOf(tx, extraIds, now, { noWait: true }));
+    await refusingWhenLocked(tx, () => sweepRunsOf(tx, extraIds, now, { lockFirst: true }));
     ids.push(...extraIds);
   }
   for (const r of held) {
@@ -490,11 +491,15 @@ function hasDurableApplyState(row: {
   return row.applyReceipt != null || row.guardState != null || row.stepId === '11g-save-database';
 }
 
-/** A statement that could not take a lock without waiting: the pass that holds it is mid-write, and
- *  the action rolls back. The bump holds the task row, so waiting here could close a cycle. */
-async function refusingWhenLocked<T>(run: () => Promise<T>): Promise<T> {
+// Below PostgreSQL's default 1s deadlock_timeout: brief status writes can finish,
+// while a cycle rolls this action back before it can kill a Stop or a pass.
+const LATE_LOCK_WAIT_MS = 250;
+
+/** The action already holds step/task rows. Wait out brief benign holds, but roll
+ *  back on a longer hold (55P03), since waiting indefinitely can close a cycle. */
+async function refusingWhenLocked<T>(tx: DbHandle, run: () => Promise<T>): Promise<T> {
   try {
-    return await run();
+    return await boundedLockWait(tx, run, LATE_LOCK_WAIT_MS);
   } catch (err) {
     if (isLockNotAvailable(err)) {
       throw new HttpError(503, 'The task changed while this was being applied; try again');
@@ -506,7 +511,7 @@ async function refusingWhenLocked<T>(run: () => Promise<T>): Promise<T> {
 /** Rows a pass activated between the action's read and its epoch bump. The worker's claim checks
  *  the epoch under the task row's lock, so after the bump this set is final. */
 async function rowsActivatedMeanwhile(tx: DbHandle, taskId: string, kept: readonly string[]) {
-  return refusingWhenLocked(() =>
+  return refusingWhenLocked(tx, () =>
     tx
       .select()
       .from(schema.taskSteps)
@@ -520,7 +525,7 @@ async function rowsActivatedMeanwhile(tx: DbHandle, taskId: string, kept: readon
       // The rows are normally held by the id-ordered batch already, and FOR UPDATE on a row held
       // FOR NO KEY UPDATE is an upgrade that conflicts with the KEY SHARE a pass's run insert holds
       // on it: a 503 for a row this transaction holds itself.
-      .for('no key update', { noWait: true }),
+      .for('no key update'),
   );
 }
 

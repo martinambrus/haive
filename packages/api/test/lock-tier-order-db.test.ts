@@ -897,6 +897,28 @@ describe.skipIf(!url)(
     });
 
     describe('the late sweep of a Retry or Resume that holds the step rows and the task row', () => {
+      it.each(['run', 'agent'] as const)(
+        'T482: waits out a brief benign %s hold instead of refusing the late sweep',
+        async (kind) => {
+          const { taskId, step } = await seedLateRow('live');
+          await seedMining({ status: 'running' });
+          const run = await interleave(
+            () => lateSweep(taskId, step),
+            {
+              first: kind === 'run' ? lockRun(RUN) : lockMining(MINING),
+              second: async () => undefined,
+            },
+            [],
+          );
+          expect(run.failures).toEqual([]);
+          expect((await rowOf(STEP.id)).status).toBe('pending');
+          expect((await runOf(RUN)).supersededAt).not.toBeNull();
+          expect(await db.$count(schema.taskStepAgentMinings)).toBe(0);
+          expect((await taskOf(taskId)).orchestrationEpoch).toBe(4);
+        },
+        TEST_TIMEOUT,
+      );
+
       const shapes = [
         ['R ended with an error', 'ended'],
         ['R live', 'live'],
@@ -979,7 +1001,7 @@ describe.skipIf(!url)(
       );
 
       it(
-        'A7d: the Retry action answers 503 at once when the run of a row a pass activated meanwhile is held, instead of waiting for it with the step rows and the task row held',
+        'A7d: the Retry action refuses a cyclic hold of a late run within its bound',
         async () => {
           const taskId = await seedTask('failed', { currentStepId: STEP.stepId, currentRound: 0 });
           await seedStep(taskId, { status: 'failed' });
