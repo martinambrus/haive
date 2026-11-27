@@ -259,13 +259,18 @@ export function BundleComposer({
   onChangeRef.current = onChange;
   const loadBundleFilesRef = useRef(loadBundleFiles);
   loadBundleFilesRef.current = loadBundleFiles;
+  const actionGeneration = useRef(0);
 
   useEffect(() => {
     let cancelled = false;
     let loaded = false;
+    let inFlight = false;
     let handle: ReturnType<typeof setInterval> | null = null;
 
     const fetchOnce = async (): Promise<void> => {
+      if (cancelled || inFlight) return;
+      inFlight = true;
+      const generation = actionGeneration.current;
       try {
         const res = await fetch(
           `${API_BASE_URL}/bundles?repositoryId=${encodeURIComponent(repositoryId)}`,
@@ -285,7 +290,8 @@ export function BundleComposer({
             archiveFilename?: string | null;
           }>;
         };
-        if (cancelled) return;
+        // Acceptance of a local sync makes any earlier server snapshot stale.
+        if (cancelled || generation !== actionGeneration.current) return;
         loaded = true;
         const next: BundleComposerEntry[] = bundles.map((b) => ({
           id: b.id,
@@ -329,9 +335,15 @@ export function BundleComposer({
               v.lastReplacementNote === n.lastReplacementNote
             );
           });
-        if (!same) onChangeRef.current(next);
+        if (!same) {
+          // Remember handled transitions even before the parent renders the value.
+          valueRef.current = next;
+          onChangeRef.current(next);
+        }
       } catch {
         // Transient network error — keep polling.
+      } finally {
+        inFlight = false;
       }
     };
 
@@ -373,6 +385,7 @@ export function BundleComposer({
         credentials: 'include',
       });
       if (!res.ok) throw await refusalError(res, 'resync failed');
+      actionGeneration.current += 1;
       onChange(value.map((v) => (v.id === entry.id ? { ...v, status: 'syncing' } : v)));
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
@@ -435,6 +448,7 @@ export function BundleComposer({
         },
       );
       if (!completeRes.ok) throw await refusalError(completeRes, 'replace complete failed');
+      actionGeneration.current += 1;
       onChange(value.map((v) => (v.id === entry.id ? { ...v, status: 'syncing' } : v)));
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));

@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { BundleComposer } from './bundle-composer';
 import {
   createRenderer,
@@ -359,6 +359,102 @@ async function mountLive(allowAdd = false) {
     },
   };
 }
+
+describe('poll races', () => {
+  beforeEach(() => {
+    // Keep render-tree's flush timeout real; advance only the polling clock.
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
+  });
+  afterEach(() => vi.useRealTimers());
+
+  it.each(['Resync', 'Replace ZIP'] as const)(
+    'discards an older poll after %s is accepted',
+    async (action) => {
+      bundleSource = action === 'Resync' ? 'git' : 'zip';
+      // Another syncing bundle keeps polling while docs is still active.
+      secondBundleState = 'syncing';
+      const live = await mountLive();
+      try {
+        await live.click('docs');
+        const release = holdPollBody();
+        await vi.advanceTimersByTimeAsync(2500);
+        if (action === 'Resync') {
+          await live.click('Resync');
+        } else {
+          const input = findAll(
+            live.view.tree(),
+            (h) => h.tag === 'input' && h.props.type === 'file',
+          )[0]!;
+          (input.props.onChange as (event: unknown) => void)({
+            target: { files: [new File(['zip'], 'docs.zip')], value: '' },
+          });
+          await settle(live.view);
+          const radio = findAll(
+            live.view.tree(),
+            (h) => h.tag === 'input' && h.props.value === 'keep_until_success',
+          )[0]!;
+          (radio.props.onChange as () => void)();
+          await settle(live.view);
+          await live.click('Confirm replacement');
+        }
+        const syncingControl = () =>
+          findAll(live.view.tree(), (h) =>
+            action === 'Resync'
+              ? h.tag === 'button' && textOf(h) === 'Resync'
+              : h.tag === 'input' && h.props.type === 'file',
+          )[0]!;
+        expect(syncingControl().props.disabled).toBe(true);
+        release();
+        await settle(live.view);
+        // A stale active answer must not enable a second action or reload early.
+        expect(syncingControl().props.disabled).toBe(true);
+        expect(live.text()).toContain('a.md');
+        expect(filesFetches).toBe(1);
+
+        bundleState = 'active';
+        filesBody = listing('final.md');
+        await vi.advanceTimersByTimeAsync(2500);
+        await settle(live.view);
+        expect(syncingControl().props.disabled).toBe(false);
+        expect(live.text()).toContain('final.md');
+        expect(filesFetches).toBe(2);
+      } finally {
+        live.unmount();
+      }
+    },
+  );
+
+  it('skips ticks during a slow poll and reloads an observed sync completion once', async () => {
+    bundleState = 'syncing';
+    const live = await mountLive();
+    try {
+      await live.click('docs');
+      bundleState = 'active';
+      const releaseFirst = holdPollBody();
+      await vi.advanceTimersByTimeAsync(2500);
+      const releaseOverlap = holdPollBody();
+      await vi.advanceTimersByTimeAsync(2500);
+      const fresh = holdFiles();
+      const duplicate = holdFiles();
+      releaseFirst();
+      releaseOverlap();
+      await settle(live.view);
+      fresh.resolve(reply(listing('final.md')));
+      await settle(live.view);
+      // A second reload must not hide the first successful answer behind loading.
+      expect(live.text()).toContain('final.md');
+      expect(live.text()).not.toContain('Loading files…');
+      expect(filesFetches).toBe(2);
+      expect(actionRequests.filter((request) => request === 'GET /bundles')).toHaveLength(2);
+      duplicate.resolve(reply(listing('final.md')));
+      await vi.advanceTimersByTimeAsync(2500);
+      await settle(live.view);
+      expect(filesFetches).toBe(2);
+    } finally {
+      live.unmount();
+    }
+  });
+});
 
 describe('file listings follow the final synced tree', () => {
   beforeEach(() => {
