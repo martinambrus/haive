@@ -1263,7 +1263,7 @@ T594 commits `status: 'cloning'` before a rebuild moves the checkout, which hide
 
 ### T778 · Settlement siblings still act on a Retry-revived task
 
-status: open · kind: bug · found: T542 review 2026-11-27 (found-not-fixed) · priority: P3
+status: done 2026-11-27, merged #1362 cc93f73c4 and live (worker reload): KB author reconcile fenced (3 s connect, 10 s store bounds); the five-minute global-KB sweep repairs interrupted settlements; `defaultContainerCleanup` dormant and `resyncAfterTaskEnd` idempotent, no change · kind: bug · found: T542 review 2026-11-27 (found-not-fixed) · priority: P3
 
 T542 fences the five destructive settlement members under the task row lock. Siblings in the same settlement functions still act without the status recheck: `reconcileKbAuthorEntryOnTaskEnd(db, taskId, 'failed')` (`worker/src/queues/task-queue.ts` ~:1136, `_global-kb-promote.ts` ~:745-789) can mark a Retry-revived task's kb_author entry `failed`; `defaultContainerCleanup` (dormant in production) and `resyncAfterTaskEnd` (idempotent writes) are lower risk. Boot-time `auth-volume-reaper.ts` is T543.
 
