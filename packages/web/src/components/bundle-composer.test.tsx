@@ -1,5 +1,5 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
-import { BundleComposer } from './bundle-composer';
+import { BUNDLE_POLL_TIMEOUT_MS, BundleComposer } from './bundle-composer';
 import {
   createRenderer,
   findAll,
@@ -75,7 +75,9 @@ let bundleState: 'active' | 'syncing' | 'failed' = 'active';
 let bundleSource: 'zip' | 'git' = 'zip';
 let secondBundleState: 'active' | 'syncing' | null = null;
 let secondFilesFetches = 0;
-let pollReplies: Array<(body: unknown) => StubResponse> = [];
+let pollReplies: Array<
+  (body: unknown, signal?: AbortSignal | null) => StubResponse | Promise<StubResponse>
+> = [];
 let poll: () => void;
 
 function holdPollBody() {
@@ -138,7 +140,7 @@ async function fakeFetch(input: unknown, init?: RequestInit) {
           : [{ id: 'b2', name: 'other', sourceType: 'git', status: secondBundleState }]),
       ],
     };
-    return pollReplies.length > 0 ? pollReplies.shift()!(body) : reply(body);
+    return pollReplies.length > 0 ? pollReplies.shift()!(body, init?.signal) : reply(body);
   }
   if (url.pathname.endsWith('/bundles/b1/files')) {
     filesFetches += 1;
@@ -318,10 +320,14 @@ describe('a refused file listing shows why', () => {
 });
 
 async function settle(view: Renderer) {
-  for (let i = 0; i < 3; i += 1) await view.flush();
+  for (let i = 0; i < 3; i += 1) {
+    const flush = view.flush();
+    if (vi.isFakeTimers()) await vi.advanceTimersByTimeAsync(0);
+    await flush;
+  }
 }
 
-async function mountLive(allowAdd = false) {
+async function mountLive(allowAdd = false, pollTimeoutMs?: number) {
   let entries: Parameters<typeof BundleComposer>[0]['value'] = [];
   let mounted = true;
   const view = createRenderer(
@@ -333,6 +339,7 @@ async function mountLive(allowAdd = false) {
           allowAddGit={allowAdd}
           credentialOptions={[]}
           repositoryId="r1"
+          pollTimeoutMs={pollTimeoutMs}
           value={entries}
           onChange={(next) => {
             entries = next;
@@ -453,6 +460,92 @@ describe('poll races', () => {
     } finally {
       live.unmount();
     }
+  });
+});
+
+describe('poll deadlines', () => {
+  beforeEach(() => vi.useFakeTimers());
+  afterEach(() => vi.useRealTimers());
+
+  it('defaults the shared request and body deadline to ten seconds', () => {
+    expect(BUNDLE_POLL_TIMEOUT_MS).toBe(10_000);
+  });
+
+  it.each([
+    ['git', 'fetch'],
+    ['git', 'body'],
+    ['zip', 'fetch'],
+    ['zip', 'body'],
+  ] as const)('retries a stalled %s bundle %s and enables its action', async (source, wait) => {
+    bundleSource = source;
+    bundleState = 'syncing';
+    const live = await mountLive(false, 3000);
+    try {
+      await live.click('docs');
+      let signal: AbortSignal | null | undefined;
+      pollReplies.push(async (body, requestSignal) => {
+        signal = requestSignal;
+        const stalled = () =>
+          new Promise<never>((_resolve, reject) => {
+            requestSignal?.addEventListener('abort', () => reject(requestSignal.reason), {
+              once: true,
+            });
+          });
+        if (wait === 'fetch') return stalled();
+        // Headers use part of the budget; reading the body gets only what remains.
+        await new Promise<void>((resolve) => setTimeout(resolve, 1000));
+        return { ...reply(body), json: stalled };
+      });
+      const control = () =>
+        findAll(live.view.tree(), (h) =>
+          source === 'git'
+            ? h.tag === 'button' && textOf(h) === 'Resync'
+            : h.tag === 'input' && h.props.type === 'file',
+        )[0]!;
+      bundleState = 'active';
+      filesBody = listing('final.md');
+      await vi.advanceTimersByTimeAsync(5000);
+      await settle(live.view);
+      expect(actionRequests.filter((request) => request === 'GET /bundles')).toHaveLength(2);
+      expect(control().props.disabled).toBe(true);
+      expect(live.text()).toContain('syncing');
+      expect(signal?.aborted).not.toBe(true);
+
+      await vi.advanceTimersByTimeAsync(500);
+      expect(signal?.aborted).toBe(true);
+      await vi.advanceTimersByTimeAsync(2000);
+      await settle(live.view);
+      expect(actionRequests.filter((request) => request === 'GET /bundles')).toHaveLength(3);
+      expect(signal?.aborted).toBe(true);
+      expect(control().props.disabled).toBe(false);
+      expect(live.text()).not.toContain('syncing');
+      expect(live.text()).toContain('final.md');
+      expect(filesFetches).toBe(2);
+    } finally {
+      live.unmount();
+    }
+  });
+
+  it.each(['fetch', 'body'] as const)('aborts a pending %s on cleanup', async (wait) => {
+    bundleState = 'syncing';
+    const live = await mountLive(false, 3000);
+    let signal: AbortSignal | null | undefined;
+    pollReplies.push((body, requestSignal) => {
+      signal = requestSignal;
+      const stalled = () =>
+        new Promise<never>((_resolve, reject) => {
+          requestSignal?.addEventListener('abort', () => reject(requestSignal.reason), {
+            once: true,
+          });
+        });
+      return wait === 'fetch' ? stalled() : { ...reply(body), json: stalled };
+    });
+    await vi.advanceTimersByTimeAsync(2500);
+    live.unmount();
+    expect(signal?.aborted).toBe(true);
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(actionRequests.filter((request) => request === 'GET /bundles')).toHaveLength(2);
+    expect(vi.getTimerCount()).toBe(0);
   });
 });
 
