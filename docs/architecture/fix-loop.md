@@ -343,7 +343,11 @@ on no step: the worker never falls back to 07 for one (its router fails the task
 no provider), so the card and the listing resolve the ordinary slot.
 
 A choice that becomes unusable before the gate answer is applied refuses that answer
-instead of failing the task. The same transaction restores the gate's `waiting_form` status,
+instead of failing the task. This includes a provider disabled between the initial provider
+read and the locked choice write: `recordFixRoundCliChoice` converts the writer's
+`ComposedLspProviderDisabledError` to `FixRoundCliUnavailable` by class, while a composed-LSP
+lock refusal retains `FixRoundCliLocked` and its specific explanation.
+The same transaction restores the gate's `waiting_form` status,
 clears its submitted values, stamps `waiting_started_at`, refreshes the eligible options and
 adds a fixed explanation to the form. It leaves the task waiting for the person, writes no
 round choice or continuation event and queues no next step. The original row-ownership and

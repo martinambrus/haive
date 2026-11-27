@@ -3,6 +3,7 @@ import { schema, type Database, type DbTx } from '@haive/database';
 import { CLI_DISPATCH_STEP_IDS } from '@haive/shared';
 import {
   checkTaskComposedLspProvider,
+  ComposedLspProviderDisabledError,
   ComposedLspProviderLockedError,
   withComposedLspTransaction,
   writeLockedStepCliChoice,
@@ -193,6 +194,8 @@ export async function recordFixRoundCliChoice(
     }),
   ).catch((error: unknown) => {
     if (error instanceof ComposedLspProviderLockedError) throw new FixRoundCliLocked(error.message);
+    if (error instanceof ComposedLspProviderDisabledError)
+      throw new FixRoundCliUnavailable(error.message);
     throw error;
   });
 }

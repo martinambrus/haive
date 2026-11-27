@@ -2,7 +2,10 @@ import { describe, expect, it } from 'vitest';
 import { schema, type DbTx } from '@haive/database';
 import { createFakeDb } from '@haive/database/testing';
 import { phase2ImplementStep } from '../src/step-engine/steps/workflow/07-phase-2-implement.js';
-import { recordFixRoundCliChoice } from '../src/step-engine/steps/workflow/_fix-round-cli.js';
+import {
+  FixRoundCliUnavailable,
+  recordFixRoundCliChoice,
+} from '../src/step-engine/steps/workflow/_fix-round-cli.js';
 
 /**
  * The next fix round's CLI choice is a writer of the composed-LSP provider rule, so it must hold
@@ -76,6 +79,19 @@ describe('next fix round CLI choice write', () => {
 });
 
 describe('composed contract read is made after the task lock', () => {
+  it('reports an unavailable choice when the provider is disabled after the initial read', async () => {
+    const fake = setup();
+    fake.hooks.beforeLock = () => {
+      fake.patch(schema.cliProviders, CODEX, { enabled: false });
+    };
+    await expect(
+      fake.db.transaction((tx) =>
+        recordFixRoundCliChoice(tx as unknown as DbTx, USER, TASK, phase2ImplementStep, 2, CODEX),
+      ),
+    ).rejects.toBeInstanceOf(FixRoundCliUnavailable);
+    expect(fake.rows(schema.taskStepCliChoices)).toEqual([]);
+  });
+
   it('refuses a contract that became composed while waiting for the lock', async () => {
     const fake = setup();
     const reads: boolean[] = [];
