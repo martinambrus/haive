@@ -1,7 +1,7 @@
 import { ollamaEmbed } from '@haive/shared/rag';
 
-// Interactive checks use the same eight-second bound as the Global KB database probe.
-export const GLOBAL_KB_EMBED_PROBE_TIMEOUT_MS = 8_000;
+// Both interactive routes allow a cold embed: MEASURED 4.6–42.8 s (docs/architecture/global-kb.md).
+export const GLOBAL_KB_EMBED_PROBE_TIMEOUT_MS = 60_000;
 
 export class OllamaProbeTimeoutError extends Error {
   constructor() {

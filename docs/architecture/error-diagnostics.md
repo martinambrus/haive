@@ -456,6 +456,8 @@ URLs trigger no request; bounding the fixed in-stack reads remains separate work
 
 Global KB Ollama Test failures use fixed guidance instead of embedding transport/error-body
 text, since either can echo a credential-bearing URL or its password alone. Config response
-and audit URL copy redact all userinfo for every role; the private stored value is used only
+and audit URL copy show only scheme, host and port for every role, marking userinfo, path, query
+and fragment as hidden; the worker's unreachable-embedder warning uses the same shared helper.
+The private stored value is used only
 for the dial. The interactive embedding deadline returns `ollama_probe_timeout` with
 `retryable: true`; it does not log the raw transport failure. See [Global knowledge base](global-kb.md).

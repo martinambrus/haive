@@ -511,6 +511,13 @@ it.each(['origin-url', 'http-proxy', 'second-push-url', 'insteadOf'])(
       { timeout: 2000 },
     );
     expect.soft(result.code).toBe(128);
+    if (kind === 'insteadOf') {
+      expect
+        .soft(result.stderr.trim())
+        .toBe(
+          "The repository's remote or git transport config changed while Haive was checking it. Retry the operation.",
+        );
+    }
     expect.soft(run.mock.calls.some(([, args]) => args.includes('fetch'))).toBe(false);
     expect.soft((await stats()).requests).toBe(before.requests);
     expect(seams.resolve).toHaveBeenCalledTimes(1);

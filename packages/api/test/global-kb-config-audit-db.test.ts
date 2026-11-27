@@ -246,7 +246,7 @@ describe.skipIf(!url)('global KB config and enforcement write audit rows first o
 
   it('persists redacted Ollama URL audit copy while retaining the private transport value', async () => {
     const secret = randomBytes(24).toString('hex');
-    const target = `http://user:${secret}@embed.example:11434`;
+    const target = `http://user:${secret}@embed.example:11434/${secret}?token=${secret}#${secret}`;
     redisValues.set(CONFIG_KEYS.GLOBAL_KB_OLLAMA_URL, target);
     const response = await put({ ollamaUrl: target });
     expect(response.status).toBe(200);
@@ -256,15 +256,31 @@ describe.skipIf(!url)('global KB config and enforcement write audit rows first o
     expect(all).toHaveLength(1);
     expect(JSON.stringify(all).includes(secret)).toBe(false);
     expect(all[0]!.metadata).toMatchObject({
-      from: { ollamaUrl: 'http://***@embed.example:11434/' },
-      to: { ollamaUrl: 'http://***@embed.example:11434/' },
+      from: { ollamaUrl: 'http://***@embed.example:11434/***?***#***' },
+      to: { ollamaUrl: 'http://***@embed.example:11434/***?***#***' },
     });
     const roundTrip = await put({
-      ollamaUrl: 'http://***@embed.example:11434/',
+      ollamaUrl: 'http://***@embed.example:11434/***?***#***',
       digestEnabled: false,
     });
     expect(roundTrip.status).toBe(200);
     expect(redisValues.get(CONFIG_KEYS.GLOBAL_KB_OLLAMA_URL)).toBe(target);
+  });
+
+  it('persists a hidden-only URL change flag without either secret', async () => {
+    const before = randomBytes(24).toString('hex');
+    const after = randomBytes(24).toString('hex');
+    redisValues.set(CONFIG_KEYS.GLOBAL_KB_OLLAMA_URL, `https://embed.example/${before}`);
+    expect((await put({ ollamaUrl: `https://embed.example/${after}` })).status).toBe(200);
+    const all = await rowsOf(CONFIG_ACTION);
+    expect(all).toHaveLength(1);
+    expect(all[0]!.metadata).toMatchObject({
+      from: { ollamaUrl: 'https://embed.example/***' },
+      to: { ollamaUrl: 'https://embed.example/***' },
+      ollamaUrlHiddenChanged: true,
+    });
+    expect(JSON.stringify(all)).not.toContain(before);
+    expect(JSON.stringify(all)).not.toContain(after);
   });
 
   it('E1: enforcement and removal each write exactly one main-DB audit row', async () => {

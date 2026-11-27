@@ -1,4 +1,4 @@
-import { displayGlobalKbAuditMetadata } from '../lib/global-kb-ollama-url.js';
+import { displayGlobalKbAuditMetadata } from '@haive/shared/ollama-url';
 import { randomBytes } from 'node:crypto';
 import { z } from 'zod';
 import { Hono } from 'hono';

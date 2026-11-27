@@ -114,6 +114,10 @@ script that dials a target typed on its command line passes `fetchFn: fetch` (`r
 `rag-eval.ts`) or `trustedTarget: true` (`rag-eval.ts`, the pg drop smoke).
 `backfill-task-embeddings.ts` initialises the config store so it can read the list.
 
+The population form's Ollama status displays the stored endpoint through
+`@haive/shared/ollama-url`: only scheme, host and port are visible; userinfo, non-root path,
+query and fragment use hidden markers. The detect state retains the actual URL for transport.
+
 **What a failure does depends on WHEN the step runs.** `10-rag-populate` FAILS — "the index
 is populated" is its whole contract and a human is watching onboarding. `02-pre-rag-sync`
 and `11c-rag-reindex` leave the chunks UNINDEXED and carry on: 02 runs at the start of every

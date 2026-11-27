@@ -1,5 +1,11 @@
 import { OllamaProbeTimeoutError, probeGlobalKbEmbedding } from '../lib/global-kb-embed-probe.js';
-import { displayOllamaUrl, isOllamaUrlRedaction } from '../lib/global-kb-ollama-url.js';
+import {
+  displayOllamaUrl,
+  isOllamaUrlRedaction,
+  isValidOllamaUrl,
+  ollamaUrlRedactionMatches,
+  ollamaUrlHiddenPartsChanged,
+} from '@haive/shared/ollama-url';
 import { GlobalKbConfigOutcomeUnknownError } from '../lib/global-kb-config-outcome.js';
 import { globalKbCallOptions } from '@haive/shared/global-kb';
 import { addBestEffort } from '../lib/queue-bounded.js';
@@ -517,20 +523,37 @@ async function putConfig(c: Context<AppEnv>) {
   const parsed = configSchema.safeParse(await c.req.json().catch(() => null));
   if (!parsed.success) throw new HttpError(400, 'invalid global KB config', 'invalid_body');
   const d = parsed.data;
-  // Blank and displayed redactions keep the stored URL, as the write-only DSN does.
-  if (d.ollamaUrl !== undefined && (!d.ollamaUrl.trim() || isOllamaUrlRedaction(d.ollamaUrl))) {
-    delete d.ollamaUrl;
-  }
   const isAdmin = c.get('userRole') === 'admin';
   const actorUserId = c.get('userId');
   const saved = await resolveGlobalKbSettings();
+  // Blank keeps the stored URL. A redaction keeps it only at the same visible destination.
+  if (d.ollamaUrl !== undefined) {
+    if (!d.ollamaUrl.trim()) delete d.ollamaUrl;
+    else if (isOllamaUrlRedaction(d.ollamaUrl)) {
+      if (!ollamaUrlRedactionMatches(d.ollamaUrl, saved.ollamaUrl || IN_STACK_OLLAMA_URL)) {
+        throw new HttpError(
+          400,
+          'Type the whole URL to change the server.',
+          'ollama_url_redaction_changed',
+        );
+      }
+      delete d.ollamaUrl;
+    } else if (!isValidOllamaUrl(d.ollamaUrl)) {
+      throw new HttpError(
+        400,
+        'Ollama URL must be a valid HTTP or HTTPS URL.',
+        'invalid_ollama_url',
+      );
+    }
+  }
   const given = d.connectionString?.trim() ?? '';
   const clearing = d.clearConnectionString === true;
   // The page sends every field on every save, so only a CHANGED value needs admin rights.
   // An unchanged DSN is not written, so it cannot undo a concurrent admin change,
   // but it must still pass DSN validation below.
   if (!isAdmin) {
-    // The resolver turns a blank URL or model into its default, and the page sends either form.
+    // Blank Ollama URL keeps the stored value; restore the bundled server by entering its URL.
+    // A blank model still resolves to its default.
     const orDefault = (value: string | null | undefined, fallback: string) =>
       value?.trim() || fallback;
     const changed = Object.entries({
@@ -656,6 +679,12 @@ async function putConfig(c: Context<AppEnv>) {
           indexes.map((i) => [fields[i]![0], auditValue(i, fields[i]![2] ?? stored[i])]),
         ),
         connectionStringChanged: storesString,
+        ollamaUrlHiddenChanged: indexes.some(
+          (i) =>
+            fields[i]![0] === 'ollamaUrl' &&
+            fields[i]![2] !== undefined &&
+            ollamaUrlHiddenPartsChanged(stored[i] ?? null, fields[i]![2]!),
+        ),
         ...extra,
       },
     });
@@ -721,6 +750,13 @@ globalKbRoutes.post('/test-ollama', async (c) => {
     input = parsed.data;
     if (isOllamaUrlRedaction(input.ollamaUrl)) {
       const saved = await resolveGlobalKbSettings();
+      if (!ollamaUrlRedactionMatches(input.ollamaUrl, saved.ollamaUrl || IN_STACK_OLLAMA_URL)) {
+        throw new HttpError(
+          400,
+          'Type the whole URL to change the server.',
+          'ollama_url_redaction_changed',
+        );
+      }
       input.ollamaUrl = saved.ollamaUrl || IN_STACK_OLLAMA_URL;
     }
   } else {

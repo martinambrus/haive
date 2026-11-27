@@ -1,3 +1,4 @@
+import { randomBytes } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -741,4 +742,12 @@ describe('onboarding populate per-file budgets', () => {
     await run({ kb: [kb], ownPaths: [] });
     expect(rowsOf(kb)).toBe(150);
   });
+});
+
+it('M3 redacts the stored Ollama URL in the population form status', async () => {
+  const secret = randomBytes(24).toString('hex');
+  const target = `https://user:${secret}@embed.example:11434/${secret}?token=${secret}#${secret}`;
+  const form = await ragPopulateStep.form!(ctx, detected({ ollamaUrl: target }));
+  expect(form?.description).toContain('https://***@embed.example:11434/***?***#***');
+  expect(JSON.stringify(form)).not.toContain(secret);
 });

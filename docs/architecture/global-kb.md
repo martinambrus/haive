@@ -144,8 +144,8 @@ that could switch every rule off at once (Enabled, namespace, mode, connection s
 admin-only, and so are the settings every user's embeds and the archive purge read (Ollama URL,
 embed model, dimensions, archive retention): the URL receives every entry's and query's text, a
 model or width change strands every stored vector, and a short retention hard-deletes the archive.
-A non-admin's save never writes them: a re-sent value is accepted and skipped (a blank URL or model
-compares as its default, as the resolver reads it), so a save that read the page before an admin's
+A non-admin's save never writes them: a re-sent value is accepted and skipped (a blank URL keeps
+the stored URL, and a blank model compares as its default, as the resolver reads it), so a save that read the page before an admin's
 change cannot revert it, and the page shows those fields disabled to a non-admin. Only "List
 matching entry titles" stays open. The stored URL may still predate this rule, so every dial to it (sync,
 `release-embed-model`, the embed helpers) goes through the egress guard: a host that resolves to a
@@ -197,30 +197,40 @@ still refused and the skeleton entry it wrote is removed.
 
 ## Ollama settings and interactive checks
 
-The Global KB Ollama URL is private transport input. Config GET and PUT replies replace its
-entire userinfo with `***` for every role, including administrators; an unparseable stored URL
-is shown as `(invalid URL)`. Config audit rows and their post-commit log lines use the same
-redaction for both `from` and `to`, including partial saves. The admin audit viewer redacts
+The Global KB Ollama URL is private transport input. Config GET and PUT replies show only scheme, host and port for every role, including administrators. Userinfo becomes
+`***@`; a non-root path, query and fragment become `/***`, `?***` and `#***` markers.
+An unparseable or non-HTTP(S) stored URL is shown as `(invalid URL)`; a new one is refused on save
+with fixed 400 guidance. The shared `@haive/shared/ollama-url` helper governs API and worker copy,
+including the reconcile sweep's unreachable-embedder warning. Config audit rows and their post-commit
+log lines use the same redaction for both `from` and `to`, including partial saves. The admin audit viewer redacts
 these same fields in historical rows at read time; the append-only stored rows are unchanged.
 The administrator's replacement field starts blank, masks typed input and clears after a
-successful save. Blank input or an echoed redaction keeps the currently stored URL, including
-when another save changed it after the form loaded. Selecting the internal service explicitly
-sends its concrete URL. An admin Test receiving the displayed redaction resolves the current
-stored URL; non-admin Test continues to ignore request-typed targets.
+successful save. Blank input keeps the currently stored URL. An echoed redaction keeps it only when its
+visible scheme, host and port match the stored destination, even after another save changes hidden parts.
+A PUT or admin Test with a redaction naming another destination is refused with fixed 400 guidance:
+“Type the whole URL to change the server.” Selecting the internal service or restoring the bundled
+server explicitly sends its concrete URL. An admin Test receiving a matching displayed redaction
+resolves the current stored URL; non-admin Test continues to ignore request-typed targets.
+The config audit row adds `ollamaUrlHiddenChanged`, true when the URL was written with changed
+hidden parts while its displayed form stayed the same; partial rows consider only keys written.
 
 The unreachable Test result displays only the redacted URL. Embedding failures return fixed
 repair guidance, never transport messages or Ollama error bodies, which may echo credentials.
 The probe makes no audit row and logs no endpoint or raw error. `probeGlobalKbEmbedding` bounds
-the embedding request and body to `GLOBAL_KB_EMBED_PROBE_TIMEOUT_MS` (8 seconds, injectable),
-after the existing five-second reachability check. It passes the interactive budget explicitly
+the embedding request and body to `GLOBAL_KB_EMBED_PROBE_TIMEOUT_MS` (60 seconds, injectable),
+after the existing five-second reachability check. `/tooling/test-ollama` uses the same helper and
+budget after its ten-second tags check; its expiry returns the same coded retryable result with
+`reachable: true` and `dimsError` guidance. The budget allows for the measured 4.6–42.8 s cold embed. Both routes pass that budget explicitly
 instead of inheriting the 240-second ingest budget, aborts the transport at expiry and settles
 even if a transport ignores cancellation. Expiry returns `{ok: false, code:
 'ollama_probe_timeout', retryable: true, message}`. Request cancellation and normal completion
-clear the deadline. A cold model can need a second Test after it finishes loading.
+clear the deadline. A timeout reports an incomplete check and allows retry; it makes no claim that
+model loading continues after cancellation.
 
-Rollback reverts the API, form and controls together; no schema or stored URL changes are
-required. A revert restores the credential-disclosing replies/audits and the ingest-sized
-probe wait. Credentials already disclosed before this fix cannot be recalled by reverting.
+Rollback reverts the shared helper, API, worker and controls together; no schema or stored URL
+changes are required. Reverting this follow-up restores incomplete URL redaction and raw worker
+URL copy, the eight-second Global KB probe and the ingest-sized tooling probe wait. Previously
+stored audit flags remain readable. Credentials already disclosed cannot be recalled by reverting.
 
 ## House rules in prompts
 

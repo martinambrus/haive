@@ -17,7 +17,7 @@ afterEach(() => {
 });
 
 it('pins the production interactive budget', () => {
-  expect(GLOBAL_KB_EMBED_PROBE_TIMEOUT_MS).toBe(8_000);
+  expect(GLOBAL_KB_EMBED_PROBE_TIMEOUT_MS).toBe(60_000);
 });
 
 it.each(['headers', 'body'])(
@@ -85,5 +85,18 @@ it('refuses a request cancelled before entry without starting transport', async 
     }).catch((error: unknown) => error),
   ).toBe(reason);
   expect(fetchFn).not.toHaveBeenCalled();
+  expect(vi.getTimerCount()).toBe(0);
+});
+
+it('M5 allows the measured 42.8-second cold embed within the shared default budget', async () => {
+  vi.useFakeTimers();
+  const fetchFn = vi.fn(async () => {
+    await new Promise<void>((resolve) => setTimeout(resolve, 42_800));
+    return Response.json({ embeddings: [[1, 2]] });
+  }) as unknown as typeof fetch;
+  const pending = probeGlobalKbEmbedding('http://embed.example', 'embed', { fetchFn });
+  const result = pending.catch((error: unknown) => error);
+  await vi.advanceTimersByTimeAsync(42_800);
+  expect(await result).toEqual([[1, 2]]);
   expect(vi.getTimerCount()).toBe(0);
 });

@@ -1287,6 +1287,7 @@ describe('PUT /global-kb/config settings audit', () => {
           archiveRetentionDays: '30',
         },
         connectionStringChanged: false,
+        ollamaUrlHiddenChanged: false,
       },
       createdAt: expect.anything(),
     });
@@ -1516,8 +1517,8 @@ it('keeps the probe connection allowance at 30 s inside its 8 s overall deadline
 describe('Ollama URL credentials and interactive probe', () => {
   const secret = randomBytes(24).toString('hex');
   const login = randomBytes(12).toString('hex');
-  const target = `http://${login}:${secret}@embed.example:11434`;
-  const safeTarget = 'http://***@embed.example:11434/';
+  const target = `http://${login}:${secret}@embed.example:11434/${secret}?token=${secret}#${secret}`;
+  const safeTarget = 'http://***@embed.example:11434/***?***#***';
   const probe = async () =>
     send('POST', '/global-kb/test-ollama', {
       ollamaUrl: target,
@@ -1629,7 +1630,7 @@ describe('Ollama URL credentials and interactive probe', () => {
     expect(h.probe.mock.calls[0]?.[0]).toBe(target);
   });
 
-  it('answers a stalled non-admin embed with a coded retryable timeout after 8 seconds', async () => {
+  it('answers a stalled non-admin embed with a coded retryable timeout after 60 seconds', async () => {
     vi.useFakeTimers();
     h.role = 'user';
     h.embed.mockImplementation(() => new Promise(() => {}));
@@ -1637,12 +1638,145 @@ describe('Ollama URL credentials and interactive probe', () => {
     const pending = probe().then(async (res) => {
       answer = await res.json();
     });
-    await vi.advanceTimersByTimeAsync(7_999);
+    await vi.advanceTimersByTimeAsync(59_999);
     expect(answer).toBeUndefined();
     await vi.advanceTimersByTimeAsync(1);
     expect(answer).toMatchObject({ ok: false, code: 'ollama_probe_timeout', retryable: true });
     await pending;
-    expect(h.embed.mock.calls[0]?.[3]).toMatchObject({ timeoutMs: 8_000 });
+    expect(h.embed.mock.calls[0]?.[3]).toMatchObject({ timeoutMs: 60_000 });
     expect(vi.getTimerCount()).toBe(0);
   });
 });
+
+describe('review URL controls', () => {
+  const secret = randomBytes(24).toString('hex');
+  const privateUrl = `https://user:${secret}@embed.example:11434/${secret}?token=${secret}#${secret}`;
+  const display = 'https://***@embed.example:11434/***?***#***';
+  it.each([
+    'localhost:11434',
+    `admin:${secret}@10.0.0.5:11434`,
+    `mailto:user:${secret}@host`,
+    'ftp://host',
+  ])('M1 refuses an invalid save without writes', async (ollamaUrl) => {
+    const res = await put({ ollamaUrl });
+    expect(res.status).toBe(400);
+    expect(await res.json()).toMatchObject({
+      error: 'Ollama URL must be a valid HTTP or HTTPS URL.',
+    });
+    expect(h.set).not.toHaveBeenCalled();
+    expect(h.audits).toEqual([]);
+  });
+  it.each(['admin', 'user'])(
+    'M2 redacts hidden components on every surface for %s',
+    async (role) => {
+      h.role = role;
+      h.settings = { ...SAVED, ollamaUrl: privateUrl };
+      h.rawConfig.set(CONFIG_KEYS.GLOBAL_KB_OLLAMA_URL, privateUrl);
+      const get = await send('GET', '/global-kb/config');
+      expect(((await get.json()) as { ollamaUrl: string }).ollamaUrl).toBe(display);
+      const save = await put({ ollamaUrl: display, digestEnabled: false });
+      expect(save.status).toBe(200);
+      expect(((await save.json()) as { ollamaUrl: string }).ollamaUrl).toBe(display);
+      expect(written().some(([key]) => key === CONFIG_KEYS.GLOBAL_KB_OLLAMA_URL)).toBe(false);
+      expect(JSON.stringify(h.audits.map(({ row }) => row))).not.toContain(secret);
+      expect(JSON.stringify(h.auditLog.info.mock.calls)).not.toContain(secret);
+      h.probe.mockResolvedValue(false);
+      const test = await send('POST', '/global-kb/test-ollama', {
+        ollamaUrl: display,
+        model: 'embed',
+        dimensions: 2,
+      });
+      expect(await test.json()).toEqual({ ok: false, message: `Ollama unreachable at ${display}` });
+    },
+  );
+  it.each(['host', 'port', 'scheme'])(
+    'L1 refuses a changed %s in a redaction for save and admin Test',
+    async (part) => {
+      h.settings = { ...SAVED, ollamaUrl: privateUrl };
+      const changed =
+        part === 'host'
+          ? display.replace('embed.example', 'other.example')
+          : part === 'port'
+            ? display.replace('11434', '11435')
+            : display.replace('https:', 'http:');
+      for (const res of [
+        await put({ ollamaUrl: changed }),
+        await send('POST', '/global-kb/test-ollama', {
+          ollamaUrl: changed,
+          model: 'embed',
+          dimensions: 2,
+        }),
+      ]) {
+        expect(res.status).toBe(400);
+        expect(await res.json()).toMatchObject({
+          error: 'Type the whole URL to change the server.',
+        });
+      }
+      expect(h.set).not.toHaveBeenCalled();
+      expect(h.probe).not.toHaveBeenCalled();
+    },
+  );
+  it.each(['userinfo', 'path', 'query', 'fragment'])(
+    'L4 records a hidden %s change even when display stays the same',
+    async (part) => {
+      const next = randomBytes(24).toString('hex');
+      h.rawConfig.set(CONFIG_KEYS.GLOBAL_KB_OLLAMA_URL, privateUrl);
+      const parsed = new URL(privateUrl);
+      if (part === 'userinfo') parsed.password = next;
+      if (part === 'path') parsed.pathname = `/${next}`;
+      if (part === 'query') parsed.search = `?token=${next}`;
+      if (part === 'fragment') parsed.hash = next;
+      const res = await put({ ollamaUrl: parsed.toString() });
+      expect(res.status).toBe(200);
+      expect(h.audits[0]?.row).toMatchObject({
+        metadata: {
+          from: { ollamaUrl: display },
+          to: { ollamaUrl: display },
+          ollamaUrlHiddenChanged: true,
+        },
+      });
+      expect(
+        JSON.stringify([h.audits.map(({ row }) => row), h.auditLog.info.mock.calls]),
+      ).not.toContain(secret);
+      expect(
+        JSON.stringify([h.audits.map(({ row }) => row), h.auditLog.info.mock.calls]),
+      ).not.toContain(next);
+    },
+  );
+});
+
+it('L4 does not flag a formatting-only URL write as a hidden change', async () => {
+  h.rawConfig.set(CONFIG_KEYS.GLOBAL_KB_OLLAMA_URL, 'http://embed.example:11434/');
+  expect((await put({ ollamaUrl: '  http://embed.example:11434  ' })).status).toBe(200);
+  expect(h.audits[0]?.row).toMatchObject({ metadata: { ollamaUrlHiddenChanged: false } });
+});
+
+it.each([true, false])(
+  'L4 partial audit flags only an actually written hidden change (%s)',
+  async (urlWritten) => {
+    const first = randomBytes(24).toString('hex');
+    const next = randomBytes(24).toString('hex');
+    h.rawConfig.set(CONFIG_KEYS.GLOBAL_KB_OLLAMA_URL, `http://embed.example/${first}`);
+    const failKey = urlWritten
+      ? CONFIG_KEYS.GLOBAL_KB_EMBED_MODEL
+      : CONFIG_KEYS.GLOBAL_KB_OLLAMA_URL;
+    const original = h.set.getMockImplementation()!;
+    h.set.mockImplementation(async (key, value) => {
+      if (key === failKey) throw new Error('write refused');
+      await original(key, value);
+    });
+    try {
+      const response = await put({
+        digestEnabled: false,
+        ollamaUrl: `http://embed.example/${next}`,
+        embedModel: 'embed',
+      });
+      expect(response.status).toBe(500);
+      expect(h.audits[0]?.row).toMatchObject({
+        metadata: { partial: true, ollamaUrlHiddenChanged: urlWritten },
+      });
+    } finally {
+      h.set.mockImplementation(original);
+    }
+  },
+);
