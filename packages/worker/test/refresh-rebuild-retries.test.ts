@@ -196,7 +196,7 @@ async function refreshJob(payload: RepoJobPayload): Promise<Job> {
   const jobId = randomUUID();
   row.refreshPending = true;
   row.refreshJobId = jobId;
-  worker = startRepoWorker(root);
+  worker ??= startRepoWorker(root);
   await worker.waitUntilReady();
   const job = await queue!.add(REPO_JOB_NAMES.REFRESH, payload, {
     jobId,
