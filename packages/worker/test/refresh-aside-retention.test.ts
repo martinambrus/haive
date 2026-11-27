@@ -289,6 +289,33 @@ describe('T486 retained checkout controls on real temporary trees', () => {
     },
   );
 
+  it('a retry whose first aside inventory write fails still names the kept folders', async () => {
+    const jobId = 'rebuild-job';
+    fake.patch(schema.repositories, REPO, { refreshJobId: jobId, refreshPending: true });
+    const retry = () =>
+      withRepoJobOwner(REPO, jobId, () =>
+        ownedRefresh(payload('copy'), db, root, async () => () => {}),
+      );
+    h.persist.mockImplementationOnce(async (_db, _id, _to, note) => {
+      fake.patch(schema.repositories, REPO, { status: 'ready', statusMessage: note });
+      throw new Error('persistDetection failed after publication');
+    });
+    await expect(retry()).rejects.toThrow('persistDetection failed');
+    const kept = await asides();
+    expect(kept).toHaveLength(1);
+    const blip = Object.assign(new Error('connection reset'), { code: 'ECONNRESET' });
+    vi.spyOn(
+      fake.db as unknown as { update: (...args: unknown[]) => unknown },
+      'update',
+    ).mockImplementationOnce(
+      () =>
+        ({
+          set: () => ({ where: () => ({ returning: () => Promise.reject(blip) }) }),
+        }) as never,
+    );
+    await expect(retry()).rejects.toThrow(kept[0]);
+  });
+
   it.each([false, true])(
     'member 6: a retry after persistDetection throws retains aside names (holder=%s)',
     async (holding) => {

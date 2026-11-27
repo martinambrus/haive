@@ -137,8 +137,9 @@ async function withAsideReport(
   };
   const notice = (message: string | null) =>
     [message, reportNotice ? asideNotice(paths) : null].filter(Boolean).join('\n\n') || null;
-  await recordAsides();
   try {
+    // Inside the try: a failed first inventory write must still name what the listing found.
+    await recordAsides();
     await run(recordAsides, notice);
   } catch (err) {
     if (err instanceof ObsoleteRepoJobError) throw err;
