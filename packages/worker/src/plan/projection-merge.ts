@@ -30,6 +30,7 @@ import {
 } from '@haive/shared/project-state';
 import { logger } from '@haive/shared/logger';
 import { gitGaveNoAnswer, gitRun, type GitRunResult } from '../repo/git-exec.js';
+import { readGitBlobs } from '../repo/git-blobs.js';
 import { provesUnbornHead } from '../repo/unborn-head.js';
 import { unmergedPaths } from '../step-engine/git-merge.js';
 
@@ -185,7 +186,7 @@ export async function readStateTree(
   );
   if (listing.code !== 0) throw new Error(`the state directory of ${rev} could not be listed`);
   const { maxEntries, maxFileBytes, maxTotalBytes } = PROJECT_STATE_LIMITS;
-  const blobs: { sha: string; rel: string }[] = [];
+  const blobs: { oid: string; size: number; rel: string }[] = [];
   const dirs = new Set<string>();
   let total = 0;
   for (const entry of listing.stdout.split('\0')) {
@@ -203,11 +204,12 @@ export async function readStateTree(
     if (total > maxTotalBytes || blobs.length + 1 + dirs.size > maxEntries) {
       throw new Error(`the state directory of ${rev} is larger than the record allows`);
     }
-    blobs.push({ sha: m[1]!, rel });
+    blobs.push({ oid: m[1]!, size, rel });
   }
   const files = new Map<string, string>();
-  for (const { sha, rel } of blobs) {
-    const bytes = await readBlob(worktreePath, sha);
+  const contents = await readGitBlobs(worktreePath, blobs, maxTotalBytes);
+  for (const { oid, rel } of blobs) {
+    const bytes = contents.get(oid);
     if (!bytes) throw new Error(`${STATE_PREFIX}${rel} of ${rev} could not be read`);
     if (!isUtf8(bytes)) throw new Error(`${STATE_PREFIX}${rel} of ${rev} is not valid UTF-8`);
     files.set(rel, bytes.toString('utf8'));

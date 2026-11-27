@@ -5,6 +5,7 @@ import path from 'node:path';
 import { promisify } from 'node:util';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { emptyProjectState, renderProjectState } from '@haive/shared/project-state';
+import { gitTemplate } from '../../test/support/git-template.js';
 
 const spawned = vi.hoisted(() => ({ calls: [] as string[][] }));
 vi.mock('../repo/git-exec.js', async (importOriginal) => {
@@ -38,7 +39,7 @@ async function git(dir: string, args: string[]): Promise<string> {
   return stdout;
 }
 
-async function commitRecord(dir: string, globs: string[], extra = 25): Promise<void> {
+async function commitRecord(dir: string, globs: string[], extra = 3): Promise<void> {
   const record = {
     ...emptyProjectState(),
     render: {
@@ -60,13 +61,13 @@ async function commitRecord(dir: string, globs: string[], extra = 25): Promise<v
   await git(dir, ['commit', '-q', '-m', 'record']);
 }
 
-async function repo(): Promise<string> {
-  const dir = await mkdtemp(path.join(tmpdir(), 'head-record-'));
-  dirs.push(dir);
+const template = gitTemplate(async (dir) => {
   await git(dir, ['init', '-q', '-b', 'main']);
   await git(dir, ['config', 'gc.auto', '0']);
   await commitRecord(dir, ['a/**']);
-  return dir;
+});
+async function repo(): Promise<string> {
+  return (await template.copy()).dir;
 }
 
 /** The sync row a rebase writes, captured from the one upsert it makes. */
@@ -100,12 +101,16 @@ describe('rebaseProjectStateOnHeadLocked with a record read before the transacti
     const dir = await repo();
     const inside = txProbe();
     await rebaseProjectStateOnHeadLocked(inside.tx, { repositoryId: 'r', repoPath: dir });
-    expect(gitVerbs().filter((v) => v === 'cat-file').length).toBeGreaterThanOrEqual(20);
+    expect(spawned.calls.filter((args) => args[0] === 'cat-file')).toEqual([
+      ['cat-file', '--batch'],
+    ]);
 
     spawned.calls = [];
     const head = await readHeadRecord(dir);
     expect(gitVerbs()).toContain('ls-tree');
-    expect(gitVerbs().filter((v) => v === 'cat-file').length).toBeGreaterThanOrEqual(20);
+    expect(spawned.calls.filter((args) => args[0] === 'cat-file')).toEqual([
+      ['cat-file', '--batch'],
+    ]);
 
     spawned.calls = [];
     const pre = txProbe();

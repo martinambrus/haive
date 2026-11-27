@@ -18,7 +18,7 @@ vi.mock('../src/repo/git-exec.js', async (original) => {
   return {
     ...real,
     gitRun: (...args: Parameters<typeof real.gitRun>) =>
-      fault.code && args[1][0] === 'cat-file' && args[1][1] === 'blob'
+      fault.code && args[1][0] === 'cat-file' && ['blob', '--batch'].includes(args[1][1]!)
         ? Promise.resolve({ code: fault.code, stdout: '', stderr: 'arbitrary diagnostic' })
         : real.gitRun(...args),
   };

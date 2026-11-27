@@ -2010,10 +2010,14 @@ async function main(): Promise<void> {
         }
         const lines = (await readFile(gitLog, 'utf8')).split('\n');
         const at = (m: string) => lines.indexOf(`MARK ${m}`);
+        // The pinned record read lists only state at a commit id. Batched projection metadata
+        // lists HEAD plus the plan pair, and restore batches legitimately read HEAD blobs in-tx.
         const recordReads = (from: number, to: number) =>
           lines
             .slice(from, to)
-            .filter((l) => /cat-file blob [0-9a-f]{40,}$/.test(l) || /ls-tree -r /.test(l)).length;
+            .filter((l) =>
+              /ls-tree -r -l -z (?:[0-9a-f]{40}|[0-9a-f]{64}) -- \.haive-data\/state$/.test(l),
+            ).length;
         check(
           "K4: a set-aside reads HEAD's record before its first transaction and none inside either one",
           (k4Out as { outcome?: string }).outcome === 'set-aside' &&

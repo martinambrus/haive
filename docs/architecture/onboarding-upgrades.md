@@ -1104,6 +1104,38 @@ fork point is taken from the local base first: a record the local base holds ahe
 the branch's history, and origin's copy would undo it. A pass that finds the feature's merge already
 open puts nothing back, since that merge's tip must not move.
 
+**Projection reads are batched within each observation, never across its fences.**
+`project-state/projection-git.ts` lists the three fixed projection roots with NUL-delimited
+`ls-files` and `ls-tree`, and compares both mode sides with one `diff-index` each. Fixed roots avoid
+an argv proportional to the dirty-path list. A fresh observation still runs at each fingerprint,
+capture and restore boundary; the restore checks the complete index again after its filesystem
+writes. HEAD blobs and differing staged blobs use `repo/git-blobs.ts` through the ordinary hardened
+`gitRun`: `cat-file --batch-check` judges staged sizes before reading content, and `--batch` takes
+only validated object ids, never path names. Responses are framed by byte length and checked for
+exact object id, type, size and completion. The committed state-tree reader retains its ordinary
+entry, per-file and total limits before one blob batch. Set-aside HEAD reads retain the old 64 MiB
+per-object pipe bound and add a 160 MiB aggregate bound (16 MiB of state plus the plan pair's
+16/128 MiB logical bounds); differing staged files retain their path-specific bounds. Every new
+read still uses the existing Git environment, timeouts and bounded pipe capture; filesystem reads
+and writes still use fs-safe. A staged entry that must move keeps the per-path patch/apply/CAS
+protocol above, including its immediate read-back and blend undo. Only ordinary read observations
+are constant in process count, not the writes and their contention checks.
+
+MEASURED for T319 on generated repositories (Node 26.5.0, Git 2.43.0, Linux/WSL2; one sample under
+concurrent host/test load), with database and sync/import/rebase work stubbed and real hardened Git
+and fs-safe I/O: 32/512 unstaged dirty projection paths used 829/12,829 Git processes before and
+85/85 after, taking 2.86/49.03 s before and 1.06/9.59 s after. At 4,096 dirty paths the original
+set-aside used 102,429 processes and took 728.83 s; the batched path used 85 processes and took
+46.31 s. The state-tree reader used 32/512/4,096 processes
+before and two after (one tree listing, one blob batch), taking 0.098/1.553/13.166 s before and
+0.018/0.059/0.368 s after. Each fixture has two dirty plan files and N-2 dirty claim files, with
+N-1 committed state files because format.json is unchanged; 4,095 state files plus their artifacts
+directory meet the 4,096-entry cap. Setup and cleanup are excluded. These are isolated read-path
+measurements, not end-to-end refresh or writer/task-start lock measurements; the writer's accepted
+admission bound is unchanged. Small fixtures pin spawn independence, staged rename/delete/binary
+put-back equality, unrelated staging, refused links and racing index changes. Rollback reverts the
+code only, with no migration or durable-format change.
+
 **Portable project state rides existing push boundaries.** Workflow cleanup's base push,
 13's onboarding push, and plan Save & push first flush the root record through its journaled writer,
 then commit its recognized files in a separate `chore(haive): sync project state` commit. Saving a
