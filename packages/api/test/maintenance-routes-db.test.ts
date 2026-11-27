@@ -453,21 +453,24 @@ describe.skipIf(!url)('maintenance routes on Postgres', () => {
       ]);
     });
 
-    it('lists a ready repository with pending refresh as refreshing, and stops listing it when settled', async () => {
-      const repo = await repository('ready', 'refreshing repo');
-      await db
-        .update(schema.repositories)
-        .set({ refreshPending: true })
-        .where(eq(schema.repositories.id, repo.id));
-      expect((await blocking()).jobs).toMatchObject([
-        { kind: 'repository', id: repo.id, status: 'refreshing' },
-      ]);
-      await db
-        .update(schema.repositories)
-        .set({ refreshPending: false })
-        .where(eq(schema.repositories.id, repo.id));
-      expect((await blocking()).jobs).toEqual([]);
-    });
+    it.each(['cloning', 'ready'] as const)(
+      'lists a %s repository with pending preparation and stops listing it when settled',
+      async (status) => {
+        const repo = await repository(status, 'preparing repo');
+        await db
+          .update(schema.repositories)
+          .set({ refreshPending: true })
+          .where(eq(schema.repositories.id, repo.id));
+        expect((await blocking()).jobs).toMatchObject([
+          { kind: 'repository', id: repo.id, status: 'pending preparation' },
+        ]);
+        await db
+          .update(schema.repositories)
+          .set({ refreshPending: false, status: 'ready' })
+          .where(eq(schema.repositories.id, repo.id));
+        expect((await blocking()).jobs).toEqual([]);
+      },
+    );
 
     it('names the owner of each, as it does for a task', async () => {
       const host = await repository('cloning', 'cloning repo');

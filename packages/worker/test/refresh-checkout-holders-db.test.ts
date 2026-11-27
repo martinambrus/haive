@@ -342,6 +342,54 @@ describe.skipIf(!url)('root checkout holders and refresh ownership', () => {
     },
   );
 
+  it.each([REPO_JOB_NAMES.COPY, REPO_JOB_NAMES.INIT, REPO_JOB_NAMES.CLONE, REPO_JOB_NAMES.EXTRACT])(
+    'same-owner %s redelivery after ready resumes imports without touching the checkout',
+    async (name) => {
+      const root = await mkdtemp(path.join(tmpdir(), 'repo-ready-redelivery-'));
+      const real =
+        await vi.importActual<typeof import('../src/repo/clone.js')>('../src/repo/clone.js');
+      const jobId = randomUUID();
+      try {
+        startRepoWorker(root);
+        const rel = `${userId}/${repositoryId}`;
+        await ensureDirNoFollow(root, rel);
+        await writeFileNoFollow(root, `${rel}/sentinel`, 'user work after ready');
+        await admit(jobId, {
+          status: 'ready',
+          storagePath: path.join(root, rel),
+          statusMessage: 'kept caveat',
+        });
+        h.scan.mockReset();
+        if (name === REPO_JOB_NAMES.INIT) h.scan.mockImplementationOnce(real.handleInit);
+        if (name === REPO_JOB_NAMES.EXTRACT) h.scan.mockImplementationOnce(real.handleExtract);
+        h.detect.mockClear();
+        h.sync.mockClear();
+        const delivery = job(jobId, name);
+        delivery.data.localPath = path.join(root, 'missing-source');
+        delivery.data.archivePath = path.join(root, '_uploads', userId, 'missing.tar');
+        delivery.data.archiveFormat = 'tar';
+        await h.processor!(delivery, 'token').catch(() => undefined);
+        expect
+          .soft((await readFileNoFollow(root, `${rel}/sentinel`))?.data.toString())
+          .toBe('user work after ready');
+        expect.soft(h.detect).not.toHaveBeenCalled();
+        expect
+          .soft(h.sync)
+          .toHaveBeenCalledWith(db, { repositoryId, repoPath: path.join(root, rel) });
+        expect(await read()).toMatchObject({
+          status: 'ready',
+          statusMessage: 'kept caveat',
+          refreshPending: false,
+          refreshJobId: null,
+        });
+      } finally {
+        h.scan.mockReset();
+        startRepoWorker('/unused');
+        await rm(root, { recursive: true, force: true });
+      }
+    },
+  );
+
   it('ownership is checked again after the root claim and before clone removes anything', async () => {
     const root = await mkdtemp(path.join(tmpdir(), 'repo-owner-claim-'));
     const entered = barrier(),
@@ -354,7 +402,7 @@ describe.skipIf(!url)('root checkout holders and refresh ownership', () => {
       const rel = `${userId}/${repositoryId}`;
       await ensureDirNoFollow(root, rel);
       await writeFileNoFollow(root, `${rel}/sentinel`, 'new checkout');
-      await admit(oldId, { status: 'ready' });
+      await admit(oldId, { status: 'cloning' });
       h.afterClaim = async () => {
         entered.release();
         await resume.promise;
@@ -381,7 +429,7 @@ describe.skipIf(!url)('root checkout holders and refresh ownership', () => {
       await rm(root, { recursive: true, force: true });
     }
   });
-  it('refused ownerless legacy preparation remains recoverable by the boot sweep', async () => {
+  it('refused ownerless legacy preparation remains recoverable by the stranded sweep', async () => {
     await db
       .update(schema.repositories)
       .set({
@@ -490,7 +538,7 @@ describe.skipIf(!url)('root checkout holders and refresh ownership', () => {
         .toMatchObject({ status: 'ready', refreshPending: true, refreshJobId: opts.jobId });
       expect
         .soft((await listBlockingJobs(db)).jobs)
-        .toContainEqual(expect.objectContaining({ id: createdId, status: 'refreshing' }));
+        .toContainEqual(expect.objectContaining({ id: createdId, status: 'pending preparation' }));
       const count = await liveWorkCount(db.$client);
       expect.soft(count).toBe(beforeImport);
       resume.release();

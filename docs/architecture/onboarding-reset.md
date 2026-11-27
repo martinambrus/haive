@@ -349,8 +349,9 @@ A lock must be HELD across the work it protects, and both places to hold one cos
 race: the repo worker and the task worker run in ONE process on ONE `max: 10` pool, so a repo job
 holding a connection across `rm -rf` + `copyTree` at concurrency 5 deadlocks the pool; and
 `repo-queue.ts` keeps BullMQ's 30s `lockDuration`, so a handler blocked past it can be failed as
-STALLED without running its catch, stranding `status = 'cloning'` until the boot reconciler in
-`data-migrations.ts` releases it (`maxStalledCount` 10 makes that rarer, not impossible). A
+STALLED without running its catch, stranding `status = 'cloning'` until the stranded-preparation
+reconciler in `data-migrations.ts` releases it at boot or on its 60-second sweep
+(`maxStalledCount` 10 makes that rarer, not impossible). A
 `repo_status` enum value
 expresses the same claim and was refused because Postgres cannot drop an enum value: an
 irreversible migration for a reversible problem. The cost of a row over a lock is that a writer

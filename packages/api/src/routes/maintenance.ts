@@ -162,7 +162,7 @@ export async function listBlockingJobs(db: ReturnType<typeof getDb>) {
     ...repositories.map(({ refreshPending, ...r }) => ({
       kind: 'repository' as const,
       ...r,
-      status: refreshPending ? 'refreshing' : r.status,
+      status: refreshPending ? 'pending preparation' : r.status,
     })),
     ...bundles.map((r) => ({ kind: 'bundle' as const, ...r })),
     ...providers.map(({ building, provisioning, ...r }) => ({

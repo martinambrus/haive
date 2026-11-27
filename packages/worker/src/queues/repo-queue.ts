@@ -1,3 +1,4 @@
+import path from 'node:path';
 import {
   assertRepoJobOwner,
   ObsoleteRepoJobError,
@@ -20,6 +21,7 @@ import {
 import { getDb } from '../db.js';
 import { getBullRedis } from '../redis.js';
 import {
+  completePreparationImports,
   handleClone,
   handleCopyLocal,
   handleExtract,
@@ -50,8 +52,22 @@ export function startRepoWorker(repoStorageRoot: string): Worker {
             );
         };
         try {
-          await assertRepoJobOwner(db, payload.repositoryId);
-          if (job.name === REPO_JOB_NAMES.CLONE) {
+          const owned = await assertRepoJobOwner(db, payload.repositoryId);
+          const initialOnly = [
+            REPO_JOB_NAMES.COPY,
+            REPO_JOB_NAMES.INIT,
+            REPO_JOB_NAMES.CLONE,
+            REPO_JOB_NAMES.EXTRACT,
+          ].some((name) => name === job.name);
+          // Ready precedes imports. A redelivery must finish that obligation without
+          // replacing a checkout that may already carry user work or task worktrees.
+          if (initialOnly && owned.status === 'ready') {
+            await completePreparationImports(
+              db,
+              payload.repositoryId,
+              owned.storagePath ?? path.join(repoStorageRoot, payload.userId, payload.repositoryId),
+            );
+          } else if (job.name === REPO_JOB_NAMES.CLONE) {
             await handleClone(payload, db, repoStorageRoot);
           } else if (job.name === REPO_JOB_NAMES.SCAN) {
             await handleScan(payload, db);
@@ -69,8 +85,8 @@ export function startRepoWorker(repoStorageRoot: string): Worker {
           await clearRefreshPending();
         } catch (err) {
           if (err instanceof ObsoleteRepoJobError) {
-            logger.info(
-              { repositoryId: payload.repositoryId, jobId: job.id },
+            logger.warn(
+              { repositoryId: payload.repositoryId, jobId: job.id, reason: err.reason },
               'Obsolete or ownerless repository job refused',
             );
             return;
@@ -115,9 +131,9 @@ export function startRepoWorker(repoStorageRoot: string): Worker {
       concurrency: 5,
       // Default 1 makes the SECOND stall of a job terminal, and terminal here means the deferred
       // failure is raised on the next pickup BEFORE the processor runs — so the catch that writes
-      // `status: 'error'` never executes and the repository strands at `cloning` for good. Two
+      // `status: 'error'` never executes and the repository stays `cloning` until reconciliation. Two
       // restarts inside one clone is ordinary (a crash loop, an OOM cycle, a deploy). The boot
-      // reconciler in `data-migrations.ts` is the backstop for the strand this still leaves.
+      // and periodic (60s) reconciler in `data-migrations.ts` is the backstop for the strand this still leaves.
       maxStalledCount: 10,
       // `lockDuration` is deliberately LEFT at the 30s default, unlike task-queue and cli-exec.
       // Raising it here makes the common case worse: shutdown force-closes this worker, so an

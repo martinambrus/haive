@@ -52,3 +52,36 @@ it('stores a repository failure without the server path and rethrows the origina
     statusMessage: "EACCES: mkdir '[path]'",
   });
 });
+
+it.each([
+  ['no_owner_on_row', null, false],
+  ['different_owner', 'new-job', true],
+  ['not_pending', 'refused-job', false],
+] as const)(
+  'warns with structural refusal reason %s and leaves the row untouched',
+  async (reason, owner, pending) => {
+    const fake = createFakeDb({ repositories: schema.repositories });
+    const id = '00000000-0000-4000-8000-000000000001';
+    fake.insert(schema.repositories, {
+      id,
+      status: 'ready',
+      refreshJobId: owner,
+      refreshPending: pending,
+      statusMessage: 'arbitrary copy that cannot determine ownership',
+    });
+    h.db = fake.db;
+    const warn = vi.spyOn(logger, 'warn').mockImplementation(() => undefined);
+    const before = structuredClone(fake.rows(schema.repositories));
+    startRepoWorker('/unused');
+    await h.processor!({
+      id: 'refused-job',
+      name: REPO_JOB_NAMES.CLONE,
+      data: { repositoryId: id },
+    });
+    expect(warn).toHaveBeenCalledWith(
+      { repositoryId: id, jobId: 'refused-job', reason },
+      'Obsolete or ownerless repository job refused',
+    );
+    expect(fake.rows(schema.repositories)).toEqual(before);
+  },
+);

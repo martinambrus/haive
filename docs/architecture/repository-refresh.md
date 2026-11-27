@@ -114,20 +114,61 @@ A second admission refuses while it is set.
 The repo queue installs an invocation-local ownership scope (`repo/job-owner.ts`) from the
 repository ID and BullMQ job ID. Its predicate requires both that ID and a pending marker;
 null is never authority. Pickup refuses an obsolete, completed or ownerless job before calling
-a handler. Every root-writing handler rechecks after acquiring its renewing root claim,
+a handler. Refusals warn with a structural reason (`no_owner_on_row`, `different_owner`,
+`not_pending`, `invalid_scope` or `ownership_changed`), never a reason inferred from message copy.
+Every root-writing handler rechecks after acquiring its renewing root claim,
 before its first filesystem mutation. Detection rechecks before reading and qualifies its
 ready/detection/storage UPDATE, skipping imports when that UPDATE no longer owns a row.
 Cloning escalation and the queue's late error UPDATE use the same predicate. Success and
 final failure clear both marker columns only for their owner; retryable failure keeps them
-through backoff. Enqueue failure cleanup also compares the admission ID, so a lost/late
+through backoff. A same-owner redelivery of an initial-only copy, init, clone or extract job
+whose structural status is already `ready` resumes the mirror imports and marker clear without
+repeating detection or replacing the checkout. Its detection result and caveat copy remain intact.
+Enqueue failure cleanup also compares the admission ID, so a lost/late
 acknowledgement cannot overwrite a completed job or a newer admission.
 
-**Legacy jobs are refused, never adopted.** Deploy API and worker together after draining old
-preparations, including delayed retries. If an ownerless legacy payload is nevertheless
+**Legacy jobs are refused, never adopted.** Before deploying API and worker together, drain old
+preparations, including delayed retries. Run both read-only checks below against the deployment's
+Postgres and Redis. Every result must be zero before recreating either service:
+
+```sql
+SELECT id, status, refresh_pending, refresh_job_id, root_claimed_at
+FROM repositories
+WHERE status = 'cloning'
+   OR refresh_pending
+   OR root_claimed_at > now() - interval '15 minutes';
+```
+
+The query must return zero rows. The updater's database count alone misses legacy delayed initial
+retries (their rows can already be `error`) and legacy post-ready imports (`ready`, without a
+pending marker). Only the BullMQ repo queue sees those jobs. Confirm the queue name and prefix
+with `redis-cli --scan --pattern 'bull:haive-repo:*'` (never `KEYS`); `haive-repo` and `bull` are
+the defaults. With the deployment's connection options, check all these read-only commands:
+
+```sh
+redis-cli LLEN bull:haive-repo:wait
+redis-cli LLEN bull:haive-repo:active
+redis-cli LLEN bull:haive-repo:paused
+redis-cli ZCARD bull:haive-repo:delayed
+redis-cli ZCARD bull:haive-repo:prioritized
+redis-cli ZCARD bull:haive-repo:waiting-children
+redis-cli SCARD bull:haive-repo:stalled
+```
+
+All seven counts must be zero; completed and failed sets do not block this drain. If any check
+is non-zero, wait for the work to finish and repeat both checks. `ZRANGE bull:haive-repo:delayed 0 -1`
+and `LRANGE bull:haive-repo:active 0 -1` inspect job IDs read-only: legacy jobs have numeric IDs;
+owned jobs have UUIDs matching `repositories.refresh_job_id`. Keep maintenance admission closed
+through the checks and deployment so new work cannot enter after the drain. Deploy both with
+`pnpm docker restart api worker`; an old API paired with the new worker creates ownerless jobs
+that the worker refuses.
+
+If an ownerless legacy payload is nevertheless
 redelivered, it completes as a logged no-op, without detection, imports or checkout writes.
 An ownerless `cloning` row remains recoverable: once no live queue job/claim remains and the
-five-minute age guard expires, run the existing stranded-preparation sweep at the next controlled worker restart; it changes
-that row to `error`. This sweep runs at boot, not on a periodic timer.
+five-minute age guard expires, the existing stranded-preparation sweep changes that row to
+`error`. It runs at worker boot and every 60 seconds; no worker restart is needed. Recovery
+usually takes at most about six minutes, or about sixteen minutes behind a stale root claim.
 Retry then admits a new owned job where a durable source exists; an initial blank project
 without a source needs delete-and-create. A legacy ready row stays ready. Never backfill an
 owner from an arbitrary payload or grant a null owner permission to rebuild.
@@ -135,7 +176,8 @@ owner from an arbitrary payload or grant a null owner permission to rebuild.
 The ordinary stranded-preparation sweep also
 releases an old marker whose queue has no live job, preserving any repair code. A `ready` row
 without a repair code keeps its status and display copy: the sweep clears only the stale marker
-and logs that release once. The maintenance blocking list labels pending refreshes `refreshing`. Root claims, holding tasks and
+and logs that release once. The maintenance blocking list labels every marked job `pending preparation`, including initial
+preparation and its post-ready imports. Root claims, holding tasks and
 live queue jobs remain temporary route refusals and do not hide Retry. An older list response
 without capability fields keeps the Retry action for compatibility. Repository archives use
 the chunked API: `POST /repos/upload/init`, `PUT /repos/upload/:id/chunk` with `Content-Range: bytes start-end/total`,

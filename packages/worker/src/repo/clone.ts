@@ -358,7 +358,15 @@ export async function persistDetection(
 
   // Recovery has already restored the private replacement before publishing it.
   if (options?.preserveProjectData) return;
+  await completePreparationImports(db, repositoryId, storagePath);
+}
 
+export async function completePreparationImports(
+  db: Database,
+  repositoryId: string,
+  storagePath: string,
+): Promise<void> {
+  await assertRepoJobOwner(db, repositoryId);
   // Best-effort: a fresh clone of an already-onboarded repo restores its
   // onboarding-derived columns from the committed .haive-data/ mirror. Never
   // fail the scan/clone over a missing or malformed mirror.
@@ -454,9 +462,9 @@ export function copyTree(src: string, dest: string): Promise<void> {
  *
  * Throwing on a refusal is the right shape, not a silent return: the repo queue runs `attempts: 3`
  * with exponential backoff, so a reset lasting seconds is simply waited out, and one that outlives
- * the retries parks the row at `error` carrying this message. A silent return would leave the row
- * `cloning` for good, since it is `persistDetection` at the end of a SUCCESSFUL run that writes
- * `ready`.
+ * the retries parks the row at `error` carrying this message. A silent return would report success
+ * without `persistDetection` marking the checkout `ready`; the boot/60s stranded-preparation sweep
+ * would later report an error instead of retrying the busy claim.
  */
 export async function withRootClaim<T>(
   db: Database,
