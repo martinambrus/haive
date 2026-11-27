@@ -962,15 +962,27 @@ and errors from other hooks retain their existing behavior. This adds no polling
 chain or durable state; the winner's completion and the existing recovery sweep
 own the next advance. Revert module consumers before removing this host support.
 
-Singleton LLM and Retry-with-AI dispatch release their exact inserted reservation
-when enqueue throws, just as a `prepareWorkspace` failure does: they stamp
-`cli_invocations.superseded_at` before propagating the failure to the step runner.
-The failed row therefore retains no live run that could block a later Retry or
-hold scratch indefinitely. A lost queue acknowledgement may have queued the job;
-its ordinary supersede checks refuse or stop that invocation too. A failed release
-still relies on the existing orphan recovery; this is not an atomic database/queue
-commit. Successful enqueues keep the reservation until the normal run lifecycle
-ends it. Fan-out and recap dispatch retain their separate failure contracts.
+Singleton LLM, Retry-with-AI and both merge-fixer dispatches (`merge-resolver.ts`
+and the DAG level merge in `dag-executor.ts`) use `enqueueReservedInvocation` to
+release only their exact inserted reservation when enqueue throws, just as a
+`prepareWorkspace` failure does. They stamp `cli_invocations.superseded_at` before
+propagating the original queue error. Without that release the ghost row remains
+live in `cliBacklogCounts`, which has no task-status filter, skewing fair priority
+and the user's backlog and showing a never-queued run on a failed step. Retry's
+reset already supersedes runs; failed tasks retain scratch by design.
+
+A lost queue acknowledgement may have queued the job; its ordinary supersede
+checks refuse or stop that invocation too. A release failure is logged through
+`serializeError` and never replaces the original queue error; existing orphan
+recovery remains responsible. This is not an atomic database/queue commit.
+Successful enqueues keep the reservation until the normal run lifecycle ends it.
+Both merge fixers retain their saved `fixInvocationId`: recovery reads that exact
+superseded row as a run that never answered, consumes it, aborts/reopens the merge
+and refunds the conflict attempt before dispatching again under the ordinary
+retry/auto-resolve policy. Mining and recap retain their own release handlers.
+Other DAG issue/reviewer/advisor/fix-coder and replanner dispatches are outside
+this merge-fixer change; their enqueue-failure cleanup is not covered by this
+contract.
 
 ## Task scratch cleanup
 

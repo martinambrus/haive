@@ -71,6 +71,11 @@ no new unroutable event. The shared `writeTaskFailed` enforces this for every ca
 including an unqualified `markTaskFailed`, a missing revise target and gate Abort;
 recovery must reopen the failed task before a fresh failure can replace it.
 Retry remains the explicit revival path; Stop needs no epoch change.
+If a gate Continue picked up an already-failed task and its target cannot run,
+the gate closes while the original failure text and completion stamp remain.
+No new `fix_loop.unroutable` event or replacement explanation is written to the
+failed task. This deliberately preserves the first failure and its settlement
+identity; the routing refusal remains in the worker log, and Retry still works.
 
 **The target is fixed; what varies is whether 07 runs.** In DAG mode
 (`06b-sprint-planning.output.mode === 'dag'`) 07 used to skip at EVERY round, so every

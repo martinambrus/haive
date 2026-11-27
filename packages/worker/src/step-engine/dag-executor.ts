@@ -1,3 +1,4 @@
+import { enqueueReservedInvocation } from './enqueue-reserved-invocation.js';
 import {
   DAG_NO_CHANGE_MARKER,
   DAG_BLOCKED_BY_MARKER,
@@ -913,7 +914,7 @@ async function dispatchMergeFixAgent(
     throw err;
   }
   await onInserted(invId);
-  await deps.enqueueCliInvocation({
+  await enqueueReservedInvocation(db, deps, {
     invocationId: invId,
     taskId: params.taskId,
     taskStepId: current.id,

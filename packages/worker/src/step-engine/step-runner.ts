@@ -1,3 +1,4 @@
+import { enqueueReservedInvocation } from './enqueue-reserved-invocation.js';
 import { resolveRunTitle } from './run-title.js';
 import { finalizeCanonicalCheckResult } from './check-result-output.js';
 import { parseExecutionContract } from '@haive/shared/modularity';
@@ -673,25 +674,6 @@ async function hasLiveInvocation(db: Database, taskStepId: string): Promise<bool
     )
     .limit(1);
   return rows.length > 0;
-}
-
-/** Release this pass's reservation if enqueue fails, as prepareWorkspace does.
- * A lost queue acknowledgement may still have queued it; superseding also fences
- * that job, while a failed step and its later Retry owe no live reservation. */
-async function enqueueReservedInvocation(
-  db: Database,
-  deps: WorkerDeps,
-  payload: CliExecJobPayload,
-): Promise<void> {
-  try {
-    await deps.enqueueCliInvocation(payload);
-  } catch (err) {
-    await db
-      .update(schema.cliInvocations)
-      .set({ supersededAt: new Date() })
-      .where(eq(schema.cliInvocations.id, payload.invocationId));
-    throw err;
-  }
 }
 
 /** Insert a cli_invocations row, returning null instead of throwing when the

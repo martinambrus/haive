@@ -1,3 +1,4 @@
+import { enqueueReservedInvocation } from './enqueue-reserved-invocation.js';
 import { recordLandedMerge } from './landed-merge.js';
 import { withProjectionMove } from '../project-state/projection-move.js';
 import path from 'node:path';
@@ -984,7 +985,7 @@ async function dispatchFixAgent(
     throw err;
   }
   await onInserted(invId);
-  await params.deps!.enqueueCliInvocation({
+  await enqueueReservedInvocation(db, params.deps!, {
     invocationId: invId,
     taskId: params.taskId,
     taskStepId: current.id,
