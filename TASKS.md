@@ -2798,7 +2798,7 @@ Note (T480 review, 2026-10-31): the KB walkers still list a git-data-named page 
 
 ### T482 · FNF[lock-order-leftovers-2] · second sweeps wait holding step rows; the late sweep refuses a benign hold; planner-dependent id lists (+6)
 
-status: open · gate: bounded verification · user decision: recheck risk-bearing members, 2026-11-01 · priority: P2
+status: open for items 1, 3, 5, 6, 7 (1 and 7 not attempted; 3, 5, 6 not reproduced: no reachable peer named); items 2 and 4 DONE 2026-11-27 in #1378 (362347d70, deployed with `pnpm docker libs`: the api and worker late reset sweeps wait a bounded LATE_LOCK_WAIT_MS of 250 ms instead of NOWAIT, 55P03 maps to 503 in the api and a RevivalBusy hold in the worker; a failed login-hint write is logged and keeps the CLI error, park and resume) · gate: bounded verification · user decision: recheck risk-bearing members, 2026-11-01 · priority: P2
 From the T459 review (2026-10-31). Minor; items 1 and 4-7 PRE-EXISTING, item 2 an accepted trade-off of T459.
 
 1. The second sweeps still wait while holding step rows (and the task row, for a Stop): api routes/tasks/steps.ts ~:252, worker `_step-reset.ts` ~:171, api lib/task-control.ts ~:66. A young live agent run held by `releaseStepAgents` can close a cycle with them; a Stop must not fail, so NOWAIT is no answer there.
