@@ -3,6 +3,7 @@ import { schema } from '@haive/database';
 import { createFakeDb } from '@haive/database/testing';
 import { declareDepsStep } from '../src/step-engine/steps/env-replicate/01-declare-deps.js';
 import { generateDockerfileStep } from '../src/step-engine/steps/env-replicate/02-generate-dockerfile.js';
+import { resolveSandboxImageComposition } from '../src/sandbox/composed-image-cache.js';
 import { resolveSandboxImageTag } from '../src/queues/cli-exec/images.js';
 import type { StepContext } from '../src/step-engine/step-definition.js';
 import type { DockerRunner } from '../src/sandbox/docker-runner.js';
@@ -13,6 +14,7 @@ function setup(pins: Record<string, unknown>, deps: Record<string, unknown> = {}
     repositories: schema.repositories,
     envTemplates: schema.envTemplates,
     cliProviders: schema.cliProviders,
+    toolPackageVersions: schema.toolPackageVersions,
   });
   fake.insert(schema.tasks, {
     id: '00000000-0000-4000-8000-000000000001',
@@ -36,7 +38,18 @@ function setup(pins: Record<string, unknown>, deps: Record<string, unknown> = {}
   return { fake, ctx };
 }
 
-it.each(['1.2.3\nRUN id', '1.2.3\n', '$(id)'])(
+const NON_VERSION_PINS = [
+  '1.2.3\nRUN id',
+  '1.2.3\n',
+  '$(id)',
+  'file:/tmp/tooling-pin-probe',
+  'git+https://example.invalid/tool.git',
+  'https://example.invalid/tool.tgz',
+  'npm:other-package@1.2.3',
+  '1.2.3 --package=other-package',
+];
+
+it.each(NON_VERSION_PINS)(
   'refuses stored pins %j before copying them into declared dependencies',
   async (token) => {
     for (const pins of [
@@ -81,4 +94,42 @@ it('does not trim a stored CLI version before resolving the provider image', asy
     ),
   ).rejects.toThrow(/version token/);
   expect(inspect).not.toHaveBeenCalled();
+});
+
+for (const source of ['repository', 'cache-head', 'cache-latest', 'retained-inputs']) {
+  it.each(NON_VERSION_PINS)(
+    `refuses RTK ${source} pin %j at the real composition builder`,
+    async (pin) => {
+      const { ctx, fake } = setup(source === 'repository' ? { rtkVersion: pin } : {});
+      fake.patch(schema.envTemplates, '00000000-0000-4000-8000-000000000003', { status: 'ready' });
+      if (source.startsWith('cache')) {
+        fake.insert(schema.toolPackageVersions, {
+          name: 'rtk',
+          versions: source === 'cache-head' ? [pin] : [],
+          latestVersion: pin,
+        });
+      }
+      const before = fake.rows(schema.envTemplates);
+      const runner = { inspect: vi.fn(async () => ({ exists: true, imageId: 'sha256:test' })) };
+      await expect(
+        resolveSandboxImageComposition(
+          ctx.db,
+          ctx.taskId,
+          { name: 'codex', cliVersion: null, sandboxDockerfileExtra: null },
+          runner as unknown as DockerRunner,
+          false,
+          undefined,
+          source === 'retained-inputs'
+            ? { inputs: { rtkVersion: pin, rtkPin: null, baseImageId: null, requestedHash: '' } }
+            : {},
+        ),
+      ).rejects.toThrow(/version token/);
+      expect(fake.rows(schema.envTemplates)).toEqual(before);
+    },
+  );
+}
+
+it.each(NON_VERSION_PINS)('refuses a saved Chrome pin %j before Dockerfile reuse', async (pin) => {
+  const { ctx } = setup({}, { browserTesting: true, chromeDevtoolsMcpVersion: pin });
+  await expect(generateDockerfileStep.detect!(ctx)).rejects.toThrow(/version token/);
 });

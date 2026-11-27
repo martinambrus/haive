@@ -123,6 +123,20 @@ describe('resolveMcpSurface', () => {
     });
   });
 
+  it.each([
+    '1.2.3\nRUN id',
+    '$(id)',
+    'file:/tmp/tooling-pin-probe',
+    'git+https://example.invalid/tool.git',
+    'https://example.invalid/tool.tgz',
+    'npm:other-package@1.2.3',
+    '1.2.3 --package=other-package',
+  ])('refuses the stored Chrome pin %j before cache warming or config generation', async (pin) => {
+    await expect(
+      resolveMcpSurface(dbFor({ ...DDEV_BROWSER, chromeDevtoolsMcpVersion: pin }), 'task-1', false),
+    ).rejects.toThrow(/version token/);
+  });
+
   it('carries the repo-pinned chrome-devtools-mcp version through', async () => {
     const surface = await resolveMcpSurface(
       dbFor({ ...DDEV_BROWSER, chromeDevtoolsMcpVersion: '0.6.1' }),

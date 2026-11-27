@@ -98,6 +98,11 @@ const HOSTILE = [
   ' 1.2.3',
   '1.2.3\u2028',
   'a'.repeat(65),
+  'file:/tmp/tooling-pin-probe',
+  'git+https://example.invalid/tool.git',
+  'https://example.invalid/tool.tgz',
+  'npm:other-package@1.2.3',
+  '1.2.3 --package=other-package',
 ];
 const VALID = ['1.2.3', 'v1.0.1', '1.18.4', 'latest', '2.0.0-rc.1', '1.0.0+build.5'];
 describe('tooling version saves', () => {
@@ -158,4 +163,83 @@ it('does not carry an invalid stored LSP pin through an unrelated cached upgrade
   });
   expect(res.status).toBe(400);
   expect(everything(fake)).toEqual(before);
+});
+
+// Feed rows bypass the PATCH boundary. Exercise both newestFor branches, with each
+// tool that upgrade-apply can persist; rust-analyzer and jdtls are not pinnable.
+describe('stored tool upgrade feed cannot introduce non-version operands', () => {
+  for (const [component, tool] of [
+    ['rtk', 'rtk'],
+    ['chrome-devtools-mcp', 'chrome-devtools-mcp'],
+    ['intelephense', 'intelephense'],
+    ['intelephense-extended', 'intelephense'],
+    ['vtsls', 'vtsls'],
+    ['pyright', 'pyright'],
+    ['gopls', 'gopls'],
+    ['solargraph', 'solargraph'],
+  ] as const) {
+    for (const source of ['head', 'latest']) {
+      it(`${component} applies a valid ${source} upgrade`, async () => {
+        const fake = setup();
+        fake.patch(schema.repositories, REPO, {
+          chromeDevtoolsMcpVersion: '0.1.0',
+          lspServerVersions: { [component]: '0.1.0' },
+        });
+        fake.insert(schema.toolPackageVersions, {
+          name: tool,
+          versions: source === 'head' ? ['9.9.9'] : [],
+          latestVersion: '9.9.9',
+        });
+        const res = await app.request(`/${REPO}/tooling-upgrade`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ components: [component] }),
+        });
+        expect(res.status).toBe(200);
+        expect(await res.json()).toHaveProperty('applied', [
+          { component, from: '0.1.0', to: '9.9.9' },
+        ]);
+        const stored = row(fake);
+        expect(
+          component === 'rtk'
+            ? stored.rtkVersion
+            : component === 'chrome-devtools-mcp'
+              ? stored.chromeDevtoolsMcpVersion
+              : (stored.lspServerVersions as Record<string, string>)[component],
+        ).toBe('9.9.9');
+      });
+      it.each([
+        '9.9.9\nRUN id',
+        '9.9.9$(id)',
+        '9.9.9 --package=other-package',
+        'file:/tmp/tooling-pin-probe',
+        'git+https://example.invalid/tool.git',
+        'https://example.invalid/tool.tgz',
+        'npm:other-package@1.2.3',
+      ])(`${component} refuses or skips ${source} %j without writes`, async (pin) => {
+        const fake = setup();
+        fake.patch(schema.repositories, REPO, {
+          rtkVersion: '0.1.0',
+          chromeDevtoolsMcpVersion: '0.1.0',
+          lspServerVersions: { [component]: '0.1.0' },
+        });
+        fake.insert(schema.toolPackageVersions, {
+          name: tool,
+          versions: source === 'head' ? [pin] : [],
+          latestVersion: pin,
+        });
+        const before = everything(fake);
+        const res = await app.request(`/${REPO}/tooling-upgrade`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ components: [component] }),
+        });
+        // isNewer skips specs without a numeric version prefix. Others reach
+        // assertVersionToken and are refused before any transaction or write.
+        expect(res.status).toBe(pin.startsWith('9.9.9') ? 400 : 200);
+        if (res.status === 200) expect(await res.json()).toHaveProperty('applied', []);
+        expect(everything(fake)).toEqual(before);
+      });
+    }
+  }
 });

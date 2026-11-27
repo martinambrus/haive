@@ -26,6 +26,11 @@ const HOSTILE = [
   ' 1.2.3',
   '1.2.3\u2028',
   'a'.repeat(65),
+  'file:/tmp/tooling-pin-probe',
+  'git+https://example.invalid/tool.git',
+  'https://example.invalid/tool.tgz',
+  'npm:other-package@1.2.3',
+  '1.2.3 --package=other-package',
 ];
 describe('stored version render boundaries', () => {
   const consumers: [string, (token: string) => unknown][] = [
@@ -34,6 +39,19 @@ describe('stored version render boundaries', () => {
         lsp,
         (token) =>
           renderDockerfile('ubuntu:24.04', {
+            lspServers: [lsp],
+            lspServerVersions: { [lsp]: token },
+          }),
+      ],
+    ),
+    ...['intelephense', 'intelephense-extended', 'vtsls', 'pyright', 'gopls', 'solargraph'].map(
+      (lsp): [string, (token: string) => unknown] => [
+        `composed ${lsp}`,
+        (token) =>
+          composeSandboxImage({
+            envTemplateDockerfile: 'FROM ubuntu:24.04\n',
+            provider: { name: 'claude-code', cliVersion: null, sandboxDockerfileExtra: null },
+            lspInstallContractVersion: 2,
             lspServers: [lsp],
             lspServerVersions: { [lsp]: token },
           }),
@@ -102,7 +120,11 @@ describe('stored version render boundaries', () => {
     ),
   ];
   for (const [label, render] of consumers) {
-    it.each(HOSTILE)(`${label} refuses %j before producing text`, (token) => {
+    // FROM deliberately accepts colon/@ separators; this npm alias also fits
+    // that separate reference grammar. It must still be refused at every pin sink.
+    const hostile =
+      label === 'base image' ? HOSTILE.filter((v) => v !== 'npm:other-package@1.2.3') : HOSTILE;
+    it.each(hostile)(`${label} refuses %j before producing text`, (token) => {
       expect(() => render(token)).toThrow(/version|token/i);
     });
   }
