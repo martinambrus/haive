@@ -285,6 +285,7 @@ function makeMockDb(state: MockState): Database {
       const tableName = tableNameOf(table);
       return {
         values: (v: Record<string, unknown>) => ({
+          onConflictDoNothing: async () => undefined,
           then: (resolve: (value: unknown) => unknown) => {
             if (tableName === 'task_events') {
               const event = {

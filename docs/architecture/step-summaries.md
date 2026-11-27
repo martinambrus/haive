@@ -80,3 +80,19 @@ instead of failing the task. See [Fix loop](fix-loop.md).
 **The invocation is unlinked but attributed.** `task_step_id` stays NULL — that column is what places a row in the step terminal, the retry blocker, park folding, the step's invocation count and the `cli_invocations_one_live_per_step_idx` partial unique index, and a recap written after the step finished is none of those. `summary_for_step_id` carries the SPEND home instead, so `enrichStepsWithCliStats` folds it into the step's token/cost badge by `coalesce(task_step_id, summary_for_step_id)` while both COUNTERS stay on `task_step_id`. `sumTaskTokens` and `sumTaskProviderBreakdown` accept `task_step_id IS NOT NULL OR summary_for_step_id IS NOT NULL` — deliberately not "no filter", because a summary row written before that column existed carries neither and must stay out of both sides, which keeps a task's list total equal to the sum of its per-step badges on old tasks with no backfill. Cost resolution needed no change: `resolveInvocationCost` already runs before the `step_summary` branch returns.
 
 **The fan-out prompt is capped, and the cap is the point.** `buildAgentMiningSummaryPrompt` used to divide 7,000 chars by the agent count but floor the result at 800, which grows without bound past ~8 agents; its comment assumed "2-6 depending on QA level", from before plan mining fanned out to 61-623 agents on one step. MEASURED across every step-summary invocation on the dev install: 71 agents produced a 62,212-character prompt, 70 produced 52,875 and 623 produced 53,720, and all three were killed by the pass's own 60s budget having written nothing, while the three near 8,000 characters all succeeded. `SUMMARY_AGENT_TEXT_BUDGET` and `SUMMARY_AGENT_LIMIT` are both hard caps now, the elision is stated in the prompt, and past the limit the closing instruction asks for an overall summary instead of one line per agent — 70 lines was never the recap the panel is sized for.
+
+**Extra CLI calls do not prove a reply was rejected.** `attemptCount` on the task detail and
+steps DTO counts all non-superseded singleton calls, including planned unit/pass calls and
+pre-form continuations. It keeps that meaning. `rejectedReplyCount` counts only consumed,
+non-superseded singleton invocations with a host `step.reply_rejected` event. The runner
+records that event atomically with consumption at its three unusable-reply retry sites:
+apply parse/shape rejection, `shouldRetryPreForm`, and output truncation. The event id is
+the rejected invocation id, so replay cannot double-count it. Accepted loops, follow-ups,
+approved pre-form continuations and AI fixes consume without a rejection event; orphan and
+capability recovery supersede instead. Mining and DAG fan-outs remain excluded. Manual
+Retry supersedes the old invocations, so their retained events do not affect the new attempt.
+`rejectedReplyBanner` in `web/src/lib/step-banners.ts` gates on this count, suppressing loop
+history and missing evidence from older APIs. Titles, exit codes and warning/status copy
+never identify a rejected reply. Legacy rejected replies have no event and are intentionally
+not guessed or backfilled; new retries of single-call steps retain the warning and count.
+No schema migration is needed. Rollback reverts the code and can retain the inert events.

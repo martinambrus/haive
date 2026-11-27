@@ -627,12 +627,11 @@ export function computeDegradedNote(
 
 /** Why an auto-retry fired, for the step card.
  *
- *  `attemptCount` proves a step re-ran and is all the card has, so its copy had to guess at
- *  the reason — and named "unparseable model JSON", which is only one of the three ways to
- *  get here and not the commonest: a byte-valid JSON body rejected by a shape rule, a run cut
- *  at the output-token cap, and a pre-form re-roll all raise the same counter. Only these
- *  sites know which. `maxAttempts` is null where the budget is not an attempt count (a loop
- *  step's truncation retries), so the phrasing drops the total rather than inventing one. */
+ *  A byte-valid JSON body rejected by a shape rule, a run cut at the output-token cap,
+ *  and a pre-form re-roll all record a structural reply-rejection event. Only these sites
+ *  know the reason; the banner counts those events and this warning supplies the words.
+ *  `maxAttempts` is null where the budget is not an attempt count (a loop step's truncation
+ *  retries), so the phrasing drops the total rather than inventing one. */
 function retryWarning(attempt: number, maxAttempts: number | null, reason: string): string {
   return `Attempt ${attempt}${maxAttempts === null ? '' : ` of ${maxAttempts}`} was rejected: ${reason}`;
 }
@@ -948,7 +947,7 @@ async function resolveLlmPhase(
               ),
             ),
           });
-          await markLatestInvocationConsumed(db, current.id);
+          await markLatestInvocationConsumed(db, current.id, ctx.taskId);
           // resolveLlmPhase returns LlmResolved; a fresh dispatch parks in
           // waiting_cli (resolved:false) — propagate it as-is. If it somehow
           // resolved, fall through and fail normally below.
@@ -4092,7 +4091,7 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
                   ),
                 ),
               });
-              await markLatestInvocationConsumed(db, current.id);
+              await markLatestInvocationConsumed(db, current.id, ctx.taskId);
               const reroll = await resolveLlmPhase(
                 db,
                 stepDef,
@@ -4867,7 +4866,7 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
               await updateRow(db, current.id, {
                 warningMessage: stepWarningAppend(retryWarning(attempt, retry.maxAttempts, reason)),
               });
-              await markLatestInvocationConsumed(db, current.id);
+              await markLatestInvocationConsumed(db, current.id, ctx.taskId);
               const retryLlm = await resolveLlmPhase(
                 db,
                 stepDef,
@@ -6090,7 +6089,11 @@ async function markCompletedInvocationConsumed(
 /** Mark the currently-active LLM invocation row as consumed so the next
  *  resolveLlmPhase pass enqueues a fresh one. No-op when the step has no
  *  unconsumed invocation (already-consumed paths or steps without llm). */
-async function markLatestInvocationConsumed(db: Database, taskStepId: string): Promise<void> {
+async function markLatestInvocationConsumed(
+  db: Database,
+  taskStepId: string,
+  rejectedTaskId?: string,
+): Promise<void> {
   const row = await db
     .select({ id: schema.cliInvocations.id })
     .from(schema.cliInvocations)
@@ -6106,10 +6109,29 @@ async function markLatestInvocationConsumed(db: Database, taskStepId: string): P
     .limit(1);
   const invId = row[0]?.id;
   if (!invId) return;
-  await db
-    .update(schema.cliInvocations)
-    .set({ consumedAt: new Date() })
-    .where(eq(schema.cliInvocations.id, invId));
+  const consume = async (tx: Pick<Database, 'update' | 'insert'>) => {
+    await tx
+      .update(schema.cliInvocations)
+      .set({ consumedAt: new Date() })
+      .where(eq(schema.cliInvocations.id, invId));
+    if (rejectedTaskId) {
+      // Consumption alone also means accepted loops and planned continuations. Record
+      // rejection only at the host's three unusable-reply retry sites, atomically with
+      // consumption. The invocation id makes replay idempotent, without a new column.
+      await tx
+        .insert(schema.taskEvents)
+        .values({
+          id: invId,
+          taskId: rejectedTaskId,
+          taskStepId,
+          eventType: 'step.reply_rejected',
+          payload: { version: 1, invocationId: invId },
+        })
+        .onConflictDoNothing();
+    }
+  };
+  if (rejectedTaskId) await db.transaction(consume);
+  else await consume(db);
 }
 
 /** Count the LLM invocations already spent on this step (non-superseded,

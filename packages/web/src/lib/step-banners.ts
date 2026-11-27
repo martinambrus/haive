@@ -477,3 +477,20 @@ export function leftCommittedMergeBanner(
         : `This task's merge stays committed on ${codeSpan(merge.landedOn)} and was not undone when the task was cancelled.`,
   };
 }
+
+/** Automatic unusable-reply retries, proven by the host's rejection events. Total calls
+ *  include successful planned continuations and cannot prove a retry. Missing evidence
+ *  from an older API is silent. Loop steps already present their iteration history. */
+export function rejectedReplyBanner(step: {
+  rejectedReplyCount?: number;
+  iterationCount: number;
+}): { text: string } | null {
+  const count = step.rejectedReplyCount ?? 0;
+  if (count < 1 || step.iterationCount !== 0) return null;
+  return {
+    text:
+      count === 1
+        ? 'An earlier attempt produced output this step could not use, so it re-ran automatically. The latest run is shown below.'
+        : `${count} earlier attempts produced output this step could not use, so it re-ran automatically. The latest run is shown below.`,
+  };
+}

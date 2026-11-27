@@ -921,6 +921,7 @@ export async function enrichStepsWithCliStats<T extends { id: string }>(
     cliInvocationCount: number;
     ragQueryCount: number;
     attemptCount: number;
+    rejectedReplyCount: number;
     tokenUsage: CliTokenUsage | null;
     throughput: ThroughputSummary;
     summaryError: StepSummaryFailure | null;
@@ -942,10 +943,20 @@ export async function enrichStepsWithCliStats<T extends { id: string }>(
     .select({
       stepId: attributedStepId,
       count: sql<number>`count(*) filter (where ${ownInvocation})::int`,
-      // LLM run attempts: exclude the per-step fan-outs (agent_mining review agents
-      // and dag_parallel DAG coders/reviewers) -- they run N concurrent per step by
-      // design and aren't retries. >1 on a non-loop step => an auto-retry happened.
+      // All singleton calls, including successful planned continuations. Kept for DTO
+      // compatibility; this count does not prove any reply was rejected.
       attemptCount: sql<number>`count(*) filter (where ${ownInvocation} and ${schema.cliInvocations.mode} not in ('agent_mining', 'dag_parallel'))::int`,
+      // The host records this event atomically with consuming an unusable reply for
+      // redispatch. A manual reset supersedes the invocation, so its event stops counting
+      // under this query's existing scope. No inference from titles, exits or warning copy.
+      rejectedReplyCount: sql<number>`count(*) filter (where ${ownInvocation}
+        and ${schema.cliInvocations.mode} not in ('agent_mining', 'dag_parallel')
+        and ${schema.cliInvocations.consumedAt} is not null
+        and exists (select 1 from ${schema.taskEvents}
+          where ${schema.taskEvents.id} = ${schema.cliInvocations.id}
+            and ${schema.taskEvents.taskId} = ${schema.cliInvocations.taskId}
+            and ${schema.taskEvents.taskStepId} = ${schema.cliInvocations.taskStepId}
+            and ${schema.taskEvents.eventType} = 'step.reply_rejected'))::int`,
       inputTokens: sql<number>`coalesce(sum((${tu} ->> 'inputTokens')::numeric), 0)::int`,
       outputTokens: sql<number>`coalesce(sum((${tu} ->> 'outputTokens')::numeric), 0)::int`,
       totalTokens: sql<number>`coalesce(sum((${tu} ->> 'totalTokens')::numeric), 0)::int`,
@@ -982,6 +993,7 @@ export async function enrichStepsWithCliStats<T extends { id: string }>(
     {
       count: number;
       attemptCount: number;
+      rejectedReplyCount: number;
       tokenUsage: CliTokenUsage | null;
       throughput: ThroughputSummary;
       summaryError: StepSummaryFailure | null;
@@ -1009,6 +1021,7 @@ export async function enrichStepsWithCliStats<T extends { id: string }>(
     byStep.set(row.stepId, {
       count: row.count,
       attemptCount: Number(row.attemptCount) || 0,
+      rejectedReplyCount: Number(row.rejectedReplyCount) || 0,
       tokenUsage,
       throughput: summarizeThroughput(
         (row.runs ?? []).map(([outputTokens, wallMs, apiMs]) => ({ outputTokens, wallMs, apiMs })),
@@ -1023,6 +1036,7 @@ export async function enrichStepsWithCliStats<T extends { id: string }>(
       cliInvocationCount: stat?.count ?? 0,
       ragQueryCount: ragCounts.get(s.id) ?? 0,
       attemptCount: stat?.attemptCount ?? 0,
+      rejectedReplyCount: stat?.rejectedReplyCount ?? 0,
       tokenUsage: stat?.tokenUsage ?? null,
       throughput: stat?.throughput ?? summarizeThroughput([]),
       summaryError: stat?.summaryError ?? null,

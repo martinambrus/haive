@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import {
   archiveExpansionBanner,
+  rejectedReplyBanner,
   upgradeAttemptBanner,
   deadBanner,
   failureBanner,
@@ -814,5 +815,34 @@ describe('cancelled step-12 push failure copy', () => {
     expect(
       failureBanner({ ...failedPush, stepId: 'other' }, { taskStatus: 'cancelled' })?.text,
     ).toBe(failedPush.errorMessage);
+  });
+});
+
+describe('rejectedReplyBanner', () => {
+  it('keeps successful planned multi-call steps silent', () => {
+    expect(
+      rejectedReplyBanner({ ...{ attemptCount: 12 }, rejectedReplyCount: 0, iterationCount: 0 }),
+    ).toBeNull();
+  });
+
+  it('keeps a single-call rejection and redispatch visible', () => {
+    expect(
+      rejectedReplyBanner({ ...{ attemptCount: 2 }, rejectedReplyCount: 1, iterationCount: 0 })
+        ?.text,
+    ).toContain('re-ran automatically');
+  });
+
+  it('counts rejected replies without counting accepted planned calls', () => {
+    expect(
+      rejectedReplyBanner({ ...{ attemptCount: 12 }, rejectedReplyCount: 2, iterationCount: 0 })
+        ?.text,
+    ).toContain('2 earlier attempts');
+  });
+
+  it('keeps loop history and older APIs without rejection evidence silent', () => {
+    expect(
+      rejectedReplyBanner({ ...{ attemptCount: 4 }, rejectedReplyCount: 2, iterationCount: 1 }),
+    ).toBeNull();
+    expect(rejectedReplyBanner({ ...{ attemptCount: 4 }, iterationCount: 0 })).toBeNull();
   });
 });

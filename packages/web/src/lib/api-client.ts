@@ -1129,10 +1129,11 @@ export interface TaskStep {
   cliInvocationCount: number;
   /** Queries in the panel's inclusive step time window, computed with the steps response. */
   ragQueryCount: number;
-  /** Non-superseded, non-agent_mining CLI invocations = LLM run attempts. >1 on a
-   *  non-loop step (iterationCount === 0) means the step auto-retried (form-aware /
-   *  retry-then-degrade) because an earlier attempt's output couldn't be used. */
+  /** Non-superseded singleton CLI calls, including planned successful continuations.
+   *  Excludes agent_mining and dag_parallel fan-outs; does not prove a retry. */
   attemptCount: number;
+  /** Replies the host rejected and consumed for automatic redispatch. Absent on older APIs. */
+  rejectedReplyCount?: number;
   /** Role id of the step's LIVE cli invocation (e.g. 'tester' | 'fixer' for the
    *  browser-test loop), reverse-looked-up from the invocation label; null when not
    *  waiting on a role-bearing CLI. Drives UI that reacts to the active pass — e.g.
