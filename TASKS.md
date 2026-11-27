@@ -2213,7 +2213,7 @@ status: open · kind: fix · found: T354 run · priority: P3
 
 ### T562 · FNF[tooling-version-pins] · stored tooling version pins are not revalidated at their sinks
 
-status: open · kind: fix · found: T354 run · priority: P3
+status: done 2026-11-27, merged #1386 (0f5aafb1b): did not reproduce; #1246 (7164a86ca) already checks every stored pin at its sink (Chrome MCP surface and config, dependency copy/reuse, RTK composition from repository pin, cached head/latest and retained inputs, pinnable LSP recipes) and the upgrade route refuses such candidates without a write; controls pin it, sandbox.md records the audit · kind: fix · found: T354 run · priority: P3
 
 1. Stored `chrome_devtools_mcp_version` rows written before the PATCH validation reach `npx` and Dockerfile `RUN` sinks unchecked: exec-core.ts:543, mcp-config.ts:295, env-replicate/01-declare-deps.ts:847, 02-generate-dockerfile.ts:800-801. Fix: call `normalizeChromeDevtoolsMcpVersion` at each sink (or one reader). PRE-EXISTING.
 2. Upgrade-apply writes the feed's `latest` unchecked (tooling-upgrades.ts:127). PRE-EXISTING.
