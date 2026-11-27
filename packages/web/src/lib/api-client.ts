@@ -253,6 +253,11 @@ export function releaseGlobalKbEmbedModel(): void {
 /** A user-uploaded reference file attached to a task. Mirrors the shared
  *  TaskAttachment shape locally to keep the @haive/shared barrel out of the
  *  browser bundle. */
+export interface CliProviderRestriction {
+  code: 'no_provider' | 'multiple_providers' | 'unverified_provider' | 'disabled_provider';
+  message: string;
+}
+
 export interface TaskAttachment {
   id: string;
   taskId: string;
@@ -819,7 +824,7 @@ export interface Task {
   cliProviderId: string | null;
   effectiveCliProviderId?: string | null;
   /** API verdicts for explicit picks this environment refuses. */
-  cliProviderRestrictions?: Record<string, string>;
+  cliProviderRestrictions?: Record<string, CliProviderRestriction>;
   /** Which CLI writes the per-step recap. NULL means INHERIT the step's own chain, which is
    *  a real choice and not "unset" — see `summaryCliChoiceRecorded` server-side. Optional so
    *  an older api renders as inherit. */

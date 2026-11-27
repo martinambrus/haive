@@ -30,7 +30,7 @@ export function providerLabel(provider: Pick<PreferredProviderRecord, 'label' | 
 /** The providers a contract 2 task may launch: those holding an effective composed image, or,
  *  before the first build makes any image effective, the lock's verified providers, so the
  *  environment steps that build that image (and their AI repair) can still run. */
-export function composedLspAllowedSet<P extends PreferredProviderRecord>(
+export function composedLspAllowedSet<P extends Pick<PreferredProviderRecord, 'id' | 'name'>>(
   providers: readonly P[],
   composedIds: readonly string[] | null | undefined,
 ): Set<string> | null {

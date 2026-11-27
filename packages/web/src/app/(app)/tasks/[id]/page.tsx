@@ -23,6 +23,7 @@ import {
   getPlanOverview,
   postUserActive,
   type CliProvider,
+  type CliProviderRestriction,
   type CliProvidersResponse,
   type CliProviderName,
   type EnvDepPreset,
@@ -2584,7 +2585,7 @@ function SummaryCliCard({
   onChange,
 }: {
   providers: CliProvider[];
-  providerRestrictions?: Record<string, string>;
+  providerRestrictions?: Record<string, CliProviderRestriction>;
   summaryCliProviderId: string | null;
   summaryLlmEnabled: boolean;
   busy: boolean;
@@ -2640,11 +2641,11 @@ function SummaryCliCard({
             <option
               key={p.id}
               value={p.id}
-              disabled={!!providerRestrictions?.[p.id]}
-              title={providerRestrictions?.[p.id]}
+              disabled={providerRestrictions?.[p.id]?.code !== undefined}
+              title={providerRestrictions?.[p.id]?.message}
             >
               {p.label}
-              {providerRestrictions?.[p.id] ? ' — unavailable for this environment' : ''}
+              {providerRestrictions?.[p.id]?.code ? ' — unavailable for this environment' : ''}
             </option>
           ))}
         </select>
@@ -2692,7 +2693,7 @@ function UpcomingCliPanel({
 }: {
   steps: UpcomingCliStep[];
   providers: CliProvider[];
-  providerRestrictions?: Record<string, string>;
+  providerRestrictions?: Record<string, CliProviderRestriction>;
   taskCliProviderId: string | null;
   fallbackProviderId: string | null;
   busyStepId: string | null;
@@ -2896,7 +2897,7 @@ interface StepCardProps {
   ) => Promise<void>;
   onCliLogin: () => void;
   providers: CliProvider[];
-  providerRestrictions?: Record<string, string>;
+  providerRestrictions?: Record<string, CliProviderRestriction>;
   /** Task-level fallback when this step has no per-step preference set. */
   taskCliProviderId: string | null;
   fallbackProviderId: string | null;

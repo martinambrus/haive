@@ -455,7 +455,7 @@ describe('advanceStep reuse of human-only form fields', () => {
     { status: 'waiting_cli', payload: false },
     { status: 'running', payload: true },
   ])(
-    'strips a human-only key from saved $status redelivery, payload=$payload',
+    'preserves saved human answers on $status redelivery, payload=$payload',
     async ({ status, payload }) => {
       const state = freshState();
       Object.assign(state.taskStepRow, {
@@ -472,13 +472,42 @@ describe('advanceStep reuse of human-only form fields', () => {
         (
           await advanceStep({
             ...runParams(state, step),
-            ...(payload ? { formValues: prior } : {}),
+            ...(payload ? { formValues: { name: 'Acme' } } : {}),
           })
         ).status,
       ).toBe('done');
-      expect((state.taskStepRow.output as { received: FormValues }).received.secretTick).not.toBe(
-        true,
+      expect((state.taskStepRow.output as { received: FormValues }).received).toEqual(prior);
+      expect(
+        state.updates.some(
+          (u) => u.patch.formValues && !('secretTick' in (u.patch.formValues as FormValues)),
+        ),
+      ).toBe(false);
+    },
+  );
+
+  it.each([
+    { status: 'running', payload: prior },
+    { status: 'waiting_cli', payload: prior },
+    { status: 'running', payload: { secretTick: true } },
+  ])(
+    'ignores job-carried human-only values on a saved $status redelivery: $payload',
+    async ({ status, payload }) => {
+      const state = freshState();
+      Object.assign(state.taskStepRow, {
+        status,
+        formValues: { name: 'Saved' },
+        formSchema: SECRET_FORM,
+        detectOutput: { ready: true },
+      });
+      const step = { ...reuseFormStep({ form: SECRET_FORM }), humanOnlyFormFields: ['secretTick'] };
+      expect((await advanceStep({ ...runParams(state, step), formValues: payload })).status).toBe(
+        'done',
       );
+      expect((state.taskStepRow.output as { received: FormValues }).received).toEqual({
+        name: 'Saved',
+      });
+      expect(state.taskStepRow.formValues).toEqual({ name: 'Saved' });
+      expect(state.updates.some((u) => u.patch.formValues != null)).toBe(false);
     },
   );
 

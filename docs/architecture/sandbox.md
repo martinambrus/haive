@@ -1387,12 +1387,12 @@ absent/1 and the adoption conditions above hold for the default selection
 mandatory because a contract-2 link restricts dispatch at once). A plain Retry of 01 stops at the
 form; no route or page offers the action. Only a person ticks it: 01 lists the field in
 `humanOnlyFormFields`, and the runner drops listed keys from the task's pre-answers for the step and
-from reused prior-task values before they are overlaid or auto-submitted, and from saved answers on a running/CLI-wait redelivery. An owner answer saved on a parked form remains valid. Thus a task-type preset,
+from reused prior-task values before they are overlaid or auto-submitted, and from job-carried values on redelivery. Saved answers are durable owner decisions: a running or CLI-wait redrive keeps them intact, and a redelivered job cannot replace them. The stalled-sweep control seeds a pass interrupted after submission, redrives the unchanged running row and proves the saved tick still commits replacement. Thus a task-type preset,
 prior-task reuse and auto-continue never replace a template. Apply re-decides from the submitted
 form and never trusts detect. A refusal throws `ComposedLspReplacementRefusedError` (code
 `composed_lsp_replacement_refused`, closed `reason`: `rollout_off`, `cli_unsupported`, `selection`,
 `run_list`, `providers`) before any write, and again inside the transaction below, where it rolls
-the inserted row back. The `selection` reason instead raises `ReopenStepFormError` with a notice: changing the dependency selection and ticking replacement together re-parks the form for review rather than failing the step.
+the inserted row back. The `selection` reason instead raises `ReopenStepFormError` with a notice: changing the dependency selection and ticking replacement together re-parks the form for review rather than failing the step. It opts into `reuseFormValues`: the runner uses the existing reuse reconciliation hook and form-default overlay to preserve the refused dependency, version, container and database edits as defaults. Human-only fields reset, and the notice explains that the replacement tick must be chosen again. Saved answers are cleared for the new decision, which requires a fresh submit.
 
 On acceptance one transaction inserts a NEW template row, locks the owned step (status and rerun generation), then takes the task row lock (see Provider
 lock), checks owner, epoch, live/nondead status, current step and round, and decides again from the task's current CLI (the oldest enabled provider when it has none)
@@ -1425,7 +1425,7 @@ Provider lock. A task whose template is contract 2 can launch only a provider th
 retained effective composed image. A switch is refused with 409 `composed_lsp_provider_locked` on
 the step-CLI choice route and the summary CLI route, and a fix-round choice is refused with
 `FixRoundCliLocked`, whose message the escalation gate shows; the gate offers only providers the
-lock accepts. `fixRoundOptionProviders` remains an advisory read: it holds no lock across a human decision. The transactional writer re-reads under the task lock and refuses a choice that became incompatible. The task detail exposes `cliProviderRestrictions`, per-provider explicit-write refusal messages from the same shared decision. The task page disables and annotates those options in summary, default, role and seat pickers; the server remains authoritative. `@haive/shared/composed-lsp-provider-lock` allows exactly one enabled
+lock accepts. `fixRoundOptionProviders` remains an advisory read: it holds no lock across a human decision. The transactional writer re-reads under the task lock and refuses a choice that became incompatible. The task detail exposes `cliProviderRestrictions`, per-provider `{ code, message }` refusals from `composedLspProviderRestrictions`, the same pure decision the locked writer uses. Both derive the retained-image set from `composedLspAllowedSet`, as dispatch does; an effective image anchors the provider row instead of a conflicting task default, while before the first image the task default still anchors the one-row rule. Web gates on the reason code, even when its display message is empty. The task page disables and annotates those options in summary, default, role and seat pickers; the server remains authoritative. `@haive/shared/composed-lsp-provider-lock` allows exactly one enabled
 `claude-code` provider. The dispatcher refuses the rest of the way: `composedLspProviderIds` holds
 the providers with an effective reference, a preferred provider outside it returns a skip plan
 with a named reason (the user's saved pick is the one exception, below), and with no preference the
@@ -1467,8 +1467,7 @@ be skipped. The persona pin check (`personaProviderNameFor`, `task-queue.ts`) as
 function, so on a composed task it names the substitute that will run, for an enabled and a disabled
 saved pick alike. The api readers parse the retained image references with the shared parser
 (`@haive/shared` `composed-image-references`); a task whose `composedLspImageRefs` pin is malformed
-is logged by id only and left on its pre-lock view in the listing, the task detail, the step cards
-and the disable preview, so it can still be opened and stopped. Dispatch stays strict and refuses
+is logged by id only and left on its pre-lock view in the listing, the task detail, the step cards and the disable preview, so it can still be opened and stopped. The task detail separately keeps coded picker restrictions for the known contract-2 task, using the writer's conservative pre-image rule; this does not change those read-only fallback views. Dispatch stays strict and refuses
 it.
 
 A composed task whose lock set has members but none enabled, with no saved or own CLI to hold on,
@@ -1501,7 +1500,7 @@ credential refresh status write, `markProvidersReady`) never take a task or step
 order before the insert, so it matches those writers. One inversion remains: deleting a provider
 holds its row and then needs the task rows its SET NULL rewrites, while a holder of the task row
 needs that provider's share lock (the choice inserts through their foreign key, the summary
-route's update); Postgres aborts one of them (`40P01`) and the state stays consistent. The choice/summary transaction retries that SQLSTATE once, re-reading its inputs on the new transaction. A second deadlock, or a selected provider lost before the retried write, returns `composed_lsp_write_busy` with retry guidance. The API maps this to 503 `composed_lsp_write_busy`; a raw deletion-side `40P01` answers 503 `transaction_retry_required`. Both carry `Retry-After: 1` and `retryable: true`. Other SQLSTATEs and prose never trigger a retry. Real-Postgres controls cover contention and both deadlock victims, including rollback of the aborted side. Saved
+route's update); Postgres aborts one of them (`40P01`) and the state stays consistent. A top-level choice/summary transaction retries that SQLSTATE once, re-reading its inputs on the new transaction. A supplied transaction handle reports busy after its first failed savepoint: rolling back a savepoint cannot release the outer task lock. Only the caller can retry that outer transaction. The retry logs the original deadlock as its cause, and an exhausted busy error retains the cause too. A second deadlock, or a selected provider lost before the retried write, returns `composed_lsp_write_busy` with retry guidance. The API maps this to 503 `composed_lsp_write_busy`; a raw deletion-side `40P01` answers 503 `transaction_retry_required`. Both carry `Retry-After: 1` and `retryable: true`. A persistently disabled provider instead raises `cli_provider_disabled` (API 400); onboarding skill verification catches that code and re-parks its decision form with a notice instead of failing with a concurrency 503. Other SQLSTATEs and prose never trigger a retry. Real-Postgres controls cover contention and both deadlock victims, including rollback of the aborted side. Saved
 preferences are user-wide, so a remembered pick made on another task is not ordered against this
 task's decision.
 

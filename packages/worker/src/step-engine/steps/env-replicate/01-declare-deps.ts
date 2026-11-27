@@ -103,8 +103,8 @@ function refuseReplacement(
 ): never {
   if (reason === 'selection')
     throw new ReopenStepFormError(
-      'The selected language servers cannot use the composed installation. Review the dependencies and leave replacement unchecked, or choose only supported PHP language servers.',
-      { notice: true },
+      'The selected language servers cannot use the composed installation. Review the dependencies and leave replacement unchecked, or choose only supported PHP language servers. Your other answers are kept; the replacement checkbox has been reset.',
+      { notice: true, reuseFormValues: true },
     );
   throw new ComposedLspReplacementRefusedError(reason);
 }

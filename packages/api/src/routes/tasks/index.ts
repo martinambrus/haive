@@ -106,7 +106,7 @@ import {
 } from '../../middleware/maintenance.js';
 import {
   assertComposedLspWriteProviderAvailable,
-  decideComposedLspProviderLock,
+  composedLspProviderRestrictions,
   lockTaskForComposedLsp,
   withComposedLspTransaction,
 } from '@haive/shared/composed-lsp-provider-lock';
@@ -1298,11 +1298,19 @@ taskRoutes.get('/:id', async (c) => {
     executionContract: _execution,
     ...taskFields
   } = task;
+  let malformedComposedPin = false;
   const composedIds = task.envTemplateId
-    ? (await loadComposedProviderSets(db, [id])).get(id)
+    ? (
+        await loadComposedProviderSets(db, [id], () => {
+          malformedComposedPin = true;
+        })
+      ).get(id)
     : undefined;
+  // Read-only CLI views retain their raw fallback, while known contract-2 pickers must
+  // still carry the writer's conservative restrictions when image metadata is unreadable.
+  const pickerComposedIds = malformedComposedPin ? [] : composedIds;
   const providerRows =
-    task.cliProviderId === null || composedIds !== undefined
+    task.cliProviderId === null || pickerComposedIds !== undefined
       ? await db
           .select({
             id: schema.cliProviders.id,
@@ -1329,21 +1337,11 @@ taskRoutes.get('/:id', async (c) => {
             preferred.providerId,
             allowed ? providerRows.filter((p) => allowed.has(p.id)) : providerRows,
           );
-  const cliProviderRestrictions =
-    composedIds === undefined
-      ? undefined
-      : Object.fromEntries(
-          providerRows.flatMap((provider) => {
-            const decision = decideComposedLspProviderLock({
-              providers: providerRows,
-              effectiveProviderIds: [
-                resolveTaskCliProviderId(task.cliProviderId, providerRows),
-                provider.id,
-              ],
-            });
-            return decision.ok ? [] : [[provider.id, decision.message]];
-          }),
-        );
+  const cliProviderRestrictions = composedLspProviderRestrictions({
+    taskCliProviderId: task.cliProviderId,
+    providers: providerRows,
+    composedProviderIds: pickerComposedIds,
+  });
   const taskWithActive = {
     ...taskFields,
     effectiveCliProviderId,

@@ -77,9 +77,9 @@ batches continue.
 The API answers a transaction deadlock by SQLSTATE `40P01`, including a wrapped driver
 error, with 503 `transaction_retry_required`, `retryable: true` and `Retry-After: 1`.
 The response contains fixed retry guidance and no query or bound values. Provider-choice
-and summary writers first retry their transaction once; a second deadlock or a provider
+and summary writers first retry their top-level transaction once; a supplied transaction handle never retries a savepoint while its outer locks stand. The retry log and exhausted busy error retain the original deadlock as `cause`. A second deadlock or a provider
 lost before the write raises `ComposedLspWriteBusyError` (`composed_lsp_write_busy`), also
-answered 503 with retry guidance. No message text triggers these outcomes.
+answered 503 with retry guidance. A persistently disabled provider has the distinct stable code `cli_provider_disabled` (API 400); skill verification re-parks on that code. No message text triggers these outcomes.
 
 ## Configuration store outage
 

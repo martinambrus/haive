@@ -1,5 +1,6 @@
 import {
   ComposedLspProviderLockedError,
+  ComposedLspProviderDisabledError,
   ComposedLspWriteBusyError,
 } from '@haive/shared/composed-lsp-provider-lock';
 import { DataEdgePlanError } from '@haive/shared/data-edge-plan';
@@ -20,6 +21,8 @@ import { isUuid } from '../lib/uuid.js';
 const INVALID_TEXT_REPRESENTATION = '22P02';
 
 export const errorHandler: ErrorHandler<AppEnv> = (err, c) => {
+  if (err instanceof ComposedLspProviderDisabledError)
+    return c.json({ error: err.message, code: err.code }, 400);
   if (err instanceof ComposedLspProviderLockedError)
     return c.json({ error: err.message, code: err.code }, 409);
   if (err instanceof ComposedLspWriteBusyError) {

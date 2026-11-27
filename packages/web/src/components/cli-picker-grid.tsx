@@ -2,7 +2,7 @@
 
 import { InlineMarkdown } from '@/components/markdown/inline-markdown';
 import { useState, type ReactNode } from 'react';
-import type { CliProvider } from '@/lib/api-client';
+import type { CliProvider, CliProviderRestriction } from '@/lib/api-client';
 
 /** A loop role or a fan-out seat: the addressable slot a CLI choice attaches to. */
 type CliSlot = { id: string; label: string };
@@ -35,7 +35,7 @@ export function CliPickerGrid({
   onChange,
 }: {
   providers: CliProvider[];
-  providerRestrictions?: Record<string, string>;
+  providerRestrictions?: Record<string, CliProviderRestriction>;
   /** Prefix for the generated input ids/labels; must be unique per rendered step. */
   idPrefix: string;
   roles?: readonly CliSlot[];
@@ -79,13 +79,13 @@ export function CliPickerGrid({
     <option
       key={p.id}
       value={p.id}
-      disabled={!p.enabled || !!providerRestrictions[p.id]}
-      title={providerRestrictions[p.id]}
+      disabled={!p.enabled || providerRestrictions[p.id]?.code !== undefined}
+      title={providerRestrictions[p.id]?.message}
     >
       {p.label} ({p.name})
       {!p.enabled
         ? ' — disabled'
-        : providerRestrictions[p.id]
+        : providerRestrictions[p.id]?.code
           ? ' — unavailable for this environment'
           : ''}
     </option>
@@ -147,7 +147,9 @@ export function CliPickerGrid({
             ? `${prov.label} is disabled, so this step's effort cannot be changed. Enable it again or choose another CLI for the step.`
             : "Reasoning/effort level for this step's CLI (overrides the CLI's default)"
         }
-        disabled={locked || busy || switchedOff || !!providerRestrictions[providerId]}
+        disabled={
+          locked || busy || switchedOff || providerRestrictions[providerId]?.code !== undefined
+        }
         value={value}
         onChange={(e) => void onChange(providerId || null, roleId, e.target.value, remember)}
         className={effortSelectClass}

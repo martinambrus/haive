@@ -484,3 +484,36 @@ it('skill-verification refuses a stale option after the task becomes composed', 
   expect(reads).toEqual([true]);
   expect(fake.rows(schema.taskStepCliChoices)).toEqual([]);
 });
+
+it('re-parks verification when a once-offered provider is persistently disabled', async () => {
+  const TASK = '00000000-0000-4000-8000-000000000001';
+  const USER = '00000000-0000-4000-8000-000000000002';
+  const OFF = '00000000-0000-4000-8000-000000000003';
+  const fake = createFakeDb({
+    tasks: schema.tasks,
+    cliProviders: schema.cliProviders,
+    envTemplates: schema.envTemplates,
+    taskStepCliChoices: schema.taskStepCliChoices,
+  });
+  fake.insert(schema.tasks, { id: TASK, userId: USER });
+  fake.insert(schema.cliProviders, { id: OFF, userId: USER, name: 'codex', enabled: false });
+  const ctx = {
+    db: fake.db,
+    userId: USER,
+    taskId: TASK,
+    logger: { info: () => {} },
+  } as unknown as StepContext;
+  await expect(
+    skillVerificationStep.apply(ctx, {
+      detected: detectStub(
+        [makeCheck({ skillId: 'bad', passed: false, issues: ['empty'] })],
+        [{ id: OFF, label: 'Codex' }],
+        OFF,
+      ),
+      formValues: { decision: 'repair', repairCli: OFF },
+      iteration: 0,
+      previousIterations: [],
+    }),
+  ).rejects.toMatchObject({ name: 'ReopenStepFormError', notice: true });
+  expect(fake.rows(schema.taskStepCliChoices)).toEqual([]);
+});

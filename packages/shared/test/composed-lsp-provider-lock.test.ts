@@ -1,6 +1,8 @@
 import { describe, expect, it, vi } from 'vitest';
-import type { SQL } from 'drizzle-orm';
+import { eq, type SQL } from 'drizzle-orm';
 import { PgDialect } from 'drizzle-orm/pg-core';
+import { PostgresJsTransaction } from 'drizzle-orm/postgres-js';
+import { logger } from '../src/logger/index.js';
 import { schema, type Database } from '@haive/database';
 import { createFakeDb } from '@haive/database/testing';
 import {
@@ -171,6 +173,36 @@ describe('checkTaskComposedLspProvider', () => {
     expect(await run(setup({ template: v2 }), CLAUDE)).toEqual({ ok: true, providerId: CLAUDE });
   });
 
+  it('anchors explicit writes to the retained effective image when the stored task default differs', async () => {
+    const db = setup({ template: v2, taskCli: CLAUDE_2 });
+    await db
+      .update(schema.tasks)
+      .set({
+        metadata: {
+          composedLspImageRefs: {
+            schemaVersion: 1,
+            entries: [
+              {
+                providerId: CLAUDE,
+                effective: {
+                  tag: 'img:1',
+                  imageId: 'sha256:1',
+                  identityHash: 'h',
+                  inputs: { rtkVersion: '1', baseImageId: null, rtkPin: null, requestedHash: 'r' },
+                },
+              },
+            ],
+          },
+        },
+      })
+      .where(eq(schema.tasks.id, TASK));
+    expect(await run(db, CLAUDE)).toEqual({ ok: true, providerId: CLAUDE });
+    expect(await run(db, CLAUDE_2)).toMatchObject({
+      ok: false,
+      violation: { code: 'multiple_providers' },
+    });
+  });
+
   it('refuses codex, a second claude row and a foreign provider under contract 2', async () => {
     const db = setup({ template: v2 });
     expect(await run(db, CODEX)).toMatchObject({
@@ -244,6 +276,34 @@ describe('composed choice transaction deadlock recovery', () => {
       withComposedLspTransaction(db as unknown as Database, async () => null),
     ).rejects.toMatchObject({ code: 'composed_lsp_write_busy', retryable: true });
     expect(db.transaction).toHaveBeenCalledTimes(2);
+  });
+  it('does not retry a transaction handle whose outer locks survive a savepoint rollback', async () => {
+    const tx = Object.create(PostgresJsTransaction.prototype);
+    tx.transaction = vi.fn().mockRejectedValue({ code: '40P01' });
+    await expect(withComposedLspTransaction(tx, async () => null)).rejects.toMatchObject({
+      code: 'composed_lsp_write_busy',
+      cause: { code: '40P01' },
+      retryable: true,
+    });
+    expect(tx.transaction).toHaveBeenCalledTimes(1);
+  });
+  it('logs the retried deadlock and retains the original cause on exhaustion', async () => {
+    const err = new Error('opaque', { cause: { code: '40P01' } });
+    const warn = vi.spyOn(logger, 'warn').mockImplementation(() => {});
+    try {
+      const db = { transaction: vi.fn().mockRejectedValue(err) };
+      await expect(
+        withComposedLspTransaction(db as unknown as Database, async () => null),
+      ).rejects.toMatchObject({ code: 'composed_lsp_write_busy', cause: err });
+      expect(warn).toHaveBeenCalledWith(
+        expect.objectContaining({
+          err: expect.objectContaining({ cause: err }),
+        }),
+        expect.any(String),
+      );
+    } finally {
+      warn.mockRestore();
+    }
   });
   it('does not retry another SQLSTATE or wording that mentions deadlock', async () => {
     const error = Object.assign(new Error('deadlock 40P01'), { code: '23503' });

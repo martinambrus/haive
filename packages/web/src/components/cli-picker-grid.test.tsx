@@ -171,7 +171,7 @@ it('disables API-refused providers in the default, role and seat pickers', () =>
   const view = createRenderer(() => (
     <CliPickerGrid
       providers={providers}
-      providerRestrictions={{ p1: 'The environment refuses this provider.' }}
+      providerRestrictions={{ p1: { code: 'multiple_providers', message: '' } }}
       idPrefix="restricted"
       defaultProviderId="p1"
       taskCliProviderId={null}
@@ -185,6 +185,6 @@ it('disables API-refused providers in the default, role and seat pickers', () =>
   for (const option of options) {
     expect(option.props.disabled).toBe(true);
     expect(textOf(option)).toContain('unavailable for this environment');
-    expect(option.props.title).toBe('The environment refuses this provider.');
+    expect(option.props.title).toBe('');
   }
 });
