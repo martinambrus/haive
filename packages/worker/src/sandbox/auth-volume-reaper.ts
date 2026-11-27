@@ -189,6 +189,7 @@ export async function reapOrphanedAuthVolumes(
           taskId,
           deps.runner ?? defaultDockerRunner,
           0,
+          false,
         );
         if (sync?.retainTaskCopy) {
           log.info(

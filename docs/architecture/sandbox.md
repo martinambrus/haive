@@ -20,9 +20,15 @@ its source user-volume name, auth mode and isolation; a copy with no source reco
 The sandbox cannot alter that label. Every sync-back path, including mid-task harvest, re-reads
 the ledger's current provider rows after acquiring the auth lock. A moved row, multiple rows
 of the same CLI resolving to different identities, or a label that does not exactly match
-refuses sync before any credential write, with a structural reason in the log. A copy from
-before the label is never synced, including at task end or summary: there is no live-task
-exception or guessed backfill. A refused source sync is safe to discard during boot reaping;
+refuses sync before any credential write, with a structural reason in the log. For a copy from
+before the label, task-end and summary sync preserve the old current-resolution behaviour only
+when every same-CLI ledger row has `updated_at <= tasks.created_at`, read after acquiring the
+auth lock, and all rows resolve to one identity. Settings saves stamp `updated_at`, including
+auth-mode and isolation changes; a newer row, even after an unrelated edit, or a missing timestamp
+refuses this fallback. `auth_generation` has no recorded baseline on an unlabeled copy and cannot
+prove unchanged settings. Boot reaping and mid-task harvest always skip unlabeled copies, so old
+leftovers cannot initiate credential writes. Labeled copies always require the exact source match;
+no label is backfilled. A refused source sync is safe to discard during boot reaping;
 only retryable failures retain the copy. Newer user logins still win by mtime, and a missing
 user volume still wins as a sign-out. No schema or data migration is needed.
 

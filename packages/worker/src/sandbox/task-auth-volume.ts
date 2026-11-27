@@ -1252,11 +1252,12 @@ export async function syncRefreshedAuthToUserVolumes(
   taskId: string,
   runner: DockerRunner = defaultDockerRunner,
   lockWaitMs = 30_000,
+  allowUnlabeled = true,
 ): Promise<{ retainTaskCopy: boolean }> {
   let retainTaskCopy = false;
   for (const provider of await taskAuthProviders(db, taskId)) {
     const outcome = { retry: false };
-    await syncProviderAuthBack(taskId, provider, db, runner, lockWaitMs, outcome);
+    await syncProviderAuthBack(taskId, provider, db, runner, lockWaitMs, outcome, allowUnlabeled);
     retainTaskCopy ||= outcome.retry;
   }
   return { retainTaskCopy };
@@ -1273,7 +1274,14 @@ async function taskAuthProviders(db: Database, taskId: string): Promise<AuthSync
     if (!providerId) continue;
     const provider = await db.query.cliProviders.findFirst({
       where: eq(schema.cliProviders.id, providerId),
-      columns: { id: true, userId: true, name: true, isolateAuth: true, authMode: true },
+      columns: {
+        id: true,
+        userId: true,
+        name: true,
+        isolateAuth: true,
+        authMode: true,
+        updatedAt: true,
+      },
     });
     if (provider) providers.push(provider);
   }
@@ -1288,6 +1296,8 @@ export interface AuthSyncProvider {
   name: CliProviderName;
   authMode: AuthMode;
   isolateAuth: boolean;
+  /** Read under the auth lock for the pre-label task-end transition only. */
+  updatedAt?: Date;
 }
 
 /** Carry ONE provider's in-task credential back to its user volume, when the in-task CLI
@@ -1308,6 +1318,7 @@ export async function syncProviderAuthBack(
   runner: DockerRunner = defaultDockerRunner,
   lockWaitMs = 30_000,
   outcome?: { retry: boolean },
+  allowUnlabeled = false,
 ): Promise<boolean> {
   const source = CLI_CREDENTIAL_FILES[provider.name];
   if (!source) return false;
@@ -1350,14 +1361,39 @@ export async function syncProviderAuthBack(
         },
         source.authPathIdx,
       );
-    const reason =
+    let reason =
       !current || identity(current) !== authSourceIdentity(ctx, source.authPathIdx)
         ? 'provider_scope_changed'
         : new Set(rows.map(identity)).size > 1
           ? 'ambiguous_provider_rows'
-          : (await runner.volumeLabel?.(taskVol, AUTH_SOURCE_LABEL)) !== identity(current)
-            ? 'source_identity_mismatch'
-            : null;
+          : null;
+    if (!reason) {
+      const label = await runner.volumeLabel?.(taskVol, AUTH_SOURCE_LABEL);
+      if (label === null && allowUnlabeled) {
+        // Only task-end/summary callers enable this transition. Boot and harvest must
+        // never use a timestamp to initiate writes from unattributed old leftovers.
+        // Settings saves stamp updatedAt, including auth-mode/isolation changes. Check
+        // EVERY ledger row: a new or edited sibling cannot vouch for an older copy.
+        // authGeneration alone cannot help: an unlabeled volume records no baseline.
+        const task = await db.query.tasks.findFirst({
+          where: eq(schema.tasks.id, taskId),
+          columns: { createdAt: true },
+        });
+        const createdAt = task?.createdAt?.getTime();
+        if (
+          createdAt === undefined ||
+          !Number.isFinite(createdAt) ||
+          !rows.every((row) => {
+            const updatedAt = row.updatedAt?.getTime();
+            return updatedAt !== undefined && updatedAt <= createdAt;
+          })
+        ) {
+          reason = 'legacy_provider_row_changed';
+        }
+      } else if (label !== identity(current!)) {
+        reason = 'source_identity_mismatch';
+      }
+    }
     if (reason) {
       log.warn(
         { taskId, providerId: provider.id, provider: provider.name, reason },

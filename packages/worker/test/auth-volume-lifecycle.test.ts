@@ -17,7 +17,10 @@ import { createFakeDb } from '@haive/database/testing';
 import { cliAuthTaskVolumeName, resolveCliAuthUserVolumeName } from '@haive/shared';
 import type { SQL } from 'drizzle-orm';
 import { reapOrphanedAuthVolumes } from '../src/sandbox/auth-volume-reaper.js';
-import { syncRefreshedAuthToUserVolumes } from '../src/sandbox/task-auth-volume.js';
+import {
+  syncProviderAuthBack,
+  syncRefreshedAuthToUserVolumes,
+} from '../src/sandbox/task-auth-volume.js';
 import type { DockerRunner, DockerRunOpts } from '../src/sandbox/docker-runner.js';
 
 const lock = vi.hoisted(() => ({ acquire: vi.fn(), afterAcquire: () => {} }));
@@ -59,8 +62,15 @@ function fixture() {
     name: 'codex' as const,
     authMode: 'subscription' as const,
     isolateAuth: false,
+    updatedAt: new Date('2026-01-01T00:00:00Z'),
   };
-  fake.insert(schema.tasks, { id: taskId, userId, status: 'failed', orchestrationEpoch: 1 });
+  fake.insert(schema.tasks, {
+    id: taskId,
+    userId,
+    status: 'failed',
+    orchestrationEpoch: 1,
+    createdAt: new Date('2026-01-02T00:00:00Z'),
+  });
   fake.insert(schema.users, { id: userId });
   fake.insert(schema.cliProviders, provider);
   fake.insert(schema.cliInvocations, { id: randomUUID(), taskId, cliProviderId: provider.id });
@@ -215,6 +225,90 @@ it('boot skips an unrecorded legacy source without writing any user credential',
   expect(await f.reap()).toBe(1);
   expect(f.events).toEqual(['remove']);
   f.unchanged();
+});
+it('task-end and summary sync carry back an unlabeled copy with an unchanged provider row', async () => {
+  const f = fixture();
+  f.labels.clear();
+  expect(await syncRefreshedAuthToUserVolumes(f.db, f.taskId, f.runner)).toEqual({
+    retainTaskCopy: false,
+  });
+  expect(f.events).toEqual(['copy']);
+  expect(readFileSync(join(f.dirs.get(f.userVol)!, 'auth.json'), 'utf8').includes(f.rotated)).toBe(
+    true,
+  );
+});
+it.each(['authMode', 'isolateAuth', 'unrelated'] as const)(
+  'skips an unlabeled copy after a provider %s update since task creation',
+  async (field) => {
+    const f = fixture();
+    f.labels.clear();
+    f.fake.patch(schema.cliProviders, f.provider.id, {
+      ...(field === 'authMode' ? { authMode: 'api_key' } : {}),
+      ...(field === 'isolateAuth' ? { isolateAuth: true } : {}),
+      updatedAt: new Date('2026-01-03T00:00:00Z'),
+    });
+    await syncRefreshedAuthToUserVolumes(f.db, f.taskId, f.runner);
+    expect(f.events).toEqual([]);
+    f.unchanged();
+  },
+);
+it('checks unlabeled row age after acquiring the auth lock', async () => {
+  const f = fixture();
+  f.labels.clear();
+  lock.afterAcquire = () =>
+    f.fake.patch(schema.cliProviders, f.provider.id, {
+      updatedAt: new Date('2026-01-03T00:00:00Z'),
+    });
+  await syncRefreshedAuthToUserVolumes(f.db, f.taskId, f.runner);
+  expect(f.events).toEqual([]);
+  f.unchanged();
+});
+it('requires every same-scope ledger row to predate task creation for an unlabeled copy', async () => {
+  const f = fixture();
+  f.labels.clear();
+  const sibling = {
+    ...f.provider,
+    id: randomUUID(),
+    updatedAt: new Date('2026-01-03T00:00:00Z'),
+  };
+  f.fake.insert(schema.cliProviders, sibling);
+  f.fake.insert(schema.cliInvocations, {
+    id: randomUUID(),
+    taskId: f.taskId,
+    cliProviderId: sibling.id,
+  });
+  await syncRefreshedAuthToUserVolumes(f.db, f.taskId, f.runner);
+  expect(f.events).toEqual([]);
+  f.unchanged();
+});
+it('keeps the multi-row scope refusal for an unlabeled copy', async () => {
+  const f = fixture();
+  f.labels.clear();
+  const sibling = { ...f.provider, id: randomUUID(), isolateAuth: true };
+  f.fake.insert(schema.cliProviders, sibling);
+  f.fake.insert(schema.cliInvocations, {
+    id: randomUUID(),
+    taskId: f.taskId,
+    cliProviderId: sibling.id,
+  });
+  await syncRefreshedAuthToUserVolumes(f.db, f.taskId, f.runner);
+  expect(f.events).toEqual([]);
+  f.unchanged();
+});
+it('mid-task harvest still refuses an unlabeled copy even with an unchanged row', async () => {
+  const f = fixture();
+  f.labels.clear();
+  expect(await syncProviderAuthBack(f.taskId, f.provider, f.db, f.runner, 0)).toBe(false);
+  expect(f.events).toEqual([]);
+  f.unchanged();
+});
+it('labeled copies still sync after unrelated row updates', async () => {
+  const f = fixture();
+  f.fake.patch(schema.cliProviders, f.provider.id, {
+    updatedAt: new Date('2026-01-03T00:00:00Z'),
+  });
+  await syncRefreshedAuthToUserVolumes(f.db, f.taskId, f.runner);
+  expect(f.events).toEqual(['copy']);
 });
 it('boot keeps a busy copy and syncs it on the next pass', async () => {
   const f = fixture();
