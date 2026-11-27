@@ -539,7 +539,7 @@ From the T355 build: `enqueueCancelJob` (api lib/cancel-task.ts ~:125, ~:145) is
 
 ### T542 · FNF[settle-members-recheck] · settle members act on a task without re-reading its status after the job-start fence
 
-status: open · kind: fix · priority: P3
+status: done 2026-11-27, merged #1359 57a0c24bb and live (`pnpm docker libs`): five members run in `withTaskSettlementTransaction` (row lock + recheck, 60 s transaction_timeout, abort signal before every destructive call); leftovers in T778 and T782 · kind: fix · priority: P3
 PRE-EXISTING, from the T393 build (2026-11-07); cost is a cold start or lost shell state when a Retry races a settlement.
 
 1. Members that do not re-check: worker task-queue.ts ~:2045-2052 (the 'superseded' branch), cli-exec/handlers.ts ~:584-631 (`cleanupAuthAfterTerminalSummary`, status only), terminal-session-reaper.ts ~:161-193, ollama-provision.ts ~:292-349, embed-residency.ts ~:87-103.
@@ -1221,6 +1221,18 @@ status: done 2026-11-26, module #20 (d8a8db7, deployed with `pnpm docker libs`):
 In `martinambrus/haive-module-translator`. The owner's English-to-Slovak run failed at `tr-translate`: unit 0's accuracy pass was accepted, its restructure pass was refused with `Source-present keep term missing`. `keepTermLost` (`src/protocol/passes.ts` ~:115, used ~:142, `review.ts` ~:123, `patch.ts` ~:50) needs the literal keep term in the target as often as in the source, so a declined name (Marek to Marka) fails. One attempt is left on that pass key.
 
 1. Accept a declined form (same stem, up to 2 trailing letters changed on words of 5+ letters) at every keep-term check; a translated name still fails; codes and short words stay exact. Then the owner Retries the step.
+
+### T782 · FNF[settle-members-lows] · settlement fence leftovers after T542
+
+status: open · kind: fix · found: T542 reviews 2 and 3 (found-not-fixed) 2026-11-27 · priority: P4
+
+Evidence: `.claude/tmp/codex-run/T542-S/fix-2/found-not-fixed.txt`.
+
+1. `volumeExists` (`worker/src/sandbox/docker-runner.ts`) returns false both for absence and a failed `docker inspect`; distinguishing them needs a richer runner probe, keyed on exit status, not message text. Backstop: boot `reapOrphanedAuthVolumes` and the final summary.
+2. A removal already issued may finish after the settlement transaction rolls back, so its audit row never commits; recording external outcomes needs a settlement identity outside the failed transaction.
+3. `transaction_timeout` needs PostgreSQL 17+; no boot-time server version check (stack and CI pin 18).
+4. The cross-task model start/unload window remains; the lock fences the settling task only.
+5. Summary, CLI-model and embed row-lock controls are fake-db only (auth and terminal run on real Postgres); the deleted-task preparation-map retention and a terminal registry read/delete race on reattachment to an already failed task remain.
 
 ### T781 · new-work-fence-db revival tests race a 5 s lock bound against a 5 s observer
 
