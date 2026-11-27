@@ -1,5 +1,6 @@
+import { taskWriteTarget } from '../task-fence.js';
 import { and, desc, eq, notInArray } from 'drizzle-orm';
-import { schema, type Database } from '@haive/database';
+import { schema, type Database, type DbTx } from '@haive/database';
 import { listResidentOllamaModels, unloadOllamaModel } from './embed.js';
 
 /** The (ollamaUrl, embeddingModel) a task uses for RAG. */
@@ -14,7 +15,7 @@ export interface EmbedTarget {
  *  Returns null when no Ollama model was configured (hash-embedding fallback
  *  loads nothing, so there is nothing to unload). */
 export async function resolveTaskEmbedTarget(
-  db: Database,
+  db: Database | DbTx,
   taskId: string,
 ): Promise<EmbedTarget | null> {
   const readTooling = async (tid: string) => {
@@ -58,7 +59,7 @@ export async function resolveTaskEmbedTarget(
  *  model whenever any unrelated task runs; this matches per (url, model) so two
  *  tasks on different RAG models can free either independently. */
 export async function isEmbedModelUsedByLiveTask(
-  db: Database,
+  db: Database | DbTx,
   url: string,
   model: string,
   excludeTaskId?: string,
@@ -83,9 +84,10 @@ export type EmbedReleaseStatus = 'unloaded' | 'in_use' | 'not_resident' | 'unrea
  *  residency is one cheap HTTP call and the common idle short-circuit, so it runs
  *  before the (multi-query) live-task scan. `alsoInUse` lets a caller fold in its
  *  own external usage signal (e.g. an in-flight global-KB sync job) without
- *  pulling its queue dependency into shared. Never throws. */
+ *  pulling its queue dependency into shared. `excludeTaskId` is the legacy name of the
+ *  settling task: it now fences removal, and is never excluded from the live-task scan. */
 export async function releaseEmbedModelIfUnused(
-  db: Database,
+  db: Database | DbTx,
   opts: { url: string; model: string; alsoInUse?: boolean; excludeTaskId?: string },
 ): Promise<EmbedReleaseStatus> {
   const { url, model, alsoInUse, excludeTaskId } = opts;
@@ -93,7 +95,21 @@ export async function releaseEmbedModelIfUnused(
   if (resident === null) return 'unreachable';
   if (!resident.includes(model)) return 'not_resident';
   if (alsoInUse) return 'in_use';
-  if (await isEmbedModelUsedByLiveTask(db, url, model, excludeTaskId)) return 'in_use';
-  const ok = await unloadOllamaModel(url, model);
-  return ok ? 'unloaded' : 'unreachable';
+  const release = async (handle: Database | DbTx): Promise<EmbedReleaseStatus> => {
+    if (await isEmbedModelUsedByLiveTask(handle, url, model)) return 'in_use';
+    const ok = await unloadOllamaModel(url, model);
+    return ok ? 'unloaded' : 'unreachable';
+  };
+  if (!excludeTaskId) return release(db);
+  // The settling task may have been revived after the job's first check. Its row
+  // lock orders this unload against Retry's status/epoch write through the HTTP call.
+  return db.transaction(async (tx) => {
+    const [task] = await tx
+      .select({ id: schema.tasks.id })
+      .from(schema.tasks)
+      .where(taskWriteTarget(excludeTaskId, { settled: true }))
+      .for('no key update');
+    if (!task) return 'in_use';
+    return release(tx);
+  });
 }

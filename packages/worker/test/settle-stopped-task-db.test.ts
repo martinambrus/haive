@@ -369,6 +369,57 @@ describe.skipIf(!url)('the worker settle job for a task the api Stop failed, on 
     expect(await snapshot(taskId)).toBe(before);
   };
 
+  it('holds the terminal settlement fence against a Retry task write, then preserves the revived shell', async () => {
+    const { reapAllSessionsForTask } = await vi.importActual<
+      typeof import('../src/sandbox/terminal-session-reaper.js')
+    >('../src/sandbox/terminal-session-reaper.js');
+    const taskId = await seedTask('failed');
+    let release!: () => void;
+    let entered!: () => void;
+    const removal = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const removing = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    const remove = vi.fn(async () => {
+      entered();
+      await removal;
+    });
+    const del = vi.fn(async () => 1);
+    const redis = {
+      scan: async () => ['0', ['session']],
+      hgetall: async () => ({ containerName: 'shell' }),
+      del,
+    };
+    const docker = { getContainer: () => ({ remove }) };
+    const cleanup = reapAllSessionsForTask(redis as never, docker as never, taskId, db);
+    await removing;
+    try {
+      await expect(
+        db.transaction(async (tx) => {
+          await tx.execute(sql`set local lock_timeout = '50ms'`);
+          await tx
+            .update(schema.tasks)
+            .set({ status: 'running', orchestrationEpoch: EPOCH + 1 })
+            .where(eq(schema.tasks.id, taskId));
+        }),
+      ).rejects.toMatchObject({ cause: { code: '55P03' } });
+    } finally {
+      release();
+      await cleanup;
+    }
+    await db
+      .update(schema.tasks)
+      .set({ status: 'running', orchestrationEpoch: EPOCH + 1 })
+      .where(eq(schema.tasks.id, taskId));
+    remove.mockClear();
+    del.mockClear();
+    expect(await reapAllSessionsForTask(redis as never, docker as never, taskId, db)).toBe(0);
+    expect(remove).not.toHaveBeenCalled();
+    expect(del).not.toHaveBeenCalled();
+  });
+
   it(
     'W1: a failed task whose completed_at is the stamp is settled and nothing else is touched',
     async () => {

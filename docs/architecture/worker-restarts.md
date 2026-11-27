@@ -673,10 +673,26 @@ cancelled, completed or dead), `warn` for a row or task that no longer exists or
 explains it.
 The allowance watch a failure arms is fenced the same way, and only while the task still reads
 `failed`: the teardown before it can outlast a Retry clicked on that failure, which clears the
-watch as every other exit from `failed` does. The settle job reads its fence once, at its start,
-so a Retry that commits after that read can still meet the teardown in progress, as after a
-failure's own settlement. What it removes is rebuilt by the next ensure (task auth volume, terminal
-shell); only the shell's state is lost. The hint it leaves on the row (`writeStepHint`) lands
+watch as every other exit from `failed` does. The settle job still checks its failure stamp at pickup, and each destructive member
+rechecks settlement through `taskWriteTarget` (`shared/task-fence.ts`, re-exported at the
+existing worker step-ownership path). Auth-volume removal/cache invalidation, each terminal
+session removal and each CLI-model unload hold the task row FOR NO KEY UPDATE from that
+check through the destructive call. The task-triggered embed release takes the same fence;
+it also includes the settling task in the live-model scan instead of excluding a possibly
+revived task. A Retry that committed first therefore keeps its volumes, shell and models;
+a Retry arriving during removal waits for the section to end before publishing its revival.
+These sections acquire no step/run rows or repository locks. Auth sync-back remains outside
+the row lock: it may wait for the CLI auth session lock, which must never be awaited while
+holding a row lock. The summary's deferred auth cleanup repeats the terminal check under
+this fence after sync-back, before invalidating preparations. The superseded pass also
+refuses to initiate a settlement at a newer task epoch.
+
+Auth-volume audit appends use the existing append-once helper under that task row lock,
+keyed by completion stamp and epoch, so two settlements of one failure record one event.
+Removal is still retried even when the event already exists; the first event's counts
+remain its observation. A terminal row without a completion stamp cannot deduplicate.
+Rollback reverts the worker and shared code together, with no migration or data rollback;
+removed resources cannot be restored by reverting and the next ensure recreates them. The hint it leaves on the row (`writeStepHint`) lands
 only while the row still reads `failed` and the task is still failed at that epoch, since a reset
 clears a hint written before it but not one written after; a finished fan-out's timeout hint lands
 only on a row still `done` under the pass's fence, and a login hint only while its run stands.

@@ -374,7 +374,7 @@ function endedAtOf(row: { endedAt: Date | null }): string | null {
 async function appendEventOnce(
   db: Database | DbHandle,
   taskId: string,
-  taskStepId: string,
+  taskStepId: string | null,
   eventType: string,
   payload: Record<string, unknown> & { endedAt: string | null },
 ): Promise<void> {
@@ -385,9 +385,14 @@ async function appendEventOnce(
       .where(
         and(
           eq(schema.taskEvents.taskId, taskId),
-          eq(schema.taskEvents.taskStepId, taskStepId),
+          taskStepId === null
+            ? isNull(schema.taskEvents.taskStepId)
+            : eq(schema.taskEvents.taskStepId, taskStepId),
           eq(schema.taskEvents.eventType, eventType),
-          sql`${schema.taskEvents.payload}->>'endedAt' = ${payload.endedAt}`,
+          sql`${schema.taskEvents.payload} ->> 'endedAt' = ${payload.endedAt}`,
+          taskStepId === null
+            ? sql`${schema.taskEvents.payload} ->> 'epoch' = ${String(payload.epoch)}`
+            : undefined,
         ),
       )
       .limit(1);
@@ -1412,21 +1417,37 @@ async function cleanupTaskContainers(
   }
 
   try {
-    const { removed, failed } = await cleanupTaskAuthVolumes(taskId);
-    if (removed.length > 0 || failed.length > 0) {
-      await appendEvent(db, taskId, null, 'auth_volumes.destroyed', {
-        reason,
-        removed: removed.length,
-        failed: failed.length,
-      });
-    }
+    await db.transaction(async (tx) => {
+      const [task] = await tx
+        .select({
+          id: schema.tasks.id,
+          completedAt: schema.tasks.completedAt,
+          epoch: schema.tasks.orchestrationEpoch,
+        })
+        .from(schema.tasks)
+        .where(taskWriteTarget(taskId, { settled: true }))
+        .for('no key update');
+      if (!task) return;
+      // Retry writes this row last. Hold it through removal and cache invalidation;
+      // no step/run row or repository lock is acquired inside this section.
+      try {
+        const { removed, failed } = await cleanupTaskAuthVolumes(taskId);
+        if (removed.length > 0 || failed.length > 0) {
+          await appendEventOnce(tx, taskId, null, 'auth_volumes.destroyed', {
+            endedAt: task.completedAt?.toISOString() ?? null,
+            epoch: String(task.epoch),
+            reason,
+            removed: removed.length,
+            failed: failed.length,
+          });
+        }
+      } finally {
+        clearTaskAuthPreparationState(taskId);
+      }
+    });
   } catch (err) {
     logger.warn({ err, taskId, reason }, 'cleanup-task-auth-volumes failed');
   }
-  // Outside the try: the in-process record of what was applied to those volumes must be
-  // dropped even when their removal failed, or a task id that came round again would be
-  // told its preparations are already in place.
-  clearTaskAuthPreparationState(taskId);
 
   // The empty workspace a repo-less task ran in. Reaped here and not in the worktree branch
   // below because it is NOT a worktree — no step owns it, nothing else sweeps it, and it sits
@@ -1460,7 +1481,7 @@ async function cleanupTaskContainers(
   // for recovery) — it only drops the live tmux session, and the next attach
   // rebuilds a container via ensureShellContainer.
   try {
-    const reaped = await reapAllSessionsForTask(getRedis(), new Docker(), taskId);
+    const reaped = await reapAllSessionsForTask(getRedis(), new Docker(), taskId, db);
     if (reaped > 0) {
       await appendEvent(db, taskId, null, 'terminal_sessions.destroyed', {
         reason,
@@ -2384,10 +2405,11 @@ export async function handleResult(
       // took it by failing the task, which moves no epoch, and a pass it stopped mid-apply is the
       // only one left to release what the failed task holds.
       const task = await db.query.tasks.findFirst({
-        where: eq(schema.tasks.id, ctx.taskId),
-        columns: { status: true },
+        where: taskWriteTarget(ctx.taskId, { settled: true, epoch: ctx.orchestrationEpoch }),
+        columns: { status: true, orchestrationEpoch: true },
       });
-      if (task?.status === 'failed') await settleFailedTask(db, ctx.taskId);
+      if (task?.status === 'failed' && task.orchestrationEpoch === ctx.orchestrationEpoch)
+        await settleFailedTask(db, ctx.taskId);
       logger.info({ taskId: ctx.taskId, stepId }, 'step pass superseded; nothing to hand off');
       return;
     }

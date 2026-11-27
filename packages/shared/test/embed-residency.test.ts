@@ -1,3 +1,5 @@
+import { schema } from '@haive/database';
+import { createFakeDb } from '@haive/database/testing';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { Database } from '@haive/database';
 import { listResidentOllamaModels } from '../src/rag/embed.js';
@@ -126,6 +128,41 @@ describe('releaseEmbedModelIfUnused', () => {
     const status = await releaseEmbedModelIfUnused(db, { url: URL, model: MODEL });
     expect(status).toBe('in_use');
     expect(calls.unload).toBe(0);
+  });
+
+  it('keeps the settling task model when Retry revives that same task', async () => {
+    const calls = stubFetch({ resident: [MODEL] });
+    const fake = createFakeDb({ tasks: schema.tasks }, { rowLocks: true });
+    fake.insert(schema.tasks, { id: '00000000-0000-4000-8000-000000000001', status: 'running' });
+    const db = fake.db as unknown as Database;
+    const status = await releaseEmbedModelIfUnused(db, {
+      url: URL,
+      model: MODEL,
+      excludeTaskId: '00000000-0000-4000-8000-000000000001',
+    });
+    expect(status).toBe('in_use');
+    expect(calls.unload).toBe(0);
+  });
+
+  it('holds the ended task row through the embed unload', async () => {
+    const fake = createFakeDb({ tasks: schema.tasks }, { rowLocks: true });
+    fake.insert(schema.tasks, { id: '00000000-0000-4000-8000-000000000002', status: 'failed' });
+    const calls = stubFetch({ resident: [MODEL] });
+    const fetch = vi.mocked(globalThis.fetch);
+    const original = fetch.getMockImplementation()!;
+    fetch.mockImplementation(async (...args) => {
+      if (String(args[0]).endsWith('/api/embed'))
+        expect(fake.rowLocked(schema.tasks, '00000000-0000-4000-8000-000000000002')).toBe(true);
+      return original(...args);
+    });
+    expect(
+      await releaseEmbedModelIfUnused(fake.db as unknown as Database, {
+        url: URL,
+        model: MODEL,
+        excludeTaskId: '00000000-0000-4000-8000-000000000002',
+      }),
+    ).toBe('unloaded');
+    expect(calls.unload).toBe(1);
   });
 
   it('unloaded: resident and no task uses it → sends keep_alive:0', async () => {

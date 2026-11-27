@@ -1,3 +1,5 @@
+import { schema, type Database } from '@haive/database';
+import { createFakeDb } from '@haive/database/testing';
 import { describe, expect, it } from 'vitest';
 import type Docker from 'dockerode';
 import type { Redis } from 'ioredis';
@@ -138,7 +140,7 @@ describe('TerminalSessionReaper.sweep', () => {
 
 describe('reapAllSessionsForTask', () => {
   it('reaps every session matching :{taskId}: regardless of refcount', async () => {
-    const taskId = 'task-9';
+    const taskId = '00000000-0000-4000-8000-000000000009';
     const seed = new Map<string, FakeRecord>([
       [
         `${TERMINAL_SESSION_PREFIX}u1:${taskId}:p1`,
@@ -159,7 +161,14 @@ describe('reapAllSessionsForTask', () => {
     ]);
     const { redis, deletes } = fakeRedis(seed);
     const { docker, removed } = fakeDocker();
-    const killed = await reapAllSessionsForTask(redis, docker, taskId);
+    const fake = createFakeDb({ tasks: schema.tasks });
+    fake.insert(schema.tasks, { id: taskId, status: 'failed' });
+    const killed = await reapAllSessionsForTask(
+      redis,
+      docker,
+      taskId,
+      fake.db as unknown as Database,
+    );
     expect(killed).toBe(2);
     expect(removed.sort()).toEqual(['haive-shell-attached', 'haive-shell-idle']);
     expect(deletes).toHaveLength(2);
@@ -169,7 +178,12 @@ describe('reapAllSessionsForTask', () => {
     const seed = new Map<string, FakeRecord>();
     const { redis } = fakeRedis(seed);
     const { docker, removed } = fakeDocker();
-    const killed = await reapAllSessionsForTask(redis, docker, 'task-none');
+    const killed = await reapAllSessionsForTask(
+      redis,
+      docker,
+      'task-none',
+      createFakeDb({ tasks: schema.tasks }).db as unknown as Database,
+    );
     expect(killed).toBe(0);
     expect(removed).toEqual([]);
   });

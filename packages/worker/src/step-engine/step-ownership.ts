@@ -6,32 +6,9 @@ import { currentBuildStamp } from '../build-stamp.js';
 type TaskStepRow = typeof schema.taskSteps.$inferSelect;
 type DbHandle = Parameters<Parameters<Database['transaction']>[0]>[0];
 
-/** Statuses a task never comes back from. Cancel is the user's final word and completion is
- *  done; only `failed` is revivable (retry / allowance auto-resume). Every write that could flip
- *  a task back to running/waiting excludes these, so a stale job cannot raise the dead. */
-export const TERMINAL_TASK_STATUSES = ['cancelled', 'completed'] as const;
-
-/** A job's write to the task under the epoch the job holds. It lands only while the task is still
- *  at that epoch and has not failed since: a Stop fails a task without moving the epoch. A job may
- *  revive a task that was already failed when it picked it up (`reviveFailed`), which the pickup
- *  guard allows only for an answer to a form still parked, since answering it reopens the task. */
-export interface TaskFence {
-  epoch: number;
-  reviveFailed?: boolean;
-}
-
-/** `held`: new work is held, so a failed task is not written, whatever the fence allows. */
-export function taskWriteTarget(taskId: string, fence?: TaskFence, held = false) {
-  const refused = held || (fence !== undefined && !fence.reviveFailed);
-  return and(
-    eq(schema.tasks.id, taskId),
-    notInArray(schema.tasks.status, [
-      ...TERMINAL_TASK_STATUSES,
-      ...(refused ? (['failed'] as const) : []),
-    ]),
-    ...(fence ? [eq(schema.tasks.orchestrationEpoch, fence.epoch)] : []),
-  );
-}
+// Keep the worker import path stable; settlement and shared RAG use the same task fence.
+export { TERMINAL_TASK_STATUSES, taskWriteTarget, type TaskFence } from '@haive/shared';
+import { taskWriteTarget } from '@haive/shared';
 
 const owned = (id: string) =>
   and(
