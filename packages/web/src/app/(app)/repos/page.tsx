@@ -1,5 +1,8 @@
 'use client';
+
 import { LinkButton } from '@/components/ui';
+import { Dialog } from '@/components/dialog';
+import { MarkdownView } from '@/components/markdown/markdown-view';
 
 import Link from 'next/link';
 import { useEffect, useState } from 'react';
@@ -144,6 +147,11 @@ interface ScopeTreeState {
   savedExclusions: string[];
 }
 
+interface RetryRequest {
+  id: string;
+  recovery: boolean;
+}
+
 export default function ReposPage() {
   usePageTitle('Repositories');
   const [repos, setRepos] = useState<Repository[] | null>(null);
@@ -151,6 +159,9 @@ export default function ReposPage() {
   const [expandedRepoId, setExpandedRepoId] = useState<string | null>(null);
   const [scope, setScope] = useState<ScopeTreeState | null>(null);
   const [scopeLoading, setScopeLoading] = useState(false);
+  const [retryRequest, setRetryRequest] = useState<RetryRequest | null>(null);
+  const [retrySending, setRetrySending] = useState<RetryRequest | null>(null);
+  const sendingRetry = retryRequest !== null && retrySending === retryRequest;
   const [scopeError, setScopeError] = useState<string | null>(null);
 
   async function reload() {
@@ -180,13 +191,29 @@ export default function ReposPage() {
 
   // Retry extraction for a failed upload, or refresh from a folder/remote source.
   async function handleRetry(id: string, recovery = false) {
+    const code = repos?.find((repo) => repo.id === id)?.errorCode;
     if (
-      recovery &&
-      !confirm(
-        'Rebuild this checkout from its source? The old folder, including unpushed commits and local files, will be kept beside the new checkout. Task records, settings and knowledge base records will be preserved. Completed or cancelled tasks’ worktrees stay in the kept folder. Finish or cancel unfinished tasks with worktrees in this checkout before rebuilding.',
-      )
-    )
+      !recovery &&
+      (code === REPOSITORY_ERROR_CODES.CHECKOUT_REPAIR_NEEDED ||
+        code === REPOSITORY_ERROR_CODES.SOURCE_REPAIR_NEEDED)
+    ) {
+      await submitRetry(id, false);
       return;
+    }
+    setRetryRequest({ id, recovery });
+  }
+
+  async function confirmRetry() {
+    if (!retryRequest || sendingRetry) return;
+    const request = retryRequest;
+    setRetrySending(request);
+    await submitRetry(request.id, request.recovery);
+    // Dismissal may have opened or confirmed another dialog while this request ran.
+    setRetrySending((current) => (current === request ? null : current));
+    setRetryRequest((current) => (current === request ? null : current));
+  }
+
+  async function submitRetry(id: string, recovery: boolean) {
     try {
       await api.post(`/repos/${id}/${recovery ? 'recover-checkout' : 'refresh-tree'}`, {});
       await reload();
@@ -244,6 +271,31 @@ export default function ReposPage() {
 
   return (
     <div className="flex flex-col gap-6">
+      <Dialog
+        open={retryRequest !== null}
+        onOpenChange={(open) => {
+          if (!open) setRetryRequest(null);
+        }}
+        aria-label="Confirm repository rebuild"
+      >
+        <div className="space-y-4 p-5 text-neutral-200">
+          <h2 className="text-lg font-semibold">
+            {retryRequest?.recovery ? 'Rebuild checkout' : 'Retry repository preparation'}
+          </h2>
+          <MarkdownView body="If this replaces the checkout, running commands in this repository’s terminals, Editors and runtimes will stop. Editor unsaved buffers are kept for review. DDEV database changes made since the last saved snapshot are discarded when its runner is replaced. After the repository is ready, reopen sessions explicitly and compare restored buffers with the rebuilt files before saving." />
+          {retryRequest?.recovery && (
+            <MarkdownView body="The old folder, including local files and unpushed commits, will be kept beside the new checkout. Task records, settings and knowledge base records are preserved. Finish or cancel unfinished tasks with worktrees before rebuilding." />
+          )}
+          <div className="flex justify-end gap-2">
+            <Button variant="secondary" onClick={() => setRetryRequest(null)}>
+              Cancel
+            </Button>
+            <Button disabled={sendingRetry} onClick={() => void confirmRetry()}>
+              {sendingRetry ? 'Starting…' : 'Continue'}
+            </Button>
+          </div>
+        </div>
+      </Dialog>
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
           <h1 className="text-2xl font-bold text-neutral-50">Repositories</h1>
