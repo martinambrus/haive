@@ -845,12 +845,18 @@ remain compatible with relink's Git hold. The project-state writer already uses 
 Deletion retains bounded `FOR UPDATE` because it must exclude child inserts and remove the row.
 The shared onboarding/upgrade admission helper retains its existing bounded `FOR UPDATE`
 (through API admission, worker revival and dead revival), preserving its admission exclusion;
-it can still answer busy during Git. Task Start can still refuse T780's live checkout mutation
-lease; a compatible project-state writer no longer holds its task key waiting on relink Git.
+it can still answer busy during Git. Residual 409: delete and onboarding/upgrade admission
+(including Retry/revival) can hold the task-creation key while their FOR UPDATE waits behind
+relink KEY SHARE, so a concurrent Task Start can still answer 409 busy at its shorter 5 s bound.
+Task Start can also refuse T780's live checkout mutation lease; a compatible project-state
+writer no longer holds its task key waiting on relink Git.
 
 Lock order: mutation-lease acquisition/release uses separate short row-update transactions;
-none holds a row while acquiring a key. Relink/intent/repair use remote key → row and acquire
-no task-creation, project-state or allow-list key afterward. Existing writers keep task key →
+none holds a row while acquiring a key. Relink/intent/repair and gate-4 origin persistence use
+remote key → row and acquire no task-creation, project-state or allow-list key afterward.
+Gate 4 opens its own transaction with no outer task/domain key; credential validation and
+audit insertion acquire no advisory key. The shared `remoteRelinkKey` in `@haive/database`
+defines the key text for API and worker. Existing writers keep task key →
 domain key → row (or their existing subset), and deletion keeps task key → row. No holder of
 a row waits for the new remote key. The final KEY SHARE → NO KEY UPDATE upgrade adds no
 reverse key edge. RAG Retry's post-commit restore remains bounded and can now pass during Git;
@@ -886,19 +892,22 @@ row lock, a typed URL or chosen credential that differs from a saved one refuses
 (`pushed:false`, nothing written, no audit row) and points to "Change remote" on the Repositories
 page; a value the form only displayed from the detect snapshot never fills a slot cleared since. A row that already
 has a remote, with an origin in the checkout, makes the push a one-off: no row lock, no write, and
-the selected credential is used for that push only. Otherwise it takes a bounded `FOR NO KEY UPDATE` lock,
-re-checks the row under it, and follows the relink's order: `repository.remote.update` row
-(source `gate4_push`), an add-only `ensureOrigin` when the checkout has no origin, then the column
-write, which also binds the selected credential when one was chosen. It removes only an origin it
-added, on a callback or commit failure, after an in-flight callback settles; a failed restore is
+the selected credential is used for that push only. Otherwise it takes the same `remote-relink:<id>`
+advisory transaction key as relink, then `FOR NO KEY UPDATE`, both under the existing LOCAL lock
+timeout. It re-checks the row, inserts the `repository.remote.update` audit row
+(source `gate4_push`), runs add-only `ensureOrigin` when the checkout has no origin, then writes the
+columns, binding the selected credential when one was chosen. It removes only an origin it
+added, on a callback or commit failure, after an in-flight callback settles. Callback-failure
+undo retains the remote key through Git, excluding relink; a commit/connection-failure undo
+can run after lock release and retains the existing late-restore race. A failed restore is
 the reported failure. Each git call is aborted after 10 s; the worker's abort sends SIGTERM to the
 git process group and SIGKILL 1 s later (the relink waits 2 s), so a killed git can still leave a
 `config.lock`. A Retry after a failed row write repairs the row from the checkout's origin, under
 the lock and without touching git, but only when that origin still matches the one the form showed;
 a changed origin is refused before any credential or row write, matching `taskRemoteUrl`'s rule that
 a push approval binds to the address the user saw. Retries and matching values add no duplicate
-audit row. A lock wait that times out fails the step with the database's message (the worker has no
-409 mapping).
+audit row. A key or row wait that times out keeps the existing step failure:
+`Repository is busy. Retry this step in a moment.` The worker has no HTTP 409 mapping.
 
 Disconnect (`integration.connection.disconnect`) is the one exception, on purpose: its row follows
 the vendor revoke, which cannot be undone and whose outcome (`revoked`) the row records, so it stays

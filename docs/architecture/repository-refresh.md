@@ -307,7 +307,8 @@ folder import's Git-only origin whose database `remote_url` is null.
 
 A successful relink leaves intent for locked reconciliation. For a request with
 no predecessor repair, a known refusal before any mutation clears its token,
-as does a successful undo under the relink row lock. An unreadable previous-remote
+as does a successful undo while the relink holds the remote advisory key and row KEY SHARE.
+An unreadable previous-remote
 snapshot also clears its token even without an exit status: that read changed
 nothing. The add-origin and clear-push-URL mutation sites still retain intent when
 the outcome is unknown (deadline, signal or spawn failure). A failed undo also
@@ -324,8 +325,9 @@ request pool is used only to collect the page, never held across sweep Git.
 Each selected repository first takes the mutation lease; a live API writer's lease holds repair
 as `checkout`, including after its database connection drops. After API death the intent remains
 untouched until that lease expires. It is then rechecked under the fresh-client remote key
-(a nonwaiting try) and KEY SHARE row lock, taken with `SKIP LOCKED`: a repository a relink
-holds is passed over, not waited for, so the
+(a nonwaiting try) and KEY SHARE row lock, taken with `SKIP LOCKED`: the advisory try-lock
+passes over a live relink or gate-4 origin writer; SKIP LOCKED passes over retained FOR UPDATE
+takers (delete and onboarding/upgrade admission), since KEY SHARE is compatible with relink's hold. The
 sweep never acts on a live request's intent the moment that request rolls back;
 the next tick sees it again. A dropped database connection releases that lock
 before the request's Git writes finish, so the lock alone is not enough: a relink

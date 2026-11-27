@@ -1,5 +1,6 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { logger } from '@haive/shared';
+import type { StepContext, StepDefinition } from '@haive/shared/step';
 import { eq, sql } from 'drizzle-orm';
 import { cp, mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -28,6 +29,15 @@ const h = vi.hoisted(() => ({
   gitHook: undefined as ((args: string[]) => Promise<void>) | undefined,
   lockTimeoutMs: 30_000,
   ragProbe: undefined as (() => Promise<boolean>) | undefined,
+  gate4Ensure: vi.fn(async () => ({ added: true, updated: false })),
+  gate4Push: vi.fn(async () => {}),
+}));
+// Only the gate-4 Git seam is faked; its transaction and the relink route use real Postgres.
+vi.mock('../../worker/src/repo/git-push.js', async (original) => ({
+  ...(await original<Record<string, unknown>>()),
+  getOriginUrl: async () => null,
+  ensureOrigin: h.gate4Ensure,
+  pushBranch: h.gate4Push,
 }));
 vi.mock('node:child_process', async (original) => {
   const actual = await original<typeof import('node:child_process')>();
@@ -110,6 +120,11 @@ import { REPOSITORY_BUSY } from '../src/lib/repository-busy.js';
 import { lockRemoteRelink, markRemoteIntent } from '../src/lib/remote-reconcile.js';
 import { errorHandler } from '../src/middleware/error-handler.js';
 import type { AppEnv } from '../src/context.js';
+// Runtime-only test loading keeps the API typecheck independent of worker sources.
+const gate4Module = new URL(
+  '../../worker/src/step-engine/steps/workflow/11a-gate-4-push.ts',
+  import.meta.url,
+).pathname;
 
 /** The pending value, or an error naming the wait when `ms` pass first. */
 async function answeredWithin<T>(ms: number, pending: Promise<T>): Promise<T> {
@@ -127,6 +142,7 @@ async function answeredWithin<T>(ms: number, pending: Promise<T>): Promise<T> {
 }
 
 describe.skipIf(!url)('Repository security settings commit with their audit, on Postgres', () => {
+  let gate4PushStep: StepDefinition;
   let db: ReturnType<typeof createDatabase>;
   let repository: string;
   let connection: string;
@@ -150,6 +166,7 @@ describe.skipIf(!url)('Repository security settings commit with their audit, on 
     `);
   let checkoutFixture: string;
   beforeAll(async () => {
+    ({ gate4PushStep } = await import(gate4Module));
     db = createDatabase(url!);
     h.db = db;
     checkoutFixture = await mkdtemp(path.join(tmpdir(), 'relink-fixture-'));
@@ -161,6 +178,8 @@ describe.skipIf(!url)('Repository security settings commit with their audit, on 
     if (checkoutFixture) await rm(checkoutFixture, { recursive: true, force: true });
   });
   beforeEach(async () => {
+    h.gate4Ensure.mockClear();
+    h.gate4Push.mockClear();
     h.freshCalls = 0;
     h.relinkDatabase = undefined;
     h.actor = (await makeActor(db)).id;
@@ -864,6 +883,72 @@ describe.skipIf(!url)('Repository security settings commit with their audit, on 
       },
     ]);
   }, 30_000);
+  it('bounds gate-4 origin writes behind a relink parked in Git', async () => {
+    const root = await mkdtemp(path.join(tmpdir(), 'remote-gate4-'));
+    roots.push(root);
+    await cp(checkoutFixture, root, { recursive: true });
+    await git(root, ['remote', 'remove', 'origin']);
+    await db
+      .update(schema.repositories)
+      .set({ localPath: root, remoteUrl: null })
+      .where(eq(schema.repositories.id, repository));
+    h.lockTimeoutMs = 300;
+    let entered!: () => void;
+    let release!: () => void;
+    const reached = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    const resume = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    h.gitHook = async (args) => {
+      if (args.includes('add') && args.at(-1) === 'https://relink.test/r') {
+        entered();
+        await resume;
+      }
+    };
+    const relink = Promise.resolve(
+      app.request(`/repos/${repository}/remote`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ remoteUrl: 'https://relink.test/r' }),
+      }),
+    );
+    let push: Promise<unknown> | undefined;
+    try {
+      await answeredWithin(5_000, reached);
+      push = gate4PushStep.apply({ db, userId: h.actor, logger } as unknown as StepContext, {
+        iteration: 0,
+        previousIterations: [],
+        detected: {
+          hasGit: true,
+          workspacePath: root,
+          branch: 'main',
+          hasOrigin: false,
+          originUrl: null,
+          recentCommits: '',
+          repositoryId: repository,
+          boundCredentialId: null,
+          credentials: [],
+        },
+        formValues: { push: true, remoteUrl: 'https://gate4.test/r' },
+      });
+      await expect(answeredWithin(5_000, push)).rejects.toThrow(
+        'Repository is busy. Retry this step in a moment.',
+      );
+      expect(h.gate4Ensure).not.toHaveBeenCalled();
+      expect(h.gate4Push).not.toHaveBeenCalled();
+      expect((await stored())!.remoteUrl).toBeNull();
+      expect(await audits(db)).toEqual([]);
+    } finally {
+      release();
+      await Promise.allSettled([relink, push]);
+      h.gitHook = undefined;
+    }
+    expect((await relink).status).toBe(200);
+    expect((await stored())!.remoteUrl).toBe('https://relink.test/r');
+    expect(await git(root, ['remote', 'get-url', 'origin'])).toBe('https://relink.test/r');
+  }, 15_000);
   const sendSetting = (suffix: string, body: unknown, method = 'PATCH') =>
     app.request(`${suffix === 'exclusions' ? '/repos' : '/repositories'}/${repository}/${suffix}`, {
       method,

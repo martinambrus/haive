@@ -7,7 +7,7 @@ import {
 import type { DbTx, RootClaimHandle } from '@haive/database';
 import { randomUUID } from 'node:crypto';
 import { and, asc, eq, gt, isNotNull, sql } from 'drizzle-orm';
-import { schema, withSettledTransaction } from '@haive/database';
+import { remoteRelinkKey, schema, withSettledTransaction } from '@haive/database';
 import { linkRepoRemoteRequestSchema, logger } from '@haive/shared';
 import { redactEditableGitUrl } from '@haive/shared/schemas';
 import { getDb, withFreshDatabase } from '../db.js';
@@ -28,7 +28,7 @@ const relinkWriters = new Map<string, number>();
 /** Always before a repository row. No task/domain key is acquired while holding this key. */
 export async function lockRemoteRelink(tx: DbTx, id: string, skipLocked = false): Promise<boolean> {
   return boundedLockWait(tx, async () => {
-    const key = `remote-relink:${id}`;
+    const key = remoteRelinkKey(id);
     if (skipLocked) {
       const [row] = await tx.execute<{ taken: boolean }>(
         sql`select pg_try_advisory_xact_lock(hashtextextended(${key}, 0)) as taken`,
@@ -129,8 +129,8 @@ export function isRemoteConnectionError(err: unknown): boolean {
 }
 
 /** A fresh locked read is the authority, never the route's pre-transaction snapshot.
- *  `skipLocked` (the sweep) passes over a row a relink holds instead of waiting for it: that
- *  request settles its own intent after it releases the row, and the next tick sees the rest. */
+ * The sweep's advisory try-lock excludes a live relink; KEY SHARE does not conflict with
+ * its row hold. SKIP LOCKED instead passes over retained FOR UPDATE takers (delete/admission). */
 export async function reconcileRemote(
   id: string,
   userId: string,
@@ -147,7 +147,8 @@ export async function reconcileRemote(
             .where(and(eq(schema.repositories.id, id), eq(schema.repositories.userId, userId)))
             .for('key share', skipLocked ? { skipLocked: true } : undefined),
         );
-        // SKIP LOCKED cannot distinguish a held row from a delete. An ordinary MVCC
+        // SKIP LOCKED skips FOR UPDATE holders, not relinks (excluded by the advisory key).
+        // It cannot distinguish a held row from a delete. An ordinary MVCC
         // read does not wait for its writer, and avoids calling a vanished row locked.
         if (!repo) {
           if (skipLocked) {

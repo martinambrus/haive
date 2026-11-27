@@ -3655,7 +3655,8 @@ repoRoutes.delete('/:id', async (c) => {
     await boundedLockWait(tx, () => lockRepositoryTasksKey(tx, id));
     // Locked, so a clone or a reset that has not claimed the root yet claims it only after this
     // commits, and finds no row: every writer of the root runs under that claim. The row's wait has
-    // its own bound: a relink holds the row through its git work, and the key above is held meanwhile.
+    // its own bound: a relink holds KEY SHARE through Git, conflicting with this FOR UPDATE,
+    // and the task-creation key above is held meanwhile.
     const repoRows = await boundedLockWait(tx, () =>
       tx
         .select({
