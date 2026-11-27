@@ -1,7 +1,9 @@
 import { cliAuthScope } from '@haive/shared/cli-auth-state';
-import { and, eq, inArray } from 'drizzle-orm';
+import { and, eq, inArray, isNotNull, isNull } from 'drizzle-orm';
 import {
+  cliAuthIdSlug,
   cliAuthTaskVolumePrefix,
+  cliAuthVolumeOwner,
   logger,
   lockLoginSet,
   resolveCliAuthUserVolumeName,
@@ -46,15 +48,85 @@ interface GrokProviderRow {
   isolateAuth: boolean;
 }
 
-/** True when any per-task auth volume for this CLI exists, i.e. some task is holding a
- *  copy of the credential. Pure so the yield rule is testable without docker. */
-export function taskVolumesHoldProvider(
+/** Only copies that live work can still rotate hold background refresh. Labels scope
+ * the hold to the original credential volume, even if a provider's settings moved.
+ * Unknown status/source holds this tick; nothing is cached, so a successful lookup on
+ * a later usage tick releases it once the task and its invocations have settled. */
+export async function taskVolumesHoldProvider(
   volumeNames: string[],
   providerName: CliProviderName,
-): boolean {
-  return volumeNames.some(
+  userVolume: string,
+  db: Database,
+  runner: DockerRunner,
+): Promise<boolean> {
+  const candidates = volumeNames.filter(
     (name) => name.startsWith(cliAuthTaskVolumePrefix()) && name.includes(`_${providerName}_`),
   );
+  if (candidates.length === 0) return false;
+  let tasks: { id: string; status: string }[] | undefined;
+  try {
+    tasks = await db.query.tasks.findMany({ columns: { id: true, status: true } });
+  } catch (err) {
+    log.warn({ err }, 'credential refresh task status lookup failed; retrying next tick');
+  }
+  for (const name of candidates) {
+    const slug = cliAuthVolumeOwner(name)?.slug;
+    const owners = tasks?.filter((task) => cliAuthIdSlug(task.id) === slug);
+    // Missing tasks have no invocation ledger left. Slug collisions hold if ANY owner
+    // can still rotate; do not arbitrarily choose one of the matching tasks.
+    let mayRotate =
+      !owners || owners.some((task) => !['completed', 'failed', 'cancelled'].includes(task.status));
+    if (!mayRotate && owners && owners.length > 0) {
+      try {
+        mayRotate = Boolean(
+          await db.query.cliInvocations.findFirst({
+            where: and(
+              inArray(
+                schema.cliInvocations.taskId,
+                owners.map((task) => task.id),
+              ),
+              isNotNull(schema.cliInvocations.startedAt),
+              isNull(schema.cliInvocations.endedAt),
+              isNull(schema.cliInvocations.supersededAt),
+            ),
+            columns: { id: true },
+          }),
+        );
+      } catch (err) {
+        mayRotate = true;
+        log.warn(
+          { err, volume: name },
+          'credential refresh invocation lookup failed; retrying next tick',
+        );
+      }
+    }
+    if (!mayRotate) continue;
+    try {
+      const label = await runner.volumeLabel?.(name, 'haive.auth-source');
+      if (label === 'none') continue;
+      if (!label) return true; // Legacy or unavailable source: retain the CLI-wide hold.
+      const source: unknown = JSON.parse(label);
+      if (!source || typeof source !== 'object' || Array.isArray(source)) return true;
+      const fields = source as Record<string, unknown>;
+      // The known unversioned v0 and v1 shapes have the same source fields. Unknown
+      // versions cannot prove which credential this live copy holds.
+      if (
+        ('version' in fields && fields.version !== 1) ||
+        typeof fields.userVolume !== 'string' ||
+        (fields.authMode !== 'subscription' && fields.authMode !== 'api_key') ||
+        typeof fields.isolateAuth !== 'boolean'
+      )
+        return true;
+      if (fields.userVolume === userVolume) return true;
+    } catch (err) {
+      log.warn(
+        { err, volume: name },
+        'credential refresh source lookup failed; retrying next tick',
+      );
+      return true;
+    }
+  }
+  return false;
 }
 
 /**
@@ -65,8 +137,8 @@ export function taskVolumesHoldProvider(
  * signed in.
  *
  * Two rules make this safe:
- *  - It YIELDS to running work. A per-task auth volume existing for the CLI means some
- *    task holds a copy of the same credential and may refresh off the same single-use
+ *  - It YIELDS to live work holding a copy of this credential (by source label,
+ *    conservatively CLI-wide for an unknown source). Both may refresh off the same single-use
  *    refresh token; rotating concurrently signs one of the two out mid-run. Waiting costs
  *    a tick, and the task's own teardown sync carries its refresh back anyway.
  *  - It rotates each USER VOLUME once, not each provider row. Several rows of one CLI share
@@ -93,10 +165,6 @@ export async function refreshExpiringCliCredentials(
   if (rows.length === 0) return;
 
   const taskVolumes = await listTaskAuthVolumes();
-  if (taskVolumesHoldProvider(taskVolumes, GROK)) {
-    log.debug({ provider: GROK }, 'credential refresh yielded: a task holds a copy');
-    return;
-  }
 
   // One entry per distinct user volume; the rows sharing it all get the same verdict.
   const byVolume = new Map<string, GrokProviderRow[]>();
@@ -117,6 +185,10 @@ export async function refreshExpiringCliCredentials(
   for (const [vol, sharing] of byVolume) {
     let release: CliAuthLock | null = null;
     try {
+      if (await taskVolumesHoldProvider(taskVolumes, GROK, vol, db, runner)) {
+        log.debug({ vol }, 'credential refresh yielded: live work may rotate a copy');
+        continue;
+      }
       release = await tryCliAuthLock(db, cliAuthScope(sharing[0]!));
       if (!release) {
         log.debug(

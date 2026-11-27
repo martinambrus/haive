@@ -103,8 +103,9 @@ const defaultDeps: AuthVolumeReaperDeps = {
 /** Names of every per-task CLI auth volume currently on the host.
  *
  *  Exported for the credential refresher, which must not rotate a user-volume credential
- *  while any task still holds a COPY of it: both sides would refresh off the same
- *  single-use refresh token and whichever lost the race would be signed out mid-run. */
+ *  while live work holds a COPY of it. This listing also includes terminal recovery
+ *  copies: callers must check task/invocation activity and the source label before
+ *  treating a copy as a refresh hold. */
 export async function listTaskAuthVolumes(): Promise<string[]> {
   return listVolumes(TASK_VOL_FILTER);
 }

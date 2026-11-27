@@ -86,6 +86,22 @@ old copy only after confirming it is no longer needed. Do not relabel a legacy c
 verification. Unknown-version copies require a compatible worker reader or the same operator
 review before disposal. Worker restarts alone do not resolve either refusal.
 
+Background Grok credential refresh holds only while a nonterminal task or a started,
+not-ended, not-superseded invocation can still rotate a task copy. Retained terminal recovery
+copies never hold refresh, including unlabeled and unknown-version copies; this decision
+neither syncs nor removes them. A missing task has no invocation ledger left and does not hold.
+For live copies, the Docker-owned source label scopes the hold to its original user-volume
+name, so another user's or isolated provider's copy does not block this credential. The known
+v0 and v1 shapes are read structurally; `none` holds nothing. Unknown/malformed/absent labels
+conservatively hold that CLI while its task/invocation is live. Slug collisions hold if any
+matching task can rotate. Failed task/invocation lookups also hold, scoped by the label where
+known. No hold result is cached: every usage tick re-reads status and source, so a transient
+lookup failure ends on the next successful read showing settlement, or after the copy is
+removed. A persistent lookup outage continues to hold until repaired; no age timeout rotates
+against work whose state cannot be established. The refresher still locks each credential
+scope and rotates each distinct user volume once. Reverting this hold change restores the
+CLI-wide blockage from retained copies; no schema or recovery-volume change is needed.
+
 Sync's task/user volume probes, credential reads and mtime reads use strict volume existence
 checks. Docker inspect's generic failure exit cannot prove absence: strict checks instead use
 a successful filtered volume listing and compare the exact name. A failed listing, spawn or
