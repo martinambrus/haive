@@ -851,6 +851,19 @@ relink KEY SHARE, so a concurrent Task Start can still answer 409 busy at its sh
 Task Start can also refuse T780's live checkout mutation lease; a compatible project-state
 writer no longer holds its task key waiting on relink Git.
 
+Every advisory key built from a uuid takes it through `canonicalUuid` (`@haive/database`), the
+lowercase 8-4-4-4-12 form. PostgreSQL reads a uuid in any case, in braces, and with hyphens omitted
+or after any group of four digits, so a route parameter, or a job payload copied from one, keyed
+as written takes a different lock than the printed id of the same row and two writers each believe
+they hold the exclusion. The sinks: `remoteRelinkKey`, `lockRepositoryTasksKey`
+(`onboarding-upgrade:`), `withTaskAttachmentsLock`, `lockPlanMerge`, `lockPlanPatch` and
+`tryLockPlanPatch`, `lockTaskIntegrations` and `tryLockTaskIntegrations`, the allow-list save
+(`integration-allow-list:`), the project-state key (`lockProjectState` and the tooling route),
+`lockPlanMirror`, the `cli-sandbox:` fence and `module-source:`. A canonical id keys exactly the
+text it keyed before, so old and new processes share one key during a rollout. A new key built from
+an id a client can spell takes the same step. Keys built from names, paths or constants are not
+uuids and are untouched; Redis job ids and filesystem paths built from a spelling are not covered.
+
 Lock order: mutation-lease acquisition/release uses separate short row-update transactions;
 none holds a row while acquiring a key. Relink/intent/repair and gate-4 origin persistence use
 remote key → row and acquire no task-creation, project-state or allow-list key afterward.
