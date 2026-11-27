@@ -29,7 +29,10 @@ vi.mock('../src/lib/remote-reconcile.js', async (original) => {
     beginRelinkWriter: vi.fn((id: string) => vi.fn(real.beginRelinkWriter(id))),
   };
 });
-vi.mock('../src/db.js', () => ({ getDb: () => h.db }));
+vi.mock('../src/db.js', () => ({
+  getDb: () => h.db,
+  withFreshDatabase: (run: (db: unknown) => Promise<unknown>) => run(h.db),
+}));
 vi.mock('../src/middleware/auth.js', () => ({
   requireAuth: async (c: { set(key: string, value: string): void }, next: () => unknown) => {
     c.set('userId', USER);
@@ -64,6 +67,7 @@ beforeEach(() => {
     repoCredentials: schema.repoCredentials,
   });
   fake.insert(schema.repositories, {
+    status: 'ready',
     id: REPO,
     userId: USER,
     name: 'repo',
@@ -919,7 +923,9 @@ it('leaves Git as written and reports reconciliation when the fresh read is unav
     expect(response.status).toBe(500);
     expect(await response.text()).toContain('state is being reconciled');
     expect(h.git).toHaveBeenCalledTimes(2); // Checkout probe and the successful remote add; no blind undo.
-    expect(h.reconcile).toHaveBeenCalledWith(REPO, USER);
+    expect(h.reconcile).toHaveBeenCalledWith(REPO, USER, {
+      owner: expect.objectContaining({ release: expect.any(Function) }),
+    });
   } finally {
     errors.mockRestore();
   }
@@ -1148,3 +1154,21 @@ it('clears its intent when the previous remote read returns no exit status', asy
   expect(fake.rows(schema.repositories)[0]!.remoteUrl).toBeNull();
   expect(fake.rows(schema.auditEvents)).toEqual([]);
 });
+
+it.each(['cloning', 'claimed'])(
+  'refuses remote mutation during %s before recording intent',
+  async (state) => {
+    fake.patch(
+      schema.repositories,
+      REPO,
+      state === 'cloning'
+        ? { status: 'cloning' }
+        : { rootClaimedAt: new Date(), rootClaimKind: 'rebuild', rootClaimOwner: 'foreign' },
+    );
+    const response = await link();
+    expect(response.status).toBe(409);
+    expect(await response.json()).toMatchObject({ code: 'checkout_unavailable' });
+    expect(h.mark).not.toHaveBeenCalled();
+    expect(h.git).not.toHaveBeenCalled();
+  },
+);

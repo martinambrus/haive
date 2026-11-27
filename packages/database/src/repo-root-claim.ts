@@ -523,6 +523,21 @@ export interface RootClaimHandle {
   lost(): boolean;
 }
 
+// Runtime identity, not structural typing: a fabricated handle cannot authorize checkout access.
+const heldClaims = new WeakMap<
+  RootClaimHandle,
+  { repositoryId: string; owner: string; active: () => boolean }
+>();
+
+export function rootClaimHandleOwns(
+  handle: RootClaimHandle,
+  repositoryId: string,
+  owner: string | null,
+): boolean {
+  const held = heldClaims.get(handle);
+  return !!held && held.repositoryId === repositoryId && held.owner === owner && held.active();
+}
+
 /**
  * Take a root claim and KEEP it for as long as the caller works, then release it.
  *
@@ -673,7 +688,7 @@ export async function acquireRootClaim(
   }, ROOT_CLAIM_RENEW_MS);
   timer.unref?.();
 
-  return {
+  const handle: RootClaimHandle = {
     lost: () => lost,
     async release() {
       clearInterval(timer);
@@ -717,6 +732,8 @@ export async function acquireRootClaim(
       current = null;
     },
   };
+  heldClaims.set(handle, { repositoryId, owner, active: () => current !== null && !lost });
+  return handle;
 }
 
 /** The live claim on this repository, or null. Readers that only need to refuse use this; the

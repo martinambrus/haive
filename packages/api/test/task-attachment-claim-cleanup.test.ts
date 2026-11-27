@@ -69,6 +69,7 @@ describe('an upload that fails after it claimed its name', () => {
     await mkdir(repo, { recursive: true });
     fake = createRouteDb();
     fake.insert(schema.repositories, {
+      status: 'ready',
       id: REPO,
       userId: USER,
       name: 'repo-1',

@@ -1,6 +1,8 @@
+import { requireCheckoutAccess, withCheckoutMutation } from '@haive/shared/checkout-access';
+import type { RootClaimHandle } from '@haive/database';
 import { randomUUID } from 'node:crypto';
 import { and, asc, eq, gt, isNotNull } from 'drizzle-orm';
-import { schema } from '@haive/database';
+import { schema, withSettledTransaction } from '@haive/database';
 import { linkRepoRemoteRequestSchema, logger } from '@haive/shared';
 import { redactEditableGitUrl } from '@haive/shared/schemas';
 import { getDb, withFreshDatabase } from '../db.js';
@@ -111,76 +113,95 @@ export function isRemoteConnectionError(err: unknown): boolean {
 export async function reconcileRemote(
   id: string,
   userId: string,
-  { skipLocked = false }: { skipLocked?: boolean } = {},
+  { skipLocked = false, owner }: { skipLocked?: boolean; owner?: RootClaimHandle } = {},
 ): Promise<'locked' | 'fenced' | undefined> {
-  return withFreshDatabase(async (db) => {
-    return db.transaction(async (tx) => {
-      const [repo] = await boundedLockWait(tx, () =>
-        tx
-          .select()
-          .from(schema.repositories)
-          .where(and(eq(schema.repositories.id, id), eq(schema.repositories.userId, userId)))
-          .for('no key update', skipLocked ? { skipLocked: true } : undefined),
-      );
-      // SKIP LOCKED cannot distinguish a held row from a delete. An ordinary MVCC
-      // read does not wait for its writer, and avoids calling a vanished row locked.
-      if (!repo) {
-        if (skipLocked) {
-          const pending = await tx.query.repositories.findFirst({
-            where: and(
-              eq(schema.repositories.id, id),
-              eq(schema.repositories.userId, userId),
-              isNotNull(schema.repositories.remoteRelinkIntent),
-            ),
-            columns: { id: true },
-          });
-          if (pending) return 'locked' as const;
+  const run = async (checkoutOwner: RootClaimHandle) =>
+    withFreshDatabase(async (db) => {
+      return withSettledTransaction(db, async (tx) => {
+        const [repo] = await boundedLockWait(tx, () =>
+          tx
+            .select()
+            .from(schema.repositories)
+            .where(and(eq(schema.repositories.id, id), eq(schema.repositories.userId, userId)))
+            .for('no key update', skipLocked ? { skipLocked: true } : undefined),
+        );
+        // SKIP LOCKED cannot distinguish a held row from a delete. An ordinary MVCC
+        // read does not wait for its writer, and avoids calling a vanished row locked.
+        if (!repo) {
+          if (skipLocked) {
+            const pending = await tx.query.repositories.findFirst({
+              where: and(
+                eq(schema.repositories.id, id),
+                eq(schema.repositories.userId, userId),
+                isNotNull(schema.repositories.remoteRelinkIntent),
+              ),
+              columns: { id: true },
+            });
+            if (pending) return 'locked' as const;
+          }
+          return;
         }
-        return;
-      }
-      if (!repo.remoteRelinkIntent) return;
-      // A relink whose connection dropped may still be writing Git; it reconciles itself.
-      if (skipLocked && relinkWriters.has(id)) return 'fenced' as const;
-      const root = repo.storagePath ?? repo.localPath;
-      if (!root) throw new Error('Repository has no path for remote reconciliation');
-      await verifyRelinkCheckout(root);
-      // A legacy stored URL may still contain credentials. Never copy those to Git.
-      let remote: string | null = null;
-      if (repo.remoteUrl !== null) {
-        const parsed = linkRepoRemoteRequestSchema.safeParse({
-          remoteUrl: redactEditableGitUrl(repo.remoteUrl),
+        if (!repo.remoteRelinkIntent) return;
+        // A relink whose connection dropped may still be writing Git; it reconciles itself.
+        if (skipLocked && relinkWriters.has(id)) return 'fenced' as const;
+        await requireCheckoutAccess(tx, id, {
+          mode: 'mutation',
+          owner: checkoutOwner,
+          availability: 'repair',
         });
-        if (!parsed.success) throw new Error('Saved remote needs repair before reconciliation');
-        remote = parsed.data.remoteUrl;
-      }
-      const git = (args: string[]) => relinkGit(root, args);
-      if (remote === null) {
-        const removed = await git(['remote', 'remove', 'origin']);
-        if (!removed.ok && removed.code !== 2)
-          throw new Error(`Could not reconcile origin: ${gitFailureText(removed)}`);
-      } else {
-        const added = await git(['remote', 'add', 'origin', remote]);
-        if (!added.ok && added.code !== 3)
-          throw new Error(`Could not reconcile origin: ${gitFailureText(added)}`);
-        if (!added.ok) {
-          const cleared = await git(['config', '--local', '--unset-all', 'remote.origin.pushurl']);
-          if (!cleared.ok && cleared.code !== 5)
-            throw new Error(`Could not reconcile push URLs: ${gitFailureText(cleared)}`);
-          const updated = await git([
-            'config',
-            '--local',
-            '--replace-all',
-            'remote.origin.url',
-            remote,
-          ]);
-          if (!updated.ok)
-            throw new Error(`Could not reconcile remote URL: ${gitFailureText(updated)}`);
+        const root = repo.storagePath ?? repo.localPath;
+        if (!root) throw new Error('Repository has no path for remote reconciliation');
+        await verifyRelinkCheckout(root);
+        // A legacy stored URL may still contain credentials. Never copy those to Git.
+        let remote: string | null = null;
+        if (repo.remoteUrl !== null) {
+          const parsed = linkRepoRemoteRequestSchema.safeParse({
+            remoteUrl: redactEditableGitUrl(repo.remoteUrl),
+          });
+          if (!parsed.success) throw new Error('Saved remote needs repair before reconciliation');
+          remote = parsed.data.remoteUrl;
         }
-      }
-      await clearRemoteIntent(id, repo.remoteRelinkIntent, tx);
-      logger.info({ repositoryId: id }, 'reconciled repository remote to the database');
+        const git = (args: string[]) => relinkGit(root, args);
+        if (remote === null) {
+          const removed = await git(['remote', 'remove', 'origin']);
+          if (!removed.ok && removed.code !== 2)
+            throw new Error(`Could not reconcile origin: ${gitFailureText(removed)}`);
+        } else {
+          const added = await git(['remote', 'add', 'origin', remote]);
+          if (!added.ok && added.code !== 3)
+            throw new Error(`Could not reconcile origin: ${gitFailureText(added)}`);
+          if (!added.ok) {
+            const cleared = await git([
+              'config',
+              '--local',
+              '--unset-all',
+              'remote.origin.pushurl',
+            ]);
+            if (!cleared.ok && cleared.code !== 5)
+              throw new Error(`Could not reconcile push URLs: ${gitFailureText(cleared)}`);
+            const updated = await git([
+              'config',
+              '--local',
+              '--replace-all',
+              'remote.origin.url',
+              remote,
+            ]);
+            if (!updated.ok)
+              throw new Error(`Could not reconcile remote URL: ${gitFailureText(updated)}`);
+          }
+        }
+        await clearRemoteIntent(id, repo.remoteRelinkIntent, tx);
+        logger.info({ repositoryId: id }, 'reconciled repository remote to the database');
+      });
     });
+  if (owner) return run(owner);
+  // Do not claim another tenant's row or turn a deleted repository into a checkout failure.
+  const repo = await getDb().query.repositories.findFirst({
+    where: and(eq(schema.repositories.id, id), eq(schema.repositories.userId, userId)),
+    columns: { id: true },
   });
+  if (!repo) return;
+  return withCheckoutMutation(getDb(), id, userId, run, 'repair');
 }
 
 /** One bounded page per tick, rotating through IDs. No request-pool connection spans Git. */

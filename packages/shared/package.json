@@ -7,6 +7,10 @@
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "exports": {
+    "./checkout-access": {
+      "types": "./dist/checkout-access.d.ts",
+      "import": "./dist/checkout-access.js"
+    },
     "./task-scratch": {
       "types": "./dist/task-scratch.d.ts",
       "import": "./dist/task-scratch.js"

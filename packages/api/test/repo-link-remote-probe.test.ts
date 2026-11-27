@@ -31,6 +31,7 @@ let fake: ReturnType<typeof createFakeDb>;
 beforeEach(() => {
   fake = createFakeDb({ repositories: schema.repositories, auditEvents: schema.auditEvents });
   fake.insert(schema.repositories, {
+    status: 'ready',
     id: REPO,
     userId: USER,
     name: 'repo',

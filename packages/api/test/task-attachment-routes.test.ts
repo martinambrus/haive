@@ -5,6 +5,7 @@ import {
   mkdtemp,
   readFile,
   readdir,
+  rename,
   rm,
   stat,
   symlink,
@@ -21,7 +22,7 @@ const h = vi.hoisted(() => ({ db: undefined as unknown }));
 vi.mock('../src/db.js', () => ({ getDb: () => h.db }));
 
 import { Hono } from 'hono';
-import { schema, withTaskAttachmentsLock, type Database } from '@haive/database';
+import { schema, acquireRootClaim, withTaskAttachmentsLock, type Database } from '@haive/database';
 import { createFakeDb, type FakeRow } from '@haive/database/testing';
 import { CONFIG_KEYS, configService } from '@haive/shared';
 import { attachmentRoutes } from '../src/routes/tasks/attachments.js';
@@ -248,6 +249,7 @@ describe('task attachment routes', () => {
 
     fake = createRouteDb();
     fake.insert(schema.repositories, {
+      status: 'ready',
       id: REPO,
       userId: USER,
       name: 'repo-1',
@@ -276,6 +278,105 @@ describe('task attachment routes', () => {
     vi.restoreAllMocks();
     await rm(storage, { recursive: true, force: true });
     await rm(outside, { recursive: true, force: true });
+  });
+
+  it('refuses new disk access while cloning but keeps the DB list available', async () => {
+    const row = await seedFile('spec.md', 'old');
+    fake.patch(schema.repositories, REPO, { status: 'cloning' });
+    for (const response of [
+      await upload('new.md'),
+      await send('DELETE', `/${TASK}/attachments/${row.id}`),
+      await send('DELETE', `/${TASK}/attachments?prefix=docs`),
+    ]) {
+      expect(response).toMatchObject({ status: 409, body: { code: 'checkout_unavailable' } });
+    }
+    const raw = await download(row.id as string);
+    expect(raw.status).toBe(409);
+    expect(JSON.parse(raw.bytes.toString())).toMatchObject({ code: 'checkout_unavailable' });
+    expect((await send('GET', `/${TASK}/attachments`)).status).toBe(200);
+    expect(await readFile(up('spec.md'), 'utf8')).toBe('old');
+  });
+
+  it('holds replacement exclusion from an acquired upload handle through finalization', async () => {
+    let started!: () => void;
+    let finish!: () => void;
+    const writing = new Promise<void>((resolve) => {
+      started = resolve;
+    });
+    const finished = new Promise<void>((resolve) => {
+      finish = resolve;
+    });
+    const body = new ReadableStream<Uint8Array>(
+      {
+        async pull(controller) {
+          started();
+          await finished;
+          controller.enqueue(new TextEncoder().encode('user bytes'));
+          controller.close();
+        },
+      },
+      { highWaterMark: 0 },
+    );
+    const response = upload('held.md', body);
+    await writing;
+    const rebuild = await acquireRootClaim(fake.db as unknown as Database, REPO, 'rebuild', USER);
+    try {
+      expect(rebuild).toBeNull();
+    } finally {
+      await rebuild?.release();
+      finish();
+      expect((await response).status).toBe(201);
+    }
+    expect(await readFile(up('held.md'), 'utf8')).toBe('user bytes');
+    expect(filenames()).toEqual(['held.md']);
+  });
+
+  it('records no public-path row if a held upload loses its claim to replacement', async () => {
+    let started!: () => void;
+    let finish!: () => void;
+    const writing = new Promise<void>((r) => {
+      started = r;
+    });
+    const finished = new Promise<void>((r) => {
+      finish = r;
+    });
+    const body = new ReadableStream<Uint8Array>(
+      {
+        async pull(controller) {
+          started();
+          await finished;
+          controller.enqueue(new TextEncoder().encode('retained user bytes'));
+          controller.close();
+        },
+      },
+      { highWaterMark: 0 },
+    );
+    const response = upload('held.md', body);
+    await writing;
+    const aside = `${repo}.aside`;
+    try {
+      // Model takeover after a renewal partition. The normal competing claim is tested above.
+      fake.patch(schema.repositories, REPO, { status: 'cloning', rootClaimOwner: 'successor' });
+      await rename(repo, aside);
+    } finally {
+      finish();
+    }
+    expect(await response).toMatchObject({ status: 409, body: { code: 'checkout_unavailable' } });
+    expect(filenames()).toEqual([]);
+    expect(await readFile(path.join(aside, '.haive/task-uploads', TASK, 'held.md'), 'utf8')).toBe(
+      'retained user bytes',
+    );
+    await expect(lstat(repo)).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
+  it('does not recreate a missing checkout anchor on upload', async () => {
+    await rm(repo, { recursive: true });
+    expect(await upload('new.md')).toMatchObject({
+      status: 409,
+      body: { code: 'checkout_unavailable' },
+    });
+    await expect(lstat(repo)).rejects.toMatchObject({ code: 'ENOENT' });
+    expect(filenames()).toEqual([]);
   });
 
   describe('POST /:id/attachments', () => {
@@ -612,10 +713,9 @@ describe('task attachment routes', () => {
     });
 
     it('never lets two concurrent uploads share a file', async () => {
-      const [first, second] = await Promise.all([
-        upload('a.md', 'first'),
-        upload('a.md', 'second'),
-      ]);
+      let [first, second] = await Promise.all([upload('a.md', 'first'), upload('a.md', 'second')]);
+      if (first?.status === 409) first = await upload('a.md', 'first');
+      if (second?.status === 409) second = await upload('a.md', 'second');
       expect(first?.status).toBe(201);
       expect(second?.status).toBe(201);
       const one = (first?.body?.attachment as Row).filename as string;
@@ -731,7 +831,15 @@ describe('task attachment routes', () => {
       if (taskOver) fake.patch(schema.tasks, TASK, taskOver);
       if (repoOver) fake.patch(schema.repositories, REPO, repoOver);
       const res = await upload('a.md', 'x');
-      expect(res).toEqual({ status: 409, body: { error: message, code: null } });
+      expect(res).toEqual({
+        status: 409,
+        body: taskOver?.repositoryId?.endsWith('f9')
+          ? {
+              error: 'This repository checkout is preparing or unavailable. Try again in a moment.',
+              code: 'checkout_unavailable',
+            }
+          : { error: message, code: null },
+      });
       expect(await listing(repo)).toEqual([]);
     });
 

@@ -216,3 +216,17 @@ into the persisted detect payload and becomes a checkbox a person has to read; a
 filters out the handled ones, so the remainder is the next round's list. The on-disk
 `_ATTACHMENTS.md` and `_PLAN_INPUTS.md` stay UNCAPPED — they are where the prompt sends a
 reader for the names it could not fit.
+
+API attachment mutations also hold `withCheckoutMutation`'s renewing repository root claim
+before any attachment lock, from directory/name creation through streamed body, row finalization,
+manifest and cleanup. No pooled connection spans the body. Competing uploads in one repository
+can receive 409 `checkout_unavailable`; retry after the current mutation finishes. Raw downloads
+use the policy's read admission and failed-acquisition recheck; a verified old handle may finish.
+The DB-only list stays available during cloning. Worker expansion and sidecar writers still rely
+on their task's checkout holder; independent background projection coverage is a follow-up (see
+[Repository refresh](repository-refresh.md#checkout-access-during-replacement-t780-pr2-reduced-scope)).
+
+The attachment-lock helper drains its entire callback even if postgres.js rejects the transaction
+first. A lost SQL lock is not retained, but the API's renewing root lease stays held until the
+last callback filesystem operation settles, including a nested manifest rewrite. This preserves
+replacement exclusion on connection failure as well as on success.

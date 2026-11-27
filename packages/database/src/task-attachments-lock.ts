@@ -1,3 +1,4 @@
+import { withSettledTransaction } from './settled-transaction.js';
 import { sql } from 'drizzle-orm';
 import type { Database } from './index.js';
 
@@ -41,7 +42,7 @@ export async function withTaskAttachmentsLock<T>(
   taskId: string,
   fn: (tx: DbTx) => Promise<T>,
 ): Promise<T> {
-  return (handle as Database).transaction(async (tx) => {
+  return withSettledTransaction(handle, async (tx) => {
     await tx.execute(sql.raw(`SET LOCAL lock_timeout = '${TASK_ATTACHMENTS_LOCK_TIMEOUT_MS}ms'`));
     await tx.execute(
       sql`select pg_advisory_xact_lock(hashtextextended(${`task-attachments:${taskId}`}, 0))`,

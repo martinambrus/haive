@@ -42,6 +42,7 @@ async function setup(nested = false) {
   const fake = createFakeDb({ repositories: schema.repositories, auditEvents: schema.auditEvents });
   if (nested) await ensureDirNoFollow(root, 'nested');
   fake.insert(schema.repositories, {
+    status: 'ready',
     id: REPO,
     userId: USER,
     name: 'repo',
@@ -324,32 +325,10 @@ it('logs both causes in one error when real git cannot restore a failed remote u
     query: 'update repositories set remote_url = $1',
     params: ['synthetic-secret'],
   });
-  h.db = new Proxy(fake.db, {
-    get(target, key) {
-      if (key === 'transaction')
-        return (fn: (tx: any) => Promise<unknown>) =>
-          target.transaction((tx) =>
-            fn(
-              new Proxy(tx, {
-                get(t, prop) {
-                  if (prop === 'update')
-                    return () => ({
-                      set: () => ({
-                        where: async () => {
-                          throw original;
-                        },
-                      }),
-                    });
-                  const value = Reflect.get(t, prop);
-                  return typeof value === 'function' ? value.bind(t) : value;
-                },
-              }),
-            ),
-          );
-      const value = Reflect.get(target, key);
-      return typeof value === 'function' ? value.bind(target) : value;
-    },
-  });
+  // Fail the column write after the required audit, on the request's dedicated client too.
+  fake.hooks.beforeUpdate = async (table) => {
+    if (table === schema.repositories && fake.rows(schema.auditEvents).length > 0) throw original;
+  };
   const shim = await mkdtemp(path.join(tmpdir(), 'remote-restore-fail-'));
   dirs.push(shim);
   const real = (await exec('sh', ['-c', 'command -v git'])).stdout.trim();

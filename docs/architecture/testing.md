@@ -143,3 +143,10 @@ fake database predicate evaluator for owner-qualified reads and updates, includi
 `repo-completion-retry.test.ts` keeps the queue processor real and models checkout replacement
 at the handler seam: a failed completion clear must retain ready, preserve edits made between
 attempts and resume imports without calling the destructive handler again.
+
+`api/test/checkout-access-db.test.ts` is in GATED and uses only its throwaway database. Promise
+barriers hold a streamed body, real Git reconciliation and plan mirror removal while a competing
+root claim tries to rebuild. `checkout-read-rename.test.ts` uses real temporary files with syscall
+seams to rename before anchor open, during descriptor verification and after handle acquisition;
+input variants and capability rejection stay in fake-database tests. No development checkout,
+queues or data stores participate in these controls.

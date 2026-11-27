@@ -1,8 +1,15 @@
+import {
+  CheckoutUnavailableError,
+  requireCheckoutAccess,
+  withCheckoutMutation,
+  withCheckoutRead,
+} from '@haive/shared/checkout-access';
+import type { RootClaimHandle } from '@haive/database';
 import { randomUUID } from 'node:crypto';
 import { type FileHandle } from 'node:fs/promises';
 import { join } from 'node:path';
 import { Readable } from 'node:stream';
-import { Hono } from 'hono';
+import { Hono, type MiddlewareHandler } from 'hono';
 import { and, asc, eq, inArray } from 'drizzle-orm';
 import { isLockNotAvailable, schema, withTaskAttachmentsLock } from '@haive/database';
 import {
@@ -54,7 +61,36 @@ import { HttpError, type AppEnv } from '../../context.js';
 // sandbox user). We create the files 0644 and chown them 1000:1000 so the agent
 // can read them.
 
-export const attachmentRoutes = new Hono<AppEnv>();
+type AttachmentEnv = AppEnv & {
+  Variables: { checkout: { repositoryId: string; owner?: RootClaimHandle } };
+};
+export const attachmentRoutes = new Hono<AttachmentEnv>();
+
+// The renewing root claim is outside the short attachment sections, including body streaming
+// and cleanup. A read only needs admission; its already-verified file may finish on the old inode.
+const checkoutAccess: MiddlewareHandler<AttachmentEnv> = async (c, next) => {
+  if (c.req.method === 'GET' && !c.req.path.endsWith('/raw')) return next();
+  const db = getDb();
+  const task = await db.query.tasks.findFirst({
+    where: and(eq(schema.tasks.id, c.req.param('id')!), eq(schema.tasks.userId, c.get('userId'))),
+    columns: { repositoryId: true },
+  });
+  if (!task) throw new HttpError(404, 'Task not found');
+  if (!task.repositoryId) throw new HttpError(409, 'Task has no repository; cannot attach files');
+  const repositoryId = task.repositoryId;
+  if (c.req.method === 'GET') {
+    c.set('checkout', { repositoryId });
+    await requireCheckoutAccess(db, repositoryId, { mode: 'read' });
+    return next();
+  }
+  await withCheckoutMutation(db, repositoryId, c.get('userId'), async (owner) => {
+    c.set('checkout', { repositoryId, owner });
+    await next();
+  });
+};
+attachmentRoutes.use('/:id/attachments', checkoutAccess);
+attachmentRoutes.use('/:id/attachments/:attachmentId', checkoutAccess);
+attachmentRoutes.use('/:id/attachments/:attachmentId/raw', checkoutAccess);
 
 const NODE_UID = 1000;
 const NODE_GID = 1000;
@@ -161,6 +197,8 @@ function safeUploadPath(raw: string): string {
  *  read routes' answer; errors that are not containment refusals (a full disk or descriptor
  *  exhaustion) propagate to the 500 handler. */
 function uploadPathError(err: unknown): never {
+  if (['ENOENT', 'ENOTDIR'].includes((err as NodeJS.ErrnoException).code ?? ''))
+    throw new CheckoutUnavailableError();
   if (isPathContainmentError(err, 'not-directory')) {
     throw new HttpError(409, 'A file already has the name of a folder in that path');
   }
@@ -442,6 +480,11 @@ attachmentRoutes.post('/:id/attachments', async (c) => {
   // Open until the row is recorded, so a take-back after a failed insert still pins the inode.
   let row: Awaited<ReturnType<typeof finalizeAttachment>>;
   try {
+    const checkout = c.get('checkout');
+    await requireCheckoutAccess(getDb(), checkout.repositoryId, {
+      mode: 'mutation',
+      owner: checkout.owner,
+    });
     row = await finalizeAttachment({
       anchor,
       uploadsRel,
@@ -494,10 +537,13 @@ attachmentRoutes.get('/:id/attachments/:attachmentId/raw', async (c) => {
   const anchor = row.storedPath.slice(0, -suffix.length);
   const rel = join('.haive', 'task-uploads', taskId, row.filename);
 
-  const fh = await openFileNoFollow(anchor, rel, 'read', { strict: true }).catch((err: unknown) =>
-    containmentHttpError(err, 'Attachment path is outside the task workspace'),
-  );
-  if (fh === null) throw new HttpError(404, 'Attachment file is missing on disk');
+  const fh = await withCheckoutRead(getDb(), c.get('checkout').repositoryId, async () => {
+    const held = await openFileNoFollow(anchor, rel, 'read', { strict: true }).catch(
+      (err: unknown) => containmentHttpError(err, 'Attachment path is outside the task workspace'),
+    );
+    if (held === null) throw new HttpError(404, 'Attachment file is missing on disk');
+    return held;
+  });
   const size = (await fh.stat()).size;
 
   // The BASENAME: `filename` may be a relative path now, and a header carrying

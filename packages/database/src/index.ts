@@ -44,6 +44,7 @@ export {
   ROOT_CLAIM_RENEW_MS,
   ROOT_CLAIM_STALE_MS,
   acquireRootClaim,
+  rootClaimHandleOwns,
   claimRepositoryRoot,
   renewRootClaim,
   isRootClaimLive,
@@ -75,3 +76,5 @@ export {
   TASK_START_LOCK_TIMEOUT_MS,
   NEW_WORK_FENCE_LOCK_TIMEOUT_MS,
 } from './repository-task-lock.js';
+
+export { withSettledTransaction } from './settled-transaction.js';

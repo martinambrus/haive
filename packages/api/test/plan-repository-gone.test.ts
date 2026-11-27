@@ -54,7 +54,7 @@ describe('a plan write for a repository that was deleted meanwhile', () => {
       planNodeEdges: schema.planNodeEdges,
       planMirrorState: schema.planMirrorState,
     });
-    fake.insert(schema.repositories, { id: REPO, userId: USER, name: 'repo' });
+    fake.insert(schema.repositories, { id: REPO, userId: USER, name: 'repo', status: 'ready' });
     h.db = fake.db;
     // The route proves the caller owns the repository, then reads the plan switch, then patches:
     // the delete lands between the first two, so the patch is the first thing to find it gone.
@@ -86,7 +86,7 @@ describe('deleting a plan after its repository disappears', () => {
         planNodeEdges: schema.planNodeEdges,
         planMirrorState: schema.planMirrorState,
       });
-      fake.insert(schema.repositories, { id: REPO, userId: USER, name: 'repo' });
+      fake.insert(schema.repositories, { id: REPO, userId: USER, name: 'repo', status: 'ready' });
       fake.insert(schema.planNodes, {
         id: FROM,
         repositoryId: REPO,
@@ -121,7 +121,7 @@ describe('deleting a plan after its repository disappears', () => {
       planNodeEdges: schema.planNodeEdges,
       planMirrorState: schema.planMirrorState,
     });
-    fake.insert(schema.repositories, { id: REPO, userId: USER, name: 'repo' });
+    fake.insert(schema.repositories, { id: REPO, userId: USER, name: 'repo', status: 'ready' });
     fake.insert(schema.planNodes, {
       id: FROM,
       repositoryId: REPO,
@@ -154,7 +154,7 @@ describe('snapshot action failure text', () => {
     '%s hides server paths and preserves refusal wording',
     async (action) => {
       const fake = createFakeDb({ repositories: schema.repositories, tasks: schema.tasks });
-      fake.insert(schema.repositories, { id: REPO, userId: USER, name: 'repo' });
+      fake.insert(schema.repositories, { id: REPO, userId: USER, name: 'repo', status: 'ready' });
       h.db = fake.db;
       vi.spyOn(configService, 'get').mockResolvedValue('true');
       const operation = vi.mocked(action === 'save' ? savePlanMirror : pullPlanMirror);
@@ -191,7 +191,7 @@ describe('snapshot action failure text', () => {
 describe('a busy plan writer', () => {
   it('returns an explicit retryable 409 without refreshing or authenticating again', async () => {
     const fake = createFakeDb({ repositories: schema.repositories, planNodes: schema.planNodes });
-    fake.insert(schema.repositories, { id: REPO, userId: USER, name: 'repo' });
+    fake.insert(schema.repositories, { id: REPO, userId: USER, name: 'repo', status: 'ready' });
     h.db = fake.db;
     vi.spyOn(configService, 'get').mockResolvedValue('true');
     vi.spyOn(fake.db, 'transaction').mockRejectedValueOnce(
