@@ -31,6 +31,18 @@ async function fixture() {
   return { root, identity };
 }
 
+// Callers of the bounded helper must drain the returned continuation, even when a
+// public name or a companion record precedes the park in the directory listing.
+async function recoverListing(root: string, rel: string, names: string[]) {
+  let startIndex = 0;
+  while (startIndex < names.length) {
+    const result = await safe.recoverWorktreeAliasArtifactsNoFollow(root, rel, names, {
+      startIndex,
+    });
+    startIndex = result.nextIndex;
+  }
+}
+
 describe('copyReplaceFileIfIdentityNoFollow', () => {
   it('detaches only the held name, preserving bytes, mode, owner and mtime', async () => {
     expect(safe.COPY_REPLACE_MAX_BYTES).toBe(256 * 1024 * 1024);
@@ -82,11 +94,7 @@ describe('interrupted alias replacement recovery', () => {
       const parked = '.file.haive-alias-park-123-11111111-1111-1111-1111-111111111111';
       await rename(path.join(root, 'tree/file'), path.join(root, 'tree', parked));
       if (published) await writeFile(path.join(root, 'tree/file'), 'new public bytes');
-      await safe.recoverWorktreeAliasArtifactsNoFollow(
-        root,
-        'tree',
-        await readdir(path.join(root, 'tree')),
-      );
+      await recoverListing(root, 'tree', (await readdir(path.join(root, 'tree'))).sort().reverse());
       const entries = await safe.readdirNoFollow(root, 'tree', {
         strict: true,
         maxEntries: 4,
@@ -138,11 +146,7 @@ it('recovers a truncated alias park with its companion record in either listing 
   const parked = `.${leaf.slice(0, 100)}.haive-alias-park-123-11111111-1111-1111-1111-111111111111`;
   await rename(path.join(root, 'tree/file'), path.join(root, 'tree', parked));
   await writeFile(path.join(root, 'tree', `${parked}.name`), leaf);
-  await safe.recoverWorktreeAliasArtifactsNoFollow(
-    root,
-    'tree',
-    await readdir(path.join(root, 'tree')),
-  );
+  await recoverListing(root, 'tree', (await readdir(path.join(root, 'tree'))).sort().reverse());
   expect(await readFile(path.join(root, 'tree', leaf), 'utf8')).toBe('original');
 });
 
@@ -233,4 +237,42 @@ it('I1 still syncs and closes every held descriptor if closing the original reje
   ).resolves.toBe('replaced');
   expect(injected).toBe(true);
   expect((await readdir('/proc/self/fd')).length).toBe(descriptors);
+});
+
+it('budgets artifact recovery and resumes the same listing without losing versions or counts', async () => {
+  expect(safe.WORKTREE_ALIAS_RECOVERY_OPERATIONS).toBe(1);
+  const { root } = await fixture();
+  const names = [
+    ...Array.from(
+      { length: 7 },
+      (_, i) => `.f${i}.haive-alias-tmp-123-11111111-1111-1111-1111-111111111111`,
+    ),
+    '.foreign.haive-alias-park-unknown',
+    '.file.haive-alias-park-123-11111111-1111-1111-1111-111111111111',
+  ];
+  for (const name of names) await writeFile(path.join(root, 'tree', name), 'saved bytes');
+  let startIndex = 0,
+    calls = 0,
+    foreignParks = 0;
+  while (startIndex < names.length) {
+    const result = await safe.recoverWorktreeAliasArtifactsNoFollow(root, 'tree', names, {
+      startIndex,
+      maxOperations: 2,
+    });
+    expect(result.nextIndex).toBe(Math.min(startIndex + 2, names.length));
+    startIndex = result.nextIndex;
+    foreignParks += result.foreignParks;
+    calls++;
+  }
+  expect(calls).toBe(5);
+  expect(foreignParks).toBe(1);
+  expect(await readFile(path.join(root, 'tree/file'), 'utf8')).toBe('original');
+  const [kept] = await readdir(path.join(root, 'tree/.haive/alias-recovery'));
+  expect(await readFile(path.join(root, 'tree/.haive/alias-recovery', kept!), 'utf8')).toBe(
+    'saved bytes',
+  );
+  expect(await readdir(path.join(root, 'tree'))).toEqual(
+    expect.arrayContaining(['file', '.haive', names[7]]),
+  );
+  expect((await readdir(path.join(root, 'tree'))).length).toBe(3);
 });

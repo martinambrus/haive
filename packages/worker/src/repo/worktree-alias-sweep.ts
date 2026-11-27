@@ -167,15 +167,21 @@ export async function* sweepWorktreeAliases(
           yield snapshot();
           return;
         }
-        const recovery = await recoverWorktreeAliasArtifactsNoFollow(
-          anchor,
-          rel,
-          entries.map((e) => e.name),
-          { staleTempMs: opts.staleTempMs },
-        );
-        if (recovery.foreignParks)
-          skipped.foreign_park = (skipped.foreign_park ?? 0) + recovery.foreignParks;
-        if (recovery.changed)
+        const artifacts = entries.map((entry) => entry.name).filter(isAliasArtifact);
+        let changed = false;
+        for (let startIndex = 0; startIndex < artifacts.length;) {
+          const recovery = await recoverWorktreeAliasArtifactsNoFollow(anchor, rel, artifacts, {
+            staleTempMs: opts.staleTempMs,
+            startIndex,
+          });
+          startIndex = recovery.nextIndex;
+          changed ||= recovery.changed;
+          if (recovery.foreignParks)
+            skipped.foreign_park = (skipped.foreign_park ?? 0) + recovery.foreignParks;
+          // Return control between recovery entries as well as discovery and copy operations.
+          yield snapshot();
+        }
+        if (changed)
           entries = await readdirNoFollow(anchor, rel, {
             strict: true,
             strictNames: true,

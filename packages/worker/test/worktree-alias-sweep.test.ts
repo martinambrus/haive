@@ -9,6 +9,7 @@ import {
   rename,
   symlink,
   open,
+  readdir,
 } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -327,4 +328,33 @@ it('L-f preserves internal pairs beside mixed links spanning three worktrees, th
     expect(await readFile(path.join(base, name), 'utf8')).toBe('cross');
   expect((await lstat(path.join(base, 'task/internal2'), { bigint: true })).ino).toBe(internal.ino);
   expect((await lstat(path.join(base, 'task/internal1'))).nlink).toBe(2);
+});
+
+it('spreads artifact recovery across ticks and permits shutdown between entries', async () => {
+  const root = await fixture();
+  const tree = path.join(root, '.haive/worktrees/task');
+  for (let i = 0; i < 7; i++)
+    await writeFile(
+      path.join(tree, `.f${i}.haive-alias-tmp-123-11111111-1111-1111-1111-111111111111`),
+      'partial',
+    );
+  await writeFile(path.join(root, 'outside'), 'original');
+  await link(path.join(root, 'outside'), path.join(tree, 'healthy'));
+  const { WorktreeAliasSweeper } = await import('../src/repo/worktree-alias-background.js');
+  const complete = vi.fn(async () => true);
+  const store = { next: async () => ({ id: 'r', anchor: root }), complete };
+  const worker = new WorktreeAliasSweeper(store, { maxSteps: 1 });
+  await worker.tick(); // Discover the task directory.
+  await worker.tick(); // Recover at most one artifact.
+  expect((await readdir(tree)).filter((name) => name.includes('haive-alias-tmp'))).toHaveLength(6);
+  await worker.stop();
+  expect(complete).not.toHaveBeenCalled();
+  // Restarted discovery completes the same cleanup and still detaches healthy aliases.
+  const restarted = new WorktreeAliasSweeper(store, { maxSteps: 1 });
+  for (let tick = 0; tick < 80 && !complete.mock.calls.length; tick++) await restarted.tick();
+  expect(complete).toHaveBeenCalledOnce();
+  await restarted.stop();
+  expect(await readdir(tree)).toEqual(['healthy']);
+  expect(await readFile(path.join(tree, 'healthy'), 'utf8')).toBe('original');
+  expect((await lstat(path.join(root, 'outside'))).nlink).toBe(1);
 });

@@ -190,8 +190,9 @@ follows the install's existing single-worker assumption.
 
 Repository/root failures retain the cursor and journal and persist an exponential retry deadline
 in the checkpoint: 60 seconds doubling to six hours, with one warning per failure streak, including
-across a worker restart. A successful progress batch clears both the in-memory and persisted streak; a faulted batch
-retains escalation even when its repeated discovery yielded checkpoints. Completion clears it too. Empty installs are queried once
+across a worker restart. Only repository completion clears the in-memory and persisted streak:
+checkpoint batches, rediscovery and earlier successful operations can replay before the same failed
+operation, so they cannot prove recovery. Empty installs are queried once
 per minute. Missing repository anchors refuse completion; selection and completion normalize stored
 storage paths consistently. A checkpoint failure cannot erase already committed progress.
 
@@ -213,7 +214,9 @@ files become dense. A save observed before the final verification is preserved/r
 identity-bound rename: a save between the final name check and rename can still be replaced. An
 already-open descriptor continues to access the old inode; the sweep does not revoke it.
 
-`readdirNoFollow` remains read-only. A separate explicit recovery call removes abandoned sweep
+`readdirNoFollow` remains read-only. A separate explicit recovery call considers one artifact per
+call (an injectable operation budget), returns a listing index to resume, and closes its held
+descriptors before the walker yields to the tick budget and shutdown. It removes abandoned sweep
 `.haive-alias-tmp` copies immediately, and generic `.haive-tmp` files only after 24 hours by mtime
 (they may belong to another live writer). Old alias parks restore a missing public name immediately
 when visited. If that name exists, or a legacy `.haive-alias-kept` version remains, recovery moves

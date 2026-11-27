@@ -2966,21 +2966,37 @@ export async function copyReplaceFileIfIdentityNoFollow(
   }
 }
 
+export const WORKTREE_ALIAS_RECOVERY_OPERATIONS = 1;
+
 /** Explicit worker sweep recovery. Reads never invoke this mutation. Per-entry failures are
  * counted, so a foreign park cannot prevent recovery of its siblings. Retained old versions
- * are recovered under this directory's ignored .haive/alias-recovery, never discarded. */
+ * are recovered under this directory's ignored .haive/alias-recovery, never discarded.
+ * Each call considers at most maxOperations names (one by default). Resume the same listing
+ * at nextIndex; no held descriptors survive the call, so callers can yield or stop safely. */
 export async function recoverWorktreeAliasArtifactsNoFollow(
   anchor: string,
   rel: string,
   names: readonly string[],
-  opts: { staleTempMs?: number } = {},
-): Promise<{ changed: boolean; foreignParks: number }> {
+  opts: { staleTempMs?: number; startIndex?: number; maxOperations?: number } = {},
+): Promise<{ changed: boolean; foreignParks: number; nextIndex: number }> {
+  const startIndex = opts.startIndex ?? 0;
+  const maxOperations = opts.maxOperations ?? WORKTREE_ALIAS_RECOVERY_OPERATIONS;
+  if (
+    !Number.isSafeInteger(startIndex) ||
+    startIndex < 0 ||
+    startIndex > names.length ||
+    !Number.isSafeInteger(maxOperations) ||
+    maxOperations < 1
+  )
+    throw new RangeError('Invalid artifact recovery budget');
+  const endIndex = Math.min(names.length, startIndex + maxOperations);
   const safe = toSafeRel(rel);
   const dir = await walkDir(anchor, safe, segments(safe));
   let changed = false,
     foreignParks = 0;
   try {
-    for (const name of names) {
+    for (let index = startIndex; index < endIndex; index++) {
+      const name = names[index]!;
       if (name.includes('/') || name === '.' || name === '..' || name.includes('\0'))
         throw new PathContainmentError('invalid-path', anchor, rel, name);
       const base = name.endsWith('.name') ? name.slice(0, -5) : name;
@@ -3037,7 +3053,7 @@ export async function recoverWorktreeAliasArtifactsNoFollow(
         if (errno(err) !== 'ENOENT') foreignParks++;
       }
     }
-    return { changed, foreignParks };
+    return { changed, foreignParks, nextIndex: endIndex };
   } finally {
     await closeQuietly(dir.fh);
   }

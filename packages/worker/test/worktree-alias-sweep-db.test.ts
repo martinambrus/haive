@@ -198,16 +198,18 @@ describe.skipIf(!url)('legacy worktree alias sweep on Postgres', () => {
     await store.checkpoint!(repo, { ...scan, examined: 3 }, []);
     expect((await row()).worktreeAliasScan).toMatchObject({ retry, examined: 3 });
   });
-  it('L-e clears persisted retries on progress without erasing scan state or names', async () => {
+  it('clears persisted retries and the name journal only on completion', async () => {
     const store = worktreeAliasStore(db, root);
     const repo = (await store.next(''))!;
     const scan = { cursor: '.haive/worktrees/task/a', examined: 2, complete: false };
     await store.checkpoint!(repo, scan, [{ path: scan.cursor, dev: '1', ino: '2' }]);
     await store.fail!(repo, { attempts: 5, retryAt: Date.now() + 3600_000 });
-    await store.progress!(repo);
-    expect((await store.load!(repo))?.scan).toEqual(scan);
+    await store.checkpoint!(repo, { ...scan, examined: 3 }, []);
+    expect((await store.load!(repo))?.scan.retry?.attempts).toBe(5);
     expect((await store.load!(repo))?.names).toHaveLength(1);
-    expect(await store.next('')).toMatchObject({ id: repoId, retry: undefined });
+    expect(await store.complete(repo)).toBe(true);
+    expect((await row()).worktreeAliasScan).toBeNull();
+    expect(await db.select().from(schema.worktreeAliasNames)).toHaveLength(0);
   });
   it('M2 records a counted done-with-skips result and clears the name journal', async () => {
     const anchor = path.join(root, userId, repoId);

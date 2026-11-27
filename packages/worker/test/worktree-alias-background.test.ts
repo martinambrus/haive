@@ -169,38 +169,50 @@ it.each([
   expect(exposure ? info : warn).not.toHaveBeenCalled();
   await worker.stop();
 });
-it('L-e resets a persisted failure streak after a successful progress batch', async () => {
-  const now = 1_000_000;
-  vi.spyOn(Date, 'now').mockReturnValue(now);
-  const warn = vi.spyOn(logger, 'warn').mockImplementation(() => undefined);
-  const repo = { id: 'r', anchor: '/owned', retry: { attempts: 5, retryAt: now } };
-  const progress = vi.fn(async () => undefined);
-  const fail = vi.fn(async () => undefined);
-  const walk = async function* () {
-    yield {
-      examined: 1,
-      replaced: 0,
-      scan: { cursor: '.haive/worktrees/task/a', examined: 1, complete: false },
+it.each(['ENOSPC', 'EIO'])(
+  'retains escalating %s backoff across multi-batch rediscovery and restart',
+  async (code) => {
+    let now = 1_000_000;
+    vi.spyOn(Date, 'now').mockImplementation(() => now);
+    const warn = vi.spyOn(logger, 'warn').mockImplementation(() => undefined);
+    const repo: AliasRepository = { id: 'r', anchor: '/owned' };
+    const fail = vi.fn(async (_repo: AliasRepository, retry: AliasRetry) => {
+      repo.retry = retry;
+    });
+    const complete = vi.fn(async () => true);
+    let failing = true;
+    const walk = async function* () {
+      for (let n = 1; n <= 3; n++)
+        yield {
+          examined: n,
+          replaced: 0,
+          scan: { cursor: `.haive/worktrees/task/${n}`, examined: n, complete: n === 3 },
+        };
+      if (failing) throw Object.assign(new Error('persistent copy failure'), { code });
     };
-    throw new Error('second failure');
-  };
-  const worker = new WorktreeAliasSweeper(
-    { next: async () => repo, complete: vi.fn(), progress, fail },
-    { walk, maxSteps: 1 },
-  );
-  await worker.tick();
-  expect(progress).toHaveBeenCalledWith(repo);
-  await worker.tick();
-  expect(fail).toHaveBeenCalledWith(repo, { attempts: 1, retryAt: now + 60_000 });
-  expect(warn).toHaveBeenCalledOnce();
-  await worker.stop();
-});
+    const store = { next: async () => repo, complete, fail, checkpoint: vi.fn() };
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      // Recreate the worker to prove persisted escalation as well as batch boundaries.
+      const worker = new WorktreeAliasSweeper(store, { walk, maxSteps: 1 });
+      for (let tick = 0; tick < 4; tick++) await worker.tick();
+      expect(repo.retry).toEqual({ attempts: attempt, retryAt: now + 60_000 * 2 ** (attempt - 1) });
+      now = repo.retry!.retryAt;
+      await worker.stop();
+    }
+    expect(fail.mock.calls.map(([, retry]) => retry.attempts)).toEqual([1, 2, 3]);
+    expect(warn).toHaveBeenCalledOnce();
+    failing = false;
+    const recovered = new WorktreeAliasSweeper(store, { walk, maxSteps: 8 });
+    await recovered.tick();
+    expect(complete).toHaveBeenCalledOnce();
+    await recovered.stop();
+  },
+);
 
 it('L-e retains escalation when a faulted batch only repeats discovery before the same copy failure', async () => {
   vi.spyOn(Date, 'now').mockReturnValue(1_000_000);
   const repo = { id: 'r', anchor: '/owned', retry: { attempts: 3, retryAt: 1_000_000 } };
   const fail = vi.fn(async () => undefined);
-  const progress = vi.fn(async () => undefined);
   const walk = async function* () {
     yield {
       examined: 1,
@@ -210,11 +222,10 @@ it('L-e retains escalation when a faulted batch only repeats discovery before th
     throw Object.assign(new Error('disk full'), { code: 'ENOSPC' });
   };
   const worker = new WorktreeAliasSweeper(
-    { next: async () => repo, complete: vi.fn(), fail, progress },
+    { next: async () => repo, complete: vi.fn(), fail },
     { walk },
   );
   await worker.tick();
-  expect(progress).not.toHaveBeenCalled();
   expect(fail).toHaveBeenCalledWith(repo, { attempts: 4, retryAt: 1_480_000 });
   await worker.stop();
 });
