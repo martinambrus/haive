@@ -7,7 +7,8 @@ so a login's auth lock or Docker helpers cannot delay queue consumption. Before 
 existing completed, failed or cancelled task's copies, the reaper calls
 `syncRefreshedAuthToUserVolumes` once for that task. It resolves provider rows from the invocation
 ledger and uses the same credential-only parse/mtime/auth-lock guards as task-end and summary
-sync. Boot tries each auth lock once; a busy lock or a helper/lookup failure keeps the task's
+sync. A task with a live invocation (started, neither ended nor superseded) is skipped
+before sync and checked again before removal. Boot tries each auth lock once; a busy lock or a helper/lookup failure keeps the task's
 copies for the next boot. Ordinary task-end and summary sync still wait up to 30 seconds and
 keep their best-effort teardown contract. No auth lock is awaited while holding a task row.
 Removal and preparation invalidation recheck settlement under the bounded task-row fence used
@@ -16,21 +17,48 @@ sync keeps the copies. A task whose row is gone has no ledger to sync; its copie
 Ambiguous task-id slugs are retained rather than choosing one task's credentials.
 
 Every newly prepared task auth volume has a Docker-owned `haive.auth-source` label recording
-its source user-volume name, auth mode and isolation; a copy with no source records `none`.
-The sandbox cannot alter that label. Every sync-back path, including mid-task harvest, re-reads
-the ledger's current provider rows after acquiring the auth lock. A moved row, multiple rows
-of the same CLI resolving to different identities, or a label that does not exactly match
-refuses sync before any credential write, with a structural reason in the log. For a copy from
-before the label, task-end and summary sync preserve the old current-resolution behaviour only
-when every same-CLI ledger row has `updated_at <= tasks.created_at`, read after acquiring the
-auth lock, and all rows resolve to one identity. Settings saves stamp `updated_at`, including
-auth-mode and isolation changes; a newer row, even after an unrelated edit, or a missing timestamp
-refuses this fallback. `auth_generation` has no recorded baseline on an unlabeled copy and cannot
-prove unchanged settings. Boot reaping and mid-task harvest always skip unlabeled copies, so old
-leftovers cannot initiate credential writes. Labeled copies always require the exact source match;
-no label is backfilled. A refused source sync is safe to discard during boot reaping;
-only retryable failures retain the copy. Newer user logins still win by mtime, and a missing
-user volume still wins as a sign-out. No schema or data migration is needed.
+version 1, its source user-volume name, auth mode and isolation; a copy with no source records
+`none`. The sandbox cannot alter that label. Every sync-back path, including mid-task harvest,
+re-reads the ledger's current provider rows after acquiring the auth lock. A moved row or a source
+label whose parsed structural fields do not match refuses sync before any credential write.
+Key order and extra label fields are ignored. The original unversioned label is the known v0
+shape; explicit unknown versions are refused and logged. A labeled copy can name its source
+among multiple ledger rows of the same CLI with different scopes. Harvest considers each distinct
+target volume and lets this locked label check choose the source.
+
+For a copy from before labels, task-end, summary and non-terminal mid-task harvest use a guarded
+transition. After acquiring the auth lock, require the task's creation time and owner, complete
+invocation-ledger ownership (no null or deleted provider), provider rows created no later than the
+task, and one same-CLI source identity. Refuse a `cli_provider.update` audit at or after task
+creation whose structured `metadata.fields` array includes `authMode` or `isolateAuth`, including
+a change away and back; malformed field lists refuse too. PATCH is the only updater of those
+fields. It computes actual changes against the locked row and writes that audit, with
+`clock_timestamp()`, in the same transaction as the change. Create and clone supply immutable
+row creation times; deletes lose the invocation's provider FK and refuse even when the deleted
+row's CLI can no longer be known. Login-set changes that move the volume occur only through
+these creates, deletes and audited auth-setting saves.
+
+Sign-out's committed launch audit also refuses this fallback when its target or structured
+`setIds` names a ledger member, or its clicked row currently resolves to the same volume. An
+unknown/deleted clicked row conservatively refuses rather than guessing the old scope. This
+also covers a volume recreated after sign-out; the original missing-volume guard remains.
+Volume logins and generation-only writes do not change volume resolution, and newer user
+credentials still win by mtime. `auth_generation` has no baseline on an unlabeled copy.
+General `updated_at` changes never decide source identity: unrelated settings saves, manual
+rebuilds, probe health, image build bookkeeping, boot image reconcile and learned model limits
+must all preserve the credential carry. Ollama provisioning and Claude token/grant writers do
+not move a tracked credential-file volume either.
+
+Boot reaping always skips unlabeled copies, so unattributed terminal leftovers cannot initiate
+credential writes. The transition warning is emitted once per copy in this worker process,
+including across harvest ticks and provider rows; no label is backfilled. Sunset: remove this
+unlabeled fallback once all pre-label non-terminal task copies have settled or been recreated
+with source labels, after verifying no resumable task still depends on one. A refused source
+sync is safe to discard at boot; retryable failures retain the copy. Credential reads and mtime
+reads distinguish a missing file from a failed or timed-out helper: failures retain the copy,
+while a genuinely missing or unparseable task credential is an ordinary no-copy result. Other
+poller readers retain their best-effort null-on-helper-failure contract. No schema or data
+migration is needed.
 
 `clearTaskAuthPreparationState` forgets applied identities for the selected provider or the
 whole task. It never drops a live preparation lock; `withScopeLock` removes its own tail when
@@ -43,12 +71,17 @@ cache clear cannot replace them. There is no legacy last-merge failure map or re
 Each sync-back helper writes a UUID-suffixed sibling temporary credential and installs an
 exit trap to remove only that file, on success or shell failure. The atomic rename, sandbox
 ownership, 0600 mode and in-helper mtime check remain unchanged. A SIGKILL can bypass the
-trap. On the next eligible locked sync pass, even if no credential needs copying, a helper
-removes regular files matching that credential's `<basename>.haive-tmp-*` prefix in its
-parent directory only when older than ten minutes. Recent temps, other prefixes and links
-are left alone; leftovers are never read as credentials. Rollback: revert the code commit;
-labels are ignored by the older worker. Credentials already synced remain in user volumes,
-and removed task copies cannot be restored by reverting code.
+trap. When a credential is about to be copied, the existing copy helper also removes regular
+files matching that credential's `<basename>.haive-tmp-*` prefix in its parent directory only
+when older than ten minutes. This adds no helper per harvest tick. Recent temps, other prefixes
+and links are left alone; leftovers are never read as credentials. A failed sweep logs a warning
+and continues the credential carry. If no copy is needed, temps wait for a later copy.
+Rollback to the pre-label worker means reverting the T543 code series; that worker ignores
+labels. Reverting only the versioned-label change to the earlier exact-string reader makes
+it refuse version-1 copies: retain a compatible reader until those copies have settled or
+been recreated before that partial rollback. No schema/data rollback is needed. Credentials
+already synced remain in user volumes, and removed task copies cannot be restored by
+reverting code.
 
 **Committed mining views are immutable mounts.** `repo/committed-snapshot.ts` owns the bounded
 resolver. `resolveInvocationRepoMount` chooses a snapshot before repository-less scratch,

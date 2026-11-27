@@ -761,12 +761,18 @@ ledger-based credential sync outside the task-row lock, then a bounded settlemen
 transaction holding the task row through cache invalidation, stopped-helper cleanup and
 each volume removal. It checks the section signal between destructive calls and forwards
 it to stopped-helper cleanup. Retry during sync or before the row lock preserves the task's
-copies. Boot tries each auth lock once; a busy lock or a failed sync/helper lookup leaves
-those copies for another boot, while unrelated orphans continue. A refused source identity
+copies. A started invocation with neither an end nor a supersede skips sync entirely;
+the same predicate is checked again under the settlement fence before removal. Boot tries
+each auth lock once; a busy lock or a failed sync/helper lookup leaves
+those copies for another boot, while unrelated orphans continue. Credential-file and mtime
+helpers report failure separately from file absence, so a failed or timed-out read retains
+the copy rather than treating it as an empty credential. Temp-file sweeping runs inside the
+copy helper, logs and continues on failure, and never gates credential carry. A refused source identity
 (including a legacy copy with no source label) writes nothing and permits removal. A deleted task has no row or invocation ledger left, so its original orphan-removal
 path remains. In-flight preparation locks survive cache invalidation and remove themselves
 on settlement; sync-back temporary files and MCP failure diagnostics are owned by their run
-(see [Sandbox](sandbox.md)). No schema change is required; revert the code to roll back.
+(see [Sandbox](sandbox.md), including the label-reader compatibility required for rollback).
+No schema change is required.
 
 The kb-author sibling (`reconcileKbAuthorEntryOnTaskEnd`, shared by failed settlement and
 Cancel) now takes that same bounded task-row fence through its separate-store mutation,

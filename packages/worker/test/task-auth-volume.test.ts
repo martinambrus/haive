@@ -148,6 +148,7 @@ describe('ensureTaskAuthVolumes', () => {
     await ensureTaskAuthVolumes(ctx('abc', 'codex'), 'task-111', runner);
     expect(create).toHaveBeenCalledWith('haive_cli_auth_task_task111_codex_0', {
       'haive.auth-source': JSON.stringify({
+        version: 1,
         userVolume: userVol,
         authMode: 'subscription',
         isolateAuth: false,

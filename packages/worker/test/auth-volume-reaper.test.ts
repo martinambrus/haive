@@ -79,6 +79,7 @@ describe('reapOrphanedAuthVolumes', () => {
     const fake = createFakeDb(
       {
         tasks: schema.tasks,
+        cliInvocations: schema.cliInvocations,
         cliProviders: schema.cliProviders,
         users: schema.users,
       },
@@ -127,6 +128,70 @@ describe('reapOrphanedAuthVolumes', () => {
       expect(fake.rowLocked(schema.tasks, DONE_TASK)).toBe(false);
     },
   );
+
+  it('keeps a terminal task with a live invocation without syncing or removing', async () => {
+    const fake = fixture('failed');
+    fake.insert(schema.cliInvocations, {
+      id: '12345678-1234-4123-8123-123456789012',
+      taskId: DONE_TASK,
+      startedAt: new Date(),
+      endedAt: null,
+      supersededAt: null,
+    });
+    const remove = vi.fn();
+    expect(
+      await reapOrphanedAuthVolumes(fake.db as unknown as Database, {
+        listAuthVolumes: async () => [cliAuthTaskVolumeName(DONE_TASK, 'codex', 0)],
+        removeVolume: remove,
+      }),
+    ).toBe(0);
+    expect(syncRefreshedAuthToUserVolumes).not.toHaveBeenCalled();
+    expect(remove).not.toHaveBeenCalled();
+  });
+
+  it.each(['queued', 'ended', 'superseded'])(
+    'does not mistake a %s invocation for a live writer',
+    async (state) => {
+      const fake = fixture('failed');
+      fake.insert(schema.cliInvocations, {
+        id: '12345678-1234-4123-8123-123456789012',
+        taskId: DONE_TASK,
+        startedAt: state === 'queued' ? null : new Date(),
+        endedAt: state === 'ended' ? new Date() : null,
+        supersededAt: state === 'superseded' ? new Date() : null,
+      });
+      const remove = vi.fn();
+      expect(
+        await reapOrphanedAuthVolumes(fake.db as unknown as Database, {
+          listAuthVolumes: async () => [cliAuthTaskVolumeName(DONE_TASK, 'codex', 0)],
+          removeVolume: remove,
+        }),
+      ).toBe(1);
+      expect(syncRefreshedAuthToUserVolumes).toHaveBeenCalledOnce();
+      expect(remove).toHaveBeenCalledOnce();
+    },
+  );
+  it('retains copies if an invocation becomes live during sync', async () => {
+    const fake = fixture('failed');
+    vi.mocked(syncRefreshedAuthToUserVolumes).mockImplementationOnce(async () => {
+      fake.insert(schema.cliInvocations, {
+        id: '12345678-1234-4123-8123-123456789012',
+        taskId: DONE_TASK,
+        startedAt: new Date(),
+        endedAt: null,
+        supersededAt: null,
+      });
+      return { retainTaskCopy: false };
+    });
+    const remove = vi.fn();
+    expect(
+      await reapOrphanedAuthVolumes(fake.db as unknown as Database, {
+        listAuthVolumes: async () => [cliAuthTaskVolumeName(DONE_TASK, 'codex', 0)],
+        removeVolume: remove,
+      }),
+    ).toBe(0);
+    expect(remove).not.toHaveBeenCalled();
+  });
 
   it('keeps auth volumes and preparations when Retry wins during sync', async () => {
     const fake = fixture('failed');

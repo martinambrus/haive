@@ -1,6 +1,6 @@
 import { SANDBOX_CORE_IMAGE } from './image-composer.js';
 import { createHash, randomUUID } from 'node:crypto';
-import { eq } from 'drizzle-orm';
+import { and, eq, gte, inArray, or } from 'drizzle-orm';
 import { schema, type CliAuthLock, type Database } from '@haive/database';
 import { cliAuthScope } from '@haive/shared/cli-auth-state';
 import {
@@ -18,7 +18,7 @@ import { SANDBOX_GID, SANDBOX_UID } from './sandbox-identity.js';
 import { ensureSandboxCoreImage } from './sandbox-core-image.js';
 import { SANDBOX_USER, SANDBOX_USER_HOME } from './sandbox-runner.js';
 import { CLI_CREDENTIAL_FILES } from '../usage-window/credential-files.js';
-import { readVolumeFile } from '../usage-window/token-source.js';
+import { readVolumeFile, VOLUME_FILE_ABSENT_EXIT } from '../usage-window/token-source.js';
 import { shellQuote } from './shell-quote.js';
 import { waitForCliAuthLock } from './cli-auth-lock.js';
 
@@ -102,11 +102,35 @@ const SOURCE_MARKER = '.haive-source';
 const AUTH_SOURCE_LABEL = 'haive.auth-source';
 function authSourceIdentity(ctx: ProviderAuthCtx, idx: number): string {
   return JSON.stringify({
+    version: 1,
     userVolume: userVolumeForCtx(ctx, idx),
     authMode: ctx.authMode,
     isolateAuth: ctx.isolateAuth,
   });
 }
+
+/** Read the pre-version label as the known v0 shape. New labels explicitly name v1.
+ * Extra fields and JSON key order do not change the source contract. */
+function authSourceLabelRefusal(label: string | undefined, expected: string): string | null {
+  if (!label) return 'source_identity_mismatch';
+  try {
+    const parsed: unknown = JSON.parse(label);
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed))
+      return 'source_identity_mismatch';
+    const source = parsed as Record<string, unknown>;
+    if ('version' in source && source.version !== 1) return 'unsupported_source_version';
+    const wanted = JSON.parse(expected) as Record<string, unknown>;
+    return ['userVolume', 'authMode', 'isolateAuth'].every((key) => source[key] === wanted[key])
+      ? null
+      : 'source_identity_mismatch';
+  } catch {
+    return 'source_identity_mismatch';
+  }
+}
+
+// A pre-label copy may survive many harvest ticks. Warn once in this worker process,
+// forgetting it on recreation or ordinary task cleanup, rather than once per provider/tick.
+const warnedUnlabeledCopies = new Set<string>();
 /** Recorded in {@link SOURCE_MARKER} when the volume was populated with NO source at all —
  *  an api-key provider row, or a CLI the user had not logged into yet.
  *
@@ -456,6 +480,7 @@ async function ensureTaskAuthVolumesUnlocked(
         `Failed to create task auth volume ${taskVol}: ${created.stderr || 'unknown error'}`,
       );
     }
+    warnedUnlabeledCopies.delete(taskVol);
     // The volume this task's rtk seed and MCP config were written into is gone. Their applied
     // identities are in-process and would otherwise make every writer skip, leaving the fresh
     // volume without the tooling the next agent expects — for codex that is the whole
@@ -1264,14 +1289,21 @@ export async function syncRefreshedAuthToUserVolumes(
 }
 
 /** Read actual rows from the ledger; a CLI name alone cannot identify an auth scope. */
-async function taskAuthProviders(db: Database, taskId: string): Promise<AuthSyncProvider[]> {
+async function taskAuthProviders(
+  db: Database,
+  taskId: string,
+  ledger?: { missingProvider: boolean },
+): Promise<AuthSyncProvider[]> {
   const used = await db
     .selectDistinct({ providerId: schema.cliInvocations.cliProviderId })
     .from(schema.cliInvocations)
     .where(eq(schema.cliInvocations.taskId, taskId));
   const providers: AuthSyncProvider[] = [];
   for (const { providerId } of used) {
-    if (!providerId) continue;
+    if (!providerId) {
+      if (ledger) ledger.missingProvider = true;
+      continue;
+    }
     const provider = await db.query.cliProviders.findFirst({
       where: eq(schema.cliProviders.id, providerId),
       columns: {
@@ -1280,10 +1312,11 @@ async function taskAuthProviders(db: Database, taskId: string): Promise<AuthSync
         name: true,
         isolateAuth: true,
         authMode: true,
-        updatedAt: true,
+        createdAt: true,
       },
     });
     if (provider) providers.push(provider);
+    else if (ledger) ledger.missingProvider = true;
   }
   return providers;
 }
@@ -1296,8 +1329,99 @@ export interface AuthSyncProvider {
   name: CliProviderName;
   authMode: AuthMode;
   isolateAuth: boolean;
-  /** Read under the auth lock for the pre-label task-end transition only. */
-  updatedAt?: Date;
+  /** Read under the auth lock for the pre-label transition only. */
+  createdAt?: Date;
+}
+
+/** An unlabeled copy has no recorded baseline. Require a complete ledger, old provider
+ * rows and no later scope change, including a change away and back. PATCH is the only
+ * authMode/isolateAuth writer; its strict audit stores the actually changed field names
+ * as an array, with clock_timestamp(), in the SAME transaction as the locked row update.
+ * General updated_at writers (builds, probes, model learning, boot repair) say nothing
+ * about auth scope. Deleted providers lose their ledger FK, so missingProvider refuses
+ * even when the lost row's CLI is no longer knowable. No generation baseline is invented.
+ */
+async function legacyAuthSourceUnchanged(
+  db: Database,
+  taskId: string,
+  rows: AuthSyncProvider[],
+  current: AuthSyncProvider,
+  missingProvider: boolean,
+): Promise<boolean> {
+  if (missingProvider) return false;
+  const task = await db.query.tasks.findFirst({
+    where: eq(schema.tasks.id, taskId),
+    columns: { createdAt: true, userId: true },
+  });
+  const createdAt = task?.createdAt;
+  if (
+    !createdAt ||
+    !Number.isFinite(createdAt.getTime()) ||
+    task.userId !== current.userId ||
+    !rows.every(
+      (row) =>
+        row.userId === task.userId &&
+        row.createdAt &&
+        Number.isFinite(row.createdAt.getTime()) &&
+        row.createdAt <= createdAt,
+    )
+  )
+    return false;
+
+  const ids = rows.map((row) => row.id);
+  const events = await db
+    .select({
+      action: schema.auditEvents.action,
+      targetId: schema.auditEvents.targetId,
+      metadata: schema.auditEvents.metadata,
+    })
+    .from(schema.auditEvents)
+    .where(
+      and(
+        eq(schema.auditEvents.targetType, 'cli_provider'),
+        gte(schema.auditEvents.createdAt, createdAt),
+        or(
+          and(
+            inArray(schema.auditEvents.targetId, ids),
+            eq(schema.auditEvents.action, 'cli_provider.update'),
+          ),
+          and(
+            eq(schema.auditEvents.actorUserId, current.userId),
+            eq(schema.auditEvents.action, 'cli_provider.sign_out'),
+          ),
+        ),
+      ),
+    );
+  for (const event of events) {
+    const metadata =
+      event.metadata && typeof event.metadata === 'object' && !Array.isArray(event.metadata)
+        ? (event.metadata as Record<string, unknown>)
+        : {};
+    if (event.action === 'cli_provider.update') {
+      const fields = metadata.fields;
+      if (
+        !Array.isArray(fields) ||
+        fields.some((field) => typeof field !== 'string') ||
+        fields.includes('authMode') ||
+        fields.includes('isolateAuth')
+      )
+        return false;
+    } else {
+      // Sign-out's committed launch audit contains the login-set ids. It may precede
+      // removal, so refusing is conservative, including a removed/recreated volume.
+      if (event.targetId && ids.includes(event.targetId)) return false;
+      if (Array.isArray(metadata.setIds) && metadata.setIds.some((id) => ids.includes(id)))
+        return false;
+      const clicked = event.targetId
+        ? await db.query.cliProviders.findFirst({
+            where: eq(schema.cliProviders.id, event.targetId),
+          })
+        : undefined;
+      // A deleted clicked row or malformed history cannot prove an unrelated sign-out.
+      if (!clicked || cliAuthScope(clicked) === cliAuthScope(current)) return false;
+    }
+  }
+  return true;
 }
 
 /** Carry ONE provider's in-task credential back to its user volume, when the in-task CLI
@@ -1348,7 +1472,10 @@ export async function syncProviderAuthBack(
     }
     if (!(await runner.volumeExists(taskVol))) return false;
     // Re-read after waiting: a settings save holds both old and new scope locks.
-    const rows = (await taskAuthProviders(db, taskId)).filter((row) => row.name === provider.name);
+    const ledger = { missingProvider: false };
+    const rows = (await taskAuthProviders(db, taskId, ledger)).filter(
+      (row) => row.name === provider.name,
+    );
     const current = rows.find((row) => row.id === provider.id);
     const identity = (row: AuthSyncProvider) =>
       authSourceIdentity(
@@ -1361,68 +1488,50 @@ export async function syncProviderAuthBack(
         },
         source.authPathIdx,
       );
+    const label = await runner.volumeLabel?.(taskVol, AUTH_SOURCE_LABEL);
+    const unlabeled = label === null;
     let reason =
       !current || identity(current) !== authSourceIdentity(ctx, source.authPathIdx)
         ? 'provider_scope_changed'
-        : new Set(rows.map(identity)).size > 1
-          ? 'ambiguous_provider_rows'
-          : null;
+        : null;
     if (!reason) {
-      const label = await runner.volumeLabel?.(taskVol, AUTH_SOURCE_LABEL);
-      if (label === null && allowUnlabeled) {
-        // Only task-end/summary callers enable this transition. Boot and harvest must
-        // never use a timestamp to initiate writes from unattributed old leftovers.
-        // Settings saves stamp updatedAt, including auth-mode/isolation changes. Check
-        // EVERY ledger row: a new or edited sibling cannot vouch for an older copy.
-        // authGeneration alone cannot help: an unlabeled volume records no baseline.
-        const task = await db.query.tasks.findFirst({
-          where: eq(schema.tasks.id, taskId),
-          columns: { createdAt: true },
-        });
-        const createdAt = task?.createdAt?.getTime();
-        if (
-          createdAt === undefined ||
-          !Number.isFinite(createdAt) ||
-          !rows.every((row) => {
-            const updatedAt = row.updatedAt?.getTime();
-            return updatedAt !== undefined && updatedAt <= createdAt;
-          })
-        ) {
-          reason = 'legacy_provider_row_changed';
-        }
-      } else if (label !== identity(current!)) {
-        reason = 'source_identity_mismatch';
+      if (unlabeled && allowUnlabeled) {
+        if (new Set(rows.map(identity)).size > 1) reason = 'ambiguous_provider_rows';
+        else if (
+          !(await legacyAuthSourceUnchanged(db, taskId, rows, current!, ledger.missingProvider))
+        )
+          reason = 'legacy_auth_scope_changed';
+      } else {
+        reason = authSourceLabelRefusal(label ?? undefined, identity(current!));
       }
     }
-    if (reason) {
+    if (unlabeled && !warnedUnlabeledCopies.has(taskVol)) {
+      warnedUnlabeledCopies.add(taskVol);
       log.warn(
-        { taskId, providerId: provider.id, provider: provider.name, reason },
-        'auth sync-back refused',
+        {
+          taskId,
+          providerId: provider.id,
+          provider: provider.name,
+          reason: reason ?? 'legacy_transition',
+        },
+        'unlabeled task auth copy; guarded transition checked',
       );
+    }
+    if (reason) {
+      if (!unlabeled)
+        log.warn(
+          { taskId, providerId: provider.id, provider: provider.name, reason },
+          'auth sync-back refused',
+        );
       return false;
     }
     // A sign-out that won the lock must not be undone by a helper mount recreating it.
     if (!(await runner.volumeExists(userVol))) return false;
     await release.assertHeld();
-    // A killed helper cannot run its EXIT trap. Never read these leftovers as credentials;
-    // only delete this credential's known prefix, older than ten minutes, under its lock.
-    const sweep = await runner.run({
-      image: HELPER_IMAGE,
-      entrypoint: '',
-      user: 'root',
-      cmd: [
-        'sh',
-        '-c',
-        `find ${shellQuote(`/vol/${source.relPath.substring(0, source.relPath.lastIndexOf('/') + 1)}`)} -maxdepth 1 -type f -name ${shellQuote(`${source.relPath.split('/').at(-1)}.haive-tmp-*`)} -mmin +10 -delete`,
-      ],
-      mounts: [{ source: userVol, target: '/vol', readOnly: false }],
-      timeoutMs: HELPER_TIMEOUT_MS,
-    });
-    if (sweep.exitCode !== 0) throw new Error('auth sync-back temp sweep failed');
-    const taskRaw = await readVolumeFile(taskVol, source.relPath, runner);
+    const taskRaw = await readVolumeFile(taskVol, source.relPath, runner, { throwOnFailure: true });
     if (!taskRaw) return false;
     const taskToken = extractToken(source.extract, taskRaw);
-    const userRaw = await readVolumeFile(userVol, source.relPath, runner);
+    const userRaw = await readVolumeFile(userVol, source.relPath, runner, { throwOnFailure: true });
     const userToken = userRaw ? extractToken(source.extract, userRaw) : null;
     const [taskMtime, userMtime] = await Promise.all([
       readVolumeFileMtimeMs(taskVol, source.relPath, runner),
@@ -1453,7 +1562,8 @@ export async function syncProviderAuthBack(
 }
 
 /** Last-modified time of a file inside a named volume, in epoch ms, or null when the
- *  volume or file is absent. Feeds the last-writer-wins half of shouldSyncAuthBack. */
+ *  volume or file is absent. Helper failures throw so boot retains the copy.
+ *  Feeds the last-writer-wins half of shouldSyncAuthBack. */
 async function readVolumeFileMtimeMs(
   vol: string,
   relPath: string,
@@ -1465,12 +1575,20 @@ async function readVolumeFileMtimeMs(
     image: HELPER_IMAGE,
     entrypoint: '',
     user: 'root',
-    cmd: ['sh', '-c', `stat -c %Y "/vol/${safeRel}" 2>/dev/null || true`],
+    cmd: [
+      'sh',
+      '-c',
+      `stat -c %Y "/vol/${safeRel}" 2>/dev/null || { [ ! -e "/vol/${safeRel}" ] && exit ${VOLUME_FILE_ABSENT_EXIT}; exit 1; }`,
+    ],
     mounts: [{ source: vol, target: '/vol', readOnly: true }],
     timeoutMs: HELPER_TIMEOUT_MS,
   });
-  const secs = Number.parseInt((result.stdout ?? '').trim(), 10);
-  return Number.isFinite(secs) ? secs * 1000 : null;
+  if (result.exitCode === VOLUME_FILE_ABSENT_EXIT && !result.timedOut) return null;
+  if (result.exitCode !== 0 || result.timedOut) throw new Error('auth mtime read helper failed');
+  const secs = Number((result.stdout ?? '').trim());
+  if (!(result.stdout ?? '').trim() || !Number.isFinite(secs))
+    throw new Error('auth mtime read helper returned no timestamp');
+  return secs * 1000;
 }
 
 /** Run a `volumeJson` source's own extractor over raw file bytes. Returns null when the
@@ -1507,10 +1625,15 @@ async function copyAuthFileBack(
 ): Promise<boolean> {
   const safeRel = relPath.replace(/["'`$]/g, '');
   const temp = `/dst/${safeRel}.haive-tmp-${randomUUID()}`;
+  // Fold hygiene into the existing copy helper. A killed helper cannot run its trap;
+  // old temps are never credentials, and a failed sweep must not lose a rotated token.
+  const parent = `/dst/${relPath.substring(0, relPath.lastIndexOf('/') + 1)}`;
+  const prefix = `${relPath.split('/').at(-1)}.haive-tmp-*`;
   const script = [
     'set -e',
     `if [ -e "/dst/${safeRel}" ] && [ ! "/src/${safeRel}" -nt "/dst/${safeRel}" ]; then exit ${SYNC_SKIPPED_NOT_NEWER_EXIT}; fi`,
     `mkdir -p "$(dirname "/dst/${safeRel}")"`,
+    `if ! find ${shellQuote(parent)} -maxdepth 1 -type f -name ${shellQuote(prefix)} -mmin +10 -delete; then echo AUTH_TEMP_SWEEP_FAILED >&2; fi`,
     // Every helper owns its temp, including its exit cleanup; a concurrent sync cannot
     // overwrite, rename or remove another helper's in-progress credential.
     `trap 'rm -f -- "${temp}"' EXIT`,
@@ -1531,6 +1654,9 @@ async function copyAuthFileBack(
     user: 'root',
     timeoutMs: HELPER_TIMEOUT_MS,
   });
+  if (result.stderr.includes('AUTH_TEMP_SWEEP_FAILED')) {
+    log.warn({ userVol, relPath }, 'auth sync-back temp sweep failed; credential carry continued');
+  }
   if (result.exitCode === SYNC_SKIPPED_NOT_NEWER_EXIT) {
     log.info(
       { taskVol, userVol, relPath },
@@ -1538,7 +1664,7 @@ async function copyAuthFileBack(
     );
     return false;
   }
-  if (result.exitCode !== 0) {
+  if (result.exitCode !== 0 || result.timedOut) {
     log.warn(
       { taskVol, userVol, relPath, exitCode: result.exitCode, stderr: result.stderr.slice(-300) },
       'auth sync-back helper exited non-zero',
@@ -1593,6 +1719,7 @@ export async function cleanupTaskAuthVolumes(
     signal?.throwIfAborted();
     const result = await runner.volumeRemove(taskVol);
     if (result.ok) {
+      warnedUnlabeledCopies.delete(taskVol);
       removed.push(taskVol);
     } else {
       failed.push({ name: taskVol, stderr: result.stderr });

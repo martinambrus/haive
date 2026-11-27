@@ -1,11 +1,9 @@
 import { and, eq, inArray, isNotNull, isNull, notInArray } from 'drizzle-orm';
-import { logger, resolveCliAuthUserVolumeName, type CliProviderName } from '@haive/shared';
+import { resolveCliAuthUserVolumeName, type CliProviderName } from '@haive/shared';
 import { schema, type Database } from '@haive/database';
 import { defaultDockerRunner, type DockerRunner } from '../sandbox/docker-runner.js';
 import { syncProviderAuthBack, type AuthSyncProvider } from '../sandbox/task-auth-volume.js';
 import { CLI_CREDENTIAL_FILES } from './credential-files.js';
-
-const log = logger.child({ module: 'credential-harvest' });
 
 // A task in one of these states has already had its teardown sync run (or will never run
 // one); its per-task auth volume is gone or about to be.
@@ -18,7 +16,7 @@ export interface HarvestCandidate {
 
 export interface HarvestSelection {
   targets: HarvestCandidate[];
-  /** (task, CLI) pairs whose ONE task volume cannot be attributed to ONE user volume. */
+  /** Mixed-scope pairs: sync must inspect the source label to choose a target. */
   ambiguous: { taskId: string; providerName: CliProviderName }[];
 }
 
@@ -44,12 +42,9 @@ function userVolumeOf(provider: AuthSyncProvider, authPathIdx: number): string {
  *    place when it refreshes, and copying a file mid-write puts a truncated credential where
  *    the user's login used to be. Between invocations — which is most of a task's life, since
  *    it parks at forms, gates and reviews — the file is quiescent. Skipping costs one tick.
- *  - A (task, CLI) pair whose provider rows resolve to DIFFERENT user volumes is skipped.
- *    cliAuthTaskVolumeName keys on (taskId, cliName, idx) and carries no provider id, so one
- *    task volume backs every row of that CLI in that task; when an isolate_auth row or an
- *    api_key row sits beside a subscription row, nothing in the name says whose credential is
- *    in there, and guessing would write one account's token over another's. The shared sync-back
- *    path also refuses ambiguity and checks the task volume's recorded source under its lock.
+ *  - Deduplicate each target user volume. A mixed-scope pair must reach the shared
+ *    sync path: a Docker-owned source label can disambiguate it; only an unlabeled
+ *    copy is refused there, under the auth lock.
  *
  *  Pure so both rules are testable without docker or a db. */
 export function selectHarvestTargets(
@@ -75,12 +70,15 @@ export function selectHarvestTargets(
     const volumes = new Set(members.map((m) => userVolumeOf(m.provider, source.authPathIdx)));
     if (volumes.size > 1) {
       ambiguous.push({ taskId: first.taskId, providerName: first.provider.name });
-      continue;
     }
-    // Every member resolves to the same user volume, so any row speaks for it. Lowest
-    // provider id, so a settled tick picks the same row every time.
-    const chosen = [...members].sort((a, b) => a.provider.id.localeCompare(b.provider.id))[0];
-    if (chosen) targets.push(chosen);
+    // Lowest id per destination makes a stable tick without duplicating reads for
+    // shared rows. Different destinations each reach the immutable source-label guard.
+    const seen = new Set<string>();
+    for (const member of [...members].sort((a, b) => a.provider.id.localeCompare(b.provider.id))) {
+      const volume = userVolumeOf(member.provider, source.authPathIdx);
+      if (!seen.has(volume)) targets.push(member);
+      seen.add(volume);
+    }
   }
   return { targets, ambiguous };
 }
@@ -148,7 +146,7 @@ export async function harvestInTaskCredentials(
       ),
     );
 
-  const { targets, ambiguous } = selectHarvestTargets(
+  const { targets } = selectHarvestTargets(
     pairs.map((p) => ({
       taskId: p.taskId,
       provider: {
@@ -162,14 +160,7 @@ export async function harvestInTaskCredentials(
     new Set(busy.map((b) => b.taskId)),
   );
 
-  for (const a of ambiguous) {
-    log.warn(
-      a,
-      'credential harvest skipped: this task used two provider rows of one CLI that do not share a user auth volume, so the task volume cannot be attributed',
-    );
-  }
-
   for (const target of targets) {
-    await syncProviderAuthBack(target.taskId, target.provider, db, runner, 0);
+    await syncProviderAuthBack(target.taskId, target.provider, db, runner, 0, undefined, true);
   }
 }

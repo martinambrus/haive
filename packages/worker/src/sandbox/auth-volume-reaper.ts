@@ -1,5 +1,6 @@
 import { spawn } from 'node:child_process';
 import { schema, type Database } from '@haive/database';
+import { and, eq, isNotNull, isNull } from 'drizzle-orm';
 import {
   cliAuthIdSlug,
   cliAuthTaskVolumePrefix,
@@ -182,6 +183,21 @@ export async function reapOrphanedAuthVolumes(
           columns: { id: true },
         });
         if (!task) continue;
+        const hasLiveInvocation = async (database: Pick<Database, 'query'>) =>
+          Boolean(
+            await database.query.cliInvocations.findFirst({
+              where: and(
+                eq(schema.cliInvocations.taskId, taskId),
+                isNotNull(schema.cliInvocations.startedAt),
+                isNull(schema.cliInvocations.endedAt),
+                isNull(schema.cliInvocations.supersededAt),
+              ),
+              columns: { id: true },
+            }),
+          );
+        // As in harvest: the CLI rewrites its credential in place. A terminal task
+        // can still have a recap or redelivered invocation; leave its copies alone.
+        if (await hasLiveInvocation(db)) continue;
         // As in terminal-summary cleanup: auth lock waits must stay OUTSIDE task-row
         // locks. A lookup failure retains the task copies for the next boot.
         const sync = await syncRefreshedAuthToUserVolumes(
@@ -210,6 +226,7 @@ export async function reapOrphanedAuthVolumes(
             .where(taskWriteTarget(taskId, { settled: true }))
             .for('no key update');
           if (!settled) return;
+          if (await hasLiveInvocation(tx)) return;
           signal.throwIfAborted();
           clearTaskAuthPreparationState(taskId);
           for (const volume of volumes) {
