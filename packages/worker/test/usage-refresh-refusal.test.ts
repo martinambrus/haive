@@ -53,7 +53,11 @@ vi.mock('../src/cli-adapters/probe-fetch.js', () => ({
 }));
 import { runUsagePollTick } from '../src/queues/usage-poll-queue.js';
 
-const GRANT = JSON.stringify({ accessToken: 'old', refreshToken: 'refresh', expiresAt: 0 });
+const GRANT = JSON.stringify({
+  accessToken: randomUUID(),
+  refreshToken: randomUUID(),
+  expiresAt: 0,
+});
 
 function setup() {
   const fake = createFakeDb({
@@ -132,4 +136,19 @@ it('still marks a rejected refresh needs_reconnect without logging the endpoint 
   await runUsagePollTick(fake.db as unknown as Database);
   expect(fake.rows(schema.usageWindowSnapshots)).toMatchObject([{ status: 'needs_reconnect' }]);
   expect(logText()).not.toContain(tok);
+});
+
+it('omits arbitrary network error text from the refresh warning', async () => {
+  const token = randomBytes(16).toString('hex');
+  const { fake, id } = setup();
+  vi.stubGlobal(
+    'fetch',
+    vi.fn(async () => {
+      throw new TypeError(`synthetic network failure ${token}`);
+    }),
+  );
+  await runUsagePollTick(fake.db as unknown as Database);
+  expect(logText()).toContain('claude usage token refresh failed');
+  expect(logText()).toContain(id);
+  expect(logText()).not.toContain(token);
 });

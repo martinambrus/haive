@@ -70,7 +70,7 @@ function sentenceHosts(root: Host): Host[] {
   );
 }
 
-function answer(rows: unknown[], reconnectIds: string[] = []) {
+function answer(rows: unknown[], reconnectIds: string[] = [], connected = true) {
   h.get.mockImplementation(async (path: string) => {
     if (path === '/cli-providers') return { providers: rows };
     if (path === '/cli-providers/catalog') return { providers: [] };
@@ -78,7 +78,7 @@ function answer(rows: unknown[], reconnectIds: string[] = []) {
       return {
         snapshots: reconnectIds.map((providerId) => ({ providerId, status: 'needs_reconnect' })),
       };
-    if (path.endsWith('/usage-auth')) return { connected: true };
+    if (path.endsWith('/usage-auth')) return { connected };
     return {};
   });
 }
@@ -193,5 +193,16 @@ it.each([false, true])(
     expect(String(confirm.mock.calls[0]?.[0])).toContain('Row a?');
     expect(String(confirm.mock.calls[0]?.[0])).not.toContain('every row');
     expect(h.delete).toHaveBeenCalledWith('/cli-providers/a/usage-auth');
+  },
+);
+
+it.each([false, true])(
+  'API-key rows hide usage authorization but retain legacy Disconnect (dead=%s)',
+  async (dead) => {
+    answer([{ ...row('a', 'claude-code'), authMode: 'api_key' }], dead ? ['a'] : [], dead);
+    const view = await renderPage();
+    expect(buttons(view.tree(), /^reconnect$/i)).toHaveLength(0);
+    expect(buttons(view.tree(), /^connect usage$/i)).toHaveLength(0);
+    expect(buttons(view.tree(), /^disconnect usage$/i)).toHaveLength(dead ? 1 : 0);
   },
 );

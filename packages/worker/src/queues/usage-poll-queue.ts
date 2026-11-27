@@ -9,6 +9,7 @@ import {
   configService,
   lockLoginSet,
   logger,
+  secretsService,
   parseAllowanceWatchMode,
   type AuthMode,
   type CliProviderName,
@@ -19,6 +20,7 @@ import { getDb } from '../db.js';
 import { resolveProbeFetch } from '../cli-adapters/probe-fetch.js';
 import { getBullRedis } from '../redis.js';
 import {
+  ClaudeOauthError,
   claudeTokenNeedsRefresh,
   isClaudeRefreshRejected,
   refreshClaudeToken,
@@ -90,6 +92,9 @@ const DEFAULT_MIN_POLL_INTERVAL_MS = 60 * 1000 + POLL_LEEWAY_MS;
  *  singleton). Drives the min-interval throttle; cleared on restart, where a fresh boot
  *  poll is fine. */
 const lastPollAt = new Map<string, number>();
+
+// Warn once per failing refresh token until recovery or a credential replacement.
+const refreshFailureToken = new Map<string, string>();
 
 /** Providers whose stored usage refresh token the token endpoint has rejected with
  *  invalid_grant — revoked, or (common when one account is registered as several
@@ -190,6 +195,7 @@ async function resolveSetGrant(
 
   const current = await pick();
   if (!current) return null;
+  if (refreshFailureToken.get(key) !== current.grant.refreshToken) refreshFailureToken.delete(key);
   if (!current.grant.refreshToken || !claudeTokenNeedsRefresh(current.grant.expiresAt)) {
     return current;
   }
@@ -205,9 +211,12 @@ async function resolveSetGrant(
 
     if (holder.grant.refreshToken && claudeTokenNeedsRefresh(holder.grant.expiresAt)) {
       try {
+        // Load everything needed to encrypt before the vendor spends its single-use token.
+        const masterKek = await secretsService.getMasterKek();
+        lastPollAt.set(key, Date.now());
         const fresh = await refreshClaudeToken(holder.grant.refreshToken);
-        await release.assertHeld();
-        const rotated = await rotateGrantCopies(db, rep, holder, fresh, release.assertHeld);
+        const rotated = await rotateGrantCopies(db, rep, holder, fresh, masterKek);
+        refreshFailureToken.delete(key);
         deadUsageRefreshToken.delete(key); // recovered (or was never dead)
         return rotated;
       } catch (err) {
@@ -238,7 +247,15 @@ async function resolveSetGrant(
         }
         // Any refresh failure stops this poll. Keep the stored grant for the next tick,
         // but never use an access token we already decided needs refreshing.
-        log.warn({ providerId: rep.id, err }, 'claude usage token refresh failed; skipping poll');
+        if (refreshFailureToken.get(key) !== holder.grant.refreshToken) {
+          // OAuth errors retain only status and an allowlisted code; an arbitrary network
+          // error may include request credentials and must not be attached.
+          log.warn(
+            { providerId: rep.id, ...(err instanceof ClaudeOauthError ? { err } : {}) },
+            'claude usage token refresh failed; skipping poll',
+          );
+          refreshFailureToken.set(key, holder.grant.refreshToken);
+        }
         return null;
       }
     }

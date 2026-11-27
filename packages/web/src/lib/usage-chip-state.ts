@@ -54,10 +54,14 @@ export type UsageChipState =
 export function resolveUsageChipState(args: {
   providerId: string | null;
   providerName: CliProviderName | null;
+  providerAuthMode?: 'subscription' | 'api_key';
   snapshots: readonly UsageWindowSnapshot[] | null;
 }): UsageChipState {
   const { providerId, providerName, snapshots } = args;
   if (!providerId || !snapshots) return { kind: 'hidden' };
+  // Claude usage OAuth is subscription-only, including the empty-meter fallback.
+  if (providerName === 'claude-code' && args.providerAuthMode === 'api_key')
+    return { kind: 'hidden' };
 
   const snap = snapshots.find((s) => s.providerId === providerId);
   if (!snap) {

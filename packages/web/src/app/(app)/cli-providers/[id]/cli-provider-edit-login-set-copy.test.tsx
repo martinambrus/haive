@@ -38,16 +38,24 @@ function sentenceHosts(root: Host): Host[] {
   );
 }
 
-function answer(name: string, usage: { connected: boolean; dead?: boolean }) {
+function answer(
+  name: string,
+  usage: {
+    connected: boolean;
+    dead?: boolean;
+    authMode?: 'subscription' | 'api_key';
+    isolateAuth?: boolean;
+  },
+) {
   const provider = {
     id: 'a',
     userId: 'u',
     name,
     label: 'Row a',
     enabled: true,
-    authMode: 'subscription',
+    authMode: usage.authMode ?? 'subscription',
     authStatus: 'ok',
-    isolateAuth: false,
+    isolateAuth: usage.isolateAuth ?? false,
     envVars: {},
     cliArgs: [],
   };
@@ -103,7 +111,13 @@ describe('login set copy on the edit page and the usage card', () => {
 
   it('says on a dead-token usage card that Disconnect removes the token from the whole login set', async () => {
     answer('claude-code', { connected: true, dead: true });
-    const view = createRenderer(() => createElement(ClaudeUsageAuth, { providerId: 'a' }));
+    const view = createRenderer(() =>
+      createElement(ClaudeUsageAuth, {
+        providerId: 'a',
+        authMode: 'subscription',
+        isolateAuth: false,
+      }),
+    );
     await vi.advanceTimersByTimeAsync(0);
     view.draw();
     const text = textOf(view.tree());
@@ -113,4 +127,30 @@ describe('login set copy on the edit page and the usage card', () => {
     expect(buttons(view.tree(), /^reconnect$/i)).toHaveLength(1);
     expect(buttons(view.tree(), /^disconnect$/i)).toHaveLength(1);
   });
+});
+
+it.each([false, true])(
+  'API-key edit page offers no usage authorization (legacy=%s)',
+  async (legacy) => {
+    answer('claude-code', { connected: legacy, dead: legacy, authMode: 'api_key' });
+    const view = createRenderer(() => createElement(EditCliProviderPage));
+    await vi.advanceTimersByTimeAsync(0);
+    view.draw();
+    await vi.advanceTimersByTimeAsync(0);
+    view.draw();
+    expect(buttons(view.tree(), /^reconnect$/i)).toHaveLength(0);
+    expect(buttons(view.tree(), /^connect usage tracking$/i)).toHaveLength(0);
+    expect(buttons(view.tree(), /^disconnect$/i)).toHaveLength(legacy ? 1 : 0);
+    expect(textOf(view.tree())).not.toContain('Token expired');
+  },
+);
+it('isolated usage card says Disconnect removes only this row’s token', async () => {
+  answer('claude-code', { connected: true, dead: true, isolateAuth: true });
+  const view = createRenderer(() => createElement(EditCliProviderPage));
+  await vi.advanceTimersByTimeAsync(0);
+  view.draw();
+  await vi.advanceTimersByTimeAsync(0);
+  view.draw();
+  expect(norm(textOf(view.tree()))).toContain('from this row');
+  expect(norm(textOf(view.tree()))).not.toContain('from every row');
 });

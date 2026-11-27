@@ -1,4 +1,5 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import { eq } from 'drizzle-orm';
 import { Hono } from 'hono';
 import { cleanActor, createDatabase, makeActor, schema } from './security-audit-db.js';
 
@@ -65,6 +66,17 @@ describe.skipIf(!url)('usage snapshots after a Claude login, on Postgres', () =>
   it('keeps a Claude snapshot at needs_reconnect although its CLI login checked ok', async () => {
     expect(await statusOf(ids['claude-code']!)).toBe('needs_reconnect');
   });
+
+  it.each([false, true])(
+    'hides a legacy API-key Claude reconnect snapshot (isolated=%s)',
+    async (isolateAuth) => {
+      await db
+        .update(schema.cliProviders)
+        .set({ authMode: 'api_key', isolateAuth })
+        .where(eq(schema.cliProviders.id, ids['claude-code']!));
+      expect(await statusOf(ids['claude-code']!)).toBeUndefined();
+    },
+  );
 
   it('shows a codex snapshot as pending after its login checked ok', async () => {
     expect(await statusOf(ids['codex']!)).toBe('pending');

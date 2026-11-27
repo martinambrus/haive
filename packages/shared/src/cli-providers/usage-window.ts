@@ -1,3 +1,7 @@
+/** Existing UI freshness bound: about 2.5 five-minute poll intervals. Also bounds
+ *  new allowance-watch evidence; a previously captured reset stays authoritative. */
+export const USAGE_SNAPSHOT_STALE_AFTER_MS = 13 * 60 * 1000;
+
 /**
  * One subscription-usage window, normalized from a vendor's (undocumented)
  * usage endpoint. `usedPct` is 0-100 CONSUMED — every fetcher normalizes to

@@ -688,7 +688,12 @@ describe("a failed step's hand-off", () => {
       outage('rate_limit');
       vi.spyOn(configService, 'get').mockResolvedValue('notify');
       const reset = new Date(0);
-      h.state.usageSnapshot = { status, fiveHourPct: 100, fiveHourResetAt: reset };
+      h.state.usageSnapshot = {
+        status,
+        fetchedAt: new Date(),
+        fiveHourPct: 100,
+        fiveHourResetAt: reset,
+      };
       await expect(finish()).resolves.toBe(true);
       expect(armed()).toEqual([
         expect.objectContaining({
@@ -698,6 +703,21 @@ describe("a failed step's hand-off", () => {
       ]);
     },
   );
+
+  it('arms without a reset from a stale ok snapshot', async () => {
+    outage('rate_limit');
+    vi.spyOn(configService, 'get').mockResolvedValue('notify');
+    h.state.usageSnapshot = {
+      status: 'ok',
+      fetchedAt: new Date(Date.now() - 13 * 60_000 - 1),
+      fiveHourPct: 100,
+      fiveHourResetAt: new Date(0),
+    };
+    await expect(finish()).resolves.toBe(true);
+    expect(armed()).toEqual([
+      expect.objectContaining({ awaitingProviderReason: 'rate_limit', allowanceResetAt: null }),
+    ]);
+  });
 
   it('arms it with no reset time when the usage snapshot cannot be read', async () => {
     outage('rate_limit');

@@ -3253,7 +3253,7 @@ function HeaderUsageChip({
   // Narrowing guard, not a duplicate of the resolver's own: the fault fallback below indexes
   // providerIds[0], and only this early return proves it exists to tsc.
   if (providerIds.length === 0) return null;
-  const meters = selectMetersForProviderIds(providerIds, snapshots, allowanceKeys);
+  const meters = selectMetersForProviderIds(providerIds, snapshots, allowanceKeys, providers);
 
   const rowOf = (providerId: string) => providers.find((p) => p.id === providerId) ?? null;
   /** Short CLI name for a chip, from the provider row where there is one — the snapshot's own
@@ -3321,6 +3321,7 @@ function HeaderUsageChip({
     const state = resolveUsageChipState({
       providerId: primaryId,
       providerName: row?.name ?? null,
+      providerAuthMode: row?.authMode,
       snapshots,
     });
     if (state.kind !== 'fault') return null;

@@ -162,3 +162,17 @@ describe('fault copy', () => {
     expect(usageFaultHref('no_meter')).toBeNull();
   });
 });
+
+it.each([
+  { snapshots: [] },
+  { snapshots: [snap({ providerName: 'claude-code', status: 'needs_reconnect' })] },
+])('API-key Claude has no actionable header fallback (%j)', ({ snapshots }) => {
+  expect(
+    resolveUsageChipState({
+      providerId: PROVIDER,
+      providerName: 'claude-code',
+      providerAuthMode: 'api_key',
+      snapshots,
+    }),
+  ).toEqual({ kind: 'hidden' });
+});

@@ -847,3 +847,26 @@ describe('allowance reset backfill from stored windows', () => {
     }
   });
 });
+
+it.each([10, 100])(
+  'stale ok snapshots cannot backfill resets or recover via percentage (%s)',
+  async (pct) => {
+    config('notify', 'normal');
+    const t = setup();
+    t.armed.resetAt = null;
+    t.fake.patch(schema.tasks, TASK, { allowanceResetAt: null });
+    t.fake.insert(schema.usageWindowSnapshots, {
+      providerId: PROVIDER,
+      userId: USER,
+      providerName: 'claude-code',
+      status: 'ok',
+      fetchedAt: new Date(Date.now() - 13 * 60_000 - 1),
+      fiveHourPct: pct,
+      fiveHourResetAt: new Date(0),
+    });
+    await checkProviderRecovery(t.db);
+    expect(t.task().allowanceReplenishedAt).toBeNull();
+    expect(t.task().allowanceResetAt).toBeNull();
+    expect(t.fake.rows(schema.taskEvents)).toEqual([]);
+  },
+);

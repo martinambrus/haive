@@ -11,9 +11,10 @@ import {
 } from './allowance-watch.js';
 
 const win = (
-  o: Partial<UsageWindows & { status: string }> = {},
-): UsageWindows & { status: string } => ({
+  o: Partial<UsageWindows & { status: string; fetchedAt: Date }> = {},
+): UsageWindows & { status: string; fetchedAt: Date } => ({
   status: 'ok',
+  fetchedAt: new Date(),
   fiveHourPct: null,
   fiveHourResetAt: null,
   sevenDayPct: null,
@@ -193,4 +194,33 @@ describe('serverErrorVerdict', () => {
     const v = serverErrorVerdict({ since: null, now, snapshot: null, hasUsageWindow: true });
     expect(v).toEqual({ back: false, giveUp: true });
   });
+});
+
+describe('allowance evidence freshness', () => {
+  const now = Date.now();
+  it.each([13 * 60_000, 13 * 60_000 + 1])(
+    'applies the existing 13-minute age bound (%s)',
+    (age) => {
+      const windows = win({
+        fetchedAt: new Date(now - age),
+        fiveHourPct: 100,
+        fiveHourResetAt: new Date(now - 1),
+      });
+      expect(constrainingResetAt(windows, now)).toEqual(
+        age === 13 * 60_000 ? new Date(now - 1) : null,
+      );
+      const verdict = allowanceVerdict({
+        resetAt: null,
+        windows: { ...windows, fiveHourPct: 10 },
+        snapshotOk: true,
+        now,
+      });
+      expect(verdict).toEqual(
+        age === 13 * 60_000 ? { back: true, via: 'usage_dropped' } : { back: false },
+      );
+      expect(
+        allowanceVerdict({ resetAt: new Date(now - 1), windows, snapshotOk: true, now }),
+      ).toEqual({ back: true, via: 'reset' });
+    },
+  );
 });

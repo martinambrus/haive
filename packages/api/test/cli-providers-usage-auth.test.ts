@@ -339,6 +339,8 @@ it.each(['api_key', 'subscription'])(
     const set = vi.spyOn(h.redis as ReturnType<typeof memoryRedis>, 'set');
     const res = await post('start');
     expect(res.status).toBe(authMode === 'subscription' ? 200 : 400);
+    if (authMode === 'api_key')
+      expect(await res.json()).toMatchObject({ code: 'usage_auth_subscription_required' });
     expect(set).toHaveBeenCalledTimes(authMode === 'subscription' ? 1 : 0);
     expect(h.fetch).not.toHaveBeenCalled();
   },
@@ -347,7 +349,47 @@ it.each(['api_key', 'subscription'])(
 it('refuses completion if a subscription row changed to API-key auth after start', async () => {
   const { state } = await startAuthorization();
   fake.patch(schema.cliProviders, PROVIDER, { authMode: 'api_key' });
-  expect((await post('complete', { code: `${CODE}#${state}` })).status).toBe(400);
+  const res = await post('complete', { code: `${CODE}#${state}` });
+  expect(res.status).toBe(400);
+  expect(await res.json()).toMatchObject({ code: 'usage_auth_subscription_required' });
   expect(h.fetch).not.toHaveBeenCalled();
   expect(fake.rows(schema.cliProviderSecrets)).toEqual([]);
+});
+
+it('rechecks auth mode on an isolated row after acquiring the completion lock', async () => {
+  fake.patch(schema.cliProviders, PROVIDER, { isolateAuth: true });
+  const { state } = await startAuthorization();
+  authLock.acquire.mockImplementationOnce(async () => {
+    fake.patch(schema.cliProviders, PROVIDER, { authMode: 'api_key' });
+    return authLock.release;
+  });
+  const paste = { code: `${CODE}#${state}` };
+  const refused = await post('complete', paste);
+  expect(refused.status).toBe(409);
+  expect(await refused.json()).toMatchObject({ code: 'cli_auth_busy' });
+  expect(h.fetch).not.toHaveBeenCalled();
+  expect(fake.rows(schema.cliProviderSecrets)).toEqual([]);
+  fake.patch(schema.cliProviders, PROVIDER, { authMode: 'subscription' });
+  expect((await post('complete', paste)).status).toBe(200);
+});
+
+it('refuses a manual usage grant on an API-key row with a stable code', async () => {
+  fake.patch(schema.cliProviders, PROVIDER, { authMode: 'api_key' });
+  const res = await app.request(`/${PROVIDER}/secrets`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      secretName: CLAUDE_USAGE_OAUTH_SECRET,
+      value: JSON.stringify({
+        accessToken: randomUUID(),
+        refreshToken: randomUUID(),
+        expiresAt: Date.now(),
+        scopes: ['user:profile'],
+      }),
+    }),
+  });
+  expect(res.status).toBe(400);
+  expect(await res.json()).toMatchObject({ code: 'usage_auth_subscription_required' });
+  expect(fake.rows(schema.cliProviderSecrets)).toEqual([]);
+  expect(authLock.acquire).not.toHaveBeenCalled();
 });

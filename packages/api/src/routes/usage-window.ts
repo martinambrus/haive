@@ -3,6 +3,7 @@ import { and, eq, isNull, notInArray } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import {
   CONFIG_KEYS,
+  USAGE_SNAPSHOT_STALE_AFTER_MS,
   configService,
   resolveTaskCliProviderId,
   type AuthMode,
@@ -15,10 +16,6 @@ import type { AppEnv } from '../context.js';
 
 export const usageWindowRoutes = new Hono<AppEnv>();
 usageWindowRoutes.use('*', requireAuth);
-
-// A snapshot older than ~2.5 poll intervals (poll is ~5 min) is "stale": the
-// header chip dims it instead of trusting a number the poller stopped refreshing.
-const STALE_AFTER_MS = 13 * 60 * 1000;
 
 type SnapshotRow = typeof schema.usageWindowSnapshots.$inferSelect;
 
@@ -60,7 +57,7 @@ function toSnapshot(
     sevenDay: toWindow(row.sevenDayPct, row.sevenDayResetAt),
     daily: toWindow(row.dailyPct, row.dailyResetAt),
     fetchedAt: row.fetchedAt.toISOString(),
-    stale: now - row.fetchedAt.getTime() > STALE_AFTER_MS,
+    stale: now - row.fetchedAt.getTime() > USAGE_SNAPSHOT_STALE_AFTER_MS,
     status: pending ? 'pending' : base,
   };
 }
@@ -206,13 +203,12 @@ function providerAllowanceKey(row: {
   return row.authMode === 'api_key' ? `shared:${row.name}:api_key` : `shared:${row.name}`;
 }
 
-/** providerId -> allowance key, for every CLI provider the caller owns. The notifier keys
- *  its depletion episodes on this instead of the provider id, so rows sharing a
- *  subscription collapse into one alert. */
+/** Allowance keys for depletion deduplication, plus rows whose retained usage snapshots
+ *  cannot be polled or repaired in their current authentication mode. */
 async function allowanceKeys(
   db: ReturnType<typeof getDb>,
   userId: string,
-): Promise<Record<string, string>> {
+): Promise<{ keys: Record<string, string>; excludedIds: Set<string> }> {
   const rows = await db
     .select({
       id: schema.cliProviders.id,
@@ -222,7 +218,15 @@ async function allowanceKeys(
     })
     .from(schema.cliProviders)
     .where(eq(schema.cliProviders.userId, userId));
-  return Object.fromEntries(rows.map((r) => [r.id, providerAllowanceKey(r)]));
+  return {
+    keys: Object.fromEntries(rows.map((r) => [r.id, providerAllowanceKey(r)])),
+    // Frozen legacy snapshots cannot offer a repair that this auth mode refuses.
+    excludedIds: new Set(
+      rows
+        .filter((r) => r.name === 'claude-code' && r.authMode !== 'subscription')
+        .map((r) => r.id),
+    ),
+  };
 }
 
 // Latest usage-window snapshot for each of the caller's CLI providers. The header
@@ -256,12 +260,14 @@ usageWindowRoutes.get('/', async (c) => {
     ]);
   const now = Date.now();
   return c.json({
-    snapshots: rows.map((r) => toSnapshot(r, now, repairedAt)),
+    snapshots: rows
+      .filter((r) => !allowance.excludedIds.has(r.providerId))
+      .map((r) => toSnapshot(r, now, repairedAt)),
     alert: {
       enabled: alertEnabled && windowEnabled && (prefs?.usageAlertEnabled ?? true),
       thresholdPct,
       activeProviderIds: activeIds,
-      allowanceKeys: allowance,
+      allowanceKeys: allowance.keys,
     },
   });
 });

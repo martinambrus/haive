@@ -603,6 +603,7 @@ export default function CliProvidersPage() {
                               onClick: () => handleSignOut(p),
                             },
                             p.name === 'claude-code' &&
+                              p.authMode === 'subscription' &&
                               needsReconnect[p.id] === true && {
                                 key: 'usage-reconnect',
                                 label: usageState?.busy ? 'Connecting...' : 'Reconnect',
@@ -628,6 +629,7 @@ export default function CliProvidersPage() {
                                     : "Stop tracking Claude's subscription usage and delete the stored usage token from every row that shares this login",
                               },
                             p.name === 'claude-code' &&
+                              p.authMode === 'subscription' &&
                               needsReconnect[p.id] !== true &&
                               usageConnected[p.id] !== true && {
                                 key: 'usage-connect',

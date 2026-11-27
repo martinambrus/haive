@@ -245,3 +245,16 @@ describe('selectMetersForProviderIds', () => {
     expect(selectMetersForProviderIds(['c1'], null, KEYS)).toEqual([]);
   });
 });
+
+it.each(['api_key', 'subscription'] as const)(
+  'header meters structurally gate Claude repair prompts (%s)',
+  (authMode) => {
+    const meters = selectMetersForProviderIds(
+      ['c1'],
+      [snap({ providerId: 'c1', status: 'needs_reconnect' })],
+      KEYS,
+      [{ id: 'c1', name: 'claude-code', authMode }],
+    );
+    expect(meters).toHaveLength(authMode === 'subscription' ? 1 : 0);
+  },
+);

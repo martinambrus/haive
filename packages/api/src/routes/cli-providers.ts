@@ -1490,6 +1490,13 @@ cliProviderRoutes.post('/:providerId/secrets', async (c) => {
   const db = getDb();
   const provider = await loadOwnedProvider(db, userId, providerId);
   const usageGrant = isUsageGrantSecret(provider.name, body.secretName);
+  if (usageGrant && provider.authMode !== 'subscription') {
+    throw new HttpError(
+      400,
+      'Usage tracking auth requires subscription authentication',
+      'usage_auth_subscription_required',
+    );
+  }
   if (usageGrant && !isUsageGrantValue(body.value)) {
     throw new HttpError(
       400,
@@ -1601,6 +1608,7 @@ cliProviderRoutes.post('/:providerId/usage-auth/start', async (c) => {
     throw new HttpError(
       400,
       'Usage tracking auth is only available for Claude Code subscription providers',
+      'usage_auth_subscription_required',
     );
   }
   const { verifier, challenge, state } = createClaudePkceChallenge();
@@ -1623,6 +1631,7 @@ cliProviderRoutes.post('/:providerId/usage-auth/complete', async (c) => {
     throw new HttpError(
       400,
       'Usage tracking auth is only available for Claude Code subscription providers',
+      'usage_auth_subscription_required',
     );
 
   const { code, state } = parseClaudeAuthCode(body.code);

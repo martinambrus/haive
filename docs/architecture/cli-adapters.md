@@ -203,22 +203,44 @@ the body.
 
 Claude usage authorization starts and completes only for a `claude-code` row on subscription
 auth; the poller also excludes API-key rows even if they retain a legacy usage grant. Disconnect
-and the generic secret routes can still remove that legacy grant. An API-key Claude clone holds
+and generic secret deletion can still remove that legacy grant. Manual usage-grant writes on
+API-key rows are refused, as are OAuth start/complete, with `usage_auth_subscription_required`.
+Completion rechecks auth mode as well as login scope after taking the advisory lock. List and
+edit-page authorization controls require subscription auth; legacy grants can still be disconnected.
+The usage API excludes frozen API-key Claude snapshots, and the task header also filters on
+the provider's auth mode, so neither header surface keeps prompting an impossible reconnect.
+The task header's empty-meter fallback is also suppressed on API-key Claude rows.
+An API-key Claude clone holds
 its source auth scope lock through the secret copy, but never copies the usage grant, whether
 shared or isolated. A subscription clone still seeds from its shared set; an isolated clone
 starts without a grant. Disconnect's confirmation and action title name only the isolated row
-when its authentication is isolated.
+when its authentication is isolated; the edit-page card uses the same scope-specific copy.
 
-Any Claude usage refresh failure stops that set's poll for the tick. Transient failures retain
-the stored grant and retry on the next tick, without fetching usage with the stale access token.
-A successful rotation commits every identical copy before the usage fetch starts, in its own
-transaction, so an interrupted fetch or failed snapshot write cannot roll it back. This preserves
-the existing single-use refresh assumption; no new vendor semantics were verified. A process
-loss after the vendor rotates but before the local rotation commit is still an external-system
-atomicity gap; ordering the local write before usage cannot remove it.
+Any Claude usage refresh failure stops that set's poll for the tick. The attempt is recorded
+before the vendor call, preserving the normal minimum 190-second cadence even on 429, 5xx,
+network failures and repeated non-`invalid_grant` refusals. These failures retain the stored
+grant without fetching usage with its stale access token. They warn once per failure streak
+for the exact refresh token; successful refresh or token replacement clears the streak.
+The warning retains sanitized OAuth status/code and omits arbitrary network error text.
+They remain retryable rather than declaring a transient vendor refusal a dead credential.
 
-Allowance-watch arming and reset backfill both ignore preserved windows on snapshots whose
-status is not `ok`. The recovery percentage probe already requires `ok`, so old numbers cannot
-supply fresh evidence on either path. A reset captured earlier from an `ok` snapshot remains
-authoritative even when a later snapshot errors. No existing snapshots or captured resets are
-rewritten.
+The encryption key is loaded before the refresh request. After a successful response, the
+poller encrypts synchronously, locks the login-set rows, and commits a compare-and-swap update
+of every identical pre-refresh copy before starting the usage fetch. No advisory-lock checks
+intervene or roll back this CAS: a lost lock connection cannot discard an otherwise committable
+rotation, and the CAS cannot overwrite a newer grant. A failed usage fetch or snapshot write
+cannot roll that commit back. This preserves the existing single-use refresh assumption;
+no new vendor semantics were verified (item 6 remains outside scope).
+
+The remote rotation and local commit cannot be atomic. Process loss before that commit,
+a local transaction/commit failure after the vendor rotates, or a timeout/connection loss
+that hides a vendor-committed response can still lose the new token. Under the single-use
+assumption, the old refresh token is then spent and reconnect is required. Forced reconnect
+is the worst outcome of this gap; the CAS prevents overwriting a newer connection. Closing
+the gap would need vendor idempotency or a verified token grace period.
+
+Allowance-watch arming and reset backfill both require an `ok` snapshot no older than the
+existing 13-minute UI freshness bound (`USAGE_SNAPSHOT_STALE_AFTER_MS`). The recovery percentage
+probe uses that same age bound, so a refresh outage cannot feed it hours-old `ok` numbers.
+A reset captured earlier from a fresh `ok` snapshot remains authoritative even if a later
+snapshot errors or ages out. No existing snapshots or captured resets are rewritten.

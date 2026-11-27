@@ -26,7 +26,16 @@ export const LOGIN_SET_NOTE =
  * setup-token used to RUN claude lacks — so the task header can show 5h/weekly windows.
  * Pure browser round-trip: start -> authorize in a new tab -> paste back code#state.
  */
-export function ClaudeUsageAuth({ providerId }: { providerId: string }) {
+export function ClaudeUsageAuth({
+  providerId,
+  authMode,
+  isolateAuth,
+}: {
+  providerId: string;
+  authMode: 'subscription' | 'api_key';
+  isolateAuth: boolean;
+}) {
+  const canAuthorize = authMode === 'subscription';
   const [connected, setConnected] = useState<boolean | null>(null);
   const [connectedAt, setConnectedAt] = useState<string | null>(null);
   const [authorizeUrl, setAuthorizeUrl] = useState<string | null>(null);
@@ -130,9 +139,9 @@ export function ClaudeUsageAuth({ providerId }: { providerId: string }) {
       <CardHeader>
         <CardTitle>Usage tracking</CardTitle>
         <CardDescription>
-          Authorize a usage-scoped (user:profile) token so the task header can show your Claude
-          5-hour and weekly subscription windows. This is separate from the login used to run
-          Claude, which can&apos;t read usage. The token auto-refreshes; revoke anytime.
+          {canAuthorize
+            ? "Authorize a usage-scoped (user:profile) token so the task header can show your Claude 5-hour and weekly subscription windows. This is separate from the login used to run Claude, which can't read usage. The token auto-refreshes; revoke anytime."
+            : 'Subscription usage polling is disabled for API-key authentication. You can disconnect a legacy usage token.'}
         </CardDescription>
       </CardHeader>
 
@@ -140,20 +149,24 @@ export function ClaudeUsageAuth({ providerId }: { providerId: string }) {
         <p className="text-sm text-neutral-500">Loading…</p>
       ) : connected && !authorizeUrl ? (
         <div className="flex flex-col gap-3">
-          {needsReconnect ? (
+          {needsReconnect && canAuthorize ? (
             <p className="text-sm text-amber-400">
               ⚠ Token expired — reconnect to restore your usage meters. (Disconnect removes the
-              usage token from every row that shares this login.)
+              usage token {isolateAuth ? 'from this row' : 'from every row that shares this login'}
+              {'.)'}
             </p>
           ) : (
             <p className="text-sm text-emerald-400">
-              Connected{connectedAt ? ` · ${new Date(connectedAt).toLocaleString()}` : ''}
+              {canAuthorize ? 'Connected' : 'Legacy usage token stored'}
+              {connectedAt ? ` · ${new Date(connectedAt).toLocaleString()}` : ''}
             </p>
           )}
           <div className="flex gap-2">
-            <Button variant="secondary" size="sm" onClick={() => void start()} disabled={busy}>
-              Reconnect
-            </Button>
+            {canAuthorize && (
+              <Button variant="secondary" size="sm" onClick={() => void start()} disabled={busy}>
+                Reconnect
+              </Button>
+            )}
             <Button
               variant="destructive"
               size="sm"
@@ -164,11 +177,11 @@ export function ClaudeUsageAuth({ providerId }: { providerId: string }) {
             </Button>
           </div>
         </div>
-      ) : !authorizeUrl ? (
+      ) : !authorizeUrl && canAuthorize ? (
         <Button size="sm" onClick={() => void start()} disabled={busy}>
           Connect usage tracking
         </Button>
-      ) : (
+      ) : authorizeUrl && canAuthorize ? (
         <div className="flex flex-col gap-3">
           <ol className="flex list-decimal flex-col gap-1 pl-5 text-sm text-neutral-300">
             <li>
@@ -213,7 +226,7 @@ export function ClaudeUsageAuth({ providerId }: { providerId: string }) {
             </Button>
           </div>
         </div>
-      )}
+      ) : null}
 
       {error && <p className="mt-3 text-sm text-red-400">{error}</p>}
       {notice && <p className="mt-3 text-sm text-emerald-400">{notice}</p>}

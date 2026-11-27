@@ -12,6 +12,23 @@ import {
   secretsService,
 } from '@haive/shared';
 
+const lockControl = vi.hoisted(() => ({ failChecks: false }));
+vi.mock('@haive/database', async (original) => {
+  const actual = await original<typeof import('@haive/database')>();
+  return {
+    ...actual,
+    tryCliAuthLock: async (...args: Parameters<typeof actual.tryCliAuthLock>) => {
+      const release = await actual.tryCliAuthLock(...args);
+      if (!release) return release;
+      return Object.assign(async () => release(), {
+        assertHeld: async () => {
+          if (lockControl.failChecks) throw new Error('synthetic lock check failure');
+          await release.assertHeld();
+        },
+      });
+    },
+  };
+});
 const logs = vi.hoisted(() => ({ calls: [] as unknown[][] }));
 vi.mock('@haive/shared', async (original) => {
   const actual = await original<typeof import('@haive/shared')>();
@@ -55,6 +72,7 @@ function makeVendor() {
     status: new Map<string, number>(),
     issuedStatus: undefined as undefined | number,
     tokenFailure: undefined as undefined | number | Error,
+    onToken: undefined as undefined | (() => void),
     onUsage: undefined as undefined | ((token: string) => Promise<void>),
     callsWith: (token: string) => v.usageCalls.filter((t) => t === token).length,
     reset() {
@@ -77,6 +95,7 @@ function makeVendor() {
         if (v.issuedStatus) v.status.set(issued.access, v.issuedStatus);
         v.refreshable.add(issued.refresh);
         allTokens.add(issued.access).add(issued.refresh);
+        v.onToken?.();
         return Response.json({
           access_token: issued.access,
           refresh_token: issued.refresh,
@@ -252,6 +271,7 @@ describe.skipIf(!url)('the usage poller treats one login set as one usage connec
     vi.useFakeTimers({ toFake: ['Date'] });
     clock += HOUR;
     vi.setSystemTime(clock);
+    lockControl.failChecks = false;
     vendor = makeVendor();
     vi.stubGlobal('fetch', vendor.fetch);
     vi.spyOn(configService, 'getBoolean').mockResolvedValue(true);
@@ -326,7 +346,7 @@ describe.skipIf(!url)('the usage poller treats one login set as one usage connec
   );
 
   it.each([503, 429, new TypeError('synthetic network failure')])(
-    'never uses the stale access token after refresh failure (%s), and retries next tick',
+    'never uses the stale access token after refresh failure (%s), and retries only after the 190-second throttle',
     async (failure) => {
       const g = await expiredSet();
       const before = await secretsOf(['A', 'B', 'C']);
@@ -336,13 +356,60 @@ describe.skipIf(!url)('the usage poller treats one login set as one usage connec
       expect(vendor.usageCalls).not.toContain(g.accessToken);
       expect(await secretsOf(['A', 'B', 'C'])).toEqual(before);
       expect(await snapshotsOf(['A', 'B', 'C'])).toEqual([]);
+      step(189_999);
+      await tick();
+      expect(vendor.tokenCalls).toHaveLength(1);
       vendor.tokenFailure = undefined;
+      step(1);
       await tick();
       expect(vendor.tokenCalls).toEqual([g.refreshToken, g.refreshToken]);
       expect(vendor.usageCalls).toContain((await grantOf('A')).accessToken);
       await expectSetConverged();
     },
   );
+
+  it('keeps a rotated token when lock checks fail after the vendor response', async () => {
+    const old = await expiredSet();
+    vendor.onToken = () => {
+      lockControl.failChecks = true;
+    };
+    await tick();
+    lockControl.failChecks = false;
+    const stored = await grantOf('A');
+    expect(stored.refreshToken === old.refreshToken).toBe(false);
+    expect(await grantOf('B')).toEqual(stored);
+    expect(await grantOf('C')).toEqual(stored);
+    step(5 * MIN);
+    await tick();
+    expect(vendor.tokenCalls).toEqual([old.refreshToken]);
+    await expectSetConverged();
+  });
+
+  it('warns once per refresh-failure streak and logs again after recovery', async () => {
+    await expiredSet();
+    vendor.tokenFailure = 400;
+    const warnings = () =>
+      logs.calls.filter((args) => args[1] === 'claude usage token refresh failed; skipping poll');
+    const before = warnings().length;
+    await tick();
+    step(190_000);
+    await tick();
+    expect(vendor.tokenCalls).toHaveLength(2);
+    expect(warnings()).toHaveLength(before + 1);
+    vendor.tokenFailure = undefined;
+    step(190_000);
+    await tick();
+    const stored = await grantOf('A');
+    await db
+      .update(schema.cliProviders)
+      .set({ enabled: false })
+      .where(eq(schema.cliProviders.id, rows.D.id));
+    step(9 * HOUR);
+    vendor.tokenFailure = 401;
+    await tick();
+    expect(vendor.tokenCalls.at(-1) === stored.refreshToken).toBe(true);
+    expect(warnings()).toHaveLength(before + 2);
+  });
 
   it('commits the single-use rotation before usage, surviving a failed fetch and snapshot write', async () => {
     const g = await expiredSet();
