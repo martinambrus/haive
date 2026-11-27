@@ -398,9 +398,10 @@ describe('Stop eligibility controls (#395)', () => {
 
 describe('empty Stop result notice', () => {
   it('requires explicit zero counts, including when an older API omits counts', () => {
-    expect(stopResultNotice({ stopped: 0, cancelled: 0, killed: 0 })).toBe(
-      'Nothing was running to stop.',
-    );
+    expect(stopResultNotice({ stopped: 0, cancelled: 0, killed: 0 })).toEqual({
+      message: 'Nothing was running to stop.',
+      warning: false,
+    });
     expect(stopResultNotice({})).toBeNull();
     expect(stopResultNotice({ stopped: 0 })).toBeNull();
     expect(stopResultNotice({ stopped: 0, killed: 0 })).toBeNull();
@@ -433,11 +434,9 @@ describe('T594 C4: deleted task repository', () => {
   });
 });
 
-it.each([0, 1])(
-  'T345 item 3: an unconfirmed kill overrides a clean Stop count (%s stopped)',
-  (stopped) => {
-    expect(stopResultNotice({ stopped, cancelled: 0, killed: 0, killConfirmed: false })).toBe(
-      'Sandbox cleanup could not be confirmed. A CLI process may still be running.',
-    );
-  },
-);
+it.each([0, 1])('an unconfirmed kill overrides a clean Stop count (%s stopped)', (stopped) => {
+  expect(stopResultNotice({ stopped, cancelled: 0, killed: 0, killConfirmed: false })).toEqual({
+    message: 'Sandbox cleanup could not be confirmed. A CLI process may still be running.',
+    warning: true,
+  });
+});

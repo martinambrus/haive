@@ -1,4 +1,6 @@
 'use client';
+import { TaskActionNotice } from '@/components/task-action-notice';
+import type { TaskActionNotice as ActionNotice } from '@/lib/task-state';
 
 import Link from 'next/link';
 import { parseUpgradeInstant } from '@/lib/upgrade-time';
@@ -160,7 +162,7 @@ export default function MaintenancePage() {
   const [blocking, setBlocking] = useState<BlockingResponse | null>(null);
   const [upgrade, setUpgrade] = useState<UpgradeStatusResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [notice, setNotice] = useState<string | null>(null);
+  const [notice, setNotice] = useState<ActionNotice | null>(null);
   const [busy, setBusy] = useState(false);
 
   const [targetVersion, setTargetVersion] = useState('');
@@ -263,11 +265,7 @@ export default function MaintenancePage() {
       </div>
 
       <FormError message={error} />
-      {notice && (
-        <Card role="status" className="px-3 py-2 text-sm text-neutral-400">
-          <InlineMarkdown body={notice} />
-        </Card>
-      )}
+      <TaskActionNotice notice={notice} />
 
       <Card className="space-y-4 p-5">
         <div className="flex items-center gap-3">

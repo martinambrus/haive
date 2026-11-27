@@ -1,4 +1,6 @@
 'use client';
+import { TaskActionNotice } from '@/components/task-action-notice';
+import type { TaskActionNotice as ActionNotice } from '@/lib/task-state';
 
 import { PromptTierUnknownList } from '@/components/prompt-tier-unknown';
 
@@ -805,7 +807,7 @@ export default function TaskDetailPage() {
   const submittedPark = useRef<string | null>(null);
   const [submitError, setSubmitError] = useState<{ stepId: string; message: string } | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
-  const [actionNotice, setActionNotice] = useState<string | null>(null);
+  const [actionNotice, setActionNotice] = useState<ActionNotice | null>(null);
   const [stepActionBusy, setStepActionBusy] = useState<string | null>(null);
   const [stepActionError, setStepActionError] = useState<{
     stepId: string;
@@ -2206,11 +2208,7 @@ export default function TaskDetailPage() {
         </div>
       )}
 
-      {actionNotice && (
-        <Card role="status" className="px-3 py-2 text-sm text-neutral-400">
-          <InlineMarkdown body={actionNotice} />
-        </Card>
-      )}
+      <TaskActionNotice notice={actionNotice} />
 
       {deadNote && <DeadTaskBanner text={deadNote.text} />}
 

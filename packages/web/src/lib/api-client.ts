@@ -2312,7 +2312,10 @@ export function endPlanChat(taskId: string): Promise<unknown> {
 
 /** Point a live conversation at a different CLI. Refused by the API while the
  *  step is running or waiting on a CLI. */
-export function setPlanChatProvider(taskId: string, cliProviderId: string): Promise<unknown> {
+export function setPlanChatProvider(
+  taskId: string,
+  cliProviderId: string,
+): Promise<Partial<StopActivityResult>> {
   return api.patch(`/tasks/${taskId}/steps/${PLAN_CHAT_STEP_ID}/cli-provider`, { cliProviderId });
 }
 

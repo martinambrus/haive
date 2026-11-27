@@ -42,12 +42,13 @@ const play = (child: FakeChild, run: Run) => {
 };
 
 const TASK = '0b0f7a52-3c5e-4e0a-9d6e-5a3f0c1d2e41';
-const IDS = 'aaa\nbbb\n';
+const IDS = 'aaa\trunning\nbbb\tcreated\n';
 const listing = [
   'docker',
   'ps',
   '-a',
-  '-q',
+  '--format',
+  '{{.ID}}\t{{.State}}',
   '--filter',
   `label=haive.task.id=${TASK}`,
   '--filter',
@@ -55,20 +56,18 @@ const listing = [
 ];
 const removal = ['docker', 'rm', '-f', 'aaa', 'bbb'];
 
-const causes: { name: string; run: Run; text: string }[] = [
+const causes: { name: string; run: Run }[] = [
   {
     name: 'cannot be spawned',
     run: { error: new Error('spawn docker ENOENT') },
-    text: 'spawn docker ENOENT',
   },
-  { name: 'throws on spawn', run: { throws: new Error('spawn E2BIG') }, text: 'spawn E2BIG' },
+  { name: 'throws on spawn', run: { throws: new Error('spawn E2BIG') } },
   {
     name: 'exits 1',
     run: { code: 1, stderr: 'first line\nCannot connect to the daemon\n\n' },
-    text: 'exit 1: Cannot connect to the daemon',
   },
-  { name: 'exits 125 with nothing on stderr', run: { code: 125 }, text: 'exit 125' },
-  { name: 'is ended by a signal', run: { code: null, signal: 'SIGKILL' }, text: 'exit SIGKILL' },
+  { name: 'exits 125 with nothing on stderr', run: { code: 125 } },
+  { name: 'is ended by a signal', run: { code: null, signal: 'SIGKILL' } },
 ];
 const deadlines = [
   ['listing', 10_000],
@@ -96,10 +95,14 @@ beforeEach(() => {
   runs = [];
   children = [];
   h.spawn.mockReset();
-  h.spawn.mockImplementation(() => {
+  h.spawn.mockImplementation((_cmd: string, args: string[]) => {
     const run = runs.shift();
     if (!run) throw new Error('unscripted docker call');
     if (run.throws) throw run.throws;
+    // Model Docker's ID-only output when an older caller omits --format.
+    if (args[0] === 'ps' && !args.includes('--format') && run.stdout) {
+      run.stdout = run.stdout.replace(/\t[^\n]*/g, '');
+    }
     const child = new FakeChild();
     children.push(child);
     if (run.delay === undefined) queueMicrotask(() => play(child, run));
@@ -123,43 +126,39 @@ describe('killTaskSandboxesOrThrow', () => {
   });
 
   describe.each(['listing', 'removal'] as const)('when the %s', (step) => {
-    it.each(causes)(
-      '$name: rejects naming the step and the cause, nothing else',
-      async ({ run, text }) => {
-        runs.push(...failing(step, run));
-        expect(await rejection(killTaskSandboxesOrThrow(TASK))).toBe(
-          `sandbox ${step} failed: ${text}`,
-        );
-        expect(argvs()).toEqual(spawned(step));
-      },
-    );
+    it.each(causes)('$name: rejects with the fixed reason code', async ({ run }) => {
+      runs.push(...failing(step, run));
+      expect(await rejection(killTaskSandboxesOrThrow(TASK))).toBe(`sandbox_${step}_failed`);
+      expect(argvs()).toEqual(spawned(step));
+    });
   });
 
   it('does not take the ids a failing listing printed', async () => {
     runs.push({ code: 1, stdout: IDS, stderr: 'boom\n' });
-    expect(await rejection(killTaskSandboxesOrThrow(TASK))).toBe(
-      'sandbox listing failed: exit 1: boom',
-    );
+    expect(await rejection(killTaskSandboxesOrThrow(TASK))).toBe('sandbox_listing_failed');
     expect(argvs()).toEqual([listing]);
   });
 
-  it.each(deadlines)('rejects a %s that outlasts %i ms with "timed out"', async (step, ms) => {
-    runs.push(...failing(step, { hang: true }));
-    let settled = false;
-    const pending = rejection(killTaskSandboxesOrThrow(TASK)).finally(() => {
-      settled = true;
-    });
-    await vi.advanceTimersByTimeAsync(ms - 1);
-    expect(settled).toBe(false);
-    await vi.advanceTimersByTimeAsync(1);
-    expect(await pending).toBe(`sandbox ${step} failed: timed out`);
-    expect(children[step === 'listing' ? 0 : 1]?.kill).toHaveBeenCalledWith('SIGKILL');
-    expect(argvs()).toEqual(spawned(step));
-  });
+  it.each(deadlines)(
+    'rejects a %s that outlasts %i ms with the fixed reason code',
+    async (step, ms) => {
+      runs.push(...failing(step, { hang: true }));
+      let settled = false;
+      const pending = rejection(killTaskSandboxesOrThrow(TASK)).finally(() => {
+        settled = true;
+      });
+      await vi.advanceTimersByTimeAsync(ms - 1);
+      expect(settled).toBe(false);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(await pending).toBe(`sandbox_${step}_failed`);
+      expect(children[step === 'listing' ? 0 : 1]?.kill).toHaveBeenCalledWith('SIGKILL');
+      expect(argvs()).toEqual(spawned(step));
+    },
+  );
 
   describe('when the removal fails, it lists the task again until the ids are gone', () => {
     const failed: Run = { code: 1, stderr: 'removal of container aaa is already in progress\n' };
-    const cause = 'sandbox removal failed: exit 1: removal of container aaa is already in progress';
+    const cause = 'sandbox_removal_failed';
     const relistings = 1 + 3_000 / 250;
     const listingsOf = (stdout: string): Run[] =>
       Array.from({ length: relistings }, () => ({ stdout }));
@@ -178,14 +177,20 @@ describe('killTaskSandboxesOrThrow', () => {
     it.each(causes)(
       'resolves the count when the removal $name and only other ids are listed',
       async ({ run }) => {
-        runs.push({ stdout: IDS }, run, { stdout: 'ccc\nddd\n' });
+        runs.push({ stdout: IDS }, run, { stdout: 'ccc\texited\nddd\tdead\n' });
         await expect(killTaskSandboxesOrThrow(TASK)).resolves.toBe(2);
         expect(argvs()).toEqual([listing, removal, listing]);
       },
     );
 
     it('lists every 250 ms and resolves the count as soon as none of the ids is listed', async () => {
-      runs.push({ stdout: IDS }, failed, { stdout: 'aaa\n' }, { stdout: 'aaa\n' }, { stdout: '' });
+      runs.push(
+        { stdout: IDS },
+        failed,
+        { stdout: 'aaa\trunning\n' },
+        { stdout: 'aaa\trunning\n' },
+        { stdout: '' },
+      );
       let outcome: string | undefined;
       const pending = killTaskSandboxesOrThrow(TASK).then(
         (count) => {
@@ -210,9 +215,9 @@ describe('killTaskSandboxesOrThrow', () => {
     });
 
     it.each([
-      ['the first of them', 'aaa\n'],
-      ['the second of them', 'bbb\n'],
-      ['one of them among others', 'ccc\nbbb\n'],
+      ['the first of them', 'aaa\trunning\n'],
+      ['the second of them', 'bbb\tpaused\n'],
+      ['one of them among others', 'ccc\texited\nbbb\tpaused\n'],
     ])(
       'rejects with the removal cause once 3000 ms have passed with %s still listed',
       async (_which, relisted) => {
@@ -231,7 +236,12 @@ describe('killTaskSandboxesOrThrow', () => {
     );
 
     it('counts the 3000 ms from the failure, a slow listing included', async () => {
-      runs.push({ stdout: IDS }, failed, { stdout: 'aaa\n', delay: 2_900 }, { stdout: 'aaa\n' });
+      runs.push(
+        { stdout: IDS },
+        failed,
+        { stdout: 'aaa\trunning\n', delay: 2_900 },
+        { stdout: 'aaa\trunning\n' },
+      );
       let settled = false;
       const pending = rejection(killTaskSandboxesOrThrow(TASK)).finally(() => {
         settled = true;
@@ -253,7 +263,7 @@ describe('killTaskSandboxesOrThrow', () => {
     it.each(causes)(
       'rejects with the removal cause when a later re-listing $name',
       async ({ run }) => {
-        runs.push({ stdout: IDS }, failed, { stdout: 'aaa\n' }, run);
+        runs.push({ stdout: IDS }, failed, { stdout: 'aaa\trunning\n' }, run);
         const pending = rejection(killTaskSandboxesOrThrow(TASK));
         await vi.advanceTimersByTimeAsync(250);
         expect(await pending).toBe(cause);
@@ -310,12 +320,12 @@ describe('killTaskSandboxes', () => {
   );
 
   it.each(causes)('reports unconfirmed when the removal $name', async ({ run }) => {
-    runs.push({ stdout: IDS }, run);
+    runs.push({ stdout: IDS }, run, { code: 1 });
     await expect(killTaskSandboxes(TASK)).resolves.toMatchObject({
       killed: 0,
       killConfirmed: false,
     });
-    expect(argvs()).toEqual([listing, removal]);
+    expect(argvs()).toEqual([listing, removal, listing]);
   });
 
   it.each(deadlines)(
@@ -325,7 +335,7 @@ describe('killTaskSandboxes', () => {
       const pending = killTaskSandboxes(TASK);
       await vi.advanceTimersByTimeAsync(ms);
       await expect(pending).resolves.toMatchObject({ killed: 0, killConfirmed: false });
-      expect(children.at(-1)?.kill).toHaveBeenCalledWith('SIGKILL');
+      expect(children[step === 'listing' ? 0 : 1]?.kill).toHaveBeenCalledWith('SIGKILL');
     },
   );
 });
@@ -353,20 +363,20 @@ describe('deadline timers', () => {
       killed: 0,
       killConfirmed: false,
     });
-    await settle(step === 'listing' ? 1 : 2);
+    await settle(step === 'listing' ? 1 : 3);
   });
 });
 
-describe('T345 red controls', () => {
-  it('3: a failed Docker listing is structurally unconfirmed', async () => {
+describe('sandbox cleanup confirmation', () => {
+  it('a failed Docker listing is structurally unconfirmed', async () => {
     runs.push({ code: 1, stderr: 'Cannot connect to the daemon' });
     expect(await killTaskSandboxes(TASK)).toMatchObject({ killed: 0, killConfirmed: false });
   });
-  it('3: a failed removal never claims a confirmed kill count', async () => {
-    runs.push({ stdout: IDS }, { code: 1 });
+  it('a failed removal never claims a confirmed kill count', async () => {
+    runs.push({ stdout: IDS }, { code: 1 }, { code: 1 });
     expect(await killTaskSandboxes(TASK)).toMatchObject({ killed: 0, killConfirmed: false });
   });
-  it('8: finds created and exited sandboxes as well as running ones', async () => {
+  it('finds created and exited sandboxes as well as running ones', async () => {
     h.spawn.mockImplementation((_cmd: string, args: string[]) => {
       const child = new FakeChild();
       queueMicrotask(() =>
@@ -378,3 +388,89 @@ describe('T345 red controls', () => {
     expect(argvs()).toContainEqual(removal);
   });
 });
+
+describe.each([
+  ['ordinary', killTaskSandboxes],
+  ['strict', killTaskSandboxesOrThrow],
+] as const)('%s removal confirmation', (_name, kill) => {
+  it.each(['', 'aaa\tremoving\n', 'aaa\tdead\n', 'aaa\texited\n'])(
+    'confirms a failed removal when no live sandbox remains (%j)',
+    async (after) => {
+      runs.push(
+        { stdout: 'aaa\trunning\n' },
+        { code: 1, stderr: 'opaque conflict' },
+        { stdout: after },
+      );
+      const pending = kill(TASK);
+      const observed = pending.catch(() => undefined);
+      await vi.runAllTimersAsync();
+      await observed;
+      const result = await pending;
+      expect(result).toEqual(_name === 'ordinary' ? { killed: 1, killConfirmed: true } : 1);
+      expect(argvs()).toEqual([listing, ['docker', 'rm', '-f', 'aaa'], listing]);
+    },
+  );
+  it.each(['removing', 'dead'])(
+    'confirms a %s leftover even when its removal fails',
+    async (state) => {
+      runs.push({ stdout: `aaa\t${state}\n` }, { code: 1 }, { stdout: `aaa\t${state}\n` });
+      const pending = kill(TASK);
+      const observed = pending.catch(() => undefined);
+      await vi.runAllTimersAsync();
+      await observed;
+      expect(await pending).toEqual(_name === 'ordinary' ? { killed: 1, killConfirmed: true } : 1);
+    },
+  );
+  it.each(['created', 'running', 'restarting', 'paused'])(
+    'refuses confirmation while a %s sandbox remains despite benign stderr',
+    async (state) => {
+      runs.push(
+        { stdout: 'aaa\trunning\n' },
+        { code: 1, stderr: 'already gone' },
+        ...Array.from({ length: 13 }, () => ({ stdout: `aaa\t${state}\n` })),
+      );
+      const pending = _name === 'ordinary' ? kill(TASK) : rejection(kill(TASK));
+      await vi.advanceTimersByTimeAsync(3000);
+      expect(await pending).toEqual(
+        _name === 'ordinary'
+          ? { killed: 0, killConfirmed: false, killError: 'sandbox_removal_failed' }
+          : 'sandbox_removal_failed',
+      );
+    },
+  );
+  it('does not confirm when a replacement live sandbox appears', async () => {
+    runs.push(
+      { stdout: 'aaa\trunning\n' },
+      { code: 1 },
+      ...Array.from({ length: 13 }, () => ({ stdout: 'new\trunning\n' })),
+    );
+    const pending = _name === 'ordinary' ? kill(TASK) : rejection(kill(TASK));
+    await vi.advanceTimersByTimeAsync(3000);
+    expect(await pending).toEqual(
+      _name === 'ordinary'
+        ? { killed: 0, killConfirmed: false, killError: 'sandbox_removal_failed' }
+        : 'sandbox_removal_failed',
+    );
+  });
+});
+it('returns a coded reason instead of private Docker stderr', async () => {
+  runs.push({ code: 1, stderr: 'private /var/run/private-docker.sock secret=example' });
+  expect(await killTaskSandboxes(TASK)).toEqual({
+    killed: 0,
+    killConfirmed: false,
+    killError: 'sandbox_listing_failed',
+  });
+});
+
+it.each(['aaa', 'aaa\tunknown\n', 'aaa\trunning\textra\n'])(
+  'refuses malformed or unknown Docker states (%j)',
+  async (stdout) => {
+    runs.push({ stdout });
+    expect(await killTaskSandboxes(TASK)).toEqual({
+      killed: 0,
+      killConfirmed: false,
+      killError: 'sandbox_listing_failed',
+    });
+    expect(argvs()).toEqual([listing]);
+  },
+);

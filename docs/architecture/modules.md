@@ -70,13 +70,14 @@ the module loads again.
   it is on, and says `capped` when more exist. The page shows that list and offers **Turn off now**,
   which sends `{"active": false, "mode": "urgent"}`. Urgent mode stamps `deactivated_at` under the
   module row's lock, then stops every task that is in one of the module's steps, listed or not, with at most
-  `URGENT_STOP_CONCURRENCY` (8, injectable) independent Stops in flight: each
+  `URGENT_STOP_CONCURRENCY` (4, injectable; the ten-connection API pool keeps six
+  connections for unrelated requests even when Stops wait on step rows) independent Stops in flight: each
   stop commits on its own (the Stop button's `supersedeLiveRuns`, failing the task as stopped by an
   administrator), then the task's sandboxes are killed, then a `task.stopped` event (reason
   `module_deactivated`) and a `task.admin_stop` audit row are written. A step waiting on a form has
   nothing to stop, so that task is left, as is every task elsewhere in its run list: those fail when
   they next run one of the module's steps. The answer reports `stopped` (with `killError` when,
-  after the stop committed, the task's sandboxes could not be listed or one was still listed 3 s after
+  after the stop committed, the task's sandboxes could not be listed or a created, running, restarting or paused sandbox was still listed 3 s after
   a failed removal, and `eventError` when the event or audit write failed), `left` and `failed` (only
   a stop transaction that threw); the page shows the counts and names each
   task it could not stop or whose kill or record failed. Results retain dependent-list order.

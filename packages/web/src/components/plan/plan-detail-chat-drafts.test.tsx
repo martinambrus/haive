@@ -21,6 +21,8 @@ vi.mock('lucide-react', async (original) =>
   Object.fromEntries(Object.keys(await original<object>()).map((name) => [name, () => null])),
 );
 const net = vi.hoisted(() => ({
+  switchProvider: vi.fn(),
+  providers: [] as Record<string, unknown>[],
   chat: null as Record<string, unknown> | null,
   chatTask: null as Record<string, unknown> | null,
   tasks: [] as PlanNodeTask[],
@@ -58,15 +60,18 @@ vi.mock('@/lib/api-client', async (original) => ({
     tasks: net.tasks,
     advisoryTask: net.advisory,
   }),
+  setPlanChatProvider: net.switchProvider,
   getPlanMessages: async () => net.chat ?? { messages: [], conversations: [] },
   getPlanBuildClis: async () => ({ plannerCliProviderId: null }),
   markPlanNodeRead: async () => undefined,
   api: {
     get: async (path: string) =>
-      path.startsWith('/tasks/') && net.chatTask ? net.chatTask : { providers: [] },
+      path.startsWith('/tasks/') && net.chatTask ? net.chatTask : { providers: net.providers },
   },
 }));
-vi.mock('@/components/markdown/markdown-view', () => ({ MarkdownView: () => null }));
+vi.mock('@/components/markdown/markdown-view', () => ({
+  MarkdownView: ({ body }: { body: string }) => body,
+}));
 
 let dispose = () => {};
 afterEach(() => {
@@ -74,6 +79,7 @@ afterEach(() => {
   vi.unstubAllGlobals();
   net.chat = null;
   net.chatTask = null;
+  net.providers = [];
 });
 
 it('keeps each node’s draft through a switch from A to B and back in PlanDetailPanel', async () => {
@@ -276,5 +282,67 @@ it.each(['initialValue', 'default'] as const)(
     fire.click(edit[0]!);
     view.draw();
     expect(findAll(view.tree(), (e) => e.tag === 'textarea')[0]!.props.value).toBe(original);
+  },
+);
+
+it.each([false, true, undefined])(
+  'shows cleanup confirmation after a plan-chat CLI switch (%s)',
+  async (killConfirmed) => {
+    net.chat = {
+      messages: [
+        {
+          id: 'message',
+          taskId: 'chat-task',
+          nodeId: 'node',
+          role: 'user',
+          body: 'Question',
+          patch: null,
+          cliLabel: null,
+          createdAt: '',
+        },
+      ],
+      conversations: [
+        {
+          taskId: 'chat-task',
+          title: 'Chat',
+          status: 'waiting_user',
+          createdAt: '',
+          cliProviderId: null,
+        },
+      ],
+    };
+    net.chatTask = {
+      task: { id: 'chat-task', status: 'waiting_user', deadAt: null },
+      steps: [{ stepId: '01-plan-chat', status: 'waiting_form', waitingStartedAt: '2026-11-14' }],
+    };
+    net.providers = [{ id: 'new-cli', name: 'New CLI', enabled: true }];
+    net.switchProvider.mockReset().mockResolvedValue({ killConfirmed });
+    let visible = true;
+    const view = createRenderer(() =>
+      visible ? <PlanChat repositoryId="repo" nodeId="node" onPatched={() => {}} /> : null,
+    );
+    dispose = () => {
+      visible = false;
+      view.draw();
+    };
+    await view.flush();
+    await view.flush();
+    const select = findAll(view.tree(), (e) => e.tag === 'select')[0]!;
+    expect(select).toBeDefined();
+    (select.props.onChange as (event: unknown) => void)({ target: { value: 'new-cli' } });
+    await view.flush();
+    await view.flush();
+    expect(net.switchProvider).toHaveBeenCalledWith('chat-task', 'new-cli');
+    const warnings = findAll(view.tree(), (e) => e.props.role === 'status');
+    expect(warnings).toHaveLength(killConfirmed === false ? 1 : 0);
+    if (killConfirmed === false) {
+      expect(textOf(warnings[0]!)).toContain('Sandbox cleanup could not be confirmed.');
+      expect(warnings[0]!.props.className).toContain('text-amber-200');
+      net.switchProvider.mockResolvedValueOnce({ killConfirmed: true });
+      (select.props.onChange as (event: unknown) => void)({ target: { value: 'another-cli' } });
+      await view.flush();
+      await view.flush();
+      expect(findAll(view.tree(), (e) => e.props.role === 'status')).toHaveLength(0);
+    }
   },
 );

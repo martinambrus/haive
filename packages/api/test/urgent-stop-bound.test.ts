@@ -50,7 +50,7 @@ beforeEach(() => {
 afterEach(() => vi.useRealTimers());
 
 describe('urgent stop bounds', () => {
-  it('pins the production concurrency', () => expect(URGENT_STOP_CONCURRENCY).toBe(8));
+  it('pins the production concurrency', () => expect(URGENT_STOP_CONCURRENCY).toBe(4));
   it.each([0, -1, 1.5, Infinity])(
     'refuses invalid concurrency %s before stopping anything',
     async (limit) => {

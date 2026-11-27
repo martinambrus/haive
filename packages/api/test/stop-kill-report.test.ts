@@ -14,7 +14,12 @@ vi.mock('node:child_process', async (original) => ({
     child.stderr = new EventEmitter();
     queueMicrotask(() =>
       h.failure
-        ? child.emit('error', Object.assign(new Error('Docker unavailable'), { code: 'ENOENT' }))
+        ? child.emit(
+            'error',
+            Object.assign(new Error('Docker unavailable at /private/docker.sock secret=example'), {
+              code: 'ENOENT',
+            }),
+          )
         : child.emit('close', 0),
     );
     return child;
@@ -91,8 +96,23 @@ it.each([true, false])(
   },
 );
 it.each([true, false])('3: Stop exposes unconfirmed cleanup (admin=%s)', async (admin) => {
-  setup();
+  const fake = setup();
   const response = await post(admin);
   expect(response.status).toBe(200);
-  expect(await response.json()).toMatchObject({ ok: true, killed: 0, killConfirmed: false });
+  expect(await response.json()).toMatchObject({
+    ok: true,
+    killed: 0,
+    killConfirmed: false,
+    killError: 'sandbox_listing_failed',
+  });
+  if (admin) {
+    expect(
+      fake.rows(schema.taskEvents).find((r) => r.eventType === 'task.stopped')?.payload,
+    ).toMatchObject({ killError: 'sandbox_listing_failed' });
+    expect(
+      fake.rows(schema.auditEvents).find((r) => r.action === 'task.admin_stop')?.metadata,
+    ).toMatchObject({ killError: 'sandbox_listing_failed' });
+  }
+  expect(JSON.stringify(fake.rows(schema.taskEvents))).not.toContain('/private/docker.sock');
+  expect(JSON.stringify(fake.rows(schema.auditEvents))).not.toContain('secret=example');
 });

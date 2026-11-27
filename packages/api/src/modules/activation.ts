@@ -210,7 +210,9 @@ const stopTask = async (
   }
 };
 
-export const URGENT_STOP_CONCURRENCY = 8;
+// The API pool has 10 connections; leave at least six for unrelated requests
+// even when independent Stops are waiting on worker-held step rows.
+export const URGENT_STOP_CONCURRENCY = 4;
 
 export async function deactivateUrgently(
   db: Database,

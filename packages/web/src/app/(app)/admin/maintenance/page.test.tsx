@@ -455,6 +455,9 @@ describe('maintenance Stop controls (#395)', () => {
     for (let i = 0; i < 5; i += 1) await view.flush();
     expect(textOf(view.tree())).toContain('Sandbox cleanup could not be confirmed.');
     expect(textOf(view.tree())).not.toContain('Nothing was running to stop.');
+    const warning = findAll(view.tree(), (h) => h.props.role === 'status')[0]!;
+    expect(warning.props.className).toContain('text-amber-200');
+    expect(warning.props.className).toContain('bg-amber-950');
   });
 
   it('keeps the Stop notice through polling and clears it on the next action', async () => {

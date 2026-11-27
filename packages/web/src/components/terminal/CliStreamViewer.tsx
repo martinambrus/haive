@@ -1,4 +1,6 @@
 'use client';
+import { TaskActionNotice } from '@/components/task-action-notice';
+import type { TaskActionNotice as ActionNotice } from '@/lib/task-state';
 
 import { memo, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { Terminal as XTerm } from '@xterm/xterm';
@@ -160,7 +162,7 @@ export function CliStreamViewer({
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [cancelling, setCancelling] = useState(false);
   const [cancelError, setCancelError] = useState<string | null>(null);
-  const [cancelNotice, setCancelNotice] = useState<string | null>(null);
+  const [cancelNotice, setCancelNotice] = useState<ActionNotice | null>(null);
   // Mid-run steering: enabled only when the connected frame reports this
   // invocation is steerable. The text is delivered to the running CLI's stdin
   // and applied at its next tool-call boundary.
@@ -731,11 +733,7 @@ export function CliStreamViewer({
           )}
           {errorMsg && <span className="text-red-400">{errorMsg}</span>}
           {cancelError && <span className="text-red-400">cancel: {cancelError}</span>}
-          {cancelNotice && (
-            <div role="status" className="text-neutral-400">
-              <InlineMarkdown body={cancelNotice} />
-            </div>
-          )}
+          <TaskActionNotice notice={cancelNotice} />
           {cliPendingChars !== null && (
             <button
               type="button"
