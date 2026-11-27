@@ -81,7 +81,7 @@ beforeEach(() => {
 describe('the allowance auto-resume', () => {
   it('takes runs and agent rows, then the step, then the task, as a Retry does', async () => {
     const t = setup('failed');
-    expect(await t.resume()).toBe(true);
+    expect(await t.resume()).toEqual({ epoch: 1 });
     expect(t.updated).toEqual([
       'cli_invocations',
       'task_step_agent_minings',
@@ -104,7 +104,7 @@ describe('the allowance auto-resume', () => {
       status: 'failed',
       errorMessage: `${PROVIDER_FATAL_HEADLINES.content_filter} — this prompt was refused.`,
     });
-    expect(await t.resume()).toBe(true);
+    expect(await t.resume()).toEqual({ epoch: 1 });
     const agents = t.fake.rows(schema.taskStepAgentMinings);
     expect(t.one(agents, AGENT).userRetryRequestedAt).not.toBeNull();
     expect(t.one(agents, REFUSED_AGENT).userRetryRequestedAt ?? null).toBeNull();

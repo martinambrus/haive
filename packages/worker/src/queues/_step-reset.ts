@@ -342,7 +342,7 @@ export async function resetStepAndDownstream(
  *  its span and would bill as WORK — CLOSED_GAP_INTO_IDLE_MS credits it to idle in the same
  *  update, exactly as the api re-open sites do. Does NOT enqueue the advance itself (that
  *  would import the task queue and form a cycle) — the caller enqueues ADVANCE_STEP when this
- *  returns true. Throws NewWorkHeld, writing nothing, while the system is held, and
+ *  returns the committed epoch. Throws NewWorkHeld, writing nothing, while the system is held, and
  *  MaintenanceStateUnreadable, writing nothing, when the held state cannot be read. */
 export async function autoResumeFailedStep(
   db: Database,
@@ -355,7 +355,7 @@ export async function autoResumeFailedStep(
     /** The polled watch's `awaiting_provider_since`: the episode a refusal may stamp. */
     watchSince: Date | null;
   },
-): Promise<boolean> {
+): Promise<{ epoch: number } | false> {
   const { taskId, stepId, round, providerId, via, watchSince } = args;
   const stepRows = await db
     .select({ id: schema.taskSteps.id })
@@ -370,9 +370,9 @@ export async function autoResumeFailedStep(
     .limit(1);
   const step = stepRows[0];
   if (!step) return false;
-  let flipped = false;
+  let flipped: { epoch: number } | false = false;
   try {
-    await db.transaction(async (tx) => {
+    flipped = await db.transaction(async (tx) => {
       const { held, state } = await admitReopen(tx, taskId);
       if (held) throw new NewWorkHeld(state);
       const refusal = await refuseRevive(tx, taskId);
@@ -476,12 +476,13 @@ export async function autoResumeFailedStep(
       // Last, as a Retry and a Stop take the task row last. Guarded flip: only a task still
       // `failed` is auto-resumed, so a concurrent manual resume makes this a no-op and takes back
       // every write above. Clears the watch + stale completedAt, bumps the anti-thrash counter,
-      // and stamps the auto-resumed marker — all atomically. RETURNING gives the post-increment
-      // count for the event's `attempt`.
+      // and stamps the auto-resumed marker and epoch — all atomically. RETURNING gives
+      // the event's post-increment attempt and the enqueue's epoch without a read-back.
       const bumped = await tx
         .update(schema.tasks)
         .set({
           status: 'running',
+          orchestrationEpoch: sql`${schema.tasks.orchestrationEpoch} + 1`,
           errorMessage: null,
           completedAt: null,
           awaitingAllowanceProviderId: null,
@@ -500,7 +501,10 @@ export async function autoResumeFailedStep(
             isNull(schema.tasks.deadAt),
           ),
         )
-        .returning({ count: schema.tasks.allowanceAutoResumeCount });
+        .returning({
+          count: schema.tasks.allowanceAutoResumeCount,
+          epoch: schema.tasks.orchestrationEpoch,
+        });
       if (bumped.length === 0) throw new ResumeClaimLost();
       await tx.insert(schema.taskEvents).values({
         taskId,
@@ -508,8 +512,8 @@ export async function autoResumeFailedStep(
         eventType: 'task.auto_resumed',
         payload: { stepId, round, providerId, via, attempt: bumped[0]?.count ?? null },
       });
+      return { epoch: bumped[0]!.epoch };
     });
-    flipped = true;
   } catch (err) {
     if (err instanceof ResumeClaimLost) return false;
     const refusal =

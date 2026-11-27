@@ -316,6 +316,29 @@ it('accepts a latched gate-2 answer that carries the form it was rendered for', 
   });
 });
 
+it.each([GATE2, GATE3])(
+  'accepts an identical retry of the saved latched %s answer without another advance',
+  async (stepId) => {
+    const { fake, stepRowId } = gateFixture({
+      stepId,
+      kinds: [check(stepId === GATE2 ? 'verify_failed' : 'gate2_approved')],
+    });
+    const binding = { stepRowId: stepRowId(), waitingStartedAt: PARK.toISOString() };
+    expect((await postGate(stepId, binding)).status).toBe(200);
+    const before = {
+      steps: fake.rows(schema.taskSteps).map((row) => ({ ...row })),
+      events: [...fake.rows(schema.taskEvents)],
+    };
+    h.add.mockClear();
+    const response = await postGate(stepId, binding);
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ ok: true, queued: false });
+    expect(fake.rows(schema.taskSteps)).toEqual(before.steps);
+    expect(fake.rows(schema.taskEvents)).toEqual(before.events);
+    expect(h.add).not.toHaveBeenCalled();
+  },
+);
+
 it('binds a latched gate-3 answer the same way', async () => {
   const stale = gateFixture({ stepId: GATE3, kinds: [check('gate2_approved')] });
   const before = snap(stale.fake);

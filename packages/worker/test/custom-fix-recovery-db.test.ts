@@ -2259,9 +2259,9 @@ describe.skipIf(!url)('recovery of a fix round on Postgres', () => {
           via: 'test',
           watchSince: null,
         });
-        expect(resumed).toBe(true);
+        expect(resumed).toEqual({ epoch: 4 });
         verdict('S7-auto-resume', leg, await trace(leg, id), {
-          task: { step: 'TARGET', round: 1, status: 'running', epoch: 0, dead: false },
+          task: { step: 'TARGET', round: 1, status: 'running', epoch: 1, dead: false },
           rows: ['TARGET@0:done', 'TARGET@1:running'],
           events: ['task.auto_resumed'],
           jobs: [],

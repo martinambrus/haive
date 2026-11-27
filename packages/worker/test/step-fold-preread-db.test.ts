@@ -470,7 +470,7 @@ describe.skipIf(!url)('worker step folds beside a peer that updates the row, on 
       expect(advanceJobs()).toEqual([
         {
           name: TASK_JOB_NAMES.ADVANCE_STEP,
-          data: { taskId, userId, stepId: PR_WAIT_STEP_ID, round: 0, formValues: {} },
+          data: { taskId, userId, stepId: PR_WAIT_STEP_ID, round: 0, epoch: 3, formValues: {} },
         },
       ]);
     },

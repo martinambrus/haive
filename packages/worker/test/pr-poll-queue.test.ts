@@ -65,6 +65,8 @@ const parkedSinceTenMinutes = (over: Partial<ParkedStep> = {}): ParkedStep => ({
 function makeDb(step: ParkedStep | undefined, matched: { id: string }[] = [{ id: STEP_ROW_ID }]) {
   const writes: { table: unknown; values: Record<string, unknown>; where: SQL }[] = [];
   const db = {
+    transaction: async (fn: (tx: unknown) => unknown): Promise<unknown> => fn(db),
+    select: () => ({ from: () => ({ where: () => ({ for: async () => [{ epoch: 3 }] }) }) }),
     query: {
       tasks: { findMany: async () => [MERGED_TASK] },
       taskSteps: { findFirst: async () => step },
@@ -109,7 +111,14 @@ describe('the PR poller finalizing a merged pull request', () => {
     expect(h.adds).toEqual([
       {
         name: TASK_JOB_NAMES.ADVANCE_STEP,
-        data: { taskId: TASK_ID, userId: USER_ID, stepId: '13-pr-wait', round: 0, formValues: {} },
+        data: {
+          taskId: TASK_ID,
+          userId: USER_ID,
+          stepId: '13-pr-wait',
+          round: 0,
+          epoch: 3,
+          formValues: {},
+        },
       },
     ]);
   });
@@ -130,7 +139,14 @@ describe('the PR poller finalizing a merged pull request', () => {
     expect(h.adds).toEqual([
       {
         name: TASK_JOB_NAMES.ADVANCE_STEP,
-        data: { taskId: TASK_ID, userId: USER_ID, stepId: '13-pr-wait', round: 0, formValues: {} },
+        data: {
+          taskId: TASK_ID,
+          userId: USER_ID,
+          stepId: '13-pr-wait',
+          round: 0,
+          epoch: 3,
+          formValues: {},
+        },
       },
     ]);
   });

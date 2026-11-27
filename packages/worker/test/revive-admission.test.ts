@@ -343,7 +343,7 @@ describe('the allowance auto-resume of a failed onboarding or upgrade', () => {
     'resumes a failed %s with nothing opposing it, as before',
     async (type) => {
       const t = setup({ ...admitted(), type });
-      expect(await t.resume()).toBe(true);
+      expect(await t.resume()).toEqual({ epoch: 4 });
       expect(t.task()).toMatchObject({ status: 'running', allowanceAutoResumeCount: 1 });
       expect(t.events().map((e) => e.eventType)).toEqual(['task.auto_resumed']);
     },

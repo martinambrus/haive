@@ -208,7 +208,7 @@ describe('the allowance auto-resume of a failed task', () => {
     const t = setup();
     t.stored('normal');
 
-    expect(await t.resume()).toBe(true);
+    expect(await t.resume()).toEqual({ epoch: 4 });
 
     expect(t.log.slice(0, 2)).toEqual([FENCE, READS_STATE]);
     expect(t.log.indexOf('updates task_steps')).toBeGreaterThan(1);

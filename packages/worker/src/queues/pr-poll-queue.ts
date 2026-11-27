@@ -267,8 +267,8 @@ async function recordPollError(db: Database, taskId: string, message: string): P
 
 /** Auto-finalize on merge: submit the parked 13-pr-wait form so the step's apply reaps
  *  the worktree and the task completes. Mirrors the API submit path (write formValues +
- *  enqueue ADVANCE_STEP); epoch is omitted so the orchestration-epoch guard never
- *  falsely skips it. Idempotent — a no-op once the step is no longer parked. */
+ *  enqueue ADVANCE_STEP). Capture the epoch under the same transaction as the answer
+ *  so a later Retry invalidates the wakeup. A no-op once the step is no longer parked. */
 async function advancePrWaitStep(db: Database, task: PrWaitTask): Promise<void> {
   const stepRow = await db.query.taskSteps.findFirst({
     where: and(
@@ -281,27 +281,38 @@ async function advancePrWaitStep(db: Database, task: PrWaitTask): Promise<void> 
   });
   if (!stepRow) return;
   const now = new Date();
-  const closed = await db
-    .update(schema.taskSteps)
-    .set({
-      formValues: {},
-      // Closed in SQL on the locked row, clamped to the int4 column: a wait past ~24.8 days must not make
-      // this update throw and wedge the task, and an idle_ms write since the read above is kept.
-      idleMs: OPEN_WAIT_INTO_IDLE_MS,
-      waitingStartedAt: null,
-      updatedAt: now,
-    })
-    .where(
-      and(
-        eq(schema.taskSteps.id, stepRow.id),
-        eq(schema.taskSteps.status, 'waiting_form'),
-        stepRow.waitingStartedAt
-          ? isNotNull(schema.taskSteps.waitingStartedAt)
-          : isNull(schema.taskSteps.waitingStartedAt),
-      ),
-    )
-    .returning({ id: schema.taskSteps.id });
-  if (closed.length === 0) return;
+  const answered = await db.transaction(async (tx) => {
+    const closed = await tx
+      .update(schema.taskSteps)
+      .set({
+        formValues: {},
+        // Closed in SQL on the locked row, clamped to the int4 column: a wait past ~24.8 days must not make
+        // this update throw and wedge the task, and an idle_ms write since the read above is kept.
+        idleMs: OPEN_WAIT_INTO_IDLE_MS,
+        waitingStartedAt: null,
+        updatedAt: now,
+      })
+      .where(
+        and(
+          eq(schema.taskSteps.id, stepRow.id),
+          eq(schema.taskSteps.status, 'waiting_form'),
+          stepRow.waitingStartedAt
+            ? isNotNull(schema.taskSteps.waitingStartedAt)
+            : isNull(schema.taskSteps.waitingStartedAt),
+        ),
+      )
+      .returning({ id: schema.taskSteps.id });
+    if (closed.length === 0) return null;
+    // Step first, then task, as Retry takes them. Keep the task lock through commit
+    // so the answer and its wakeup belong to this epoch together.
+    const [current] = await tx
+      .select({ epoch: schema.tasks.orchestrationEpoch })
+      .from(schema.tasks)
+      .where(eq(schema.tasks.id, task.id))
+      .for('share');
+    return current ?? null;
+  });
+  if (!answered) return;
   await retrying(async () => {
     await getTaskQueue().add(
       TASK_JOB_NAMES.ADVANCE_STEP,
@@ -310,6 +321,7 @@ async function advancePrWaitStep(db: Database, task: PrWaitTask): Promise<void> 
         userId: task.userId,
         stepId: '13-pr-wait',
         round: stepRow.round,
+        epoch: answered.epoch,
         formValues: {},
       },
       {

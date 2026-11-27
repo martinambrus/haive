@@ -4329,7 +4329,7 @@ describe('08e implementer dispatch and recovery', () => {
             via: 'reset_at',
             watchSince: null,
           }),
-        ).toBe(true);
+        ).toEqual({ epoch: 1 });
         // Feed the actual auto-resume's persisted rows to the continuation, translating only
         // the UUID keys into this harness's existing symbolic keys.
         state.taskStepRow = { ...fake.rows(schema.taskSteps)[0]!, id: 'ts-1', taskId: 'task-1' };

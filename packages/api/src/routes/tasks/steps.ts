@@ -10,6 +10,7 @@ import {
 import { validateFormValues, type FormSchema } from '@haive/shared';
 import { assertUserPostgresDsn } from '@haive/shared/egress';
 import { Hono } from 'hono';
+import { isDeepStrictEqual } from 'node:util';
 import { z } from 'zod';
 import {
   and,
@@ -186,8 +187,8 @@ function refuseLiveFanout(count: number): void {
 }
 
 /** An open wait must still have the marker read by the handler: a closer or a re-park took that wait.
- *  A NULL marker can be an already answered wait (or a legacy unmarked park), so only the status
- *  is checked there. This keeps accepting a duplicate read after an answer closed the wait. */
+ *  A NULL marker can also be a legacy unmarked park, so this predicate checks only its status.
+ *  Submit separately checks saved answers under the row lock before using this predicate. */
 function stillParkedAsRead(step: { id: string; waitingStartedAt: Date | null }) {
   return and(
     eq(schema.taskSteps.id, step.id),
@@ -1129,15 +1130,6 @@ stepRoutes.post('/:id/steps/:stepId/submit', async (c) => {
     .limit(1);
   const step = stepRows[0];
   if (!step) throw formNotWaiting('form submission', stepId);
-  if (await insightGateLatched(db, id, stepId)) {
-    if (
-      body.stepRowId !== step.id ||
-      step.waitingStartedAt === null ||
-      typeof body.waitingStartedAt !== 'string' ||
-      new Date(body.waitingStartedAt).getTime() !== step.waitingStartedAt.getTime()
-    )
-      throw formStale();
-  }
   // Upgrade the same persisted 06 schema the display and worker readers use. Keep all
   // other fields sparse: their existing defaults/presets are resolved by 06 apply.
   const submitSchema = upgradeRunConfigSchema(
@@ -1156,6 +1148,18 @@ stepRoutes.post('/:id/steps/:stepId/submit', async (c) => {
   const normalized = normalizeStepFormValues(stepId, submittedValues);
   if (!normalized.success) throw new HttpError(400, normalized.issues.join('; '));
   const values = normalized.data;
+  if (await insightGateLatched(db, id, stepId)) {
+    if (
+      body.stepRowId !== step.id ||
+      (step.waitingStartedAt === null
+        ? step.formValues === null || !isDeepStrictEqual(step.formValues, values)
+        : new Date(body.waitingStartedAt as string).getTime() !==
+          step.waitingStartedAt.getTime()) ||
+      typeof body.waitingStartedAt !== 'string'
+    )
+      throw formStale();
+  }
+
   if (
     stepId === '04-tooling-infrastructure' &&
     typeof values.ragConnectionString === 'string' &&
@@ -1166,6 +1170,20 @@ stepRoutes.post('/:id/steps/:stepId/submit', async (c) => {
 
   const now = new Date();
   const writeAnswer = async (tx: DbHandle) => {
+    // A submit closes the wait before pickup changes waiting_form. Decide from the
+    // held row so two submissions cannot both replace the accepted answer. A legacy
+    // unmarked park with no values still accepts its first answer.
+    const [held] = await tx
+      .select()
+      .from(schema.taskSteps)
+      .where(eq(schema.taskSteps.id, step.id))
+      .for('no key update');
+    if (!held || held.status !== 'waiting_form') throw formNotWaiting('form submission', stepId);
+    if (held.waitingStartedAt === null && held.formValues !== null) {
+      if (!isDeepStrictEqual(held.formValues, values))
+        throw formNotWaiting('form submission', stepId);
+      return false;
+    }
     const answered = await tx
       .update(schema.taskSteps)
       .set({
@@ -1208,13 +1226,16 @@ stepRoutes.post('/:id/steps/:stepId/submit', async (c) => {
           ? { userId, generation: step.rerunGeneration, commit: values.commit }
           : {}),
     });
+    return true;
   };
-  await db.transaction(async (tx) => {
+  const accepted = await db.transaction(async (tx) => {
     if (!(await admitAnswer(tx, id))) return writeAnswer(tx);
     await refuseReviveBesideLive(tx, id);
-    await writeAnswer(tx);
+    if (!(await writeAnswer(tx))) return false;
     await reopenFailedTask(tx, id, now);
+    return true;
   });
+  if (!accepted) return c.json({ ok: true, queued: false });
 
   const payload: TaskJobPayload = {
     taskId: id,
