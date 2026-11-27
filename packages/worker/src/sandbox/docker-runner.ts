@@ -190,6 +190,8 @@ export interface DockerRunner {
    * Other callers keep the historical best-effort inspect/false contract. */
   volumeExists(name: string, options?: { throwOnFailure?: boolean }): Promise<boolean>;
   volumeRemove(name: string): Promise<DockerVolumeOpResult>;
+  /** Strict retirement prerequisite: any container can still pin/write the copy. */
+  volumeHasContainers?(name: string): Promise<boolean>;
   /** Remove only non-running containers that still mount this volume. A worker killed
    *  between `docker create` and `docker start` can otherwise leave a Created helper
    *  container pinning an auth volume forever. Running containers are never selected. */
@@ -632,6 +634,15 @@ export const defaultDockerRunner: DockerRunner = {
       timeoutMs: 30_000,
     });
     return { ok: result.exitCode === 0, stderr: result.stderr, error: result.error };
+  },
+
+  async volumeHasContainers(name) {
+    const result = await spawnAndCollect('docker', ['ps', '-aq', '--filter', `volume=${name}`], {
+      timeoutMs: 15_000,
+    });
+    if (result.exitCode !== 0 || result.timedOut || result.error)
+      throw new Error('auth volume container lookup failed');
+    return result.stdout.trim().length > 0;
   },
 
   async removeStoppedContainersUsingVolume(name, signal) {

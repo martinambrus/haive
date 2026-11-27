@@ -1,11 +1,12 @@
 import { SANDBOX_CORE_IMAGE } from './image-composer.js';
 import { createHash, randomUUID } from 'node:crypto';
-import { and, eq, gte, inArray, or } from 'drizzle-orm';
+import { and, desc, eq, gte, inArray, isNotNull, isNull, notInArray, or, sql } from 'drizzle-orm';
 import { schema, type CliAuthLock, type Database } from '@haive/database';
-import { cliAuthScope } from '@haive/shared/cli-auth-state';
+import { cliAuthSetWhere, cliAuthScope } from '@haive/shared/cli-auth-state';
 import {
   CLI_PROVIDER_LIST,
   cliAuthTaskVolumeName,
+  cliAuthVolumeName,
   getCliProviderMetadata,
   logger,
   resolveCliAuthUserVolumeName,
@@ -25,6 +26,7 @@ import {
 } from '../usage-window/token-source.js';
 import { shellQuote } from './shell-quote.js';
 import { waitForCliAuthLock } from './cli-auth-lock.js';
+import { CliLoginRequiredError, CliAuthRetryableError } from './cli-auth-errors.js';
 import { parseGrokAuthFile } from '../cli-adapters/grok-oauth.js';
 import {
   GROK_REFRESH_FENCE_FILE,
@@ -37,6 +39,9 @@ export interface ProviderAuthCtx {
   providerName: CliProviderName;
   authMode: AuthMode;
   isolateAuth: boolean;
+  /** Docker-owned baseline; refresh and harvest never advance this. */
+  volumeLoginId?: string;
+  volumeLoginAt?: Date;
 }
 
 function userVolumeForCtx(ctx: ProviderAuthCtx, idx: number): string {
@@ -116,6 +121,9 @@ function authSourceIdentity(ctx: ProviderAuthCtx, idx: number): string {
     userVolume: userVolumeForCtx(ctx, idx),
     authMode: ctx.authMode,
     isolateAuth: ctx.isolateAuth,
+    ...(ctx.providerName === 'grok'
+      ? { volumeLoginId: ctx.volumeLoginId ?? NO_SOURCE_SENTINEL }
+      : {}),
   });
 }
 
@@ -173,11 +181,12 @@ const NO_SOURCE_SENTINEL = 'none';
  *  fault: a half-built volume versus credentials that have since been refreshed. */
 type VolumeReadiness = 'ready' | 'not_ready' | 'source_moved' | 'recovery_required';
 
-class GrokCopyRecoveryError extends Error {
-  readonly code = 'grok_login_required';
-  constructor() {
+class GrokCopyRecoveryError extends CliLoginRequiredError {
+  constructor(ctx: ProviderAuthCtx) {
     super(
-      'grok_login_required: Grok credentials cannot be safely reused. Re-run login from the Haive providers page. Any existing task auth copy is retained; recover or explicitly retire it before retrying if its lineage cannot be verified.',
+      'Grok credentials cannot be safely reused. Log in to Grok from the Haive providers page and retry. Existing recovery copies are preserved.',
+      { type: 'cli_login_required', providerId: ctx.providerId, providerName: 'grok' },
+      'grok_login_required',
     );
   }
 }
@@ -253,6 +262,12 @@ const VOLUME_REMOVE_RETRIES = 5;
  * file layout.
  */
 const ensureVolumeRuns = new Map<string, Promise<void>>();
+// Pending cohorts cannot write the copy yet. Mark a cohort admitted BEFORE its
+// preparation tail releases, so a subsequent retirement sees its durable run.
+const authAdmissionGroups = new Map<
+  string,
+  { taskKey: string; active: boolean; ids: Set<string> }
+>();
 const rtkSeedRuns = new Map<string, Promise<boolean>>();
 const cliMcpMergeRuns = new Map<string, Promise<CliMcpMergeResult>>();
 const geminiMcpMergeRuns = new Map<string, Promise<boolean>>();
@@ -415,48 +430,237 @@ export function ensureTaskAuthVolumes(
   taskId: string,
   runner: DockerRunner = defaultDockerRunner,
   db?: Database,
+  invocationId?: string,
 ): Promise<void> {
   const grok = ctx.providerName === 'grok';
   const scope = cliAuthScope({ ...ctx, name: ctx.providerName, id: ctx.providerId });
-  return coalesceAuthPreparation(ensureVolumeRuns, `${taskId}:${ctx.providerName}:${scope}`, () =>
-    withScopeLock(`${taskId}:${ctx.providerName}:ensure`, async () => {
-      // Heal a missing helper image before any readiness/credential read, outside
-      // the auth lock: building the image can take minutes.
-      await ensureSandboxCoreImage(HELPER_IMAGE, runner);
-      if (!grok) return ensureTaskAuthVolumesUnlocked(ctx, taskId, runner);
-      if (!db) throw new Error('Grok auth preparation requires the authentication lock database');
-      // No task/step/run row or transaction may be held while waiting for this lock.
-      const release = await waitForCliAuthLock(db, scope, 30_000);
-      if (!release)
-        throw new Error('cli_auth_busy: Authentication is busy; retry this invocation.');
+  const taskKey = `${taskId}:${ctx.providerName}`;
+  const key = `${taskKey}:${scope}`;
+  let group = authAdmissionGroups.get(key);
+  if (!group || !ensureVolumeRuns.has(key)) {
+    group = { taskKey, active: true, ids: new Set() };
+    authAdmissionGroups.set(key, group);
+  }
+  const cohort = group;
+  if (invocationId) cohort.ids.add(invocationId);
+  return coalesceAuthPreparation(ensureVolumeRuns, key, () =>
+    withScopeLock(`${taskKey}:ensure`, async () => {
       try {
-        const current = await db.query.cliProviders.findFirst({
-          where: eq(schema.cliProviders.id, ctx.providerId),
+        // Heal a missing helper image before any readiness/credential read, outside
+        // the auth lock: building the image can take minutes.
+        await ensureSandboxCoreImage(HELPER_IMAGE, runner);
+        if (!grok) return ensureTaskAuthVolumesUnlocked(ctx, taskId, runner);
+        if (!db) throw new Error('Grok auth preparation requires the authentication lock database');
+        // No task/step/run row or transaction may be held while waiting for this lock.
+        const release = await waitForCliAuthLock(db, scope, 30_000).catch(() => {
+          throw new CliAuthRetryableError('cli_auth_probe_unknown');
         });
-        if (!current || current.userId !== ctx.userId || cliAuthScope(current) !== scope)
-          throw new GrokCopyRecoveryError();
-        const userVol = userVolumeForCtx(ctx, 0);
-        const fence = await readVolumeFile(userVol, GROK_REFRESH_FENCE_FILE, runner, {
-          throwOnFailure: true,
-        });
-        if (fence && fence !== 'none') {
-          const raw = await readVolumeFile(userVol, 'auth.json', runner, { throwOnFailure: true });
-          const credential = raw ? parseGrokAuthFile(raw) : null;
-          if (
-            !/^[a-f0-9]{64}$/.test(fence) ||
-            !credential ||
-            fence === grokRefreshFingerprint(credential.refreshToken)
-          )
-            throw new GrokCopyRecoveryError();
+        if (!release) throw new CliAuthRetryableError('cli_auth_busy');
+        try {
+          const current = await db.query.cliProviders.findFirst({
+            where: eq(schema.cliProviders.id, ctx.providerId),
+          });
+          if (!current || current.userId !== ctx.userId || cliAuthScope(current) !== scope)
+            throw new GrokCopyRecoveryError(ctx);
+          const userVol = userVolumeForCtx(ctx, 0);
+          if (ctx.authMode === 'subscription') {
+            const raw = await readVolumeFile(userVol, 'auth.json', runner, {
+              throwOnFailure: true,
+            });
+            const credential = raw ? parseGrokAuthFile(raw) : null;
+            if (!credential) throw new GrokCopyRecoveryError(ctx);
+            const fence = await readVolumeFile(userVol, GROK_REFRESH_FENCE_FILE, runner, {
+              throwOnFailure: true,
+            });
+            if (
+              fence &&
+              fence !== 'none' &&
+              (!/^[a-f0-9]{64}$/.test(fence) ||
+                fence === grokRefreshFingerprint(credential.refreshToken))
+            )
+              throw new GrokCopyRecoveryError(ctx);
+          }
+          await release.assertHeld();
+          await ensureTaskAuthVolumesUnlocked(
+            {
+              ...ctx,
+              ...(ctx.authMode === 'subscription' ? await latestGrokVolumeLogin(db, ctx) : {}),
+            },
+            taskId,
+            runner,
+            true,
+            db,
+          );
+          await release.assertHeld();
+        } catch (error) {
+          if (error instanceof CliLoginRequiredError) {
+            try {
+              await release.assertHeld();
+              await db
+                .update(schema.cliProviders)
+                .set({
+                  authStatus: 'unknown',
+                  authMessage: error.message,
+                  authLastCheckedAt: new Date(),
+                })
+                .where(eq(schema.cliProviders.id, ctx.providerId));
+            } catch {
+              throw new CliAuthRetryableError('cli_auth_probe_unknown');
+            }
+          }
+          if (error instanceof CliLoginRequiredError || error instanceof CliAuthRetryableError)
+            throw error;
+          log.warn({ err: error, taskId }, 'Grok admission could not verify auth; retrying');
+          throw new CliAuthRetryableError('cli_auth_probe_unknown');
+        } finally {
+          await release().catch(() => {
+            throw new CliAuthRetryableError('cli_auth_probe_unknown');
+          });
         }
-        await release.assertHeld();
-        await ensureTaskAuthVolumesUnlocked(ctx, taskId, runner, true);
-        await release.assertHeld();
       } finally {
-        await release();
+        cohort.active = false;
       }
     }),
+  ).finally(() => {
+    if (authAdmissionGroups.get(key) === cohort && !ensureVolumeRuns.has(key))
+      authAdmissionGroups.delete(key);
+  });
+}
+
+/** Only the volume-login audit is authority for superseding a copy. A settings
+ * secret, usage reconnect or boot migration can advance auth_generation too. */
+async function latestGrokVolumeLogin(
+  db: Database,
+  ctx: ProviderAuthCtx,
+): Promise<Pick<ProviderAuthCtx, 'volumeLoginId' | 'volumeLoginAt'>> {
+  const members = await db.query.cliProviders.findMany({
+    where: cliAuthSetWhere({ ...ctx, id: ctx.providerId, name: ctx.providerName }),
+    columns: { id: true },
+  });
+  const logins = await db
+    .select({
+      id: schema.auditEvents.id,
+      createdAt: schema.auditEvents.createdAt,
+      metadata: schema.auditEvents.metadata,
+    })
+    .from(schema.auditEvents)
+    .where(
+      and(
+        eq(schema.auditEvents.action, 'cli_provider.login'),
+        eq(schema.auditEvents.targetType, 'cli_provider'),
+        eq(schema.auditEvents.actorUserId, ctx.userId),
+        inArray(
+          schema.auditEvents.targetId,
+          members.map((row) => row.id),
+        ),
+        sql`${schema.auditEvents.metadata}->>'source' = 'volume'`,
+      ),
+    )
+    .orderBy(desc(schema.auditEvents.createdAt), desc(schema.auditEvents.id))
+    .limit(1);
+  const latest = logins[0];
+  return latest ? { volumeLoginId: latest.id, volumeLoginAt: latest.createdAt } : {};
+}
+
+/** Old copies have no login baseline. A completed volume-login audit after task
+ * creation supplies the upgrade bridge. New copies use their Docker-owned id. */
+async function hasNewGrokLogin(
+  db: Database,
+  ctx: ProviderAuthCtx,
+  taskId: string,
+  label: string | null | undefined,
+): Promise<boolean> {
+  if (!ctx.volumeLoginId) return false;
+  try {
+    const fields = JSON.parse(label ?? 'null');
+    if (typeof fields?.volumeLoginId === 'string')
+      return fields.volumeLoginId !== ctx.volumeLoginId;
+  } catch {
+    /* Legacy/unknown labels use the audited transition below. */
+  }
+  const task = await db.query.tasks.findFirst({
+    where: eq(schema.tasks.id, taskId),
+    columns: { createdAt: true, userId: true },
+  });
+  return Boolean(
+    task && task.userId === ctx.userId && ctx.volumeLoginAt && ctx.volumeLoginAt >= task.createdAt,
   );
+}
+
+/** The run ledger covers already-admitted writers even before docker create.
+ * Physical containers also cover a superseded/ended run still being stopped.
+ * Never archive a moving credential, or let repeated busy retries create archives. */
+async function assertGrokCopyQuiescent(
+  db: Database,
+  ctx: ProviderAuthCtx,
+  taskId: string,
+  taskVol: string,
+  runner: DockerRunner,
+): Promise<void> {
+  const preparing = [...authAdmissionGroups.values()]
+    .filter((group) => group.active && group.taskKey === `${taskId}:${ctx.providerName}`)
+    .flatMap((group) => [...group.ids]);
+  const providers = await db.query.cliProviders.findMany({
+    where: and(eq(schema.cliProviders.userId, ctx.userId), eq(schema.cliProviders.name, 'grok')),
+    columns: { id: true },
+  });
+  const live = await db.query.cliInvocations.findFirst({
+    where: and(
+      eq(schema.cliInvocations.taskId, taskId),
+      isNotNull(schema.cliInvocations.startedAt),
+      isNull(schema.cliInvocations.endedAt),
+      preparing.length ? notInArray(schema.cliInvocations.id, preparing) : undefined,
+      or(
+        isNull(schema.cliInvocations.cliProviderId),
+        inArray(
+          schema.cliInvocations.cliProviderId,
+          providers.map((row) => row.id),
+        ),
+      ),
+    ),
+    columns: { id: true },
+  });
+  if (live) throw new CliAuthRetryableError('cli_auth_busy');
+  const cleanup = await runner.removeStoppedContainersUsingVolume?.(taskVol);
+  if (cleanup && !cleanup.ok) throw new CliAuthRetryableError('cli_auth_probe_unknown');
+  if (!runner.volumeHasContainers) throw new CliAuthRetryableError('cli_auth_probe_unknown');
+  if (await runner.volumeHasContainers(taskVol)) throw new CliAuthRetryableError('cli_auth_busy');
+}
+
+/** Retired copies belong to the user, not the task. The existing orphan reaper
+ * removes them when that user is deleted. Until then they remain available for
+ * operator recovery, never mounted by admission/harvest or used as refresh holds.
+ * Copy AND compare must succeed before the original can be removed. */
+async function retireGrokCopy(
+  ctx: ProviderAuthCtx,
+  taskVol: string,
+  idx: number,
+  label: string | null | undefined,
+  runner: DockerRunner,
+): Promise<void> {
+  const retired = `${cliAuthVolumeName(ctx.userId, 'grok', idx)}_retired_${randomUUID()}`;
+  const created = await runner.volumeCreate(retired, {
+    'haive.auth-retired': JSON.stringify({
+      taskVol,
+      source: label ?? null,
+      reason: 'superseded_login_or_scope',
+    }),
+  });
+  if (!created.ok) throw new CliAuthRetryableError('cli_auth_probe_unknown');
+  const kept = await runner.run({
+    image: HELPER_IMAGE,
+    entrypoint: '',
+    user: 'root',
+    cmd: ['sh', '-c', 'cp -a /src/. /dst/ && diff -qr /src /dst'],
+    mounts: [
+      { source: taskVol, target: '/src', readOnly: true },
+      { source: retired, target: '/dst', readOnly: false },
+    ],
+    timeoutMs: HELPER_TIMEOUT_MS,
+  });
+  if (kept.exitCode !== 0 || kept.timedOut)
+    throw new CliAuthRetryableError('cli_auth_probe_unknown');
+  log.info({ taskVol, retired, userId: ctx.userId }, 'preserved superseded Grok task auth copy');
 }
 
 async function ensureTaskAuthVolumesUnlocked(
@@ -464,6 +668,7 @@ async function ensureTaskAuthVolumesUnlocked(
   taskId: string,
   runner: DockerRunner,
   preserveGrokCopy = false,
+  db?: Database,
 ): Promise<void> {
   const meta = getCliProviderMetadata(ctx.providerName);
   for (let idx = 0; idx < meta.authConfigPaths.length; idx += 1) {
@@ -476,26 +681,57 @@ async function ensureTaskAuthVolumesUnlocked(
     const credRelPath = credentialRelPath(ctx.providerName, idx);
 
     if (await runner.volumeExists(taskVol, { throwOnFailure: preserveGrokCopy })) {
-      if (preserveGrokCopy) {
-        const label = await runner.volumeLabel?.(taskVol, AUTH_SOURCE_LABEL);
-        if (authSourceLabelRefusal(label ?? undefined, authSourceIdentity(ctx, idx))) {
-          // A no-source copy may still be empty. Any credential there has unknown
-          // lineage and must be kept, including a possibly newer in-task login.
-          if (
-            label !== NO_SOURCE_SENTINEL ||
-            (await readVolumeFile(taskVol, credRelPath!, runner, { throwOnFailure: true }))
-          )
-            throw new GrokCopyRecoveryError();
+      const label = preserveGrokCopy
+        ? await runner.volumeLabel?.(taskVol, AUTH_SOURCE_LABEL)
+        : undefined;
+      const refusal =
+        preserveGrokCopy &&
+        authSourceLabelRefusal(label ?? undefined, authSourceIdentity(ctx, idx));
+      // A settings change explicitly chooses another scope. Keep the old copy before
+      // adopting it; neither a refresh nor a changed source fingerprint is a new login.
+      let scopeChanged = false;
+      if (refusal && label && label !== NO_SOURCE_SENTINEL) {
+        try {
+          const fields = JSON.parse(label);
+          scopeChanged =
+            (fields.version === undefined || fields.version === 1) &&
+            typeof fields.userVolume === 'string' &&
+            (fields.userVolume !== userVol ||
+              fields.authMode !== ctx.authMode ||
+              fields.isolateAuth !== ctx.isolateAuth);
+        } catch {
+          /* An unknown contract needs a subsequent login. */
         }
       }
-      const readiness = await isTaskVolumeReady(
-        taskVol,
-        runner,
-        userHasData ? userVol : null,
-        credRelPath,
-        preserveGrokCopy,
-      );
-      if (readiness === 'recovery_required') throw new GrokCopyRecoveryError();
+      const newerLogin = preserveGrokCopy && (await hasNewGrokLogin(db!, ctx, taskId, label));
+      let retired = false;
+      if (preserveGrokCopy && (scopeChanged || newerLogin)) {
+        // A subscription must have a credential to replace the old one. API-key
+        // mode deliberately starts with an empty auth volume, using injected env.
+        if (ctx.authMode === 'subscription') {
+          const raw = await readVolumeFile(userVol, credRelPath!, runner, { throwOnFailure: true });
+          if (!raw || !parseGrokAuthFile(raw)) throw new GrokCopyRecoveryError(ctx);
+        }
+        await assertGrokCopyQuiescent(db!, ctx, taskId, taskVol, runner);
+        await retireGrokCopy(ctx, taskVol, idx, label, runner);
+        retired = true;
+      } else if (refusal) {
+        if (
+          label !== NO_SOURCE_SENTINEL ||
+          (await readVolumeFile(taskVol, credRelPath!, runner, { throwOnFailure: true }))
+        )
+          throw new GrokCopyRecoveryError(ctx);
+      }
+      const readiness = retired
+        ? 'source_moved'
+        : await isTaskVolumeReady(
+            taskVol,
+            runner,
+            userHasData ? userVol : null,
+            credRelPath,
+            preserveGrokCopy,
+          );
+      if (readiness === 'recovery_required') throw new GrokCopyRecoveryError(ctx);
       if (readiness === 'ready') {
         continue;
       }
@@ -507,6 +743,7 @@ async function ensureTaskAuthVolumesUnlocked(
         log.warn({ taskVol }, 'task auth volume exists but not ready, recreating');
       }
       let removed = await runner.volumeRemove(taskVol);
+      if (!removed.ok && preserveGrokCopy) throw new CliAuthRetryableError('cli_auth_busy');
       if (!removed.ok && /in use/i.test(removed.stderr)) {
         // In use → a CONCURRENT sibling agent (08c fans out 2 agents that share this
         // per-task volume) is mid-setup with the volume mounted by its populate helper,
@@ -543,7 +780,7 @@ async function ensureTaskAuthVolumesUnlocked(
         // been using. Failing the invocation would deny the task work AND not refresh
         // anything; the next dispatch after the sibling exits replaces the volume properly.
         if (readiness === 'source_moved') {
-          if (preserveGrokCopy) throw new GrokCopyRecoveryError();
+          if (preserveGrokCopy) throw new CliAuthRetryableError('cli_auth_busy');
           log.warn(
             { taskVol, userVol, stderr: removed.stderr.slice(-200) },
             'auth source moved but the volume is held by a running invocation; ' +
@@ -619,7 +856,7 @@ async function ensureTaskAuthVolumesUnlocked(
       timeoutMs: HELPER_TIMEOUT_MS,
     });
 
-    if (result.exitCode !== 0) {
+    if (result.exitCode !== 0 || result.timedOut) {
       log.warn(
         { taskVol, userVol, exitCode: result.exitCode, stderr: result.stderr.slice(-500) },
         'task auth volume copy helper exited non-zero',
@@ -662,7 +899,8 @@ async function waitForTaskVolumeReady(
       credRelPath,
       preserveGrokCopy,
     );
-    if (readiness === 'recovery_required') throw new GrokCopyRecoveryError();
+    if (readiness === 'recovery_required')
+      throw new CliAuthRetryableError('cli_auth_probe_unknown');
     if (readiness === 'ready') return true;
   }
   return false;
@@ -723,6 +961,7 @@ async function isTaskVolumeReady(
       `copy=$(${sourceFingerprintSh('/x', credRelPath)})`,
       `rec=$(cat /x/${SOURCE_MARKER} 2>/dev/null || echo '')`,
       `cur=${userVol ? `$(${sourceFingerprintSh('/src', credRelPath)})` : CREDENTIAL_ABSENT}`,
+      `if [ ! -f /x/${READY_MARKER} ] && { [ "$copy" = "$cur" ] || [ "$copy" = "$rec" ] || [ "$copy" = '${CREDENTIAL_ABSENT}' ]; }; then exit 1; fi`,
       `if [ "$copy" != '${CREDENTIAL_ABSENT}' ]; then`,
       `  [ -n "$rec" ] && [ "$rec" != '${NO_SOURCE_SENTINEL}' ] && test -f /x/${READY_MARKER} && [ "$(stat -c %u /x)" = "1000" ] || exit ${VOLUME_RECOVERY_REQUIRED_EXIT}`,
       `  if [ "$cur" != '${CREDENTIAL_ABSENT}' ] && [ "$cur" != "$rec" ] && [ "$copy" != "$rec" ] && [ "$copy" != "$cur" ]; then exit ${VOLUME_RECOVERY_REQUIRED_EXIT}; fi`,
@@ -768,11 +1007,10 @@ async function isTaskVolumeReady(
     user: 'root',
     timeoutMs: 15_000,
   });
+  if (preserveGrokCopy && (result.timedOut || ![0, 1, 2, 3].includes(result.exitCode ?? -1)))
+    throw new CliAuthRetryableError('cli_auth_probe_unknown');
   if (result.exitCode === 0) return 'ready';
-  if (
-    preserveGrokCopy &&
-    (result.timedOut || (result.exitCode !== 1 && result.exitCode !== VOLUME_SOURCE_MOVED_EXIT))
-  )
+  if (preserveGrokCopy && result.exitCode === VOLUME_RECOVERY_REQUIRED_EXIT)
     return 'recovery_required';
   return result.exitCode === VOLUME_SOURCE_MOVED_EXIT ? 'source_moved' : 'not_ready';
 }

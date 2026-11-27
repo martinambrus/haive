@@ -84,10 +84,11 @@ audits alone are insufficient, especially before the floor. Preserve the volume 
 is complete. With all task invocations stopped and the original scope verified, an operator can
 recover the credential to that scope under its auth lock using the same credential-only parse,
 mtime and atomic-copy guards; never dump credential bytes into logs or attach them to a report.
-If the source cannot be proven, sign in afresh to the intended scope and explicitly retire the
-old copy only after confirming it is no longer needed. Do not relabel a legacy copy to bypass
-verification. Unknown-version copies require a compatible worker reader or the same operator
-review before disposal. Worker restarts alone do not resolve either refusal.
+For Grok, a completed interactive login now lets admission preserve the old copy in a retired
+user-owned volume before preparing a new task copy (below). Other CLIs still require explicit
+operator recovery or retirement. Do not relabel a legacy copy to bypass verification.
+Unknown-version copies stay available for compatible-reader recovery; restarting alone does
+not establish their lineage.
 
 Background Grok credential refresh holds only while a nonterminal task or a started,
 not-ended, not-superseded invocation can still rotate a task copy. Retained terminal recovery
@@ -120,15 +121,66 @@ and CLIs retain independent scopes.
 Under that lock, admission re-reads the provider scope and the Docker-owned source label.
 The existing `.haive-source` credential fingerprint supplies a three-way comparison: if the
 source changed and the copy still equals its baseline, Retry recopies from the source. If both
-changed differently, or lineage cannot be verified (including a missing baseline, unlabeled
-or unknown-version source), admission refuses with stable code `grok_login_required` and
-re-login/recovery guidance. It does not delete or overwrite the copy. A newer in-copy login
-whose source is unchanged continues to be used. A stale copy that Docker still holds cannot
-fall back to continued use. Strict existence/helper failures also refuse admission. The same
-lineage refusal sets sync-back's retention result, so the failed invocation's settlement,
-summary cleanup and boot cannot discard that recovery copy by mtime alone. Recover it under
-the verified original scope's auth lock, or explicitly retire it after signing in afresh;
-re-login alone cannot verify an unknown lineage and never authorizes deleting it.
+changed differently, or lineage cannot be verified, admission refuses with stable code
+`grok_login_required`, as a `CliLoginRequiredError`. Missing source credentials and a possibly
+consumed source grant use that same error. Admission marks the provider `auth_status = unknown`;
+the existing CLI handler writes the inline login hint, and DAG classification halts for user
+action (`environment`) instead of sending the problem to a code advisor.
+
+A completed interactive volume login supersedes the scope's old task copies. New Grok source
+labels record `volumeLoginId`, the latest `cli_provider.login` audit id with `source: volume`
+for the current login set, or `none`. Refresh, harvest, health checks and unrelated secret writes
+cannot advance that baseline. `auth_generation` alone is insufficient: it also changes on secret
+writes. A legacy, unlabeled or unknown-version copy has no baseline; a volume-login audit after
+the task's creation supplies its upgrade bridge. Without that evidence it still asks for login.
+A changed `authMode` or `isolateAuth` also selects a new scope. Before adopting that scope or the
+new login, admission copies the entire old volume to a unique user-owned auth volume named
+`<user-auth-volume>_retired_<uuid>` and requires both `cp -a` and `diff -qr` to succeed. Only then
+may it remove the original and populate from the current source. Before preserving anything,
+admission requires that no already-admitted Grok invocation can still write this task copy,
+including one whose Docker container is not created yet. Invocation ids are passed by the
+ordinary, native and sequential exec paths. Pending preparation cohorts are excluded because
+the shared task/CLI tail prevents their writes; each cohort becomes admitted before that tail
+is released. A strict container listing also refuses a still-mounted ended/superseded run.
+Stopped helpers are removed first through the existing stopped-only cleanup, so a helper left
+Created by a worker death cannot pin recovery forever. Unknown lookups retain the original and
+retry; a busy writer creates no archive. A failed preservation keeps the original. Subscription mode requires a parseable source credential; API-key mode prepares
+its separate empty auth volume and uses the injected key. No original source label is relabeled.
+
+Retired volumes carry `haive.auth-retired` with the original task volume, source label and reason.
+Task settlement and task deletion leave them available for operator recovery. They have a USER
+owner in the existing name parser, so the boot reaper removes them when that user is deleted.
+They are outside the task-volume prefix: neither harvest, admission nor refresh holds adopts them.
+An operator may recover or explicitly remove them earlier after verifying they are no longer
+needed. A failed archive may leave a partial retired volume; it follows the same retention rule,
+and never authorizes removing the original. No age-based deletion is added.
+
+A newer in-copy login whose source is unchanged continues to be used. A labeled half-built copy
+with no ready marker and credential equal to its source/baseline (or absent) is safe to recreate;
+it never reached a CLI. A missing baseline on a ready copy still requires recovery. A stale copy
+that Docker holds never falls back to continued use: admission releases the auth lock and returns
+`CliAuthRetryableError` with stable code `cli_auth_busy` immediately, without polling under the
+lock. A scope lock still busy after 30 seconds returns the same code. Probe timeouts and exits
+outside 0/1/2/3, and other unverifiable helper failures, use `cli_auth_probe_unknown`. These are
+transient in DAG classification and free re-dispatches in the step, mining and DAG retry budgets;
+they do not set a login hint or exhaust the crash-loop budget while a user finishes a login.
+The direct plugin-install apply has no invocation handler: the step runner preserves the
+same login hint there, or parks `waiting_cli` with the idle marker and a 30-second deferral.
+Neither error can enter a code fix loop.
+Image ensure stays outside the lock. The lock covers only scope/source verification and copy IO,
+never a task-row transaction, an image build or a wait for a sibling's mounted copy.
+
+Controlled Docker measurements on 2026-11-27 used only new throwaway auth volumes, random
+fixture credentials and `node:26-bookworm-slim` for the exact helper scripts. With the scope
+lock and vendor modeled, measured holds were 1,425.72 ms for first admission, 1,637.10 ms
+for refresh, 1,831.60 ms for admission recopy and 1,375.43 ms for reuse. The login fixture's
+credential-write container held its lock for 407.35 ms; a separate fake-clock control held a
+modeled interactive login for 120,000 ms of user time. That is not an actual provider login:
+the real dialog retains its whole-session lock, subject to the session limits documented below. A real-Postgres/fake-Docker
+contention control separately measured refresh at 84.30 ms and the waiting scope's admission
+at 25.39 ms (independent scope: 19.54 ms). These are controlled measurements, not production
+latency guarantees. The busy-timeout control proves free retries when a login outlasts
+admission's 30-second wait. All throwaway Docker volumes were removed after measurement.
 
 Before making a Grok grant, refresh atomically writes `.haive-grok-refresh` in the source
 volume with only the SHA-256 of the refresh token it is about to use. Failure to write it
@@ -137,10 +189,17 @@ a failed credential write. Admission refuses when the source still holds that to
 login or a successfully persisted rotated token has a different fingerprint. When the vendor
 keeps the same refresh token, refresh clears the marker only after persisting success.
 Sync-back never promotes the marked token from a copy. The marker contains no credential
-bytes and is never logged. A transient request failure can therefore require re-login on an
-immediate Retry; a later successful background refresh also resolves that hold.
+bytes and is never logged. A received HTTP 4xx other than a rejected grant proves no token was issued: refresh checks
+that clearing its fence succeeds. Network loss, timeouts, malformed success and 5xx remain
+possibly consumed and retain the fence. A failed same-token success clear is logged and its
+fenced token is retried on the next usage tick even when the new access token is not due for
+refresh. Only a possibly consumed grant therefore asks for re-login on immediate admission;
+a later successful background refresh can also resolve that hold.
 
-Rollback: revert the fix-7 commit to restore the earlier admission/refresh race; do not downgrade
+Rollback: revert fix 8 to restore fix 7's refusal behavior; its reader ignores the extra login-id
+label field. Retired user-owned volumes remain retained until explicit recovery/removal or user
+deletion, including under the older name parser. Reverting fix 7 restores the earlier
+admission/refresh race; do not downgrade
 while a retained copy or an uncertainty marker still needs recovery. Resolve or explicitly retire
 those copies first. Older workers ignore the marker and cannot refuse a consumed token. Reverting
 the earlier live-copy hold change restores CLI-wide blockage from retained copies. Neither change

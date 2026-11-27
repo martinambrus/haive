@@ -774,7 +774,14 @@ including tasks older than the provider audit floor, and unknown source-label ve
 the copy unsynced; known labeled identity mismatches permit removal except for Grok. Grok
 admission and sync-back retain unverifiable or divergent copy lineage, including a known
 source mismatch, so an admission refusal cannot lose its recovery copy in settlement.
-See [Sandbox](sandbox.md) for its shared refresh/admission lock and `grok_login_required` guidance.
+See [Sandbox](sandbox.md) for its shared refresh/admission lock, typed `grok_login_required`
+login hint and preserved retired-copy recovery. `cli_auth_busy` and `cli_auth_probe_unknown`
+admission waits are transient, free re-dispatches in single-CLI, mining and DAG execution;
+they spend neither the crash-loop nor agent recovery budget. A login-required error instead
+halts DAG execution for user action (`environment`), never code-advisor escalation. Direct
+plugin-install applies use the same login hint; busy or unverifiable auth parks their step
+in `waiting_cli`, stamps the ordinary idle marker and returns a 30-second same-step deferral.
+Saved detection and form answers survive that park and boot recovery.
 A non-regular credential
 file is refused before reading, reported once with a structured reason and permits terminal
 leftover disposal, while transient helper failures keep retrying. See [Sandbox](sandbox.md) for

@@ -479,8 +479,11 @@ describe('task credential copy refresh holds', () => {
     ] as never);
     await refreshExpiringCliCredentials(f.db, f.runner);
     expect(f.fetchMock).toHaveBeenCalledOnce();
-    expect(readVolumeFile).toHaveBeenCalledOnce();
-    expect(vi.mocked(readVolumeFile).mock.calls[0]![0]).not.toBe(f.userVolume);
+    // Both the credential and its uncertainty fence belong to the unheld scope.
+    expect(vi.mocked(readVolumeFile).mock.calls.length).toBeGreaterThan(0);
+    expect(vi.mocked(readVolumeFile).mock.calls.every(([volume]) => volume !== f.userVolume)).toBe(
+      true,
+    );
   });
 
   it.each(['tasks', 'cliInvocations'])(

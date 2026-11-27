@@ -6,7 +6,6 @@ import {
   type CliTokenUsage,
   type InvocationCompaction,
   type ModelIdentity,
-  type StepErrorHint,
 } from '@haive/shared';
 import type { CliExecQueuePayload } from '@haive/shared';
 import { QUEUE_NAMES, type InvocationToolUsage } from '@haive/shared';
@@ -113,17 +112,4 @@ export interface ExecutionOutcome {
   codexAppServer?: { failure: CodexAppServerFailure | null; binaryVersion: string | null };
 }
 
-/**
- * Thrown by `assertUserAuthReady` when a subscription-auth CLI has no
- * populated user auth volume. Carries a structured hint so the UI can render
- * an inline "Log in to <provider>" button that triggers the Haive login flow
- * and auto-retries the step after successful login.
- */
-export class CliLoginRequiredError extends Error {
-  readonly hint: StepErrorHint;
-  constructor(message: string, hint: StepErrorHint) {
-    super(message);
-    this.name = 'CliLoginRequiredError';
-    this.hint = hint;
-  }
-}
+export { CliLoginRequiredError } from '../../sandbox/cli-auth-errors.js';

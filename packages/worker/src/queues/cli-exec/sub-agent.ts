@@ -75,7 +75,13 @@ export async function executeSubAgentNative(
   // BEFORE resolveMcpExtraFiles: a `cli-merge` provider writes its MCP servers INTO the task
   // auth volume, which resolveAuthMounts is what creates. Reversed, the merge finds no volume
   // and the agent silently runs with no MCP servers at all.
-  const authMounts = await resolveAuthMounts(db, provider, payload.taskId, sandboxImage);
+  const authMounts = await resolveAuthMounts(
+    db,
+    provider,
+    payload.taskId,
+    sandboxImage,
+    payload.invocationId,
+  );
   authMounts.push(...gitDataMounts);
   const mcp = await resolveMcpExtraFiles(
     db,
@@ -157,7 +163,13 @@ export async function executeSubAgentSequential(
   // BEFORE resolveMcpExtraFiles: a `cli-merge` provider writes its MCP servers INTO the task
   // auth volume, which resolveAuthMounts is what creates. Reversed, the merge finds no volume
   // and the agent silently runs with no MCP servers at all.
-  const authMounts = await resolveAuthMounts(db, provider, payload.taskId, sandboxImage);
+  const authMounts = await resolveAuthMounts(
+    db,
+    provider,
+    payload.taskId,
+    sandboxImage,
+    payload.invocationId,
+  );
   authMounts.push(...gitDataMounts);
   const mcp = await resolveMcpExtraFiles(
     db,

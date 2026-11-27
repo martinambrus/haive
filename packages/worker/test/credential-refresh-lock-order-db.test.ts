@@ -16,7 +16,34 @@ import { refreshExpiringCliCredentials } from '../src/usage-window/credential-re
 import { readVolumeFile, writeVolumeFile } from '../src/usage-window/token-source.js';
 import { GROK_REFRESH_FENCE_FILE } from '../src/usage-window/grok-refresh-fence.js';
 
-const authAttempts = vi.hoisted(() => ({ onBusy: (_scope: string) => {} }));
+const dockerVolumes = vi.hoisted(() => ({ names: [] as string[], calls: 0 }));
+vi.mock('node:child_process', async (original) => {
+  const actual = await original<typeof import('node:child_process')>();
+  const { EventEmitter } = await import('node:events');
+  return {
+    ...actual,
+    spawn: (...args: Parameters<typeof actual.spawn>) => {
+      if (args[0] !== 'docker' || args[1]?.[0] !== 'volume' || args[1]?.[1] !== 'ls')
+        return actual.spawn(...args);
+      dockerVolumes.calls++;
+      const child = Object.assign(new EventEmitter(), {
+        stdout: new EventEmitter(),
+        kill: vi.fn(),
+      });
+      queueMicrotask(() => {
+        child.stdout.emit('data', Buffer.from(dockerVolumes.names.join('\n')));
+        child.emit('close', 0);
+      });
+      return child;
+    },
+  };
+});
+
+const authAttempts = vi.hoisted(() => ({
+  onBusy: (_scope: string) => {},
+  phase: '',
+  onRelease: (_phase: string, _ms: number) => {},
+}));
 vi.mock('@haive/database', async (original) => {
   const actual = await original<typeof import('@haive/database')>();
   return {
@@ -24,7 +51,16 @@ vi.mock('@haive/database', async (original) => {
     tryCliAuthLock: async (db: Database, scope: string) => {
       const lock = await actual.tryCliAuthLock(db, scope);
       if (!lock) authAttempts.onBusy(scope);
-      return lock;
+      if (!lock) return null;
+      const phase = authAttempts.phase;
+      const start = performance.now();
+      return Object.assign(
+        async () => {
+          await lock();
+          authAttempts.onRelease(phase, performance.now() - start);
+        },
+        { assertHeld: lock.assertHeld },
+      );
     },
   };
 });
@@ -33,9 +69,7 @@ vi.mock('../src/sandbox/sandbox-core-image.js', () => ({ ensureSandboxCoreImage:
 vi.mock('../src/usage-window/token-source.js', () => ({
   readVolumeFile: vi.fn(),
   writeVolumeFile: vi.fn(),
-}));
-vi.mock('../src/sandbox/auth-volume-reaper.js', () => ({
-  listTaskAuthVolumes: vi.fn(async () => []),
+  NonRegularVolumeFileError: class extends Error {},
 }));
 
 const url = process.env.CREDENTIAL_REFRESH_LOCK_ORDER_TEST_URL;
@@ -105,6 +139,12 @@ describe.skipIf(!url)(
       vi.mocked(writeVolumeFile).mockReset().mockResolvedValue(true);
       vi.mocked(readVolumeFile).mockReset();
       authAttempts.onBusy = () => {};
+      authAttempts.onRelease = () => {};
+      authAttempts.phase = '';
+      dockerVolumes.names = [];
+      dockerVolumes.calls = 0;
+      await db.delete(schema.tasks).where(eq(schema.tasks.userId, userId));
+      await db.delete(schema.auditEvents).where(eq(schema.auditEvents.actorUserId, userId));
       await db
         .update(schema.cliProviders)
         .set({ authStatus: 'ok', authMessage: 'authenticated', isolateAuth: false })
@@ -116,6 +156,7 @@ describe.skipIf(!url)(
     });
 
     afterAll(async () => {
+      await db.delete(schema.auditEvents).where(eq(schema.auditEvents.actorUserId, userId));
       await db.delete(schema.users).where(eq(schema.users.emailBlindIndex, BLIND_INDEX));
       await db.$client.end({ timeout: 5 });
       await peer.$client.end({ timeout: 5 });
@@ -306,9 +347,14 @@ describe.skipIf(!url)(
             };
           }),
         );
+        const measured: { phase: string; holdMs: number }[] = [];
+        authAttempts.onRelease = (phase, ms) =>
+          measured.push({ phase, holdMs: Math.round(ms * 100) / 100 });
+        authAttempts.phase = 'refresh';
         const refresh = refreshExpiringCliCredentials(db, runner);
         await entered;
         let adopted = false;
+        authAttempts.phase = 'admission';
         const adoption = ensureTaskAuthVolumes(ctx, taskId, runner, db).then(() => {
           adopted = true;
         });
@@ -331,11 +377,139 @@ describe.skipIf(!url)(
           await refresh;
           await adoption;
         }
+        process.stdout.write(`AUTH_LOCK_POSTGRES_MEASUREMENTS ${JSON.stringify(measured)}\n`);
         expect(taskBytes === userBytes).toBe(true);
         expect(taskBytes === initial).toBe(false);
       },
       TEST_TIMEOUT,
     );
+
+    it('uses the production listing after the real scope lock and yields to its live labeled copy', async () => {
+      const provider = (await db.query.cliProviders.findFirst({
+        where: eq(schema.cliProviders.id, IDS[0]),
+      }))!;
+      const [task] = await db
+        .insert(schema.tasks)
+        .values({ userId, type: 'workflow', title: 'throwaway refresh hold', status: 'running' })
+        .returning();
+      const userVol = resolveCliAuthUserVolumeName(
+        { ...provider, providerId: provider.id, providerName: 'grok' },
+        0,
+      );
+      dockerVolumes.names = [cliAuthTaskVolumeName(task!.id, 'grok', 0)];
+      const runner = {
+        volumeLabel: async () =>
+          JSON.stringify({
+            version: 1,
+            userVolume: userVol,
+            authMode: 'subscription',
+            isolateAuth: false,
+          }),
+      } as unknown as DockerRunner;
+      const fetchMock = vi.fn();
+      vi.stubGlobal('fetch', fetchMock);
+      const locked = await tryCliAuthLock(peer, cliAuthScope(provider));
+      expect(locked).not.toBeNull();
+      try {
+        await refreshExpiringCliCredentials(db, runner);
+        expect(dockerVolumes.calls).toBe(0);
+      } finally {
+        await locked?.();
+      }
+      await refreshExpiringCliCredentials(db, runner);
+      expect(dockerVolumes.calls).toBe(1);
+      expect(fetchMock).not.toHaveBeenCalled();
+      expect(readVolumeFile).not.toHaveBeenCalled();
+    });
+
+    it('retirement waits for an already-admitted run and excludes the current admission on real SQL', async () => {
+      const ctx = {
+        userId,
+        providerId: IDS[0],
+        providerName: 'grok' as const,
+        authMode: 'subscription' as const,
+        isolateAuth: false,
+      };
+      const [task] = await db
+        .insert(schema.tasks)
+        .values({
+          userId,
+          type: 'workflow',
+          title: 'throwaway retirement guard',
+          status: 'running',
+        })
+        .returning();
+      const taskId = task!.id;
+      const [writer, admission] = await db
+        .insert(schema.cliInvocations)
+        .values(
+          [1, 2].map(() => ({
+            taskId,
+            cliProviderId: IDS[0],
+            mode: 'cli' as const,
+            prompt: 'fixture only',
+            startedAt: new Date(),
+          })),
+        )
+        .returning();
+      await db.insert(schema.auditEvents).values({
+        actorUserId: userId,
+        targetId: IDS[0],
+        targetType: 'cli_provider',
+        action: 'cli_provider.login',
+        metadata: { source: 'volume' },
+      });
+      const userVol = resolveCliAuthUserVolumeName(ctx, 0);
+      const taskVol = cliAuthTaskVolumeName(taskId, 'grok', 0);
+      const volumes = new Set([userVol, taskVol]);
+      const labels = new Map([
+        [
+          taskVol,
+          JSON.stringify({
+            version: 1,
+            userVolume: userVol,
+            authMode: 'subscription',
+            isolateAuth: false,
+            volumeLoginId: 'none',
+          }),
+        ],
+      ]);
+      const raw = JSON.stringify({
+        'issuer::client': {
+          key: randomBytes(16).toString('hex'),
+          refresh_token: randomBytes(16).toString('hex'),
+          oidc_client_id: 'client',
+        },
+      });
+      vi.mocked(readVolumeFile).mockImplementation(async (_volume, path) =>
+        path === GROK_REFRESH_FENCE_FILE ? null : raw,
+      );
+      const runner = {
+        volumeExists: async (name: string) => volumes.has(name),
+        volumeLabel: async (name: string) => labels.get(name) ?? null,
+        volumeHasContainers: async () => false,
+        volumeCreate: async (name: string, values: Record<string, string>) => {
+          volumes.add(name);
+          labels.set(name, values['haive.auth-retired'] ?? values['haive.auth-source']!);
+          return { ok: true, stderr: '' };
+        },
+        volumeRemove: async (name: string) => {
+          volumes.delete(name);
+          return { ok: true, stderr: '' };
+        },
+        run: async () => ({ exitCode: 0, stdout: '', stderr: '', durationMs: 0, timedOut: false }),
+      } as unknown as DockerRunner;
+      await expect(
+        ensureTaskAuthVolumes(ctx, taskId, runner, db, admission!.id),
+      ).rejects.toMatchObject({ code: 'cli_auth_busy' });
+      expect([...labels.keys()].some((name) => name.includes('_retired_'))).toBe(false);
+      await db
+        .update(schema.cliInvocations)
+        .set({ endedAt: new Date() })
+        .where(eq(schema.cliInvocations.id, writer!.id));
+      await ensureTaskAuthVolumes(ctx, taskId, runner, db, admission!.id);
+      expect([...labels.keys()].filter((name) => name.includes('_retired_'))).toHaveLength(1);
+    });
 
     it(
       'writes the status to the rows it locked, not the rows it read before the lock',

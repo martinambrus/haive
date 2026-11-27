@@ -65,7 +65,7 @@ export const CLI_TERMINATION_EXIT_CODES: ReadonlySet<number> = new Set([130, 137
  *  exec-core.ts (stop/cancel/timeout), stream.ts (premature stream end). Stable
  *  internal contracts we own end-to-end, never ephemeral upstream wording. */
 export const TRANSIENT_CLI_FAILURE_RE =
-  /orphaned by a worker restart|stopped before it finished|stream ended prematurely|cancelled or timed out|exceeded its time budget|preempted for a higher-priority task|MCP server failed to start|codex app-server transport failed/i;
+  /orphaned by a worker restart|stopped before it finished|stream ended prematurely|cancelled or timed out|exceeded its time budget|preempted for a higher-priority task|MCP server failed to start|codex app-server transport failed|\bcli_auth_busy:|\bcli_auth_probe_unknown:/i;
 
 /** Stable headline for a run that started without a capability it was configured with.
  *
@@ -170,16 +170,21 @@ export function isCliPreemptionFailure(sig: { errorMessage?: string | null }): b
   return !!sig.errorMessage && sig.errorMessage.startsWith(CLI_PREEMPTED_HEADLINE);
 }
 
-/** True when re-running after this run spends no recovery budget: it was preempted, or it never
- *  started, which the handler stamps before anything that can fail, so nothing ran at all. */
+/** Auth admission did no agent work. Contention and unknown probes retry freely. */
+export function isCliAuthWaitFailure(run: { errorMessage?: string | null }): boolean {
+  return /^(?:cli_auth_busy|cli_auth_probe_unknown):/.test(run.errorMessage ?? '');
+}
+
+/** Free re-dispatch: preemption, an auth admission wait, or a run that never started.
+ *  Auth waits did no agent work even though the handler already stamped started_at. */
 export function isFreeRedispatch(run: {
   errorMessage: string | null;
   startedAt: Date | null;
 }): boolean {
-  return isCliPreemptionFailure(run) || run.startedAt === null;
+  return isCliPreemptionFailure(run) || isCliAuthWaitFailure(run) || run.startedAt === null;
 }
 
-/** Drop preemption rows from a step's invocation history before any consecutive-failure budget
+/** Drop preemption and auth-admission wait rows before any consecutive-failure budget
  *  scans it. One helper rather than a skip inside each loop, so the rule is stated (and tested)
  *  once instead of three times — and so a fourth budget added later inherits it by using the same
  *  entry point.
@@ -190,7 +195,7 @@ export function isFreeRedispatch(run: {
 export function withoutPreemptions<T extends { errorMessage: string | null }>(
   rows: readonly T[],
 ): T[] {
-  return rows.filter((r) => !isCliPreemptionFailure({ errorMessage: r.errorMessage }));
+  return rows.filter((r) => !isCliPreemptionFailure(r) && !isCliAuthWaitFailure(r));
 }
 
 /** Minutes an invocation was allowed before the timeout killed it, recovered from the

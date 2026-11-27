@@ -82,3 +82,28 @@ it('best-effort volume callers keep false on inspect failure', async () => {
   respond(1);
   expect(await defaultDockerRunner.volumeExists('copy')).toBe(false);
 });
+
+it.each([
+  ['', false],
+  ['fixture-container\n', true],
+] as const)(
+  'retirement container probe distinguishes an empty listing from a holder',
+  async (stdout, expected) => {
+    respond(0, stdout);
+    expect(await defaultDockerRunner.volumeHasContainers!('copy')).toBe(expected);
+    expect(h.spawn.mock.calls[0]?.[1]).toEqual(['ps', '-aq', '--filter', 'volume=copy']);
+  },
+);
+
+it('retirement container probe never treats a daemon failure as quiescence', async () => {
+  respond(125);
+  await expect(defaultDockerRunner.volumeHasContainers!('copy')).rejects.toThrow();
+});
+
+it('retirement container probe never treats a timeout as quiescence', async () => {
+  vi.useFakeTimers();
+  respond(null, '', undefined, true);
+  const result = defaultDockerRunner.volumeHasContainers!('copy').catch((error) => error);
+  await vi.advanceTimersByTimeAsync(15_000);
+  expect(await result).toBeInstanceOf(Error);
+});

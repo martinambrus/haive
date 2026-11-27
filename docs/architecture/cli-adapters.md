@@ -200,3 +200,12 @@ message reaches the Connect HTTP 400 and the usage poller's warn log, so callers
 (`isClaudeRefreshRejected` reads `invalid_grant`), never on wording. A 200 body that is not JSON
 throws a fixed `claude oauth: invalid token response`, because the parser's SyntaxError quotes
 the body.
+
+Grok task admission shares that scope lock. A possibly consumed refresh grant or missing login
+throws the existing `CliLoginRequiredError` with `grok_login_required`, flips auth health to
+`unknown` and reaches the inline login affordance. Completed interactive volume-login audits,
+not general auth generations, let admission preserve and replace old copies. Busy locks and
+unknown helper/probe results use free, transient admission retries. Received non-grant 4xx
+responses clear their uncertainty fence; network/5xx outcomes retain it. A failed fence clear
+is checked and retried on the next tick even before access-token expiry. See
+[Sandbox](sandbox.md) for archive retention, lock ordering and the controlled hold measurements.

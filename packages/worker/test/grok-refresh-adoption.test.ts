@@ -12,6 +12,9 @@ import {
   syncRefreshedAuthToUserVolumes,
   type ProviderAuthCtx,
 } from '../src/sandbox/task-auth-volume.js';
+import { CliLoginRequiredError } from '../src/queues/cli-exec/_shared.js';
+import { classifyDagIssueFailure } from '../src/step-engine/dag-failure-class.js';
+import { isFreeRedispatch } from '../src/queues/cli-exec/failure-class.js';
 import { refreshExpiringCliCredentials } from '../src/usage-window/credential-refresh.js';
 import type { DockerRunner, DockerRunOpts } from '../src/sandbox/docker-runner.js';
 
@@ -75,6 +78,7 @@ function fixture() {
     name: 'grok' as const,
     authMode: 'subscription' as const,
     isolateAuth: false,
+    authGeneration: randomUUID(),
   };
   const ctx: ProviderAuthCtx = {
     ...provider,
@@ -113,13 +117,28 @@ function fixture() {
       userVolume: userVol,
       authMode: 'subscription',
       isolateAuth: false,
+      volumeLoginId: 'none',
     }),
   );
   const task = { id: taskId, status: 'failed' };
+  let logins: { id: string; createdAt: Date; metadata: { source: string } }[] = [];
+  const statusWrite = vi.fn();
   const db = {
+    update: () => ({
+      set: (values: unknown) => {
+        statusWrite(values);
+        return { where: async () => {} };
+      },
+    }),
+    select: () => ({
+      from: () => ({ where: () => ({ orderBy: () => ({ limit: async () => logins }) }) }),
+    }),
     selectDistinct: () => ({ from: () => ({ where: async () => [{ providerId: provider.id }] }) }),
     query: {
-      tasks: { findMany: vi.fn(async () => [task]) },
+      tasks: {
+        findMany: vi.fn(async () => [task]),
+        findFirst: async () => ({ createdAt: new Date(0), userId: provider.userId }),
+      },
       cliInvocations: { findFirst: vi.fn(async () => undefined) },
       cliProviders: {
         findMany: vi.fn(async () => [provider]),
@@ -131,14 +150,19 @@ function fixture() {
   let failCredentialWrite = false;
   let failFenceWrite = false;
   let refuseRemove = false;
+  let probeExit: number | undefined;
+  let probeTimeout = false;
+  let failFenceClear = false;
+  let failArchive = false;
   const runner = {
+    volumeHasContainers: async () => false,
     volumeExists: async (name: string) => dirs.has(name),
     volumeLabel: async (name: string) => labels.get(name) ?? null,
     volumeCreate: async (name: string, values: Record<string, string>) => {
       const dir = join(root, name);
       mkdirSync(dir, { recursive: true });
       dirs.set(name, dir);
-      labels.set(name, values['haive.auth-source']!);
+      labels.set(name, values['haive.auth-source'] ?? values['haive.auth-retired']!);
       return { ok: true, stderr: '' };
     },
     volumeRemove: async (name: string) => {
@@ -150,6 +174,22 @@ function fixture() {
     },
     run: async (opts: DockerRunOpts) => {
       let script = opts.cmd[2]!;
+      if (script.includes('cp -a /src/. /dst/') && script.includes('diff') && failArchive)
+        return { exitCode: 1, stdout: '', stderr: '', durationMs: 0, timedOut: false };
+      if (opts.mounts?.some((m) => m.target === '/x') && (probeExit !== undefined || probeTimeout))
+        return {
+          exitCode: probeExit ?? 0,
+          stdout: '',
+          stderr: '',
+          durationMs: 0,
+          timedOut: probeTimeout,
+        };
+      if (
+        failFenceClear &&
+        script.includes('haive-grok-refresh.haive-tmp') &&
+        script.includes("printf '%s' 'none'")
+      )
+        return { exitCode: 1, stdout: '', stderr: '', durationMs: 0, timedOut: false };
       if (failFenceWrite && script.includes('haive-grok-refresh.haive-tmp'))
         return { exitCode: 1, stdout: '', stderr: '', durationMs: 0, timedOut: false };
       if (failCredentialWrite && script.includes("mv '/vol/auth.json.haive-tmp'"))
@@ -186,6 +226,27 @@ function fixture() {
   const adopt = () => ensureTaskAuthVolumes(ctx, taskId, runner, db);
   return {
     db,
+    provider,
+    statusWrite,
+    freshLogin: () => {
+      provider.authGeneration = randomUUID();
+      logins = [
+        { id: provider.authGeneration, createdAt: new Date(), metadata: { source: 'volume' } },
+      ];
+      const bytes = raw();
+      writeFileSync(join(dirs.get(userVol)!, 'auth.json'), bytes);
+      return bytes;
+    },
+    probeFailure: (exit: number, timeout = false) => {
+      probeExit = exit;
+      probeTimeout = timeout;
+    },
+    failArchive: () => {
+      failArchive = true;
+    },
+    failClear: () => {
+      failFenceClear = true;
+    },
     task,
     ctx,
     taskId,
@@ -236,7 +297,7 @@ it('adoption during rotation waits, then gets the fresh credential; another scop
   const adoption = f.adopt().then(() => {
     adopted = true;
   });
-  const otherCtx = { ...f.ctx, userId: randomUUID() };
+  const otherCtx = { ...f.ctx, userId: randomUUID(), authMode: 'api_key' as const };
   const otherDb = {
     query: {
       cliProviders: {
@@ -308,7 +369,7 @@ it('refuses a stale copy still mounted by another invocation', async () => {
     (error: unknown) => error,
   );
   await vi.advanceTimersByTimeAsync(45_000);
-  expect(await result).toMatchObject({ code: 'grok_login_required' });
+  expect(await result).toMatchObject({ code: 'cli_auth_busy' });
   expect(f.credential(f.taskVol) === f.initial).toBe(true);
 });
 
@@ -359,7 +420,7 @@ it('settlement keeps a divergent recovery copy after admission refused it', asyn
 it('settlement retains refused Grok copies from another or no source, even without a ledger provider', async () => {
   for (const label of [
     JSON.stringify({
-      version: 1,
+      version: 2,
       userVolume: 'different-source',
       authMode: 'subscription',
       isolateAuth: false,
@@ -424,4 +485,265 @@ it('clears uncertainty after a successful grant that keeps the same refresh toke
   await f.adopt();
   expect(f.credential(f.taskVol) === f.credential(f.userVol)).toBe(true);
   expect(f.credential(f.taskVol) === f.initial).toBe(false);
+});
+
+it('surfaces a fenced grant as the existing login error, marks health and halts DAG for user action', async () => {
+  const f = fixture();
+  f.failWrite();
+  await refreshExpiringCliCredentials(f.db, f.runner);
+  const error = await f.adopt().catch((error) => error);
+  expect(error).toBeInstanceOf(CliLoginRequiredError);
+  expect(error.hint).toEqual({
+    type: 'cli_login_required',
+    providerId: f.ctx.providerId,
+    providerName: 'grok',
+  });
+  expect(error.code).toBe('grok_login_required');
+  expect(f.statusWrite).toHaveBeenCalledWith(expect.objectContaining({ authStatus: 'unknown' }));
+  expect(classifyDagIssueFailure({ exitCode: -1, errorMessage: error.message })).toBe(
+    'environment',
+  );
+});
+
+it.each(['divergent', 'unlabeled', 'unknown-version', 'missing-marker'])(
+  'fresh interactive login preserves then replaces a %s copy',
+  async (kind) => {
+    const f = fixture();
+    const kept = f.raw();
+    writeFileSync(join(f.dirs.get(f.taskVol)!, 'auth.json'), kept);
+    if (kind === 'unlabeled') f.labels.delete(f.taskVol);
+    if (kind === 'unknown-version') f.labels.set(f.taskVol, '{"version":2}');
+    if (kind === 'missing-marker') rmSync(join(f.dirs.get(f.taskVol)!, '.haive-source'));
+    const login = f.freshLogin();
+    await f.adopt();
+    expect(f.credential(f.taskVol) === login).toBe(true);
+    const retired = [...f.labels].filter(([name]) => name.includes('_retired_'));
+    expect(retired).toHaveLength(1);
+    expect(f.credential(retired[0]![0]) === kept).toBe(true);
+  },
+);
+
+it.each(['isolateAuth', 'authMode'])(
+  'a %s toggle preserves the old copy and admits the new scope',
+  async (field) => {
+    const f = fixture();
+    if (field === 'isolateAuth') {
+      f.ctx.isolateAuth = true;
+      f.provider.isolateAuth = true;
+      const next = resolveCliAuthUserVolumeName(f.ctx, 0);
+      const dir = join(f.root, next);
+      mkdirSync(dir);
+      f.dirs.set(next, dir);
+      writeFileSync(join(dir, 'auth.json'), f.raw());
+    } else {
+      f.ctx.authMode = 'api_key';
+      Object.assign(f.provider, { authMode: 'api_key' });
+    }
+    await f.adopt();
+    const retired = [...f.labels].filter(([name]) => name.includes('_retired_'));
+    expect(retired).toHaveLength(1);
+    expect(f.credential(retired[0]![0]) === f.initial).toBe(true);
+  },
+);
+
+it('never removes the original if preserving the recovery copy fails', async () => {
+  const f = fixture();
+  f.labels.delete(f.taskVol);
+  f.freshLogin();
+  f.failArchive();
+  await expect(f.adopt()).rejects.toMatchObject({ code: 'cli_auth_probe_unknown' });
+  expect(f.credential(f.taskVol) === f.initial).toBe(true);
+  expect(f.removed).not.toContain(f.taskVol);
+});
+
+it('recreates a half-built copy using the exact readiness and population scripts', async () => {
+  const f = fixture();
+  rmSync(join(f.dirs.get(f.taskVol)!, '.haive-ready'));
+  rmSync(join(f.dirs.get(f.taskVol)!, '.haive-source'));
+  await f.adopt();
+  expect(f.removed).toContain(f.taskVol);
+  expect(f.credential(f.taskVol) === f.initial).toBe(true);
+  expect(readFileSync(join(f.dirs.get(f.taskVol)!, '.haive-ready'), 'utf8')).toBe('');
+});
+
+it('busy admission times out with a free, transient retry then succeeds after login releases', async () => {
+  vi.useFakeTimers();
+  const f = fixture();
+  const scope = cliAuthScope({ ...f.ctx, id: f.ctx.providerId, name: 'grok' });
+  held.add(scope);
+  const result = f.adopt().catch((error) => error);
+  await vi.advanceTimersByTimeAsync(30_000);
+  const error = await result;
+  expect(error.code).toBe('cli_auth_busy');
+  expect(classifyDagIssueFailure({ exitCode: -1, errorMessage: error.message })).toBe('transient');
+  expect(isFreeRedispatch({ startedAt: new Date(), errorMessage: error.message })).toBe(true);
+  expect(f.statusWrite).not.toHaveBeenCalled();
+  held.delete(scope);
+  await f.adopt();
+});
+
+it.each([125, 126, 127, 4, 0])(
+  'probe exit %s (0 with timeout) stays unknown/retryable and keeps the copy',
+  async (exit) => {
+    const f = fixture();
+    f.probeFailure(exit, exit === 0);
+    const error = await f.adopt().catch((error) => error);
+    expect(error.code).toBe('cli_auth_probe_unknown');
+    expect(classifyDagIssueFailure({ exitCode: -1, errorMessage: error.message })).toBe(
+      'transient',
+    );
+    expect(f.statusWrite).not.toHaveBeenCalled();
+    expect(f.removed).toEqual([]);
+    expect(await syncRefreshedAuthToUserVolumes(f.db, f.taskId, f.runner)).toEqual({
+      retainTaskCopy: true,
+    });
+  },
+);
+
+it.each([400, 401, 403, 429, 500, 503])(
+  'HTTP %s clears only known unspent-grant fences',
+  async (status) => {
+    const f = fixture();
+    f.fetchMock.mockResolvedValueOnce({
+      ok: false,
+      status,
+      text: async () => '{"error":"temporarily_unavailable"}',
+    } as never);
+    await refreshExpiringCliCredentials(f.db, f.runner);
+    if (status < 500) await f.adopt();
+    else await expect(f.adopt()).rejects.toMatchObject({ code: 'grok_login_required' });
+  },
+);
+
+it('a failed same-token fence clear is reported and retried even before the next refresh is due', async () => {
+  const f = fixture();
+  const token: string = JSON.parse(f.initial)['issuer::client'].refresh_token;
+  f.fetchMock.mockResolvedValueOnce({
+    ok: true,
+    json: async () => ({ access_token: randomBytes(24).toString('hex'), refresh_token: token }),
+  });
+  f.failClear();
+  await refreshExpiringCliCredentials(f.db, f.runner);
+  await refreshExpiringCliCredentials(f.db, f.runner);
+  expect(f.fetchMock).toHaveBeenCalledTimes(2);
+});
+
+it('missing source credentials ask for login through the existing typed error', async () => {
+  const f = fixture();
+  rmSync(join(f.dirs.get(f.userVol)!, 'auth.json'));
+  const error = await f.adopt().catch((error) => error);
+  expect(error).toBeInstanceOf(CliLoginRequiredError);
+  expect(error.code).toBe('grok_login_required');
+  expect(f.statusWrite).toHaveBeenCalledWith(expect.objectContaining({ authStatus: 'unknown' }));
+});
+
+it('measures the scope-lock windows with fixture shell IO and a controlled two-minute login', async () => {
+  const f = fixture();
+  const acquire = locks.acquire.getMockImplementation()!;
+  const measurements: { phase: string; logicalMs: number; wallMs: number }[] = [];
+  let phase = 'login';
+  locks.acquire.mockImplementation(async (...args) => {
+    const lock = await acquire(...args);
+    if (!lock) return null;
+    const logicalStart = Date.now();
+    const wallStart = vi.getRealSystemTime();
+    return Object.assign(
+      async () => {
+        measurements.push({
+          phase,
+          logicalMs: Date.now() - logicalStart,
+          wallMs: vi.getRealSystemTime() - wallStart,
+        });
+        await lock();
+      },
+      { assertHeld: lock.assertHeld },
+    );
+  });
+  vi.useFakeTimers();
+  const login = await locks.acquire(
+    f.db,
+    cliAuthScope({ ...f.ctx, id: f.ctx.providerId, name: 'grok' }),
+  );
+  await vi.advanceTimersByTimeAsync(120_000);
+  await login();
+  vi.useRealTimers();
+  phase = 'refresh';
+  await refreshExpiringCliCredentials(f.db, f.runner);
+  phase = 'admission';
+  await f.adopt();
+  expect(measurements.map((row) => row.phase)).toEqual(['login', 'refresh', 'admission']);
+  expect(measurements[0]?.logicalMs).toBe(120_000);
+  process.stdout.write(`AUTH_LOCK_FIXTURE_MEASUREMENTS ${JSON.stringify(measurements)}\n`);
+});
+
+it('an unrelated generation write cannot supersede a newer unharvested copy', async () => {
+  const f = fixture();
+  const newer = f.raw();
+  writeFileSync(join(f.dirs.get(f.taskVol)!, 'auth.json'), newer);
+  await refreshExpiringCliCredentials(f.db, f.runner);
+  f.provider.authGeneration = randomUUID();
+  await expect(f.adopt()).rejects.toMatchObject({ code: 'grok_login_required' });
+  expect(f.removed).toEqual([]);
+});
+
+it('a failed lock connection is retryable without a login hint or copy mutation', async () => {
+  const f = fixture();
+  locks.acquire.mockRejectedValueOnce(new Error('fixture auth connection failed'));
+  await expect(f.adopt()).rejects.toMatchObject({ code: 'cli_auth_probe_unknown' });
+  expect(f.statusWrite).not.toHaveBeenCalled();
+  expect(f.removed).toEqual([]);
+});
+
+it('waits for an admitted writer before preserving its final unharvested credential', async () => {
+  const f = fixture();
+  f.freshLogin();
+  vi.mocked(f.db.query.cliInvocations.findFirst).mockResolvedValueOnce({
+    id: randomUUID(),
+  } as never);
+  await expect(f.adopt()).rejects.toMatchObject({ code: 'cli_auth_busy' });
+  expect([...f.labels.keys()].some((name) => name.includes('_retired_'))).toBe(false);
+  const finalCredential = f.raw();
+  writeFileSync(join(f.dirs.get(f.taskVol)!, 'auth.json'), finalCredential);
+  await f.adopt();
+  const retired = [...f.labels.keys()].find((name) => name.includes('_retired_'))!;
+  expect(f.credential(retired) === finalCredential).toBe(true);
+});
+
+it('a still-mounted ended writer prevents retirement and no archive is created', async () => {
+  const f = fixture();
+  f.freshLogin();
+  f.runner.volumeHasContainers = async () => true;
+  await expect(f.adopt()).rejects.toMatchObject({ code: 'cli_auth_busy' });
+  expect(f.removed).toEqual([]);
+  expect([...f.labels.keys()].some((name) => name.includes('_retired_'))).toBe(false);
+});
+
+it('coalesced pending admissions are excluded from the retirement writer check', async () => {
+  const f = fixture();
+  f.freshLogin();
+  const ids = [randomUUID(), randomUUID()];
+  const { PgDialect } = await import('drizzle-orm/pg-core');
+  vi.mocked(f.db.query.cliInvocations.findFirst).mockImplementation((async (
+    query: { where?: unknown } | undefined,
+  ) => {
+    const parameters = new PgDialect().sqlToQuery(query!.where as import('drizzle-orm').SQL).params;
+    expect(parameters).toEqual(expect.arrayContaining(ids));
+    return undefined;
+  }) as never);
+  await Promise.all(ids.map((id) => ensureTaskAuthVolumes(f.ctx, f.taskId, f.runner, f.db, id)));
+  expect([...f.labels.keys()].filter((name) => name.includes('_retired_'))).toHaveLength(1);
+});
+
+it('a stopped helper cannot permanently pin recovery after a fresh login', async () => {
+  const f = fixture();
+  f.freshLogin();
+  let pinned = true;
+  f.runner.removeStoppedContainersUsingVolume = async () => {
+    pinned = false;
+    return { ok: true, removed: ['fixture-helper'], stderr: '' };
+  };
+  f.runner.volumeHasContainers = async () => pinned;
+  await f.adopt();
+  expect(pinned).toBe(false);
+  expect([...f.labels.keys()].filter((name) => name.includes('_retired_'))).toHaveLength(1);
 });

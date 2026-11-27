@@ -1059,6 +1059,7 @@ export async function resolveAuthMounts(
   provider: CliProviderRecord,
   taskId: string,
   sandboxImage: string | null,
+  invocationId?: string,
 ): Promise<DockerVolumeMount[]> {
   const providerName = provider.name as CliProviderName;
   await assertUserAuthReady(db, provider);
@@ -1073,6 +1074,7 @@ export async function resolveAuthMounts(
     taskId,
     undefined,
     db,
+    invocationId,
   );
 
   // RTK seeding: when this task's repo opted into the token-saving proxy,

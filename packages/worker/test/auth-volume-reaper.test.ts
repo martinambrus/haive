@@ -65,6 +65,12 @@ describe('selectOrphanAuthVolumes', () => {
     expect(orphans.sort()).toEqual([...reaped].sort());
   });
 
+  it('keeps retired recovery copies through task settlement and reaps them when their user is deleted', () => {
+    const retired = `${cliAuthVolumeName(USER, 'grok', 0)}_retired_fixture`;
+    expect(selectOrphanAuthVolumes([retired], live([], [], [USER]))).toEqual([]);
+    expect(selectOrphanAuthVolumes([retired], live([], [], []))).toEqual([retired]);
+  });
+
   it('is empty when every owner is live', () => {
     const orphans = selectOrphanAuthVolumes(
       [cliAuthTaskVolumeName(LIVE_TASK, 'codex', 0), cliAuthVolumeName(USER, 'codex', 0)],

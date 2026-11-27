@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { CliAuthRetryableError, CliLoginRequiredError } from '../src/sandbox/cli-auth-errors.js';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Database } from '@haive/database';
 import { StepPrepareParkError } from '@haive/shared/step';
@@ -2447,6 +2448,98 @@ describe('advanceStep LLM phase', () => {
     expect(enqueued).toBe(1);
     expect(state.updates.some((u) => u.table === 'cli_invocations' && u.supersededAt)).toBe(true);
   });
+
+  it.each(['cli_auth_busy', 'cli_auth_probe_unknown'] as const)(
+    'direct auth %s defers apply and resumes after admission recovers',
+    async (code) => {
+      const state = freshState();
+      const step = baseStep();
+      delete step.llm;
+      step.apply = async () => {
+        throw new CliAuthRetryableError(code);
+      };
+      const params = {
+        db: makeMockDb(state),
+        taskId: 'task-1',
+        userId: 'user-1',
+        repoPath: '/tmp',
+        workspacePath: '/tmp',
+        cliProviderId: 'prov-1',
+        stepDef: step,
+        providers: [makeProvider()],
+      };
+      const result = await advanceStep(params);
+      expect(result.status).toBe('deferred');
+      if (result.status === 'deferred') {
+        expect(result.delayMs).toBe(30_000);
+        expect(result.row.status).toBe('waiting_cli');
+      }
+      expect(state.updates.some((row) => row.status === 'failed')).toBe(false);
+      step.apply = async () => ({ recovered: true });
+      expect((await advanceStep(params)).status).toBe('done');
+    },
+  );
+
+  it('direct auth login refusal saves the inline hint and never routes to a code fix loop', async () => {
+    const state = freshState();
+    const step = baseStep();
+    delete step.llm;
+    step.fixLoopOnError = true;
+    const hint = {
+      type: 'cli_login_required',
+      providerId: 'prov-1',
+      providerName: 'grok',
+    } as const;
+    step.apply = async () => {
+      throw new CliLoginRequiredError('Log in and retry.', hint, 'grok_login_required');
+    };
+    const result = await advanceStep({
+      db: makeMockDb(state),
+      taskId: 'task-1',
+      userId: 'user-1',
+      repoPath: '/tmp',
+      workspacePath: '/tmp',
+      cliProviderId: 'prov-1',
+      stepDef: step,
+      providers: [makeProvider()],
+    });
+    expect(result.status).toBe('failed');
+    expect(result.row.errorHint).toEqual(hint);
+  });
+
+  it.each(['cli_auth_busy', 'cli_auth_probe_unknown'])(
+    'keeps retrying %s without spending the crash budget',
+    async (code) => {
+      const state = freshState();
+      state.taskStepRow = { ...state.taskStepRow, status: 'waiting_cli' };
+      const wait = (id: string) => ({
+        id,
+        startedAt: new Date(),
+        exitCode: -1,
+        rawOutput: null,
+        parsedOutput: null,
+        endedAt: new Date(),
+        errorMessage: `${code}: Authentication admission will retry.`,
+        createdAt: new Date(),
+      });
+      state.cliInvocationRow = wait('inv-4');
+      state.cliInvocationHistory = ['inv-4', 'inv-3', 'inv-2', 'inv-1'].map(wait);
+      const enqueueCliInvocation = vi.fn(async () => {});
+      const result = await advanceStep({
+        db: makeMockDb(state),
+        taskId: 'task-1',
+        userId: 'user-1',
+        repoPath: '/tmp',
+        workspacePath: '/tmp',
+        cliProviderId: 'prov-1',
+        stepDef: baseStep(),
+        providers: [makeProvider()],
+        deps: { enqueueCliInvocation },
+      });
+      expect(result.status).toBe('waiting_cli');
+      expect(enqueueCliInvocation).toHaveBeenCalledOnce();
+    },
+  );
 
   it('does not spend the orphan budget on invocations that never STARTED', async () => {
     // Under GLOBAL_PAUSE the cli-exec pickup gate holds every invocation at started_at NULL

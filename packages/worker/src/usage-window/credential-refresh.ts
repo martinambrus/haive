@@ -219,7 +219,10 @@ async function refreshGrokVolume(
   if (!raw) return; // not signed in, or grok already deleted the file
   const cred = parseGrokAuthFile(raw);
   if (!cred) return;
-  if (!grokTokenNeedsRefresh(cred.expiresAtMs)) return;
+  // A failed same-token fence clear must retry even with a newly renewed access token.
+  const fence = await readVolumeFile(vol, GROK_REFRESH_FENCE_FILE, runner);
+  const fenced = fence === grokRefreshFingerprint(cred.refreshToken);
+  if (!grokTokenNeedsRefresh(cred.expiresAtMs) && !fenced) return;
   if (deadRefreshToken.get(vol) === cred.refreshToken) return;
 
   await assertHeld();
@@ -238,8 +241,13 @@ async function refreshGrokVolume(
     fresh = await refreshGrokToken(cred.refreshToken, cred.clientId);
   } catch (err) {
     if (!(err instanceof GrokOauthError && err.code === 'invalid_grant')) {
-      // Transient (network / 5xx). Leave the stored credential untouched and retry next
-      // tick; the access token may still have life left in it.
+      // A received 4xx (except rejected grant below) proves no token was issued.
+      // Network loss, aborts, malformed success and 5xx remain possibly consumed.
+      if (err instanceof GrokOauthError && err.status >= 400 && err.status < 500) {
+        await assertHeld();
+        if (!(await writeVolumeFile(vol, GROK_REFRESH_FENCE_FILE, 'none', runner)))
+          log.warn({ vol }, 'grok unspent-grant fence clear failed; retrying next tick');
+      }
       log.warn({ vol, err }, 'grok token refresh failed (transient); retrying next tick');
       return;
     }
@@ -296,8 +304,13 @@ async function refreshGrokVolume(
   deadRefreshToken.delete(vol);
   // A vendor may keep the same refresh token. Its successful credential write is
   // durable before clearing the uncertainty fence; a crash here safely refuses Retry.
-  if (fresh.refreshToken === cred.refreshToken)
-    await writeVolumeFile(vol, GROK_REFRESH_FENCE_FILE, 'none', runner);
+  if (fresh.refreshToken === cred.refreshToken) {
+    await assertHeld();
+    if (!(await writeVolumeFile(vol, GROK_REFRESH_FENCE_FILE, 'none', runner))) {
+      log.warn({ vol }, 'grok successful same-token fence clear failed; retrying next tick');
+      return;
+    }
+  }
   log.info(
     { vol, expiresAt: new Date(fresh.expiresAtMs).toISOString() },
     'rotated the stored grok credential',

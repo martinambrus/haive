@@ -138,6 +138,7 @@ import {
   cliTimeoutBudgetMinutes,
   isCliPreemptionFailure,
   isFreeRedispatch,
+  isCliAuthWaitFailure,
   isCliTimeoutFailure,
   isProviderOutage,
   isProviderRefusal,
@@ -147,6 +148,7 @@ import {
 } from '../queues/cli-exec/failure-class.js';
 import { enqueueUsagePollTick } from '../queues/usage-poll-queue.js';
 import { foldCliParkOnResume, markCliParkBegin } from '../queues/cli-park-timing.js';
+import { CliAuthRetryableError, CliLoginRequiredError } from '../sandbox/cli-auth-errors.js';
 import {
   AdvisedStepError,
   PromptBudgetExceededError,
@@ -893,7 +895,11 @@ async function resolveLlmPhase(
         // work we know is safe. The sweeper's own guards (min run age, a higher-voted task with
         // real queued demand) are what bound how often this can happen.
         const preempted = isCliPreemptionFailure({ errorMessage: errTrimmed });
-        if (preempted || (await countTrailingOrphans(db, current.id)) < MAX_ORPHAN_REDISPATCH) {
+        if (
+          preempted ||
+          isCliAuthWaitFailure(invocation) ||
+          (await countTrailingOrphans(db, current.id)) < MAX_ORPHAN_REDISPATCH
+        ) {
           ctx.logger.warn(
             { stepId: stepDef.metadata.id, message },
             'cli invocation orphaned/killed; re-dispatching a fresh invocation',
@@ -5151,6 +5157,22 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
         block: err.block,
       };
     }
+    // 01b installs plugins directly, outside the CLI invocation handler. Its auth
+    // admission waits need the same recovery without failing a task or fixing code.
+    if (err instanceof CliAuthRetryableError) {
+      const patch: UpdatePatch = { status: 'waiting_cli', statusMessage: err.message };
+      const parked = await (
+        opened
+          ? updateRow(db, row.id, patch)
+          : openPendingStep(db, taskId, params.epoch, row.id, patch)
+      ).catch((error: unknown) => {
+        if (error instanceof StepSupersededError) return null;
+        throw error;
+      });
+      if (!parked) return supersededPass(row);
+      await markCliParkBegin(db, row.id);
+      return { status: 'deferred', row: parked, delayMs: 30_000 };
+    }
     const cancelled = err instanceof TaskCancelledError;
     // A done fix-loop row stores the diagnosis for reclassification on recovery. Preserve
     // it through routing and that write; scrub only failure display copy below.
@@ -5176,6 +5198,7 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
     const routeErrorToFixLoop =
       !(err instanceof StepOutputContractInvalidError) &&
       !(err instanceof DataEdgePlanError) &&
+      !(err instanceof CliLoginRequiredError) &&
       routesErrorToFixLoop(stepDef, errorMessage);
     if (!cancelled && routeErrorToFixLoop) {
       if (meta.id === '08-phase-5-verify')
@@ -5223,6 +5246,7 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
       status: 'failed',
       statusMessage: null,
       errorMessage: storedError,
+      ...(err instanceof CliLoginRequiredError ? { errorHint: err.hint } : {}),
       endedAt: new Date(),
     });
     if (stepDef.agentMining && failed !== row) await releaseStepAgents(db, row.id, storedError);
