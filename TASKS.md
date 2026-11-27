@@ -386,7 +386,7 @@ User decision 2026-11-01: Retain complete/consumed upload metadata 90 days; prot
 
 ### T308 · FNF[worktree-aliases] · hard links planted into .haive/worktrees before #800 survive
 
-status: open · priority: P2 · gate: bounded verification
+status: done 2026-11-27, merged #1354 5c14b711c and live (`pnpm docker libs`, migration 0251 applied 03:18:29Z; one-time sweep running in batches, 16 of 83 managed repositories completed within minutes, 0 errors) · priority: P2 · gate: bounded verification
 A file under `.haive/worktrees` sharing an inode with a name in the writable checkout stays writable through the alias. Fix: a one-time background sweep (recorded per repository) that copy-replaces files whose st_nlink exceeds their names under that tree, via fs-safe. Measure the walk on a large repo first.
 
 Execution fence 2026-11-01: first establish an affected legacy/current supported case in owned fixtures. The recorded risk is not a confirmed production incident and does not make completing an unbounded inventory a prerequisite for new functionality. Escalate a reproduced security/data-loss consequence.
