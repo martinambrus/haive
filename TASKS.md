@@ -1253,7 +1253,7 @@ status: done 2026-11-27, merged #1355 27614f5e3 and live (worker hot-reloaded): 
 
 ### T780 · Repository readers outside admission during a rebuild
 
-status: in progress 2026-11-27: analysis `.claude/tmp/codex-run/T780-S/analysis/analysis.md` proposes 3 PRs; PR1 DONE: merged #1364 06e1a0ac8, live 2026-11-27 (drain checks zero, api and worker restarted together; leftovers L2 per-run token, L5 import wall-clock bound, L6 paired-deploy enforcement); PR2 (central checkout-access gate) next; PR3 (stop or warn open Terminal/Editor on rebuild) waits on the owner's choice · kind: bug · found: T594 fix-2 (Codex found-not-fixed) 2026-11-27 · priority: P3
+status: in progress 2026-11-27: analysis `.claude/tmp/codex-run/T780-S/analysis/analysis.md` proposes 3 PRs; PR1 DONE: merged #1364 06e1a0ac8, live 2026-11-27 (drain checks zero, api and worker restarted together; leftovers L2 per-run token, L5 import wall-clock bound, L6 paired-deploy enforcement); PR2 (central checkout-access gate, reduced scope) in review as #1366; PR3 owner decision 2026-11-27: stop + warn (warn before the rebuild, then stop the repository's shells, runtimes and Editors, keeping Editor user data, extensions, auth volumes and unsaved buffers for review; reopen after ready), starts after #1366 merges · kind: bug · found: T594 fix-2 (Codex found-not-fixed) 2026-11-27 · priority: P3
 
 T594 commits `status: 'cloning'` before a rebuild moves the checkout, which hides it from archive, Terminal and Editor admission. Path-based file readers that do not go through readiness admission, and sessions already open before the rebuild, are not covered.
 
