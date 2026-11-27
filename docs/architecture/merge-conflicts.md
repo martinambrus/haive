@@ -102,13 +102,16 @@ left. The following rules keep it that way, each MEASURED on git 2.43 and 2.54:
   with the merge commit's sha (`squashMergeSha`) ahead of any reset, so a crash between the reset and
   the commit re-enters it. `squashMergeCommit` decides in a fixed
   order, on parents, trees and ancestry only: a feature already contained in the base tip recorded
-  at the first open (`baseShaBefore`) has nothing to squash, unless `ORIG_HEAD` or HEAD shows this
-  merge's interrupted squash (a two-parent commit on that tip, or the recorded merge), which goes to
+  at the first open (`baseShaBefore`) has nothing to squash, unless the recorded merge, `ORIG_HEAD`
+  or HEAD shows this merge's interrupted squash (a two-parent commit on that tip), which goes to
   the proofs below instead; HEAD at that tip is a reset already
-  made, committed only when `ORIG_HEAD` is the recorded merge commit (or, for a row saved without
-  one, a merge of base and feature) with the staged tree; HEAD with that tip as its one parent is a
-  squash already made, accepted on the same proof against its tree. A feature branch that moved
-  after the merge does not break either proof;
+  made, committed only when the recorded merge commit has that base as its first parent and
+  matches the staged tree (a legacy row without a recorded sha requires `ORIG_HEAD` to prove a
+  merge of base and feature); HEAD with that tip as its one parent is a squash already made,
+  accepted on the same proof against its tree. A recorded merge sha suffices when `ORIG_HEAD`
+  is missing or overwritten: a crash after the soft reset resumes the commit, and a crash after
+  the commit accepts it without resetting or recommitting. Parent and tree mismatches still halt.
+  A feature branch that moved after the merge does not break either proof;
   HEAD as the feature's merge is reset and recommitted unless its tree equals the base's. An
   unproven reset or squash halts the step with its claim kept. Otherwise (a person's commit on
   top of the merge, a moved base, an empty net diff) it keeps the merge commit and records why

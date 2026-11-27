@@ -1461,8 +1461,8 @@ export async function completeMergeHostSide(
   return mergeCommitted(worktreePath, branch);
 }
 
-/** Collapse only the feature merge's own first-parent edge; resume a reset only when its
- *  ORIG_HEAD and staged tree still prove the same merge. A live merge is left to its fixer.
+/** Collapse only the feature merge's own first-parent edge; resume a reset only when the
+ *  recorded merge (ORIG_HEAD for legacy rows) and staged tree prove it. A live merge is left to its fixer.
  *  git merge --squash never writes MERGE_HEAD, which the conflict resolver needs. */
 export async function squashMergeCommit(
   worktreePath: string,
@@ -1490,7 +1490,14 @@ export async function squashMergeCommit(
       feature = mergedFeature;
     }
   }
-  const origParents = await gitRun(worktreePath, ['rev-list', '--parents', '-n', '1', 'ORIG_HEAD']);
+  const recoveryMerge = squashMergeSha ?? 'ORIG_HEAD';
+  const origParents = await gitRun(worktreePath, [
+    'rev-list',
+    '--parents',
+    '-n',
+    '1',
+    recoveryMerge,
+  ]);
   const origCommits = origParents.stdout.trim().split(/\s+/);
   const recoveringSquash =
     (headParents.code === 0 &&
@@ -1535,7 +1542,7 @@ export async function squashMergeCommit(
     return null;
   };
   const restoreMerge = `restore ORIG_HEAD to the feature merge${squashMergeSha ? ` ${squashMergeSha}` : ''}`;
-  const candidate = resetAlready || committedAlready ? 'ORIG_HEAD' : 'HEAD';
+  const candidate = resetAlready || committedAlready ? recoveryMerge : 'HEAD';
   const parents = await gitRun(worktreePath, ['rev-list', '--parents', '-n', '1', candidate]);
   const commits = parents.stdout.trim().split(/\s+/);
   const matchesMerge = squashMergeSha
