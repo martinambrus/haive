@@ -432,3 +432,12 @@ describe('T594 C4: deleted task repository', () => {
     ).not.toContain('retry');
   });
 });
+
+it.each([0, 1])(
+  'T345 item 3: an unconfirmed kill overrides a clean Stop count (%s stopped)',
+  (stopped) => {
+    expect(stopResultNotice({ stopped, cancelled: 0, killed: 0, killConfirmed: false })).toBe(
+      'Sandbox cleanup could not be confirmed. A CLI process may still be running.',
+    );
+  },
+);

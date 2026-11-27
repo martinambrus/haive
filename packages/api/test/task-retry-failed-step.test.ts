@@ -5,7 +5,7 @@ const USER = vi.hoisted(() => '00000000-0000-4000-8000-0000000000a1');
 const h = vi.hoisted(() => ({
   db: undefined as unknown,
   add: vi.fn(async (..._args: unknown[]) => undefined),
-  kill: vi.fn(async (_taskId: string) => 0),
+  kill: vi.fn(async (_taskId: string) => ({ killed: 0, killConfirmed: true })),
   guardPin: false,
 }));
 
@@ -523,7 +523,10 @@ describe('a task Retry re-runs the step the task stopped on', () => {
       prompt: 'p',
       startedAt: t.fake.now(),
     });
-    expect((await t.retry()).status).toBe(200);
+    h.kill.mockResolvedValueOnce({ killed: 0, killConfirmed: false });
+    const response = await t.retry();
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ killed: 0, killConfirmed: false });
     const run = t.fake.rows(schema.cliInvocations)[0]!;
     expect(run.supersededAt).not.toBeNull();
     expect(run.endedAt).not.toBeNull();

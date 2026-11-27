@@ -46,6 +46,7 @@ const IDS = 'aaa\nbbb\n';
 const listing = [
   'docker',
   'ps',
+  '-a',
   '-q',
   '--filter',
   `label=haive.task.id=${TASK}`,
@@ -280,35 +281,53 @@ describe('killTaskSandboxesOrThrow', () => {
 describe('killTaskSandboxes', () => {
   it('resolves the count of the sandboxes it removed', async () => {
     runs.push({ stdout: IDS }, { stdout: IDS });
-    await expect(killTaskSandboxes(TASK)).resolves.toBe(2);
+    await expect(killTaskSandboxes(TASK)).resolves.toMatchObject({
+      killed: 2,
+      killConfirmed: true,
+    });
     expect(argvs()).toEqual([listing, removal]);
   });
 
   it('resolves 0 for an empty listing and spawns no removal', async () => {
     runs.push({ stdout: '' });
-    await expect(killTaskSandboxes(TASK)).resolves.toBe(0);
+    await expect(killTaskSandboxes(TASK)).resolves.toMatchObject({
+      killed: 0,
+      killConfirmed: true,
+    });
     expect(argvs()).toEqual([listing]);
   });
 
-  it.each(causes)('resolves 0 and spawns no removal when the listing $name', async ({ run }) => {
-    runs.push(run);
-    await expect(killTaskSandboxes(TASK)).resolves.toBe(0);
-    expect(argvs()).toEqual([listing]);
-  });
+  it.each(causes)(
+    'reports unconfirmed and spawns no removal when the listing $name',
+    async ({ run }) => {
+      runs.push(run);
+      await expect(killTaskSandboxes(TASK)).resolves.toMatchObject({
+        killed: 0,
+        killConfirmed: false,
+      });
+      expect(argvs()).toEqual([listing]);
+    },
+  );
 
-  it.each(causes)('still resolves the count when the removal $name', async ({ run }) => {
+  it.each(causes)('reports unconfirmed when the removal $name', async ({ run }) => {
     runs.push({ stdout: IDS }, run);
-    await expect(killTaskSandboxes(TASK)).resolves.toBe(2);
+    await expect(killTaskSandboxes(TASK)).resolves.toMatchObject({
+      killed: 0,
+      killConfirmed: false,
+    });
     expect(argvs()).toEqual([listing, removal]);
   });
 
-  it.each(deadlines)('resolves when the %s outlasts %i ms, as it always did', async (step, ms) => {
-    runs.push(...failing(step, { hang: true }));
-    const pending = killTaskSandboxes(TASK);
-    await vi.advanceTimersByTimeAsync(ms);
-    await expect(pending).resolves.toBe(step === 'listing' ? 0 : 2);
-    expect(children.at(-1)?.kill).toHaveBeenCalledWith('SIGKILL');
-  });
+  it.each(deadlines)(
+    'resolves when the %s outlasts %i ms, without claiming confirmation',
+    async (step, ms) => {
+      runs.push(...failing(step, { hang: true }));
+      const pending = killTaskSandboxes(TASK);
+      await vi.advanceTimersByTimeAsync(ms);
+      await expect(pending).resolves.toMatchObject({ killed: 0, killConfirmed: false });
+      expect(children.at(-1)?.kill).toHaveBeenCalledWith('SIGKILL');
+    },
+  );
 });
 
 describe('deadline timers', () => {
@@ -321,13 +340,41 @@ describe('deadline timers', () => {
 
   it.each(deadlines)('leaves no timer and no kill when the %s call exits', async (step) => {
     runs.push(...(step === 'listing' ? [{ stdout: '' }] : [{ stdout: IDS }, { stdout: IDS }]));
-    await expect(killTaskSandboxes(TASK)).resolves.toBe(step === 'listing' ? 0 : 2);
+    await expect(killTaskSandboxes(TASK)).resolves.toMatchObject({
+      killed: step === 'listing' ? 0 : 2,
+      killConfirmed: true,
+    });
     await settle(step === 'listing' ? 1 : 2);
   });
 
   it.each(deadlines)('leaves no timer and no kill when the %s call cannot spawn', async (step) => {
     runs.push(...failing(step, { error: new Error('spawn docker ENOENT') }));
-    await expect(killTaskSandboxes(TASK)).resolves.toBe(step === 'listing' ? 0 : 2);
+    await expect(killTaskSandboxes(TASK)).resolves.toMatchObject({
+      killed: 0,
+      killConfirmed: false,
+    });
     await settle(step === 'listing' ? 1 : 2);
+  });
+});
+
+describe('T345 red controls', () => {
+  it('3: a failed Docker listing is structurally unconfirmed', async () => {
+    runs.push({ code: 1, stderr: 'Cannot connect to the daemon' });
+    expect(await killTaskSandboxes(TASK)).toMatchObject({ killed: 0, killConfirmed: false });
+  });
+  it('3: a failed removal never claims a confirmed kill count', async () => {
+    runs.push({ stdout: IDS }, { code: 1 });
+    expect(await killTaskSandboxes(TASK)).toMatchObject({ killed: 0, killConfirmed: false });
+  });
+  it('8: finds created and exited sandboxes as well as running ones', async () => {
+    h.spawn.mockImplementation((_cmd: string, args: string[]) => {
+      const child = new FakeChild();
+      queueMicrotask(() =>
+        play(child, { stdout: args[0] === 'ps' && args.includes('-a') ? IDS : '' }),
+      );
+      return child;
+    });
+    await killTaskSandboxes(TASK);
+    expect(argvs()).toContainEqual(removal);
   });
 });

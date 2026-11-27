@@ -3,7 +3,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 const h = vi.hoisted(() => ({
   db: undefined as unknown,
   add: vi.fn(async (..._args: unknown[]) => undefined),
-  kill: vi.fn(async (_taskId: string) => 0),
+  kill: vi.fn(async (_taskId: string) => ({ killed: 0, killConfirmed: true })),
 }));
 
 vi.mock('../src/db.js', () => ({ getDb: () => h.db }));
@@ -127,3 +127,27 @@ describe('a step action on a task that has ended', () => {
     expect(fake.rows(schema.tasks)[0]).toMatchObject({ status: 'running', orchestrationEpoch: 4 });
   }, 10_000);
 });
+
+it.each(['retry', 'skip', 'resume'] as const)(
+  '%s exposes unconfirmed cleanup of active downstream work',
+  async (action) => {
+    const fake = setup('failed');
+    fake.insert(schema.taskSteps, {
+      taskId: TASK,
+      stepId: 'next',
+      stepIndex: 2,
+      runSeq: 2,
+      round: 0,
+      status: 'running',
+    });
+    h.kill.mockResolvedValueOnce({ killed: 0, killConfirmed: false });
+    const res = await app.request(`/${TASK}/steps/${STEP}/action`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ action }),
+    });
+    expect(res.status).toBe(200);
+    expect(h.kill).toHaveBeenCalledWith(TASK);
+    expect(await res.json()).toMatchObject({ ok: true, killed: 0, killConfirmed: false });
+  },
+);

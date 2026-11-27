@@ -1,7 +1,9 @@
 import { STOP_SETTLE_EVENTS } from '@haive/shared';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-const kill = vi.hoisted(() => vi.fn(async (_taskId: string) => 0));
+const kill = vi.hoisted(() =>
+  vi.fn(async (_taskId: string) => ({ killed: 0, killConfirmed: true })),
+);
 vi.mock('../src/lib/sandbox-kill.js', () => ({ killTaskSandboxes: kill }));
 vi.mock('../src/db.js', () => ({ getDb: () => undefined }));
 

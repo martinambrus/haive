@@ -29,7 +29,9 @@ vi.mock('../src/queues.js', () => {
     getUsagePollQueue: queue,
   };
 });
-vi.mock('../src/lib/sandbox-kill.js', () => ({ killTaskSandboxes: async () => 0 }));
+vi.mock('../src/lib/sandbox-kill.js', () => ({
+  killTaskSandboxes: async () => ({ killed: 0, killConfirmed: true }),
+}));
 vi.mock('../src/lib/execution-contract-admission.js', async (importOriginal) => {
   const real = await importOriginal<typeof import('../src/lib/execution-contract-admission.js')>();
   return {

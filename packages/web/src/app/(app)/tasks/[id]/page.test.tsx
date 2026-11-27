@@ -83,7 +83,12 @@ const net = vi.hoisted(() => ({
   unstubbed: [] as string[],
   patchError: null as string | null,
   actionError: null as string | null,
-  stopResult: { killed: 0, cancelled: 0, stopped: 0 },
+  stopResult: { killed: 0, cancelled: 0, stopped: 0 } as {
+    killed: number;
+    cancelled: number;
+    stopped: number;
+    killConfirmed?: boolean;
+  },
   submits: [] as Record<string, unknown>[],
   submitFailure: null as { status: number; error: string; code?: string } | null,
   detailFetches: 0,
@@ -516,6 +521,15 @@ describe('task page Stop controls (#395)', () => {
     fire.click(stop);
     for (let i = 0; i < 5; i += 1) await view.flush();
     expect(textOf(view.tree()).includes('Nothing was running to stop.')).toBe(notice);
+  });
+
+  it('shows unconfirmed sandbox cleanup even when Stop reports zero counts', async () => {
+    net.stopResult = { killed: 0, cancelled: 0, stopped: 0, killConfirmed: false };
+    const view = await mount({ pausedAt: null }, [{ ...stepRow(), status: 'running' }]);
+    fire.click(buttons(view.tree(), 'stop')[0]!);
+    for (let i = 0; i < 5; i += 1) await view.flush();
+    expect(textOf(view.tree())).toContain('Sandbox cleanup could not be confirmed.');
+    expect(textOf(view.tree())).not.toContain('Nothing was running to stop.');
   });
 
   it('shows the header Stop notice through polling and clears it on the next step Retry', async () => {

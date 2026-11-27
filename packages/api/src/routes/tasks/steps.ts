@@ -63,7 +63,7 @@ import { parseInvocationHistoryQuery } from './_invocation-history.js';
 import { loadCustomToolCalls, loadIntegrationCalls } from './_call-log.js';
 import { HttpError, type AppEnv } from '../../context.js';
 import { admitNewWork, assertNewWorkAllowed } from '../../middleware/maintenance.js';
-import { killTaskSandboxes } from '../../lib/sandbox-kill.js';
+import { killTaskSandboxes, type SandboxKillResult } from '../../lib/sandbox-kill.js';
 import { refuseBesideLiveUpgrade, refuseReviveBesideLive } from '../upgrades.js';
 import {
   cancelLiveRuns,
@@ -652,7 +652,7 @@ export async function retryTaskAtStep(
   userId: string,
   target: typeof schema.taskSteps.$inferSelect,
   opts: { liftPause?: { read: Date; role: string | undefined; actorUserId: string } } = {},
-): Promise<{ epoch: number }> {
+): Promise<{ epoch: number } & Partial<SandboxKillResult>> {
   // The immutable task pin is authoritative even for callers outside the action route.
   const task = await db.query.tasks.findFirst({
     where: eq(schema.tasks.id, taskId),
@@ -734,9 +734,13 @@ export async function retryTaskAtStep(
     };
   });
   if (moved.resumeAudit) logAuditEvent(moved.resumeAudit);
+  let sandboxKill: SandboxKillResult | undefined;
   if (moved.live) {
-    const killed = await killTaskSandboxes(taskId);
-    logger.info({ taskId, killed }, 'killed task sandboxes for task retry');
+    sandboxKill = await killTaskSandboxes(taskId);
+    logger[sandboxKill.killConfirmed ? 'info' : 'warn'](
+      { taskId, ...sandboxKill },
+      'task retry sandbox cleanup',
+    );
   }
   await addBestEffort(
     () =>
@@ -759,7 +763,7 @@ export async function retryTaskAtStep(
     'step advance not queued; the stalled sweep will queue it',
     { taskId, stepId: target.stepId },
   );
-  return { epoch: moved.epoch };
+  return { epoch: moved.epoch, ...sandboxKill };
 }
 function unendedTask(taskId: string) {
   return and(
@@ -1360,6 +1364,8 @@ stepRoutes.post('/:id/steps/:stepId/action', async (c) => {
   const step = stepRows[0];
   if (!step) throw new HttpError(404, 'Step not found');
 
+  let sandboxKill: SandboxKillResult | undefined;
+
   if (body.action === 'retry' && isGuardOwnedSkip(step, task.executionContract))
     throwGuardOwnedSkip();
 
@@ -1514,8 +1520,11 @@ stepRoutes.post('/:id/steps/:stepId/action', async (c) => {
         (r) => r.status === 'running' || r.status === 'waiting_cli',
       );
     if (cascadeIsActive) {
-      const killed = await killTaskSandboxes(id);
-      logger.info({ taskId: id, stepId, killed }, 'killed task sandboxes for retry-while-active');
+      sandboxKill = await killTaskSandboxes(id);
+      logger[sandboxKill.killConfirmed ? 'info' : 'warn'](
+        { taskId: id, stepId, ...sandboxKill },
+        'step action sandbox cleanup',
+      );
     }
     await addBestEffort(
       () =>
@@ -1535,7 +1544,7 @@ stepRoutes.post('/:id/steps/:stepId/action', async (c) => {
       'step advance not queued; the stalled sweep will queue it',
       { taskId: id, stepId },
     );
-    return c.json({ ok: true, status: 'pending' });
+    return c.json({ ok: true, status: 'pending', ...sandboxKill });
   }
 
   if (body.action === 'resume') {
@@ -1797,8 +1806,11 @@ stepRoutes.post('/:id/steps/:stepId/action', async (c) => {
           (r) => r.status === 'running' || r.status === 'waiting_cli',
         );
       if (liveInCascade) {
-        const killed = await killTaskSandboxes(id);
-        logger.info({ taskId: id, stepId, killed }, 'killed sandboxes for fan-out resume');
+        sandboxKill = await killTaskSandboxes(id);
+        logger[sandboxKill.killConfirmed ? 'info' : 'warn'](
+          { taskId: id, stepId, ...sandboxKill },
+          'step action sandbox cleanup',
+        );
       }
       await addBestEffort(
         () =>
@@ -1821,7 +1833,7 @@ stepRoutes.post('/:id/steps/:stepId/action', async (c) => {
         'step advance not queued; the stalled sweep will queue it',
         { taskId: id, stepId },
       );
-      return c.json({ ok: true, status: 'running', retriedAgents });
+      return c.json({ ok: true, status: 'running', retriedAgents, ...sandboxKill });
     }
     const isLoopStep = ((await loadStepFlags(db)).get(stepId)?.cliRoles?.length ?? 0) > 0;
     if (step.status !== 'failed' || (step.iterationCount <= 0 && !isLoopStep)) throw notResumable();
@@ -1896,8 +1908,11 @@ stepRoutes.post('/:id/steps/:stepId/action', async (c) => {
       return result;
     });
     if (isLive(step) || moved.leftActive.some(isLive)) {
-      const killed = await killTaskSandboxes(id);
-      logger.info({ taskId: id, stepId, killed }, 'killed sandboxes for resume');
+      sandboxKill = await killTaskSandboxes(id);
+      logger[sandboxKill.killConfirmed ? 'info' : 'warn'](
+        { taskId: id, stepId, ...sandboxKill },
+        'step action sandbox cleanup',
+      );
     }
     // Stamp the epoch (here and on the other recovery actions below) so a task-level retry
     // that bumps it invalidates this job instead of letting it run against the restarted
@@ -1926,7 +1941,7 @@ stepRoutes.post('/:id/steps/:stepId/action', async (c) => {
       'step advance not queued; the stalled sweep will queue it',
       { taskId: id, stepId },
     );
-    return c.json({ ok: true, status: 'running', resumedFromIteration });
+    return c.json({ ok: true, status: 'running', resumedFromIteration, ...sandboxKill });
   }
 
   if (body.action === 'retry_ai') {
@@ -2019,8 +2034,11 @@ stepRoutes.post('/:id/steps/:stepId/action', async (c) => {
       return result;
     });
     if (moved.leftActive.some(isLive)) {
-      const killed = await killTaskSandboxes(id);
-      logger.info({ taskId: id, stepId, killed }, 'killed sandboxes for retry_ai');
+      sandboxKill = await killTaskSandboxes(id);
+      logger[sandboxKill.killConfirmed ? 'info' : 'warn'](
+        { taskId: id, stepId, ...sandboxKill },
+        'step action sandbox cleanup',
+      );
     }
     await addBestEffort(
       () =>
@@ -2043,7 +2061,7 @@ stepRoutes.post('/:id/steps/:stepId/action', async (c) => {
       'step advance not queued; the stalled sweep will queue it',
       { taskId: id, stepId },
     );
-    return c.json({ ok: true, status: 'running' });
+    return c.json({ ok: true, status: 'running', ...sandboxKill });
   }
 
   if (body.action === 'skip') {
@@ -2126,8 +2144,11 @@ stepRoutes.post('/:id/steps/:stepId/action', async (c) => {
       return result;
     });
     if (moved.leftActive.some(isLive)) {
-      const killed = await killTaskSandboxes(id);
-      logger.info({ taskId: id, stepId, killed }, 'killed sandboxes for skip');
+      sandboxKill = await killTaskSandboxes(id);
+      logger[sandboxKill.killConfirmed ? 'info' : 'warn'](
+        { taskId: id, stepId, ...sandboxKill },
+        'step action sandbox cleanup',
+      );
     }
     // The api can't see unmaterialized future steps, so it can't compute the next
     // step. Enqueue an advance for the SKIPPED step; the worker sees it is already
@@ -2154,7 +2175,7 @@ stepRoutes.post('/:id/steps/:stepId/action', async (c) => {
       'step advance not queued; the stalled sweep will queue it',
       { taskId: id, stepId },
     );
-    return c.json({ ok: true, status: 'skipped', nextStepId: null });
+    return c.json({ ok: true, status: 'skipped', nextStepId: null, ...sandboxKill });
   }
 
   if (body.action === 'abort') {
@@ -2378,6 +2399,7 @@ stepRoutes.patch('/:id/steps/:stepId/cli-provider', async (c) => {
   const stepId = c.req.param('stepId');
   const body = setCliProviderRequestSchema.parse(await c.req.json());
   const db = getDb();
+  let sandboxKill: SandboxKillResult | undefined;
 
   const task = await db.query.tasks.findFirst({
     where: and(eq(schema.tasks.id, id), eq(schema.tasks.userId, userId)),
@@ -2591,8 +2613,11 @@ stepRoutes.patch('/:id/steps/:stepId/cli-provider', async (c) => {
       return moved;
     });
     if ((redrive?.leftActive ?? pendingResetExtras).some(isLive)) {
-      const killed = await killTaskSandboxes(id);
-      logger.info({ taskId: id, stepId, killed }, 'killed sandboxes for a CLI switch');
+      sandboxKill = await killTaskSandboxes(id);
+      logger[sandboxKill.killConfirmed ? 'info' : 'warn'](
+        { taskId: id, stepId, ...sandboxKill },
+        'step action sandbox cleanup',
+      );
     }
   }
 
@@ -2638,5 +2663,5 @@ stepRoutes.patch('/:id/steps/:stepId/cli-provider', async (c) => {
     );
   }
 
-  return c.json({ ok: true, stepId, cliProviderId: body.cliProviderId });
+  return c.json({ ok: true, stepId, cliProviderId: body.cliProviderId, ...sandboxKill });
 });

@@ -210,11 +210,17 @@ const stopTask = async (
   }
 };
 
+export const URGENT_STOP_CONCURRENCY = 8;
+
 export async function deactivateUrgently(
   db: Database,
   moduleId: string,
   actorUserId: string,
+  { concurrency = URGENT_STOP_CONCURRENCY }: { concurrency?: number } = {},
 ): Promise<UrgentDeactivation> {
+  if (!Number.isSafeInteger(concurrency) || concurrency < 1) {
+    throw new RangeError('Urgent stop concurrency must be a positive safe integer');
+  }
   const event: AuditEvent = {
     actorUserId,
     action: 'module.deactivate',
@@ -270,17 +276,19 @@ export async function deactivateUrgently(
   if (stamped.drainCancelled) logAuditEvent(drainCancelEvent);
 
   const report: UrgentReport = { stopped: [], left: [], failed: [], capped: stamped.capped };
-  for (const { id, title, status, ownerId, currentStepId } of stamped.dependents) {
+  const settlements: { id: string; ownerId: string; failedAt: string | null }[] = [];
+  let next = 0;
+  const stopDependent = async ({ id, title, status, ownerId, currentStepId }: ModuleDependent) => {
     if (!isStepOfModule(currentStepId, moduleId)) {
       report.left.push({ id, title, status, currentStepId });
-      continue;
+      return;
     }
     try {
       const { killError, ...result } = await stopTask(db, id);
-      await enqueueStopSettle(id, ownerId, result.failedAt);
+      settlements.push({ id, ownerId, failedAt: result.failedAt });
       if (result.cancelled === 0 && result.stopped === 0) {
         report.left.push({ id, title, status, currentStepId });
-        continue;
+        return;
       }
       const entry: UrgentReport['stopped'][number] = { id, title, ...result };
       if (killError !== undefined) entry.killError = killError;
@@ -308,6 +316,22 @@ export async function deactivateUrgently(
     } catch (err) {
       report.failed.push({ id, title, error: safeErrorMessage(err) });
     }
+  };
+  // Independent task transactions retain their lock order; only a bounded number run at once.
+  await Promise.all(
+    Array.from({ length: Math.min(concurrency, stamped.dependents.length) }, async () => {
+      while (next < stamped.dependents.length) {
+        await stopDependent(stamped.dependents[next++]!);
+      }
+    }),
+  );
+  // Each enqueue has the same bounded wait, all begun together. Redis cannot add a wait per task.
+  await Promise.all(
+    settlements.map(({ id, ownerId, failedAt }) => enqueueStopSettle(id, ownerId, failedAt)),
+  );
+  const order = new Map(stamped.dependents.map(({ id }, index) => [id, index]));
+  for (const entries of [report.stopped, report.left, report.failed]) {
+    entries.sort((a, b) => order.get(a.id)! - order.get(b.id)!);
   }
   return { kind: 'ok', deactivatedAt: stamped.deactivatedAt, ...report };
 }

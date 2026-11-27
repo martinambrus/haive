@@ -14,7 +14,7 @@ import { CLEAR_STEP_USAGE_STAMP, lockStepRows, schema } from '@haive/database';
 import { FIX_LOOP_ACTION_FIELD, STOP_SETTLE_EVENTS } from '@haive/shared';
 import { computeStepContribution } from '@haive/shared/timing';
 import { getDb } from '../db.js';
-import { killTaskSandboxes } from './sandbox-kill.js';
+import { killTaskSandboxes, type SandboxKillResult } from './sandbox-kill.js';
 
 type DbHandle = Parameters<Parameters<ReturnType<typeof getDb>['transaction']>[0]>[0];
 
@@ -39,7 +39,7 @@ export async function stopActiveCliInvocations(
   db: ReturnType<typeof getDb>,
   taskId: string,
   opts: { failTask: boolean; actor?: StopActor },
-): Promise<{ killed: number; cancelled: number; stopped: number; failedAt: string | null }> {
+): Promise<SandboxKillResult & { cancelled: number; stopped: number; failedAt: string | null }> {
   // Supersede every still-live invocation first (committed before the kill) so
   // the dying cli-exec job's resume is a no-op and can't clobber the caller's
   // terminal state. One transaction, so no reader sees a run cancelled beside a step still
@@ -50,8 +50,8 @@ export async function stopActiveCliInvocations(
   // Force-remove the cli sandboxes AFTER the supersede writes commit, so the
   // dying job's resume sees the superseded row and skips its advance. Narrowed
   // to `haive-cli-*` (sandbox-kill.ts) so the DDEV/app runtime survives.
-  const killed = await killTaskSandboxes(taskId);
-  return { killed, cancelled, stopped, failedAt };
+  const kill = await killTaskSandboxes(taskId);
+  return { ...kill, cancelled, stopped, failedAt };
 }
 
 /** The database half of `stopActiveCliInvocations`, inside the caller's transaction and killing

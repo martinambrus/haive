@@ -29,7 +29,9 @@ vi.mock('../src/queues.js', () => {
     getUsagePollQueue: queue,
   };
 });
-vi.mock('../src/lib/sandbox-kill.js', () => ({ killTaskSandboxes: async () => 0 }));
+vi.mock('../src/lib/sandbox-kill.js', () => ({
+  killTaskSandboxes: async () => ({ killed: 0, killConfirmed: true }),
+}));
 vi.mock('../src/middleware/auth.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../src/middleware/auth.js')>()),
   requireAuth: async (c: { set: (key: string, value: string) => void }, next: () => unknown) => {
@@ -191,7 +193,7 @@ describe.skipIf(!url)('Stop over a fix-loop gate row on Postgres', () => {
 
     expect(await stop(task.id)).toEqual({
       status: 200,
-      body: { ok: true, killed: 0, cancelled: 0, stopped: 1 },
+      body: { ok: true, killed: 0, killConfirmed: true, cancelled: 0, stopped: 1 },
     });
 
     const after = await rowOf(row.id);
@@ -242,7 +244,7 @@ describe.skipIf(!url)('Stop over a fix-loop gate row on Postgres', () => {
 
       expect(await stop(task.id)).toEqual({
         status: 200,
-        body: { ok: true, killed: 0, cancelled: 0, stopped: 1 },
+        body: { ok: true, killed: 0, killConfirmed: true, cancelled: 0, stopped: 1 },
       });
 
       const after = await rowOf(row.id);
@@ -275,7 +277,7 @@ describe.skipIf(!url)('Stop over a fix-loop gate row on Postgres', () => {
 
       expect(await stop(task.id)).toEqual({
         status: 200,
-        body: { ok: true, killed: 0, cancelled: 0, stopped: 0 },
+        body: { ok: true, killed: 0, killConfirmed: true, cancelled: 0, stopped: 0 },
       });
 
       expect(await rowOf(row.id)).toEqual(rowBefore);
@@ -365,7 +367,7 @@ describe.skipIf(!url)('Stop over a fix-loop gate row on Postgres', () => {
 
       expect(await stop(task.id)).toEqual({
         status: 200,
-        body: { ok: true, killed: 0, cancelled: 0, stopped: 0 },
+        body: { ok: true, killed: 0, killConfirmed: true, cancelled: 0, stopped: 0 },
       });
 
       expect(await Promise.all(seeded.map((r) => rowOf(r.id)))).toEqual(before);
@@ -388,7 +390,7 @@ describe.skipIf(!url)('Stop over a fix-loop gate row on Postgres', () => {
 
       expect(await stop(task.id)).toEqual({
         status: 200,
-        body: { ok: true, killed: 0, cancelled: 0, stopped: 0 },
+        body: { ok: true, killed: 0, killConfirmed: true, cancelled: 0, stopped: 0 },
       });
 
       expect(await rowOf(row.id)).toEqual(before);
@@ -413,7 +415,7 @@ describe.skipIf(!url)('Stop over a fix-loop gate row on Postgres', () => {
 
     expect(await stop(task.id)).toEqual({
       status: 200,
-      body: { ok: true, killed: 0, cancelled: 0, stopped: 1 },
+      body: { ok: true, killed: 0, killConfirmed: true, cancelled: 0, stopped: 1 },
     });
 
     expect((await rowOf(current.id)).status).toBe('failed');

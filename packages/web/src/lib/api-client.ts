@@ -1604,7 +1604,7 @@ export type TaskAction = 'cancel' | 'retry' | 'pause' | 'resume' | 'start';
 
 export type StepAction = 'retry' | 'retry_ai' | 'resume' | 'skip' | 'abort';
 
-export interface StepActionResponse {
+export interface StepActionResponse extends Partial<StopActivityResult> {
   ok: boolean;
   status: string;
   nextStepId?: string | null;
@@ -2553,6 +2553,9 @@ export interface AdminInviteCreated {
 export type MaintenanceState = 'normal' | 'draining' | 'maintenance';
 
 export interface StopActivityResult {
+  /** Absent from older APIs; false means Docker cleanup was not confirmed. */
+  killConfirmed?: boolean;
+  killError?: string;
   killed: number;
   cancelled: number;
   stopped: number;

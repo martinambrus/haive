@@ -896,6 +896,24 @@ Statements that match several runs or agent rows are not batched: each locks its
 96,000 runs: a Seq Scan or Bitmap Heap Scan, rows locked in ctid order), the same order for all of them, so an
 id-ordered batch on some of them would be inconsistent with the rest.
 
+**API sandbox cleanup reports confirmation separately from the committed action.**
+`killTaskSandboxes` returns `killed`, `killConfirmed` and optional `killError`. A failed
+listing, removal, spawn or Docker deadline returns zero confirmed kills and
+`killConfirmed: false`; it does not roll back Stop or a committed recovery reset.
+An empty successful listing is confirmed with count zero. Stop, task/step Retry,
+both Resumes, Retry with AI, Skip and the step CLI switch expose that result whenever
+cleanup was attempted; recovery actions also warn on an unconfirmed result. Callers
+must use the boolean, never error wording or a zero count, to decide confirmation.
+The task page, CLI stream and maintenance Stop notices prioritize an explicit
+`killConfirmed: false` over zero counts; task and step recovery controls show the same
+warning after a committed action, including a CLI switch. Older APIs without the field
+retain their existing behavior. Both API kill helpers list all container states (`docker ps -a -q`), including
+created and exited sandboxes, and retain the task label AND CLI-family name filter
+so DDEV/app runners survive. The strict urgent-stop helper retains its removal
+re-list policy. Docker failures already return normally from the ordinary helper:
+controls on owner and maintenance Stop confirm 200 after commit, with maintenance's
+event and audit intact. No new event rule is introduced for those producers.
+
 **A cancel ends only the step rows it locked.** Every task cancel the api commits goes through one core
 (`cancelStillOpen`, `api/src/lib/cancel-task.ts`): the Cancel action, the step `abort` and
 `DELETE /repositories/:id/plan/merge` through `cancelTaskIfOpen`, a repository delete through

@@ -10,12 +10,24 @@ import { CONTAINER_FAMILY, containerPrefix } from '@haive/shared';
  *  `name=^haive-cli-` filter is what keeps this runtime-safe (mirrors the
  *  worker's `killCliSandboxesForTask`). The api container mounts the docker
  *  socket (see docker-compose.yml), so it can shell out to `docker rm -f`
- *  directly. Returns the count of containers killed. */
-export async function killTaskSandboxes(taskId: string): Promise<number> {
-  const { ids } = await listIds(taskId);
-  if (ids.length === 0) return 0;
-  await rmForce(ids);
-  return ids.length;
+ *  directly. Reports a confirmed count only after successful listing and removal. */
+export type SandboxKillResult = {
+  killed: number;
+  killConfirmed: boolean;
+  killError?: string;
+};
+
+export async function killTaskSandboxes(taskId: string): Promise<SandboxKillResult> {
+  const { ids, failure } = await listIds(taskId);
+  if (failure !== null) {
+    return { killed: 0, killConfirmed: false, killError: `sandbox listing failed: ${failure}` };
+  }
+  if (ids.length === 0) return { killed: 0, killConfirmed: true };
+  const removal = await rmForce(ids);
+  if (removal !== null) {
+    return { killed: 0, killConfirmed: false, killError: `sandbox removal failed: ${removal}` };
+  }
+  return { killed: ids.length, killConfirmed: true };
 }
 
 /** The strict twin of `killTaskSandboxes`: it rejects, naming the step that failed and why. */
@@ -55,6 +67,7 @@ async function listIds(taskId: string): Promise<{ ids: string[]; failure: string
   const { stdout, failure } = await runDocker(
     [
       'ps',
+      '-a',
       '-q',
       '--filter',
       `label=haive.task.id=${taskId}`,

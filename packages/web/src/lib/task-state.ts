@@ -107,9 +107,20 @@ export function taskClockEndMs(task: TaskClockRow, nowMs: number): number {
   return stoppedAt === null ? nowMs : new Date(stoppedAt).getTime();
 }
 
+export function sandboxKillNotice(
+  result: Pick<StopActivityResult, 'killConfirmed'>,
+): string | null {
+  return result.killConfirmed === false
+    ? 'Sandbox cleanup could not be confirmed. A CLI process may still be running.'
+    : null;
+}
+
 /** An empty Stop can race a completion; only explicit zero counts prove nothing was stopped. */
 export function stopResultNotice(result: Partial<StopActivityResult>): string | null {
-  return result.stopped === 0 && result.killed === 0 && result.cancelled === 0
-    ? 'Nothing was running to stop.'
-    : null;
+  return (
+    sandboxKillNotice(result) ??
+    (result.stopped === 0 && result.killed === 0 && result.cancelled === 0
+      ? 'Nothing was running to stop.'
+      : null)
+  );
 }

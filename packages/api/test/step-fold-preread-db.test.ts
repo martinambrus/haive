@@ -51,7 +51,7 @@ vi.mock('bullmq', async (original) => ({
 vi.mock('../src/lib/sandbox-kill.js', () => ({
   killTaskSandboxes: async (id: string) => {
     h.kills.push(id);
-    return 0;
+    return { killed: 0, killConfirmed: true };
   },
 }));
 vi.mock('../src/middleware/auth.js', async (importOriginal) => ({
