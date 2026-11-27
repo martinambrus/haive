@@ -186,6 +186,14 @@ old overlay remains: generated shell helpers bake its filename in at install tim
 and config validation include that retained installed overlay, and the local record hashes the
 actual installed files. An unselected target overlay is never silently enabled.
 
+The version/head gate has one total `VERSION_WAIT_TIMEOUT_MS` budget (180 s, injectable through
+`UpgradeContext.versionWaitTimeoutMs`): image pulls and migrations have finished, so this retains
+the three-minute allowance for the newly started API to boot and report its migrated schema.
+Both the HTTP headers and JSON body race the remaining budget; expiry aborts the request with a
+`TimeoutError` DOMException and follows the existing `verify-timeout`/false result into rollback.
+Retries and the two-second poll sleeps share that deadline; a stalled request cannot hold the
+upgrade indefinitely, and a late matching reply cannot turn a timed-out gate into success.
+
 Before commit, a failure restores the backup files first, then the old image pins and
 `HAIVE_VERSION`, restarts on the old compose files, restores the prior maintenance state and marks
 the run rolled back. Installed hashes first identify only the files that differ from `from`,
@@ -337,7 +345,11 @@ on commit or rollback), like an administrator's maintenance write, takes the sam
 it waits for every admission in flight, so the live-work count it reads next includes each task or
 job admitted before it, every admission after it reads the new state, and no write lands inside an
 administrator's write. Lifting the hold therefore needs Postgres: an updater that cannot reach it
-leaves its run `running`, and the next `haive upgrade` resumes into the commit or the rollback. A rollback that throws does the same: the updater records the error on the run, keeps it `running`, emits `rollback-failed` and exits 6, and the next `haive upgrade` finds the run and finishes the rollback. The admin
+leaves its run `running`, and the next `haive upgrade` resumes into the commit or the rollback. A rollback that throws does the same: the updater records the error on the run, keeps it `running`, emits `rollback-failed` and exits 6, and the next `haive upgrade` finds the run and finishes the rollback. Its
+diagnosis write is best effort: a failed found-state read or restoration write still escapes the
+rollback, and even if writing its error also fails, the already-inserted `running` row remains the
+durable record the next start reads. Neither failure closes the run or authorizes lifting its hold;
+no second recovery file is needed. The admin
 page (`GET /admin/maintenance`) and the app banner (`GET /system/state`) read the state past the
 config cache, so a change shows at once; the gate that locks non-admins out during `maintenance`
 keeps its cached read, so that lockout can lag by up to 30 s. `PUT /admin/maintenance` writes its
