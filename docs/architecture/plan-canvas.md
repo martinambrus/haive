@@ -29,8 +29,16 @@ order: they acquire no earlier node/conflict row and cannot form this cross-row 
 | Repository delete (unchanged)                                         | task key → repository FOR UPDATE → id-ordered step batch → id-ordered tasks → repository DELETE and FK cascades → cleanup records                         |
 
 The mining-claim → repository edge crosses onboarding/upgrade Retry and revival, which take
-the repository FOR UPDATE before deleting agent rows. Repository acquisition therefore uses
-`boundedLockWait` with the shared `LATE_LOCK_WAIT_MS` (250 ms). SQLSTATE 55P03 becomes
+the repository FOR UPDATE before deleting agent rows. Those folds explicitly pass
+`repositoryLockTimeoutMs: LATE_LOCK_WAIT_MS` (250 ms) through `applyAgentPatch` to
+`applyPlanPatch`. Answers after the mirror lock, and mirror/set-aside operations, retain the
+250 ms helper default. Pool-backed patches (canvas edits, chat and non-mining worker writes)
+and code-link staleness hold no earlier row and use `TASK_START_LOCK_TIMEOUT_MS` (5 s).
+Both bounds use `boundedLockWait`'s LOCAL `lock_timeout` around repository acquisition only.
+The API/worker plan pools set no `statement_timeout` in code and inherit the database/role
+setting (PostgreSQL's default is 0, disabled); the PostgreSQL control sets a 10 s statement
+backstop, above the 5 s repository lock bound. A deployment override shorter than 5 s can
+cancel the statement first. SQLSTATE 55P03 becomes
 `PlanPatchError` `busy`; the whole transaction rolls back, including consumed_at and partial
 notes. Worker patch retry backs off only after releasing that transaction. The bound covers
 repository acquisition, restores the ordinary timeout on success, and leaves subsequent writes'
@@ -45,8 +53,23 @@ waiting for the mirror. `answerPlanQuestion` had the same conflict/node → mirr
 `plan-delete-cycle-db.test.ts` reproduces both as 40P01 on origin/main using query gates and
 `pg_blocking_pids`, then proves both transactions commit after the fix. It also holds a delete
 first to prove bounded busy with no partial writes and named deleted outcomes, and exercises
-the mining-claim/Retry inversion. The existing shared repository-delete suite retains inserting,
+the mining-claim/Retry inversion (an injected 25 ms bound and test-only 10 s detector interval
+avoid a race against the production 1 s detector). A node edit survives a one-second admission
+hold; flush excludes delete before its cascade. Import and reconcile map repository `busy` to
+`PlanMirrorHeldError(HELD_RACED)`, like ancestry contention, and repository loss to their existing
+no-op results (`no_mirror` and an empty pull outcome). The production checkout sync caller
+therefore propagates the held class to watchers and clone recovery, or completes without work
+when the repository is gone. The existing shared repository-delete suite retains inserting,
 ancestry, missing-repository and project-state NO KEY UPDATE compatibility controls.
+
+The repository KEY SHARE spans flush and set-aside file/git I/O deliberately: releasing it early
+would let delete reach plan rows mid-write. It can delay admission/Retry/delete FOR UPDATE
+holders until that I/O finishes; those callers keep their existing bounded waits. Taskable and
+staleness marks remain best-effort hints: a bounded refusal can still lose a hint, and neither
+path gains an unbounded retry. Raw 40P01 is not reclassified or automatically retried by
+`retryPlanPatch`; the worker step can fail and require Retry when a peer detects first.
+Set-aside/staleness still have no dedicated held-delete DB controls; their lock primitive is
+shared with the tested writers, and adding those scenario fixtures is outside this small fix.
 
 Rollback reverts shared and worker code together after active plan writes settle. There is no
 migration or data rollback. Reverting restores the update-only/delete deadlock and fold

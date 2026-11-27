@@ -179,6 +179,9 @@ describe('plan build wave re-roll', () => {
     expect(
       (vi.mocked(applyAgentPatch).mock.calls[0]![0] as { inTransaction?: boolean }).inTransaction,
     ).toBe(true);
+    expect(vi.mocked(applyAgentPatch).mock.calls[0]![2]).toMatchObject({
+      repositoryLockTimeoutMs: 250,
+    });
     // Past the re-roll: the fixture's empty plan is what stops it next.
     expect((err as Error).message).toContain('did not produce a root node');
   });

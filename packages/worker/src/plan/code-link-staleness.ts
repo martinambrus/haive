@@ -1,5 +1,5 @@
 import { and, eq, inArray } from 'drizzle-orm';
-import { schema, type Database } from '@haive/database';
+import { TASK_START_LOCK_TIMEOUT_MS, schema, type Database } from '@haive/database';
 import { logger } from '@haive/shared';
 import { lockRepositoryForPlanWrite, markPlanMirrorDirty } from '@haive/shared/plan';
 import { flushPlanMirrorForRepository } from './mirror.js';
@@ -70,7 +70,7 @@ export async function markPlanCodeLinksStaleForPaths(
     // Scoped to the paths that actually changed, and to links that are not already
     // flagged — re-flagging an old one would reset nothing and write for no reason.
     const marked = await db.transaction(async (tx) => {
-      await lockRepositoryForPlanWrite(tx, repositoryId);
+      await lockRepositoryForPlanWrite(tx, repositoryId, TASK_START_LOCK_TIMEOUT_MS);
       const rows = await tx
         .update(schema.planNodeCodeLinks)
         .set({ stale: true, updatedAt: new Date() })

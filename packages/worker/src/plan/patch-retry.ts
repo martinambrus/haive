@@ -4,7 +4,8 @@ const BACKOFF_MS = [1_000, 2_000, 3_000, 4_000];
 
 /** Retry the same intent, never another planner turn. Wrap the WHOLE transaction
  * that claims a mining reply, so backoff holds neither its row nor a connection.
- * Five bounded lock attempts plus ten seconds of backoff cost about 15 seconds.
+ * Five repository lock attempts plus ten seconds of backoff cost at most 35 s
+ * with the pool-backed 5 s bound (claim folds keep the 250 ms late bound).
  * Other refusals (especially a stale version) must still reach the caller.
  */
 export async function retryPlanPatch<T>(apply: () => Promise<T>): Promise<T> {

@@ -1,5 +1,5 @@
 import { and, eq } from 'drizzle-orm';
-import { schema } from '@haive/database';
+import { LATE_LOCK_WAIT_MS, schema } from '@haive/database';
 import {
   CONFIG_KEYS,
   configService,
@@ -859,6 +859,7 @@ export function createPlanBuildStep(
                   {
                     repositoryId,
                     sourceTaskId: ctx.taskId,
+                    repositoryLockTimeoutMs: LATE_LOCK_WAIT_MS,
                     derivedAtCommit,
                     ...(expanding ? { selfNodeId: expanding } : {}),
                   },

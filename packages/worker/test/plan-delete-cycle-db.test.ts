@@ -1,3 +1,6 @@
+import { mkdir, mkdtemp, readFile, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { setImmediate } from 'node:timers/promises';
 import { eq, sql } from 'drizzle-orm';
@@ -5,15 +8,24 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import {
   createDatabase,
   hasPgCode,
+  LATE_LOCK_WAIT_MS,
   lockRepositoryRow,
   lockRepositoryTasksKey,
   schema,
   type Database,
 } from '@haive/database';
+import { HAIVE_DATA_FILES } from '@haive/shared';
 import { applyPlanPatch, PlanPatchError } from '@haive/shared/plan';
 import { resolveProjectStateConflict } from '../src/project-state/resolve.js';
 import { answerPlanQuestion } from '../src/plan/answer.js';
-import { lockPlanMirror } from '../src/plan/mirror.js';
+import {
+  importPlanMirror,
+  lockPlanMirror,
+  PlanMirrorHeldError,
+  reconcilePlanFromCheckout,
+  writePlanMirror,
+} from '../src/plan/mirror.js';
+import { syncPlanFromCheckout } from '../src/plan/sync-checkout.js';
 
 const url = process.env.PLAN_DELETE_CYCLE_TEST_URL;
 if (url && !new URL(url).pathname.startsWith('/plan_delete_cycle_test'))
@@ -61,14 +73,17 @@ function gateTx(tx: Tx, hook: (text: string) => Promise<void>): Tx {
   });
 }
 
-// These test promises synchronize on held locks and pg_blocking_pids, never elapsed sleeps.
+// Promise gates and pg_blocking_pids establish the races. Only the benign one-second
+// admission control models an external holder with a server-side wait.
 // The 10s statement timeout is a cleanup backstop, not the race scheduler.
 describe.skipIf(!url)('update-only plan writers beside repository deletion', () => {
+  let root: string;
   let db: Database;
   let writerDb: Database;
   let deleteDb: Database;
   const userId = randomUUID();
   beforeAll(async () => {
+    root = await mkdtemp(join(tmpdir(), 'plan-delete-cycle-'));
     db = createDatabase(url!);
     writerDb = createDatabase(url!);
     deleteDb = createDatabase(url!);
@@ -80,6 +95,7 @@ describe.skipIf(!url)('update-only plan writers beside repository deletion', () 
     });
   });
   afterAll(async () => {
+    await rm(root, { recursive: true, force: true });
     await db.delete(schema.users).where(eq(schema.users.id, userId));
     await Promise.all([db, writerDb, deleteDb].map((d) => d.$client.end({ timeout: 5 })));
   });
@@ -99,6 +115,8 @@ describe.skipIf(!url)('update-only plan writers beside repository deletion', () 
       },
       { repositoryId, origin: 'user' },
     );
+    const repoPath = join(root, repositoryId);
+    await mkdir(repoPath);
     const nodeId = built.refs.a!;
     const [conflict] = await db
       .insert(schema.projectStateConflicts)
@@ -110,7 +128,7 @@ describe.skipIf(!url)('update-only plan writers beside repository deletion', () 
         incoming: { v: 'theirs' },
       })
       .returning();
-    return { repositoryId, nodeId, conflictId: conflict!.id, otherId: built.refs.b! };
+    return { repositoryId, repoPath, nodeId, conflictId: conflict!.id, otherId: built.refs.b! };
   }
   type Ids = Awaited<ReturnType<typeof seed>>;
   async function pid(tx: Tx) {
@@ -128,7 +146,12 @@ describe.skipIf(!url)('update-only plan writers beside repository deletion', () 
       await setImmediate();
     }
   }
-  const write = async (kind: string, tx: Tx, ids: Ids) =>
+  const write = async (
+    kind: string,
+    tx: Tx,
+    ids: Ids,
+    repositoryLockTimeoutMs = LATE_LOCK_WAIT_MS,
+  ) =>
     kind === 'patch'
       ? applyPlanPatch(
           tx,
@@ -138,11 +161,13 @@ describe.skipIf(!url)('update-only plan writers beside repository deletion', () 
               { op: 'upsert', nodeRef: ids.otherId, title: 'also edited' },
             ],
           },
-          { repositoryId: ids.repositoryId, origin: 'user' },
+          { repositoryId: ids.repositoryId, origin: 'user', repositoryLockTimeoutMs },
         )
-      : answerPlanQuestion(tx, { ...ids, userId, answer: 'take_theirs' });
+      : kind === 'flush'
+        ? writePlanMirror(tx as unknown as Database, ids.repositoryId, ids.repoPath)
+        : answerPlanQuestion(tx, { ...ids, userId, answer: 'take_theirs' });
 
-  it.each(['patch', 'answer'])(
+  it.each(['patch', 'answer', 'flush'])(
     '%s first: delete waits before its cascade, both commit',
     async (kind) => {
       const ids = await seed();
@@ -270,78 +295,181 @@ describe.skipIf(!url)('update-only plan writers beside repository deletion', () 
     },
   );
 
-  it('bounds the mining-claim -> repository inversion against onboarding Retry and rolls the claim back', async () => {
+  it('a pool-backed node edit waits through a one-second admission hold and commits', async () => {
     const ids = await seed();
-    const [task] = await db
-      .insert(schema.tasks)
-      .values({
-        userId,
-        repositoryId: ids.repositoryId,
-        type: 'onboarding',
-        title: 'retry',
-        status: 'failed',
-      })
-      .returning();
-    const [step] = await db
-      .insert(schema.taskSteps)
-      .values({ taskId: task!.id, stepId: '10_8-plan-build', stepIndex: 14.5, title: 'plan' })
-      .returning();
-    const [mining] = await db
-      .insert(schema.taskStepAgentMinings)
-      .values({ taskStepId: step!.id, agentId: 'planner', status: 'done' })
-      .returning();
-    const claimed = Promise.withResolvers<void>();
+    const held = Promise.withResolvers<number>();
     const release = Promise.withResolvers<void>();
-    const peerStarted = Promise.withResolvers<number>();
-    let writerPid = 0;
-    let peerEnded = false;
-    const writer = settle(
+    const started = Promise.withResolvers<number>();
+    let ended = false;
+    const holder = deleteDb.transaction(async (tx) => {
+      await lockRepositoryRow(tx, ids.repositoryId);
+      held.resolve(await pid(tx));
+      await release.promise;
+      // This real server wait models the external holder's duration; no elapsed assertion.
+      await tx.execute(sql`select pg_sleep(1)`);
+    });
+    await held.promise;
+    const patch = settle(
       writerDb.transaction(async (tx) => {
-        writerPid = await pid(tx);
-        await tx
-          .update(schema.taskStepAgentMinings)
-          .set({ consumedAt: new Date() })
-          .where(eq(schema.taskStepAgentMinings.id, mining!.id));
-        claimed.resolve();
-        await release.promise;
-        return write('patch', tx, ids);
-      }),
-    );
-    await claimed.promise;
-    const rollback = new Error('test-only Retry rollback');
-    const peer = settle(
-      deleteDb.transaction(async (tx) => {
         await tx.execute(sql`set local statement_timeout = '10s'`);
-        await lockRepositoryRow(tx, ids.repositoryId);
-        peerStarted.resolve(await pid(tx));
-        await tx
-          .delete(schema.taskStepAgentMinings)
-          .where(eq(schema.taskStepAgentMinings.id, mining!.id));
-        throw rollback;
+        started.resolve(await pid(tx));
+        return applyPlanPatch(
+          tx,
+          { ops: [{ op: 'upsert', nodeRef: ids.nodeId, title: 'patient edit' }] },
+          { repositoryId: ids.repositoryId, origin: 'user' },
+        );
       }),
     );
-    void peer.then(() => {
-      peerEnded = true;
+    void patch.then(() => {
+      ended = true;
     });
     try {
-      await untilBlocked(await peerStarted.promise, writerPid, () => peerEnded);
+      await untilBlocked(await started.promise, await held.promise, () => ended);
     } finally {
       release.resolve();
+      await holder;
     }
-    const [result, retried] = await Promise.all([writer, peer]);
-    expect(result).toMatchObject({ ok: false, error: { kind: 'busy' } });
-    expect(retried).toMatchObject({ ok: false, error: rollback });
-    const [row] = await db
-      .select()
-      .from(schema.taskStepAgentMinings)
-      .where(eq(schema.taskStepAgentMinings.id, mining!.id));
-    expect(row?.consumedAt).toBeNull();
-    const [node] = await db
-      .select()
-      .from(schema.planNodes)
-      .where(eq(schema.planNodes.id, ids.nodeId));
-    expect(node).toMatchObject({ title: 'A', version: 1 });
+    expect(await patch).toMatchObject({ ok: true });
+    expect(
+      await db.query.planNodes.findFirst({ where: eq(schema.planNodes.id, ids.nodeId) }),
+    ).toMatchObject({ title: 'patient edit', version: 2 });
   });
+
+  it.each(['import', 'reconcile'])(
+    '%s maps repository busy to held and deletion to a clean no-op',
+    async (kind) => {
+      const ids = await seed();
+      await writePlanMirror(db, ids.repositoryId, ids.repoPath);
+      const json = await readFile(join(ids.repoPath, HAIVE_DATA_FILES.plan), 'utf8');
+      const revision = (await db.query.planMirrorState.findFirst({
+        where: eq(schema.planMirrorState.repositoryId, ids.repositoryId),
+      }))!.revision;
+      if (kind === 'import')
+        await db
+          .delete(schema.planNodes)
+          .where(eq(schema.planNodes.repositoryId, ids.repositoryId));
+      const run = () =>
+        kind === 'import'
+          ? importPlanMirror(writerDb, ids.repositoryId, ids.repoPath)
+          : reconcilePlanFromCheckout(writerDb, ids.repositoryId, ids.repoPath);
+      const held = Promise.withResolvers<void>();
+      const release = Promise.withResolvers<void>();
+      const deletion = deleteDb.transaction(async (tx) => {
+        await lockRepositoryRow(tx, ids.repositoryId);
+        held.resolve();
+        await release.promise;
+        await tx.delete(schema.repositories).where(eq(schema.repositories.id, ids.repositoryId));
+      });
+      try {
+        await held.promise;
+        await expect(run()).rejects.toBeInstanceOf(PlanMirrorHeldError);
+        expect(
+          (
+            await db.query.planMirrorState.findFirst({
+              where: eq(schema.planMirrorState.repositoryId, ids.repositoryId),
+            })
+          )?.revision,
+        ).toBe(revision);
+        // The production sync caller (watcher and clone recovery) must see that same hold.
+        await expect(
+          syncPlanFromCheckout(writerDb, ids.repositoryId, ids.repoPath),
+        ).rejects.toBeInstanceOf(PlanMirrorHeldError);
+      } finally {
+        release.resolve();
+        await deletion;
+      }
+      const gone = await run();
+      if (kind === 'import') expect(gone).toMatchObject({ imported: false, code: 'no_mirror' });
+      else expect(gone).toMatchObject({ nodesCreated: 0, nodesUpdated: 0, skipped: null });
+      await expect(
+        syncPlanFromCheckout(writerDb, ids.repositoryId, ids.repoPath),
+      ).resolves.toBeUndefined();
+      expect(await readFile(join(ids.repoPath, HAIVE_DATA_FILES.plan), 'utf8')).toBe(json);
+      expect(
+        await db.query.planMirrorState.findFirst({
+          where: eq(schema.planMirrorState.repositoryId, ids.repositoryId),
+        }),
+      ).toBeUndefined();
+    },
+  );
+
+  it.each([LATE_LOCK_WAIT_MS, 25])(
+    'bounds the mining-claim -> repository inversion against onboarding Retry and rolls the claim back (%s ms)',
+    async (repositoryLockTimeoutMs) => {
+      const ids = await seed();
+      const [task] = await db
+        .insert(schema.tasks)
+        .values({
+          userId,
+          repositoryId: ids.repositoryId,
+          type: 'onboarding',
+          title: 'retry',
+          status: 'failed',
+        })
+        .returning();
+      const [step] = await db
+        .insert(schema.taskSteps)
+        .values({ taskId: task!.id, stepId: '10_8-plan-build', stepIndex: 14.5, title: 'plan' })
+        .returning();
+      const [mining] = await db
+        .insert(schema.taskStepAgentMinings)
+        .values({ taskStepId: step!.id, agentId: 'planner', status: 'done' })
+        .returning();
+      const claimed = Promise.withResolvers<void>();
+      const release = Promise.withResolvers<void>();
+      const peerStarted = Promise.withResolvers<number>();
+      let writerPid = 0;
+      let peerEnded = false;
+      const writer = settle(
+        writerDb.transaction(async (tx) => {
+          await tx.execute(sql`set local deadlock_timeout = '10s'`);
+          writerPid = await pid(tx);
+          await tx
+            .update(schema.taskStepAgentMinings)
+            .set({ consumedAt: new Date() })
+            .where(eq(schema.taskStepAgentMinings.id, mining!.id));
+          claimed.resolve();
+          await release.promise;
+          return write('patch', tx, ids, repositoryLockTimeoutMs);
+        }),
+      );
+      await claimed.promise;
+      const rollback = new Error('test-only Retry rollback');
+      const peer = settle(
+        deleteDb.transaction(async (tx) => {
+          await tx.execute(sql`set local statement_timeout = '10s'`);
+          await tx.execute(sql`set local deadlock_timeout = '10s'`);
+          await lockRepositoryRow(tx, ids.repositoryId);
+          peerStarted.resolve(await pid(tx));
+          await tx
+            .delete(schema.taskStepAgentMinings)
+            .where(eq(schema.taskStepAgentMinings.id, mining!.id));
+          throw rollback;
+        }),
+      );
+      void peer.then(() => {
+        peerEnded = true;
+      });
+      try {
+        await untilBlocked(await peerStarted.promise, writerPid, () => peerEnded);
+      } finally {
+        release.resolve();
+      }
+      const [result, retried] = await Promise.all([writer, peer]);
+      expect(result).toMatchObject({ ok: false, error: { kind: 'busy' } });
+      expect(retried).toMatchObject({ ok: false, error: rollback });
+      const [row] = await db
+        .select()
+        .from(schema.taskStepAgentMinings)
+        .where(eq(schema.taskStepAgentMinings.id, mining!.id));
+      expect(row?.consumedAt).toBeNull();
+      const [node] = await db
+        .select()
+        .from(schema.planNodes)
+        .where(eq(schema.planNodes.id, ids.nodeId));
+      expect(node).toMatchObject({ title: 'A', version: 1 });
+    },
+  );
   it('the production answer caller returns coded busy after rolling back its bounded wait', async () => {
     const ids = await seed();
     const held = Promise.withResolvers<void>();

@@ -298,10 +298,12 @@ export async function applyAgentPatch(
      *  transcribes its uuid. Set by the expansion fan-out. */
     selfNodeId?: string;
     requireAllUpdateVersions?: boolean;
+    repositoryLockTimeoutMs?: number;
   },
 ): Promise<ApplyPlanPatchResult> {
   return applyPlanPatch(db, patch, {
     repositoryId: opts.repositoryId,
+    repositoryLockTimeoutMs: opts.repositoryLockTimeoutMs,
     origin: 'llm',
     sourceTaskId: opts.sourceTaskId,
     derivedAtCommit: opts.derivedAtCommit ?? null,

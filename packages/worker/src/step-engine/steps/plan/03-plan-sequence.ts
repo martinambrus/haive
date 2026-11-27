@@ -1,6 +1,6 @@
 import { applyPlanPatchWithRetry as applyPlanPatch } from '../../../plan/patch-retry.js';
 import { and, eq, inArray, isNull } from 'drizzle-orm';
-import { schema } from '@haive/database';
+import { LATE_LOCK_WAIT_MS, schema } from '@haive/database';
 import {
   PLAN_PATCH_MAX_OPS,
   SEQUENCE_CONTEXT_ARMS,
@@ -716,6 +716,7 @@ export async function foldSequenceResults(
               {
                 repositoryId,
                 sourceTaskId: ctx.taskId,
+                repositoryLockTimeoutMs: LATE_LOCK_WAIT_MS,
                 ...(self ? { selfNodeId: self } : {}),
               },
             ),

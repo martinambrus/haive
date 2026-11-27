@@ -4,6 +4,7 @@ import {
   boundedLockWait,
   isLockNotAvailable,
   LATE_LOCK_WAIT_MS,
+  TASK_START_LOCK_TIMEOUT_MS,
   schema,
   type Database,
 } from '@haive/database';
@@ -46,6 +47,9 @@ export function isPlanNodeId(ref: unknown): ref is string {
 
 export interface ApplyPlanPatchOptions {
   repositoryId: string;
+  /** Repository row wait only. Pool-backed writes default to 5 s; a caller already
+   * holding a mining claim must pass LATE_LOCK_WAIT_MS to bound the reverse tier. */
+  repositoryLockTimeoutMs?: number;
   /** The commit the patch's code links were derived at. Stored beside each link
    *  so a stale one can be DATED rather than merely doubted. */
   derivedAtCommit?: string | null;
@@ -218,7 +222,11 @@ export async function markPlanMirrorDirty(tx: DbOrTx, repositoryId: string): Pro
  * bound this reverse-tier wait by the shared late-lock policy, then roll the fold back.
  * KEY SHARE remains compatible with other plan writers and project-state NO KEY UPDATE.
  */
-export async function lockRepositoryForPlanWrite(tx: PlanPatchTx, repositoryId: string) {
+export async function lockRepositoryForPlanWrite(
+  tx: PlanPatchTx,
+  repositoryId: string,
+  timeoutMs = LATE_LOCK_WAIT_MS,
+) {
   let repository;
   try {
     [repository] = await boundedLockWait(
@@ -229,7 +237,7 @@ export async function lockRepositoryForPlanWrite(tx: PlanPatchTx, repositoryId: 
           .from(schema.repositories)
           .where(eq(schema.repositories.id, repositoryId))
           .for('key share'),
-      LATE_LOCK_WAIT_MS,
+      timeoutMs,
     );
   } catch (err) {
     if (!isLockNotAvailable(err)) throw err;
@@ -892,7 +900,11 @@ async function applyOps(
   // depend on which of the two looked at it.
   // Before reference resolution and every plan write: a lost repository is
   // repository_gone even when an agent's every op would otherwise be dropped.
-  await lockRepositoryForPlanWrite(tx, repositoryId);
+  await lockRepositoryForPlanWrite(
+    tx,
+    repositoryId,
+    opts.repositoryLockTimeoutMs ?? TASK_START_LOCK_TIMEOUT_MS,
+  );
   const ops =
     opts.onUnresolvableRef === 'drop'
       ? await dropUnresolvableOps(tx, patchOps, repositoryId, refs, result.dropped)

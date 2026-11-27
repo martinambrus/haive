@@ -390,6 +390,9 @@ describe('00b-plan-clarify apply', () => {
       const result = await thrown(apply([reply], {}, false));
       expect(result).toBeInstanceOf(MiningWaveError);
       expect(applyAgentPatch).toHaveBeenCalledTimes(2);
+      expect(vi.mocked(applyAgentPatch).mock.calls[0]![2]).toMatchObject({
+        repositoryLockTimeoutMs: 250,
+      });
       expect(
         fake.rows(schema.taskStepAgentMinings).find((r) => r.agentId === reply.agentId)?.consumedAt,
       ).not.toBeNull();

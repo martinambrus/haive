@@ -438,6 +438,9 @@ describe('foldSequenceResults', () => {
     expect(
       (vi.mocked(applyAgentPatch).mock.calls[0]![0] as { inTransaction?: boolean }).inTransaction,
     ).toBe(true);
+    expect(vi.mocked(applyAgentPatch).mock.calls[0]![2]).toMatchObject({
+      repositoryLockTimeoutMs: 250,
+    });
     expect(stamps).toEqual([{ errorMessage: `plan patch partially applied: ${gone}` }]);
   });
 

@@ -1,5 +1,5 @@
 import { and, asc, eq, isNull } from 'drizzle-orm';
-import { schema } from '@haive/database';
+import { LATE_LOCK_WAIT_MS, schema } from '@haive/database';
 import { CONFIG_KEYS, configService } from '@haive/shared';
 import { PlanPatchError, findPlanRoot } from '@haive/shared/plan';
 import type {
@@ -219,7 +219,11 @@ async function foldOutline(
           const applied = await applyAgentPatch(
             tx,
             { ...patch, ops: withMinedStatus(openQuestionsTodo(kept), d.build.mode) },
-            { repositoryId: d.build.repositoryId!, sourceTaskId: ctx.taskId },
+            {
+              repositoryId: d.build.repositoryId!,
+              sourceTaskId: ctx.taskId,
+              repositoryLockTimeoutMs: LATE_LOCK_WAIT_MS,
+            },
           );
           // Round 0 names the root THIS task drafted (see `assertOwnOutline`). A redrafted outline,
           // after a re-roll or after its root was deleted, folds again over the same row.
@@ -312,7 +316,11 @@ async function foldAnswers(
           const applied = await applyAgentPatch(
             tx,
             { ...patch, ops: kept },
-            { repositoryId: d.build.repositoryId!, sourceTaskId: ctx.taskId },
+            {
+              repositoryId: d.build.repositoryId!,
+              sourceTaskId: ctx.taskId,
+              repositoryLockTimeoutMs: LATE_LOCK_WAIT_MS,
+            },
           );
           const outcome: ClarifyOutcome = {
             summary: patch.summary ?? '',

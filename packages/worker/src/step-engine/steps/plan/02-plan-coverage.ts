@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { readTextNoFollow } from '@haive/shared/fs-safe';
 import { and, eq } from 'drizzle-orm';
-import { schema } from '@haive/database';
+import { LATE_LOCK_WAIT_MS, schema } from '@haive/database';
 import type { FormSchema, FormValues } from '@haive/shared';
 import { PlanPatchError, loadPlanSkeletons } from '@haive/shared/plan';
 import type { PlanNodeSkeleton } from '@haive/shared/plan';
@@ -774,6 +774,7 @@ export async function foldCoverageResults(
               {
                 repositoryId: detected.repositoryId!,
                 sourceTaskId: ctx.taskId,
+                repositoryLockTimeoutMs: LATE_LOCK_WAIT_MS,
                 ...(self ? { selfNodeId: self } : {}),
               },
             );
