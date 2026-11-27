@@ -1,3 +1,4 @@
+import { hasUsageWindow } from '@haive/shared/usage-window';
 import type { CliProvider, Task, UsageWindowSnapshot } from '@/lib/api-client';
 // Relative, not the `@/` alias: this module is unit-tested and the web package has no
 // vitest config, so an aliased VALUE import would not resolve under the test runner (the
@@ -68,14 +69,12 @@ export function selectMetersForProviderIds(
   const deadByAllowance = new Map<string, UsageWindowSnapshot>();
   const pendingByAllowance = new Map<string, UsageWindowSnapshot>();
   for (const snap of snapshots) {
-    // The header already has provider rows. Require a subscription structurally before
-    // offering Claude's OAuth repair, even for a frozen legacy needs_reconnect snapshot.
-    if (
-      providers &&
-      snap.providerName === 'claude-code' &&
-      providers.find((p) => p.id === snap.providerId)?.authMode !== 'subscription'
-    )
-      continue;
+    // Without provider rows the task-list strip trusts the API's eligibility filter.
+    // The header has those rows and applies the same predicate to retained snapshots.
+    if (providers) {
+      const provider = providers.find((p) => p.id === snap.providerId);
+      if (!provider || !hasUsageWindow(provider.name, provider.authMode)) continue;
+    }
     const key = allowanceKeyOf(snap.providerId, allowanceKeys);
     if (!visible.has(key)) continue;
     if (snap.status === 'needs_reconnect' || snap.status === 'pending') {

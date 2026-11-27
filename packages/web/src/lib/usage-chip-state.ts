@@ -18,27 +18,10 @@
  *  Pure and unit-tested, like usage-strip-select and step-banners — the component renders what
  *  this returns and decides nothing itself. */
 
-import type { UsageWindowProviderName } from '@haive/shared';
+import { hasUsageWindow } from '@haive/shared/usage-window';
 import type { CliProviderName, UsageWindowSnapshot } from '@/lib/api-client';
 
-/** The CLIs a reading can exist for at all.
- *
- *  Typed as an EXHAUSTIVE `Record` of the shared union rather than a plain array on purpose:
- *  adding a fetcher to the worker's USAGE_PROVIDERS without adding it here — or the reverse —
- *  then fails `tsc` instead of quietly labelling the new CLI "not connected" forever. The list
- *  itself is owned by `USAGE_WINDOW_PROVIDERS` in @haive/shared; this is a type-checked mirror
- *  because the web bundle must not VALUE-import from the shared barrel (it drags ioredis into
- *  the browser). The type import above is erased, so it costs the bundle nothing. */
-const METERED_CLIS: Record<UsageWindowProviderName, true> = {
-  'claude-code': true,
-  codex: true,
-  gemini: true,
-  zai: true,
-};
-
-export function isMeteredCli(name: CliProviderName | null): boolean {
-  return name !== null && name in METERED_CLIS;
-}
+export const isMeteredCli = hasUsageWindow;
 
 export type UsageChipFault = 'not_connected' | 'unavailable' | 'no_windows' | 'no_meter';
 
@@ -60,7 +43,7 @@ export function resolveUsageChipState(args: {
   const { providerId, providerName, snapshots } = args;
   if (!providerId || !snapshots) return { kind: 'hidden' };
   // Claude usage OAuth is subscription-only, including the empty-meter fallback.
-  if (providerName === 'claude-code' && args.providerAuthMode === 'api_key')
+  if (providerName === 'claude-code' && !hasUsageWindow(providerName, args.providerAuthMode))
     return { kind: 'hidden' };
 
   const snap = snapshots.find((s) => s.providerId === providerId);
@@ -69,7 +52,8 @@ export function resolveUsageChipState(args: {
     // never got a reading for this provider — not signed in, or never polled — a fault a user
     // can act on. For any other CLI it is the normal permanent state, stated rather than left
     // blank so the header keeps a line where the bars were on the previous step's CLI.
-    if (isMeteredCli(providerName)) return { kind: 'fault', fault: 'not_connected' };
+    if (hasUsageWindow(providerName, args.providerAuthMode))
+      return { kind: 'fault', fault: 'not_connected' };
     // Which CLI this is has not been established yet (the provider list loads after the task),
     // so there is nothing to make a claim about. Blank, not "no meter" — the latter would be a
     // guess that contradicts itself one render later.

@@ -116,6 +116,7 @@ function setup() {
     currentRound: 0,
     autoResumeCount: 0,
     providerName: 'claude-code',
+    providerAuthMode: 'subscription',
   };
   const next: (typeof armed)[] = [];
   const db = {
@@ -143,6 +144,45 @@ beforeEach(() => {
   h.failNextAdd = null;
   h.refusals = 1;
   h.tries = 0;
+});
+
+describe('auth-aware server-error recovery', () => {
+  afterEach(() => vi.restoreAllMocks());
+  it.each(['auto', 'notify'])(
+    'recovers unpolled API-key Claude through cool-off (%s)',
+    async (mode) => {
+      config(mode, 'normal');
+      const t = setup();
+      Object.assign(t.armed, {
+        reason: 'server_error',
+        providerAuthMode: 'api_key',
+        since: new Date(Date.now() - 5 * 60_000),
+      });
+      await checkProviderRecovery(t.db);
+      expect(t.task().status).toBe(mode === 'auto' ? 'running' : 'failed');
+      expect(t.fake.rows(schema.taskEvents)).toHaveLength(1);
+      expect(h.queued).toHaveLength(mode === 'auto' ? 1 : 0);
+      if (mode === 'notify') expect(t.task().allowanceReplenishedAt).toBeInstanceOf(Date);
+    },
+  );
+
+  it('still requires a post-failure snapshot for subscription Claude', async () => {
+    config('auto', 'normal');
+    const t = setup();
+    Object.assign(t.armed, { reason: 'server_error', since: new Date(Date.now() - 5 * 60_000) });
+    await checkProviderRecovery(t.db);
+    expect(t.writes).toEqual([]);
+    expect(h.queued).toEqual([]);
+  });
+
+  it('preserves a captured rate-limit reset even if auth has since changed', async () => {
+    config('auto', 'normal');
+    const t = setup();
+    t.armed.providerAuthMode = 'api_key';
+    await checkProviderRecovery(t.db);
+    expect(t.task().status).toBe('running');
+    expect(h.queued).toHaveLength(1);
+  });
 });
 
 describe('the allowance auto-resume of a task whose provider is back', () => {

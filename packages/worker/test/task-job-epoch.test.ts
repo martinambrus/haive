@@ -138,6 +138,7 @@ const h = vi.hoisted(() => {
     hintWriteFails: false,
     snapshotReadFails: false,
     usageSnapshot: null as Record<string, unknown> | null,
+    providerAuthMode: 'subscription',
     /** What the skip-first step's shouldRun answers. */
     shouldRun: (async () => true) as () => Promise<boolean>,
     /** What classifyRuntime reports for an if-serving step. */
@@ -196,7 +197,9 @@ const db = {
       findFirst: async () =>
         h.state.repoGone ? undefined : { storagePath: '/tmp/repo', localPath: null },
     },
-    cliProviders: { findFirst: async () => ({ name: 'claude-code' }) },
+    cliProviders: {
+      findFirst: async () => ({ name: 'claude-code', authMode: h.state.providerAuthMode }),
+    },
     // The root merge fence a reopen checks: no setup row, no merge claim, no merge left open.
     taskSteps: { findFirst: async () => undefined, findMany: async () => [] },
     mergeDirClaims: { findFirst: async () => undefined },
@@ -520,6 +523,7 @@ afterEach(() => {
   h.state.hintWriteFails = false;
   h.state.snapshotReadFails = false;
   h.state.usageSnapshot = null;
+  h.state.providerAuthMode = 'subscription';
   h.state.shouldRun = async () => true;
   h.state.runtimeMode = 'none';
   h.state.moduleRows = [];
@@ -681,6 +685,19 @@ describe("a failed step's hand-off", () => {
     await expect(finish()).resolves.toBe(true);
     expect(hints()).toEqual([]);
   });
+
+  it.each(['rate_limit', 'server_error'] as const)(
+    'API-key Claude arms only the server-error watch (%s)',
+    async (reason) => {
+      outage(reason);
+      h.state.providerAuthMode = 'api_key';
+      h.state.snapshotReadFails = true;
+      vi.spyOn(configService, 'get').mockResolvedValue('notify');
+      await expect(finish()).resolves.toBe(true);
+      expect(armed()).toHaveLength(reason === 'server_error' ? 1 : 0);
+      expect(pollTicks()).toHaveLength(reason === 'server_error' ? 1 : 0);
+    },
+  );
 
   it.each(['error', 'needs_reconnect', 'ok'])(
     'captures reset times only from ok snapshots (%s)',

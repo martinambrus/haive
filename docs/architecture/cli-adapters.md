@@ -248,3 +248,12 @@ existing 13-minute UI freshness bound (`USAGE_SNAPSHOT_STALE_AFTER_MS`). The rec
 probe uses that same age bound, so a refresh outage cannot feed it hours-old `ok` numbers.
 A reset captured earlier from a fresh `ok` snapshot remains authoritative even if a later
 snapshot errors or ages out. No existing snapshots or captured resets are rewritten.
+
+Usage-window eligibility is one browser-safe shared predicate, `hasUsageWindow`
+(`@haive/shared/usage-window`), used by poll target selection, outage probe expectations,
+rate-limit watch arming and snapshot display. API-key Claude rows use the existing five-minute
+server-error cool-off without waiting for a snapshot the poller cannot produce. Subscription
+Claude still requires a post-failure `ok` probe. Rate-limit recovery retains its existing
+captured-reset/percentage verdict, including a reset captured before an auth-mode change;
+there is no rate-limit cool-off fallback. Provider enablement and credential presence remain
+separate from this capability check.

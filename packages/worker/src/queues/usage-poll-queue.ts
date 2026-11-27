@@ -11,6 +11,7 @@ import {
   logger,
   secretsService,
   parseAllowanceWatchMode,
+  hasUsageWindow,
   type AuthMode,
   type CliProviderName,
 } from '@haive/shared';
@@ -571,7 +572,6 @@ export async function runUsagePollTick(db: Database): Promise<void> {
     return;
   }
 
-  const supported = new Set(Object.keys(USAGE_PROVIDERS));
   const providers = (await db.query.cliProviders.findMany({
     where: eq(schema.cliProviders.enabled, true),
     columns: {
@@ -589,12 +589,11 @@ export async function runUsagePollTick(db: Database): Promise<void> {
   const targets: ProviderRow[] = [];
   const setReps = new Map<string, ProviderRow>();
   for (const p of providers) {
-    if (!supported.has(p.name)) continue;
+    if (!hasUsageWindow(p.name, p.authMode)) continue;
     if (USAGE_PROVIDERS[p.name]?.token.kind !== 'oauthRefresh') {
       targets.push(p);
       continue;
     }
-    if (p.authMode !== 'subscription') continue;
     const scope = cliAuthScope(p);
     const rep = setReps.get(scope);
     if (!rep || p.id < rep.id) setReps.set(scope, p);
@@ -653,6 +652,7 @@ export async function checkProviderRecovery(db: Database): Promise<void> {
       currentRound: schema.tasks.currentRound,
       autoResumeCount: schema.tasks.allowanceAutoResumeCount,
       providerName: schema.cliProviders.name,
+      providerAuthMode: schema.cliProviders.authMode,
     })
     .from(schema.tasks)
     .leftJoin(
@@ -699,7 +699,7 @@ export async function checkProviderRecovery(db: Database): Promise<void> {
           since: task.since,
           now,
           snapshot: snap ? { status: snap.status, fetchedAt: snap.fetchedAt } : null,
-          hasUsageWindow: !!task.providerName && task.providerName in USAGE_PROVIDERS,
+          hasUsageWindow: hasUsageWindow(task.providerName, task.providerAuthMode),
         });
         if (!verdict.back) {
           if (verdict.giveUp) {
@@ -724,6 +724,8 @@ export async function checkProviderRecovery(db: Database): Promise<void> {
         }
         via = verdict.via;
       } else {
+        // Rate-limit verdicts retain captured resets across auth changes; they do not
+        // infer probe capability from a provider name or use the server-error cool-off.
         // Backfill the reset if the arm path couldn't capture it (no snapshot yet) but the
         // window is now visible — so a later tick can fire on the authoritative reset.
         let resetAt = task.resetAt;

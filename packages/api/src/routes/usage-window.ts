@@ -6,6 +6,7 @@ import {
   USAGE_SNAPSHOT_STALE_AFTER_MS,
   configService,
   resolveTaskCliProviderId,
+  hasUsageWindow,
   type AuthMode,
   type UsageWindowSnapshot,
 } from '@haive/shared';
@@ -221,11 +222,7 @@ async function allowanceKeys(
   return {
     keys: Object.fromEntries(rows.map((r) => [r.id, providerAllowanceKey(r)])),
     // Frozen legacy snapshots cannot offer a repair that this auth mode refuses.
-    excludedIds: new Set(
-      rows
-        .filter((r) => r.name === 'claude-code' && r.authMode !== 'subscription')
-        .map((r) => r.id),
-    ),
+    excludedIds: new Set(rows.filter((r) => !hasUsageWindow(r.name, r.authMode)).map((r) => r.id)),
   };
 }
 

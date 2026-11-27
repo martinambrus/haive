@@ -345,6 +345,51 @@ describe.skipIf(!url)('the usage poller treats one login set as one usage connec
     },
   );
 
+  it.each(['api_key', 'subscription'] as const)(
+    'server-error recovery uses the cool-off only for unpolled Claude auth (%s)',
+    async (authMode) => {
+      vi.spyOn(configService, 'get').mockResolvedValue('notify');
+      await db
+        .update(schema.cliProviders)
+        .set({ enabled: true, authMode })
+        .where(eq(schema.cliProviders.id, rows.E.id));
+      const grant = await grantOf('E');
+      vendor.status.set(grant.accessToken, 503);
+      await seed('E', 'ok'); // A legacy reading from BEFORE the failure cannot prove recovery.
+      const [task] = await db
+        .insert(schema.tasks)
+        .values({
+          userId: U,
+          type: 'workflow',
+          title: 'outage control',
+          status: 'failed',
+          awaitingAllowanceProviderId: rows.E.id,
+          awaitingProviderReason: 'server_error',
+          awaitingProviderSince: new Date(clock),
+        })
+        .returning();
+      const readTask = () => db.query.tasks.findFirst({ where: eq(schema.tasks.id, task!.id) });
+      await tick();
+      expect((await readTask())!.allowanceReplenishedAt).toBeNull();
+      step(5 * MIN);
+      await tick();
+      expect((await readTask())!.allowanceReplenishedAt != null).toBe(authMode === 'api_key');
+      expect(vendor.callsWith(grant.accessToken)).toBe(authMode === 'api_key' ? 0 : 2);
+      if (authMode === 'subscription') {
+        vendor.status.delete(grant.accessToken);
+        step(5 * MIN);
+        await tick();
+        expect((await readTask())!.allowanceReplenishedAt).toBeInstanceOf(Date);
+      }
+      const events = await db
+        .select()
+        .from(schema.taskEvents)
+        .where(eq(schema.taskEvents.taskId, task!.id));
+      expect(events).toHaveLength(1);
+      expect(events[0]!.eventType).toBe('task.allowance_replenished');
+    },
+  );
+
   it.each([503, 429, new TypeError('synthetic network failure')])(
     'never uses the stale access token after refresh failure (%s), and retries only after the 190-second throttle',
     async (failure) => {
