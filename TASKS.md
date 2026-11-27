@@ -135,7 +135,7 @@ All low unless marked. Code in `worker/src/queues/validation-recheck.ts`, `07b-p
 
 ### T602 · FNF[repair-recovery-followups] · repair-needed checkout recovery follow-ups (+18)
 
-status: open · kind: fix · found: F2 (#460, #512) reviews 2026-11-10/11 · priority: P3
+status: open for items 3, 4, 7-23 (fenced run 2026-11-27: items 1 and 6 DONE, merged #1393 (280c44f4b) and live: a recovery's restore and publication commit in one transaction, and a failed recovery or enqueue keeps the admitted repair code while a source folder that fails its proof records `source_repair_needed`; item 5 RESOLVED earlier by 13fd8307d (#1366, `RootClaimBusyError` defers a check-only job without touching the row), four controls pass) · kind: fix · found: F2 (#460, #512) reviews 2026-11-10/11 · priority: P3
 Low unless marked. Code in `worker/src/project-state/refresh.ts`, `worker/src/queues/repo-queue.ts`, `api/src/routes/repos.ts`, `shared/src/repo-rebuild.ts` and `worker/src/project-state/write.ts`.
 
 1. CONSEQUENTIAL, PRE-EXISTING: bases advance before publication of the rebuilt checkout.
@@ -156,6 +156,12 @@ Low unless marked. Code in `worker/src/project-state/refresh.ts`, `worker/src/qu
 16. Fence PG race control missing; the mirror holds the task key.
 17. Doubled "but" in a refusal message.
 18. CI budget: the gated Postgres step is at 134 of 138 rows its 26-minute limit holds; measure before the next raise (`docs/architecture/ci-smokes.md`).
+
+19. (T602 review) The recovery's publication transaction holds the tasks, project-state, plan-mirror and plan-patch keys and the row for the whole restore; an ancestry-changing plan edit holding the patch key past its 1 s bound makes the recovery fail retryably (replacement kept), and plan edits answer busy meanwhile. Take the patch key only when plan rows exist, or retry it.
+20. (T602 review) No control covers plan bases after a death between rename and commit; the repair runs through best-effort importers (`completePreparationImports`), so a failed import leaves old bases with a warning until a later sweep.
+21. (T602 review) `discardWriteIntentOnFailure` is no longer reached by a rebuild (rollback covers it); its rebuild test now passes through rollback. Relates to item 11.
+22. (T602 review) Outbox and plan-mirror diagnostics written during the restore (`setOutboxError`, `recordPlanMirrorError`, `recordPlanReconcileFailure`) roll back with it; a refused recovery reports only the outcome word.
+23. (T602 review) "No pool call inside the publication transaction" is a cast and a comment (`refresh.ts` ~:800); nothing pins it.
 
 ### T604 · docs · document the 5 s start-admission bound against a large claim ledger
 
