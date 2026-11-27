@@ -1549,19 +1549,29 @@ export async function clearCancelledTaskPause(
   actorUserId: string,
   ownerUserId: string,
 ): Promise<void> {
-  const result = await db.transaction(async (tx) => {
-    if (!(await clearTaskPause(tx, taskId))) return null;
-    // The clear holds the task row lock: judge the pause actually cleared, not a stale read.
-    if (!(await findAdminPausedTaskIds(tx, [taskId])).has(taskId)) return null;
-    try {
-      const audit = await tx.transaction((auditTx) =>
-        recordAdminResume(auditTx, taskId, actorUserId, ownerUserId),
+  const result = await db
+    .transaction(async (tx) => {
+      if (!(await clearTaskPause(tx, taskId))) return null;
+      // The clear holds the task row lock: judge the pause actually cleared, not a stale read.
+      if (!(await findAdminPausedTaskIds(tx, [taskId])).has(taskId)) return null;
+      try {
+        const audit = await tx.transaction((auditTx) =>
+          recordAdminResume(auditTx, taskId, actorUserId, ownerUserId),
+        );
+        return { audit };
+      } catch (err) {
+        return { err };
+      }
+    })
+    .catch((err: unknown) => {
+      // The cancellation already stands. A failed pause clear must not suppress its teardown or
+      // step.abort event, or turn a committed cancel into an HTTP error.
+      logger.warn(
+        { err, taskId },
+        'failed to clear cancelled task pause; cancellation still stands',
       );
-      return { audit };
-    } catch (err) {
-      return { err };
-    }
-  });
+      return null;
+    });
   if (!result) return;
   if ('err' in result) {
     logger.warn(

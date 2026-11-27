@@ -37,7 +37,7 @@ import type { TaskStepRow } from './step-runner.js';
 // on its own: the cancel cannot prove the open merge is the task's.
 
 /** Merge phases that can have the task's merge open: after them it is committed or aborted. */
-const MID_MERGE_PHASES: ReadonlySet<MergeResolveState['phase']> = new Set([
+export const MID_MERGE_PHASES: ReadonlySet<MergeResolveState['phase']> = new Set([
   'pending',
   'resolving',
   'awaiting-guidance',

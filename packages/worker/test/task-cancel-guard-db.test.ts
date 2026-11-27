@@ -7,7 +7,7 @@ import { recordLandedMerge } from '../src/step-engine/landed-merge.js';
 import { randomUUID } from 'node:crypto';
 import os from 'node:os';
 import path from 'node:path';
-import { asc, eq, inArray, sql } from 'drizzle-orm';
+import { and, asc, eq, inArray, sql } from 'drizzle-orm';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   createDatabase,
@@ -19,6 +19,8 @@ import {
 } from '@haive/database';
 import { TASK_JOB_NAMES } from '@haive/shared';
 import { processTaskJob, setContainerCleanupRunner } from '../src/queues/task-queue.js';
+
+import { abandonCancelledTeardowns, CANCEL_REDRIVE_MAX } from '../src/queues/stalled-redrive.js';
 
 const url = process.env.WORKER_TASK_CANCEL_GUARD_TEST_URL;
 if (url && !new URL(url).pathname.startsWith('/worker_task_cancel_guard_test'))
@@ -42,6 +44,7 @@ const h = vi.hoisted(() => {
   return {
     db: undefined as unknown,
     realMergeReport: false,
+    reportFails: new Set<string>(),
     /** Results the next re-syncs return, in order; empty means success. */
     resyncResults: [] as boolean[],
     /** In call order: every teardown seam the job reached (`<seam>:<task id>`), child process it started and job it queued. */
@@ -175,6 +178,8 @@ vi.mock('../src/step-engine/left-open-merge.js', async (importOriginal) => {
     ...actual,
     recordLeftOpenMerges: async (db: Database, taskId: string) => {
       h.seen('recordLeftOpenMerges', taskId);
+      if (h.reportFails.has(taskId))
+        throw Object.assign(new Error('report unavailable'), { code: '08006' });
       if (h.realMergeReport) await actual.recordLeftOpenMerges(db, taskId);
     },
   };
@@ -352,6 +357,7 @@ describe.skipIf(!url)(
     beforeEach(async () => {
       h.calls.length = 0;
       h.realMergeReport = false;
+      h.reportFails.clear();
       h.resyncResults = [];
       await db.delete(schema.tasks).where(eq(schema.tasks.userId, userId));
     });
@@ -622,6 +628,166 @@ describe.skipIf(!url)(
         .toHaveLength(1);
       expectTeardownRan(taskId);
     }
+
+    const staleMs = 5 * 60_000;
+    const overdue = () => new Date(Date.now() - 10 * 60_000);
+    const sweep = (queued: string[] = [], batchSize?: number) =>
+      abandonCancelledTeardowns(
+        db,
+        { queuedCancelTaskIds: async () => new Set(queued) },
+        { staleMs, batchSize },
+      );
+    const capped = async (kind: 'claim' | 'dag' | 'resolver', phase = 'resolving') => {
+      const taskId = await seedTask('cancelled', { worktreePath: `/missing/${randomUUID()}` });
+      const taskStepId = randomUUID();
+      await seedStep(taskId, 'merge', 0, 'failed', {
+        id: taskStepId,
+        ...(kind === 'resolver'
+          ? {
+              mergeResolveState: {
+                mode: 'same-branch',
+                phase,
+                mergeDir: NO_SUCH_DIR,
+                sandboxMergeDir: NO_SUCH_DIR,
+                featureBranch: 'feature',
+                baseBranch: 'main',
+                fixInvocationId: null,
+                conflictRetries: 0,
+                pendingQuestion: null,
+                pushAfterMerge: false,
+                merged: false,
+                pushed: false,
+                skipReason: null,
+              } as import('@haive/database').MergeResolveState,
+            }
+          : {}),
+      });
+      if (kind === 'claim') {
+        await db
+          .insert(schema.mergeDirClaims)
+          .values({ taskId, taskStepId, mergeDir: `/missing/${taskId}` });
+      } else if (kind === 'dag') {
+        const [plan] = await db
+          .insert(schema.taskDagPlans)
+          .values({ taskId, taskStepId, mode: 'dag' })
+          .returning();
+        await db
+          .insert(schema.taskDagLevels)
+          .values({ dagPlanId: plan!.id, level: 0, mergeState: { activeConflict: 'issue-1' } });
+      }
+      await db.insert(schema.taskEvents).values([
+        { taskId, eventType: 'task.cancelled', createdAt: overdue() },
+        ...Array.from({ length: CANCEL_REDRIVE_MAX }, () => ({
+          taskId,
+          eventType: 'task.cancel_redriven',
+          createdAt: overdue(),
+        })),
+      ]);
+      return taskId;
+    };
+
+    it.each(['dag', 'resolver'] as const)(
+      'T309 member 1: finishes a capped %s cancel without a claim row',
+      async (kind) => {
+        const taskId = await capped(kind);
+        expect(await sweep()).toBe(1);
+        expect(await eventsOfType(taskId, 'task.cancel_finished')).toMatchObject([
+          { payload: { abandoned: true, reason: 're-drive cap reached' } },
+        ]);
+        expect(h.calls).toContain(`recordLeftOpenMerges:${taskId}`);
+        expect(await sweep()).toBe(0);
+      },
+    );
+
+    it('T309 member 1: leaves live cancels and states with no recorded merge alone', async () => {
+      const queued = await capped('dag');
+      const fresh = await capped('resolver');
+      await db.insert(schema.taskEvents).values({ taskId: fresh, eventType: 'task.cancelled' });
+      const recentRedrive = await capped('dag');
+      await db
+        .insert(schema.taskEvents)
+        .values({ taskId: recentRedrive, eventType: 'task.cancel_redriven' });
+      const belowCap = await capped('resolver');
+      await db
+        .delete(schema.taskEvents)
+        .where(
+          and(
+            eq(schema.taskEvents.taskId, belowCap),
+            eq(schema.taskEvents.eventType, 'task.cancel_redriven'),
+          ),
+        );
+      const done = await capped('resolver', 'done');
+      const pushing = await capped('resolver', 'pushing');
+      const inactiveDag = await capped('dag');
+      const [plan] = await db
+        .select()
+        .from(schema.taskDagPlans)
+        .where(eq(schema.taskDagPlans.taskId, inactiveDag));
+      await db
+        .update(schema.taskDagLevels)
+        .set({ mergeState: { activeConflict: null } })
+        .where(eq(schema.taskDagLevels.dagPlanId, plan!.id));
+      const missingWorktree = await capped('dag');
+      await db
+        .update(schema.tasks)
+        .set({ worktreePath: null })
+        .where(eq(schema.tasks.id, missingWorktree));
+      expect(await sweep([queued])).toBe(0);
+      for (const id of [
+        queued,
+        fresh,
+        recentRedrive,
+        belowCap,
+        done,
+        pushing,
+        inactiveDag,
+        missingWorktree,
+      ]) {
+        expect(await eventsOfType(id, 'task.cancel_finished')).toEqual([]);
+        expect(h.calls).not.toContain(`recordLeftOpenMerges:${id}`);
+      }
+    });
+
+    it('T309 member 4: a full failing batch yields the next pass to a later task, then retries after cooldown', async () => {
+      const failing = [await capped('claim'), await capped('claim')];
+      for (const id of failing) h.reportFails.add(id);
+      const next = await capped('claim');
+      // Make the ordering explicit, independent of UUID or heap order.
+      await db
+        .update(schema.tasks)
+        .set({ updatedAt: new Date(+T0 + 1000) })
+        .where(eq(schema.tasks.id, next));
+      expect(await sweep([], 2)).toBe(0);
+      expect(await sweep([], 2)).toBe(1);
+      expect(await eventsOfType(next, 'task.cancel_finished')).toHaveLength(1);
+      for (const id of failing) {
+        expect(h.calls.filter((call) => call === `recordLeftOpenMerges:${id}`)).toHaveLength(1);
+      }
+      // Move the persisted structural stamp across the deadline without real waiting.
+      await db
+        .update(schema.tasks)
+        .set({ updatedAt: overdue() })
+        .where(inArray(schema.tasks.id, failing));
+      h.reportFails.clear();
+      expect(await sweep([], 2)).toBe(2);
+      for (const id of failing)
+        expect(await eventsOfType(id, 'task.cancel_finished')).toHaveLength(1);
+    });
+
+    it('T309 member 4: a report failure cools down before it can take another batch slot', async () => {
+      const taskId = await capped('claim');
+      h.reportFails.add(taskId);
+      expect(await sweep()).toBe(0);
+      expect(await sweep()).toBe(0);
+      expect(h.calls.filter((call) => call === `recordLeftOpenMerges:${taskId}`)).toHaveLength(1);
+      expect(await eventsOfType(taskId, 'task.cancel_finished')).toEqual([]);
+      expect(
+        await db
+          .select()
+          .from(schema.mergeDirClaims)
+          .where(eq(schema.mergeDirClaims.taskId, taskId)),
+      ).toHaveLength(1);
+    });
 
     it('W1: a CANCEL for a completed task changes nothing and tears nothing down', async () => {
       const taskId = await seedTask('completed', { completedAt: T0 });

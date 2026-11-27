@@ -120,6 +120,9 @@ function makeDb(
   const db = {
     select: (fields: Parameters<typeof real.select>[0] & object) =>
       'taskId' in fields ? outer : real.select(fields),
+    update: () => ({
+      set: () => ({ where: () => ({ returning: async () => [{ id: 'claimed' }] }) }),
+    }),
     insert: () => ({
       values: async (v: Record<string, unknown>) => {
         if (v.taskId === opts.insertFailsFor) throw new Error('db blinked');
@@ -180,6 +183,9 @@ function makeRedriveDb(taskIds: string[], priorAttempts = 0) {
         ? candidates((id) => redriven(id) < CANCEL_REDRIVE_MAX, true)
         : candidates((id) => redriven(id) >= CANCEL_REDRIVE_MAX && !finished(events, id), false);
     },
+    update: () => ({
+      set: () => ({ where: () => ({ returning: async () => [{ id: 'claimed' }] }) }),
+    }),
     insert: () => ({
       values: (v: Omit<CountedEvent, 'id'>) => {
         const row = { id: `event-${(next += 1)}`, ...v };
@@ -443,10 +449,10 @@ describe('abandonCancelledTeardowns', () => {
       .filter((v): v is string => typeof v === 'string' && /^\d{4}-\d\d-\d\dT/.test(v))
       .map((v) => before - new Date(v).getTime())
       .sort((x, y) => x - y);
-    expect(ages).toHaveLength(2);
+    expect(ages).toHaveLength(4);
     expect(ages[0]).toBeGreaterThanOrEqual(OPTS.staleMs - 1000);
     expect(ages[0]).toBeLessThan(OPTS.staleMs + 5000);
-    expect(ages[1]).toBeGreaterThanOrEqual(CANCEL_REDRIVE_LOOKBACK_MS - 1000);
+    expect(ages[3]).toBeGreaterThanOrEqual(CANCEL_REDRIVE_LOOKBACK_MS - 1000);
     expect(seen.limit).toBe(CANCEL_REDRIVE_BATCH);
   });
 
@@ -511,6 +517,9 @@ describe('StalledTaskSweeper', () => {
     return {
       select: (fields?: object) =>
         fields && 'attempts' in fields && !('userId' in fields) ? abandonCandidates : empty,
+      update: () => ({
+        set: () => ({ where: () => ({ returning: async () => [{ id: 'claimed' }] }) }),
+      }),
       insert: () => ({
         values: async (v: Record<string, unknown>) => {
           h.log.push(`insert:${String(v.eventType)}:${String(v.taskId)}`);

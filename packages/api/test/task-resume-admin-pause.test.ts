@@ -528,6 +528,31 @@ describe.each(['cancel', 'abort', 'discard'] as const)('%s clearing a pause', (a
     expect(events(fake)).toEqual([]);
   });
 
+  it('queues teardown and preserves the abort event when clearing the committed cancel pause fails', async () => {
+    const fake = seed();
+    expect((await adminPause()).status).toBe(200);
+    const pausedAt = fake.rows(schema.tasks)[0]?.pausedAt;
+    let refused = false;
+    fake.hooks.beforeUpdate = async (table) => {
+      if (table !== schema.tasks || fake.rows(schema.tasks)[0]?.status !== 'cancelled') return;
+      refused = true;
+      throw Object.assign(new Error('database unavailable'), { code: '08006' });
+    };
+    const res = await act();
+    expect(refused).toBe(true);
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject(
+      action === 'discard' ? { cancelled: true } : { status: 'cancelled' },
+    );
+    expect(fake.rows(schema.tasks)[0]).toMatchObject({ status: 'cancelled', pausedAt });
+    expect(h.add.mock.calls.filter(([name]) => name === TASK_JOB_NAMES.CANCEL)).toHaveLength(1);
+    if (action === 'abort') {
+      expect(
+        fake.rows(schema.taskEvents).filter((e) => e.eventType === 'step.abort'),
+      ).toMatchObject([{ taskStepId: TARGET_ROW, payload: { stepId: 'test-step', note: null } }]);
+    }
+  });
+
   it('keeps the clear and queues cancellation when the audit savepoint fails', async () => {
     const fake = seed();
     expect((await adminPause()).status).toBe(200);
