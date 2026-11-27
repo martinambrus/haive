@@ -92,7 +92,7 @@ interface BranchLeftover {
 }
 
 /** Compare-and-delete only commits contained in the feature head the squash actually landed. */
-async function deleteSquashedBranch(
+export async function deleteSquashedBranch(
   repoPath: string,
   branch: string,
   mergedFeature: string | null,
