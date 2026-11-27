@@ -674,3 +674,13 @@ describe('AUTH_RE must not fire on adversarial-QA prose', () => {
     expect(classifyProviderFatal(1, text, null)).toBe('auth');
   });
 });
+
+it.each(['cli_auth_busy', 'cli_auth_probe_unknown'])(
+  'embedded %s is not an auth transient',
+  (code) => {
+    expect(
+      isTransientCliFailure({ exitCode: 1, errorMessage: `vendor output mentions ${code}: text` }),
+    ).toBe(false);
+    expect(isTransientCliFailure({ exitCode: 1, errorMessage: `${code}: text` })).toBe(true);
+  },
+);

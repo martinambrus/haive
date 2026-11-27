@@ -205,7 +205,10 @@ Grok task admission shares that scope lock. A possibly consumed refresh grant or
 throws the existing `CliLoginRequiredError` with `grok_login_required`, flips auth health to
 `unknown` and reaches the inline login affordance. Completed interactive volume-login audits,
 not general auth generations, let admission preserve and replace old copies. Busy locks and
-unknown helper/probe results use free, transient admission retries. Received non-grant 4xx
-responses clear their uncertainty fence; network/5xx outcomes retain it. A failed fence clear
+unknown helper/probe results use paced admission retries, free of agent crash-loop budgets.
+Unknown formats stay retryable, without a login hint. The shared step runner caps unknowns
+at 20 per step attempt, then halts for Retry; busy waits remain uncapped. Received non-grant
+4xx responses clear only a fence newly set by that attempt; prior uncertainty and network/5xx
+outcomes retain it. A failed fence clear
 is checked and retried on the next tick even before access-token expiry. See
 [Sandbox](sandbox.md) for archive retention, lock ordering and the controlled hold measurements.

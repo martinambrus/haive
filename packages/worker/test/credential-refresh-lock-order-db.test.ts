@@ -10,6 +10,7 @@ import {
 } from '@haive/database';
 import { cliAuthTaskVolumeName, resolveCliAuthUserVolumeName } from '@haive/shared';
 import { cliAuthScope } from '@haive/shared/cli-auth-state';
+import { advanceStep } from '../src/step-engine/step-runner.js';
 import { ensureTaskAuthVolumes } from '../src/sandbox/task-auth-volume.js';
 import type { DockerRunner } from '../src/sandbox/docker-runner.js';
 import { refreshExpiringCliCredentials } from '../src/usage-window/credential-refresh.js';
@@ -485,6 +486,8 @@ describe.skipIf(!url)(
         path === GROK_REFRESH_FENCE_FILE ? null : raw,
       );
       const runner = {
+        volumeList: async (prefix: string) =>
+          [...volumes].filter((name) => name.startsWith(prefix)),
         volumeExists: async (name: string) => volumes.has(name),
         volumeLabel: async (name: string) => labels.get(name) ?? null,
         volumeHasContainers: async () => false,
@@ -509,6 +512,98 @@ describe.skipIf(!url)(
         .where(eq(schema.cliInvocations.id, writer!.id));
       await ensureTaskAuthVolumes(ctx, taskId, runner, db, admission!.id);
       expect([...labels.keys()].filter((name) => name.includes('_retired_'))).toHaveLength(1);
+    });
+
+    it('bounds the step admission ledger on real SQL, including superseded errors, and resets on Retry', async () => {
+      const [task] = await db
+        .insert(schema.tasks)
+        .values({
+          userId,
+          type: 'workflow',
+          title: 'throwaway bounded admission',
+          status: 'running',
+        })
+        .returning();
+      const start = new Date(Date.now() - 5000);
+      const [step] = await db
+        .insert(schema.taskSteps)
+        .values({
+          taskId: task!.id,
+          stepId: 'auth-bound-fixture',
+          stepIndex: 0,
+          title: 'fixture',
+          status: 'waiting_cli',
+          startedAt: start,
+        })
+        .returning();
+      const addRun = async (code: string | null, createdAt: Date) =>
+        db.insert(schema.cliInvocations).values({
+          taskId: task!.id,
+          taskStepId: step!.id,
+          mode: 'cli',
+          prompt: 'fixture',
+          createdAt,
+          startedAt: createdAt,
+          endedAt: new Date(),
+          exitCode: code ? -1 : 0,
+          errorMessage: code ? `${code}: fixture` : null,
+          supersededAt: code === 'cli_auth_probe_unknown' ? new Date() : null,
+        });
+      await addRun('cli_auth_probe_unknown', new Date(start.getTime() - 1000));
+      for (const code of [
+        'cli_auth_probe_unknown',
+        'cli_auth_busy',
+        null,
+        'cli_auth_probe_unknown',
+      ])
+        await addRun(code, new Date(start.getTime() + 1000));
+      const apply = vi.fn(async () => ({}));
+      const enqueueCliInvocation = vi.fn();
+      const params = {
+        db,
+        taskId: task!.id,
+        userId,
+        repoPath: '/tmp',
+        workspacePath: '/tmp',
+        cliProviderId: null,
+        authProbeUnknownLimit: 2,
+        moduleDeactivation: null,
+        stepDef: {
+          metadata: {
+            id: 'auth-bound-fixture',
+            workflowType: 'workflow' as const,
+            index: 0,
+            title: 'fixture',
+            description: 'fixture',
+            requiresCli: true,
+          },
+          apply,
+        },
+        deps: { enqueueCliInvocation },
+      };
+      const capped = await advanceStep(params);
+      expect(capped.status).toBe('failed');
+      expect(capped.row.errorMessage).toContain('cli_auth_probe_exhausted:');
+      expect(apply).not.toHaveBeenCalled();
+      expect(enqueueCliInvocation).not.toHaveBeenCalled();
+      // Retry clears output/start and reopens the row. Old ended errors stay in the ledger.
+      const retriedAt = new Date();
+      await db
+        .update(schema.taskSteps)
+        .set({
+          status: 'waiting_cli',
+          startedAt: retriedAt,
+          endedAt: null,
+          output: null,
+          errorMessage: null,
+        })
+        .where(eq(schema.taskSteps.id, step!.id));
+      await addRun('cli_auth_probe_unknown', new Date(retriedAt.getTime() + 1));
+      const paced = await advanceStep(params);
+      expect(paced.status).toBe('deferred');
+      if (paced.status === 'deferred') expect(paced.delayMs).toBeGreaterThan(0);
+      expect(apply).not.toHaveBeenCalled();
+      expect(enqueueCliInvocation).not.toHaveBeenCalled();
     });
 
     it(

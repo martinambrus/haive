@@ -155,6 +155,8 @@ function fixture() {
   let failFenceClear = false;
   let failArchive = false;
   const runner = {
+    volumeList: async (prefix: string) =>
+      [...dirs.keys()].filter((name) => name.startsWith(prefix)),
     volumeHasContainers: async () => false,
     volumeExists: async (name: string) => dirs.has(name),
     volumeLabel: async (name: string) => labels.get(name) ?? null,
@@ -747,3 +749,54 @@ it('a stopped helper cannot permanently pin recovery after a fresh login', async
   expect(pinned).toBe(false);
   expect([...f.labels.keys()].filter((name) => name.includes('_retired_'))).toHaveLength(1);
 });
+
+it('caps retirement at one copy of a scope across successive logins', async () => {
+  const f = fixture();
+  f.freshLogin();
+  await f.adopt();
+  f.freshLogin();
+  await f.adopt();
+  expect([...f.dirs.keys()].filter((name) => name.includes('_retired_'))).toHaveLength(1);
+});
+
+it('a failed archive leaves no second volume, including on retry', async () => {
+  const f = fixture();
+  f.freshLogin();
+  f.failArchive();
+  for (let attempt = 0; attempt < 2; attempt++) {
+    await expect(f.adopt()).rejects.toMatchObject({ code: 'cli_auth_probe_unknown' });
+    expect([...f.dirs.keys()].filter((name) => name.includes('_retired_'))).toHaveLength(0);
+    expect(f.credential(f.taskVol) === f.initial).toBe(true);
+  }
+});
+
+it.each([false, true])(
+  'an unrecognized credential remains unknown after fresh login=%s',
+  async (login) => {
+    const f = fixture();
+    if (login) f.freshLogin();
+    writeFileSync(
+      join(f.dirs.get(f.userVol)!, 'auth.json'),
+      JSON.stringify({ future: randomBytes(24).toString('hex') }),
+    );
+    await expect(f.adopt()).rejects.toMatchObject({ code: 'cli_auth_probe_unknown' });
+    expect(f.statusWrite).not.toHaveBeenCalled();
+    expect(f.removed).toEqual([]);
+  },
+);
+
+it.each([400, 401, 403, 429])(
+  'HTTP %s cannot clear uncertainty from a previous grant',
+  async (status) => {
+    const f = fixture();
+    f.fetchMock.mockRejectedValueOnce(new Error('response lost'));
+    await refreshExpiringCliCredentials(f.db, f.runner);
+    f.fetchMock.mockResolvedValueOnce({
+      ok: false,
+      status,
+      text: async () => '{"error":"temporarily_unavailable"}',
+    } as never);
+    await refreshExpiringCliCredentials(f.db, f.runner);
+    await expect(f.adopt()).rejects.toMatchObject({ code: 'grok_login_required' });
+  },
+);

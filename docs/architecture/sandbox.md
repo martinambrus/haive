@@ -134,8 +134,8 @@ cannot advance that baseline. `auth_generation` alone is insufficient: it also c
 writes. A legacy, unlabeled or unknown-version copy has no baseline; a volume-login audit after
 the task's creation supplies its upgrade bridge. Without that evidence it still asks for login.
 A changed `authMode` or `isolateAuth` also selects a new scope. Before adopting that scope or the
-new login, admission copies the entire old volume to a unique user-owned auth volume named
-`<user-auth-volume>_retired_<uuid>` and requires both `cp -a` and `diff -qr` to succeed. Only then
+new login, admission copies the entire old volume to the scope-owned recovery volume described below
+and requires both `cp -a` and `diff -qr` to succeed. Only then
 may it remove the original and populate from the current source. Before preserving anything,
 admission requires that no already-admitted Grok invocation can still write this task copy,
 including one whose Docker container is not created yet. Invocation ids are passed by the
@@ -144,16 +144,21 @@ the shared task/CLI tail prevents their writes; each cohort becomes admitted bef
 is released. A strict container listing also refuses a still-mounted ended/superseded run.
 Stopped helpers are removed first through the existing stopped-only cleanup, so a helper left
 Created by a worker death cannot pin recovery forever. Unknown lookups retain the original and
-retry; a busy writer creates no archive. A failed preservation keeps the original. Subscription mode requires a parseable source credential; API-key mode prepares
-its separate empty auth volume and uses the injected key. No original source label is relabeled.
+retry; a busy writer creates no archive. A failed preservation keeps the original. Subscription
+mode requires a nonempty source credential; an unrecognized parser shape stays unknown and
+retryable, never a login refusal. API-key mode prepares its separate empty auth volume and
+uses the injected key. No original source label is relabeled.
 
 Retired volumes carry `haive.auth-retired` with the original task volume, source label and reason.
-Task settlement and task deletion leave them available for operator recovery. They have a USER
-owner in the existing name parser, so the boot reaper removes them when that user is deleted.
-They are outside the task-volume prefix: neither harvest, admission nor refresh holds adopts them.
-An operator may recover or explicitly remove them earlier after verifying they are no longer
-needed. A failed archive may leave a partial retired volume; it follows the same retention rule,
-and never authorizes removing the original. No age-based deletion is added.
+There is at most one per current login scope/path index, named `<resolved-user-auth-volume>_retired_copy`.
+After writers drain, a new retirement removes the previous archive (including UUID-named copies
+in that scope) before copying and verifying the new one. A removal refusal retains the original
+and retries admission. A failed archive attempts to remove its partial copy; a worker death or
+failed cleanup leaves that same fixed name for the next attempt, never another UUID volume.
+Sign-out lists and removes that login scope's retired copies even when its primary volume is
+already absent, under its existing auth lock and newer-login guard. Task settlement leaves the
+single recovery copy; the existing owner reaper removes it when its user or isolated provider
+is deleted. No age reaper or new cleanup queue is added.
 
 A newer in-copy login whose source is unchanged continues to be used. A labeled half-built copy
 with no ready marker and credential equal to its source/baseline (or absent) is safe to recreate;
@@ -162,11 +167,19 @@ that Docker holds never falls back to continued use: admission releases the auth
 `CliAuthRetryableError` with stable code `cli_auth_busy` immediately, without polling under the
 lock. A scope lock still busy after 30 seconds returns the same code. Probe timeouts and exits
 outside 0/1/2/3, and other unverifiable helper failures, use `cli_auth_probe_unknown`. These are
-transient in DAG classification and free re-dispatches in the step, mining and DAG retry budgets;
-they do not set a login hint or exhaust the crash-loop budget while a user finishes a login.
-The direct plugin-install apply has no invocation handler: the step runner preserves the
-same login hint there, or parks `waiting_cli` with the idle marker and a 30-second deferral.
-Neither error can enter a code fix loop.
+transient in DAG classification and free in the step, mining and DAG crash-loop budgets.
+Before any of those dispatch paths re-enters, the shared step runner enforces the existing
+30-second delay from the last admission failure. Busy stays uncapped. Unknown failures have a
+separate fixed cap, `MAX_AUTH_PROBE_UNKNOWNS = 20` (injectable through advance parameters),
+counted from existing ended invocation rows since the step's current `started_at`, including
+superseded rows. Successful siblings and busy waits cannot erase that attempt's count.
+At the cap the step fails for user action with `cli_auth_probe_exhausted` and Retry guidance;
+no further automatic dispatch or code fix loop occurs. Retry resets the step start/output and
+therefore its allowance. No new table, queue or fence is used.
+The direct plugin-install apply has no invocation ledger row: its existing deferred catch
+keeps just its unknown count and retry timestamp in temporary step output, replaced on success
+and cleared by Retry. It uses the same cap and delay, parking `waiting_cli` with the idle marker
+between attempts. A missing login keeps its existing inline login hint on both paths.
 Image ensure stays outside the lock. The lock covers only scope/source verification and copy IO,
 never a task-row transaction, an image build or a wait for a sibling's mounted copy.
 
@@ -189,12 +202,18 @@ a failed credential write. Admission refuses when the source still holds that to
 login or a successfully persisted rotated token has a different fingerprint. When the vendor
 keeps the same refresh token, refresh clears the marker only after persisting success.
 Sync-back never promotes the marked token from a copy. The marker contains no credential
-bytes and is never logged. A received HTTP 4xx other than a rejected grant proves no token was issued: refresh checks
-that clearing its fence succeeds. Network loss, timeouts, malformed success and 5xx remain
+bytes and is never logged. A received HTTP 4xx other than a rejected grant clears the fence
+only if it was not already set at this attempt's entry; a previous ambiguous grant stays fenced.
+Refresh checks that clearing its own fence succeeds. Network loss, timeouts, malformed success and 5xx remain
 possibly consumed and retain the fence. A failed same-token success clear is logged and its
 fenced token is retried on the next usage tick even when the new access token is not due for
 refresh. Only a possibly consumed grant therefore asks for re-login on immediate admission;
 a later successful background refresh can also resolve that hold.
+
+Rollback of fix 9 restores uncapped retries and UUID archive retention. Removed older/partial
+archives cannot be restored by reverting code. No schema rollback is needed; keep fix 7's
+serialization/fence and fix 8's login halt. Pre-fix-9 UUID archives outside a scope that is
+retired again or signed out retain their existing owner-reaper lifecycle.
 
 Rollback: revert fix 8 to restore fix 7's refusal behavior; its reader ignores the extra login-id
 label field. Retired user-owned volumes remain retained until explicit recovery/removal or user

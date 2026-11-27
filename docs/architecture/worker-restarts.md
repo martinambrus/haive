@@ -1512,3 +1512,16 @@ A pass that detaches anything owes another full discovery, at most four passes. 
 for the current bounded batch and closes the iterator. Reads perform no recovery; the sweep calls
 an explicit fs-safe mutation. Generic parks retain their age policy. Details and residuals are in
 [Secret and git-data masking](sandbox-masking.md).
+
+## Bounded auth admission retries
+
+Before re-entering ordinary LLM, mining or any DAG dispatch, the step runner reads existing
+ended auth failures for this step since its current `started_at`. Superseding an unknown
+failure does not erase it. Every busy/unknown retry waits 30 seconds from the last ended auth
+failure. Unknowns stop at `MAX_AUTH_PROBE_UNKNOWNS` (20, injectable), failing with named reason
+`cli_auth_probe_exhausted` and Retry guidance before any further dispatch. This is user action,
+never a code fix loop. Busy stays uncapped and free of crash-loop budgets. Direct applies use
+the same delay/cap with a small temporary count/timestamp in existing step output, since they
+have no invocation. Retry clears start/output and gives a fresh allowance; a failed row cannot
+automatically reopen. No new state machine, table, queue or fence is introduced. Existing login
+refusals, auth-lock serialization and settlement guards are unchanged.

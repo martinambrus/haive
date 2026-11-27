@@ -2,11 +2,11 @@ import { SANDBOX_CORE_IMAGE } from './image-composer.js';
 import { createHash, randomUUID } from 'node:crypto';
 import { and, desc, eq, gte, inArray, isNotNull, isNull, notInArray, or, sql } from 'drizzle-orm';
 import { schema, type CliAuthLock, type Database } from '@haive/database';
+import { serializeError } from '@haive/shared/logger';
 import { cliAuthSetWhere, cliAuthScope } from '@haive/shared/cli-auth-state';
 import {
   CLI_PROVIDER_LIST,
   cliAuthTaskVolumeName,
-  cliAuthVolumeName,
   getCliProviderMetadata,
   logger,
   resolveCliAuthUserVolumeName,
@@ -468,7 +468,8 @@ export function ensureTaskAuthVolumes(
               throwOnFailure: true,
             });
             const credential = raw ? parseGrokAuthFile(raw) : null;
-            if (!credential) throw new GrokCopyRecoveryError(ctx);
+            if (!raw) throw new GrokCopyRecoveryError(ctx);
+            if (!credential) throw new CliAuthRetryableError('cli_auth_probe_unknown');
             const fence = await readVolumeFile(userVol, GROK_REFRESH_FENCE_FILE, runner, {
               throwOnFailure: true,
             });
@@ -510,7 +511,10 @@ export function ensureTaskAuthVolumes(
           }
           if (error instanceof CliLoginRequiredError || error instanceof CliAuthRetryableError)
             throw error;
-          log.warn({ err: error, taskId }, 'Grok admission could not verify auth; retrying');
+          log.warn(
+            { err: serializeError(error), taskId },
+            'Grok admission could not verify auth; retrying',
+          );
           throw new CliAuthRetryableError('cli_auth_probe_unknown');
         } finally {
           await release().catch(() => {
@@ -627,10 +631,8 @@ async function assertGrokCopyQuiescent(
   if (await runner.volumeHasContainers(taskVol)) throw new CliAuthRetryableError('cli_auth_busy');
 }
 
-/** Retired copies belong to the user, not the task. The existing orphan reaper
- * removes them when that user is deleted. Until then they remain available for
- * operator recovery, never mounted by admission/harvest or used as refresh holds.
- * Copy AND compare must succeed before the original can be removed. */
+/** One recovery copy per login scope. Writers drained before this call; delete
+ * the previous archive before copying, retaining the original on every failure. */
 async function retireGrokCopy(
   ctx: ProviderAuthCtx,
   taskVol: string,
@@ -638,28 +640,42 @@ async function retireGrokCopy(
   label: string | null | undefined,
   runner: DockerRunner,
 ): Promise<void> {
-  const retired = `${cliAuthVolumeName(ctx.userId, 'grok', idx)}_retired_${randomUUID()}`;
-  const created = await runner.volumeCreate(retired, {
-    'haive.auth-retired': JSON.stringify({
-      taskVol,
-      source: label ?? null,
-      reason: 'superseded_login_or_scope',
-    }),
-  });
-  if (!created.ok) throw new CliAuthRetryableError('cli_auth_probe_unknown');
-  const kept = await runner.run({
-    image: HELPER_IMAGE,
-    entrypoint: '',
-    user: 'root',
-    cmd: ['sh', '-c', 'cp -a /src/. /dst/ && diff -qr /src /dst'],
-    mounts: [
-      { source: taskVol, target: '/src', readOnly: true },
-      { source: retired, target: '/dst', readOnly: false },
-    ],
-    timeoutMs: HELPER_TIMEOUT_MS,
-  });
-  if (kept.exitCode !== 0 || kept.timedOut)
-    throw new CliAuthRetryableError('cli_auth_probe_unknown');
+  const prefix = `${userVolumeForCtx(ctx, idx)}_retired_`;
+  if (!runner.volumeList) throw new CliAuthRetryableError('cli_auth_probe_unknown');
+  for (const old of await runner.volumeList(prefix)) {
+    if (!old.startsWith(prefix)) continue;
+    if (!(await runner.volumeRemove(old)).ok)
+      throw new CliAuthRetryableError('cli_auth_probe_unknown');
+  }
+  // A fixed name also bounds leftovers if a helper or worker dies during copying.
+  const retired = `${prefix}copy`;
+  try {
+    const created = await runner.volumeCreate(retired, {
+      'haive.auth-retired': JSON.stringify({
+        taskVol,
+        source: label ?? null,
+        reason: 'superseded_login_or_scope',
+      }),
+    });
+    if (!created.ok) throw new CliAuthRetryableError('cli_auth_probe_unknown');
+    const kept = await runner.run({
+      image: HELPER_IMAGE,
+      entrypoint: '',
+      user: 'root',
+      cmd: ['sh', '-c', 'cp -a /src/. /dst/ && diff -qr /src /dst'],
+      mounts: [
+        { source: taskVol, target: '/src', readOnly: true },
+        { source: retired, target: '/dst', readOnly: false },
+      ],
+      timeoutMs: HELPER_TIMEOUT_MS,
+    });
+    if (kept.exitCode !== 0 || kept.timedOut)
+      throw new CliAuthRetryableError('cli_auth_probe_unknown');
+  } catch (error) {
+    // If Docker refuses cleanup, the next attempt removes this exact same name.
+    await runner.volumeRemove(retired).catch(() => {});
+    throw error;
+  }
   log.info({ taskVol, retired, userId: ctx.userId }, 'preserved superseded Grok task auth copy');
 }
 
@@ -710,7 +726,8 @@ async function ensureTaskAuthVolumesUnlocked(
         // mode deliberately starts with an empty auth volume, using injected env.
         if (ctx.authMode === 'subscription') {
           const raw = await readVolumeFile(userVol, credRelPath!, runner, { throwOnFailure: true });
-          if (!raw || !parseGrokAuthFile(raw)) throw new GrokCopyRecoveryError(ctx);
+          if (!raw) throw new GrokCopyRecoveryError(ctx);
+          if (!parseGrokAuthFile(raw)) throw new CliAuthRetryableError('cli_auth_probe_unknown');
         }
         await assertGrokCopyQuiescent(db!, ctx, taskId, taskVol, runner);
         await retireGrokCopy(ctx, taskVol, idx, label, runner);

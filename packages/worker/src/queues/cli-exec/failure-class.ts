@@ -65,7 +65,7 @@ export const CLI_TERMINATION_EXIT_CODES: ReadonlySet<number> = new Set([130, 137
  *  exec-core.ts (stop/cancel/timeout), stream.ts (premature stream end). Stable
  *  internal contracts we own end-to-end, never ephemeral upstream wording. */
 export const TRANSIENT_CLI_FAILURE_RE =
-  /orphaned by a worker restart|stopped before it finished|stream ended prematurely|cancelled or timed out|exceeded its time budget|preempted for a higher-priority task|MCP server failed to start|codex app-server transport failed|\bcli_auth_busy:|\bcli_auth_probe_unknown:/i;
+  /orphaned by a worker restart|stopped before it finished|stream ended prematurely|cancelled or timed out|exceeded its time budget|preempted for a higher-priority task|MCP server failed to start|codex app-server transport failed/i;
 
 /** Stable headline for a run that started without a capability it was configured with.
  *
@@ -142,7 +142,11 @@ export function isTransientCliFailure(sig: {
   const killedByExit =
     sig.exitCode === null ||
     (typeof sig.exitCode === 'number' && CLI_TERMINATION_EXIT_CODES.has(sig.exitCode));
-  return killedByExit || (!!sig.errorMessage && TRANSIENT_CLI_FAILURE_RE.test(sig.errorMessage));
+  return (
+    killedByExit ||
+    isCliAuthWaitFailure(sig) ||
+    (!!sig.errorMessage && TRANSIENT_CLI_FAILURE_RE.test(sig.errorMessage))
+  );
 }
 
 /** True when an invocation was killed specifically by its own TIMEOUT — the transient
@@ -170,7 +174,8 @@ export function isCliPreemptionFailure(sig: { errorMessage?: string | null }): b
   return !!sig.errorMessage && sig.errorMessage.startsWith(CLI_PREEMPTED_HEADLINE);
 }
 
-/** Auth admission did no agent work. Contention and unknown probes retry freely. */
+/** Worker-authored code prefixes, never matches embedded CLI output. Auth waits
+ * spend no agent budget; the step entry gate separately paces/bounds admission. */
 export function isCliAuthWaitFailure(run: { errorMessage?: string | null }): boolean {
   return /^(?:cli_auth_busy|cli_auth_probe_unknown):/.test(run.errorMessage ?? '');
 }

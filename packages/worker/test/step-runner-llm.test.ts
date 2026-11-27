@@ -1,5 +1,9 @@
 import { randomUUID } from 'node:crypto';
-import { CliAuthRetryableError, CliLoginRequiredError } from '../src/sandbox/cli-auth-errors.js';
+import {
+  MAX_AUTH_PROBE_UNKNOWNS,
+  CliAuthRetryableError,
+  CliLoginRequiredError,
+} from '../src/sandbox/cli-auth-errors.js';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Database } from '@haive/database';
 import { StepPrepareParkError } from '@haive/shared/step';
@@ -119,78 +123,107 @@ interface MockDbOptions {
 function makeMockDb(state: MockState, opts: MockDbOptions = {}, inTransaction = false): Database {
   let nextId = 1;
   const db = {
-    select: () => ({
-      from: (table: unknown) => {
-        const tableName = tableNameOf(table);
-        // Every row of the table, for the un-limited/un-ordered form of the query.
-        const allRows = async () =>
-          tableName === 'task_steps' && state.taskStepRow.id
-            ? [state.taskStepRow]
-            : tableName === 'cli_invocations'
-              ? (state.cliInvocationHistory ?? [])
-              : [];
-        return {
-          where: (_cond: SQL) => ({
-            limit: async (_n: number) => {
-              if (tableName === 'task_steps') {
-                return state.taskStepRow.id ? [state.taskStepRow] : [];
-              }
-              if (tableName === 'cli_invocations') {
-                const { sql, params } = new PgDialect().sqlToQuery(_cond);
-                // The singleton guard's non-ordered read, separate from latest/history.
-                expect(sql).toContain('"ended_at" is null');
-                expect(sql).toContain('"superseded_at" is null');
-                expect(sql).toContain('"mode" not in');
-                expect(params.slice(1)).toEqual(['agent_mining', 'dag_parallel']);
-                const row = state.cliInvocationRow;
-                return row &&
-                  row.taskStepId === params[0] &&
-                  row.endedAt === null &&
-                  row.supersededAt == null &&
-                  !params.slice(1).includes(row.mode)
-                  ? [row]
-                  : [];
-              }
-              return [];
-            },
-            orderBy: (_o: unknown) => ({
-              limit: async (n: number) => {
-                if (tableName === 'cli_invocations') {
-                  // limit(1) is the "latest live invocation" read; anything wider is a
-                  // trailing-history count, which needs more than the one live row.
-                  if (n > 1 && state.cliInvocationHistory)
-                    return state.cliInvocationHistory.slice(0, n);
-                  return state.cliInvocationRow && !state.cliInvocationRow.consumedAt
-                    ? [state.cliInvocationRow]
-                    : [];
-                }
-                return [];
+    select: (projection?: Record<string, unknown>) =>
+      projection?.authUnknownCount
+        ? {
+            from: () => ({
+              where: async () => {
+                const rows = (
+                  state.cliInvocationHistory ??
+                  (state.cliInvocationRow ? [state.cliInvocationRow] : [])
+                ).filter(
+                  (run) =>
+                    run.endedAt instanceof Date &&
+                    /^(cli_auth_busy|cli_auth_probe_unknown):/.test(String(run.errorMessage)) &&
+                    (!(state.taskStepRow.startedAt instanceof Date) ||
+                      (run.createdAt as Date) >= state.taskStepRow.startedAt),
+                );
+                return [
+                  {
+                    authUnknownCount: rows.filter((run) =>
+                      String(run.errorMessage).startsWith('cli_auth_probe_unknown:'),
+                    ).length,
+                    authLastWaitAt: Math.max(
+                      0,
+                      ...rows.map((run) => (run.endedAt as Date).getTime()),
+                    ),
+                  },
+                ];
               },
-              // The ledger's read awaits the ordered query with no limit.
-              ...(tableName === 'task_events'
-                ? {
-                    then: (onOk: (r: unknown) => unknown, onErr?: (e: unknown) => unknown) =>
-                      Promise.resolve(state.taskEvents ?? []).then(onOk, onErr),
-                  }
-                : {}),
             }),
-            // Drizzle's query builder is a thenable: awaiting .where() directly, with no
-            // .limit()/.orderBy(), runs the query. learnedTimeoutMs does exactly that, and
-            // without this the await yielded the builder object itself — not iterable, so
-            // the dispatch threw and the step came back `failed`.
-            then: (onOk: (r: unknown) => unknown, onErr?: (e: unknown) => unknown) =>
-              allRows().then(onOk, onErr),
-            // The lock a run is recorded under: the row, while it is still the pass's own.
-            for: async () =>
-              tableName === 'task_steps' &&
-              state.taskStepRow.id &&
-              !['pending', 'skipped', 'failed'].includes(String(state.taskStepRow.status))
-                ? [{ id: state.taskStepRow.id }]
-                : [],
-          }),
-        };
-      },
-    }),
+          }
+        : {
+            from: (table: unknown) => {
+              const tableName = tableNameOf(table);
+              // Every row of the table, for the un-limited/un-ordered form of the query.
+              const allRows = async () =>
+                tableName === 'task_steps' && state.taskStepRow.id
+                  ? [state.taskStepRow]
+                  : tableName === 'cli_invocations'
+                    ? (state.cliInvocationHistory ?? [])
+                    : [];
+              return {
+                where: (_cond: SQL) => ({
+                  limit: async (_n: number) => {
+                    if (tableName === 'task_steps') {
+                      return state.taskStepRow.id ? [state.taskStepRow] : [];
+                    }
+                    if (tableName === 'cli_invocations') {
+                      const { sql, params } = new PgDialect().sqlToQuery(_cond);
+                      // The singleton guard's non-ordered read, separate from latest/history.
+                      expect(sql).toContain('"ended_at" is null');
+                      expect(sql).toContain('"superseded_at" is null');
+                      expect(sql).toContain('"mode" not in');
+                      expect(params.slice(1)).toEqual(['agent_mining', 'dag_parallel']);
+                      const row = state.cliInvocationRow;
+                      return row &&
+                        row.taskStepId === params[0] &&
+                        row.endedAt === null &&
+                        row.supersededAt == null &&
+                        !params.slice(1).includes(row.mode)
+                        ? [row]
+                        : [];
+                    }
+                    return [];
+                  },
+                  orderBy: (_o: unknown) => ({
+                    limit: async (n: number) => {
+                      if (tableName === 'cli_invocations') {
+                        // limit(1) is the "latest live invocation" read; anything wider is a
+                        // trailing-history count, which needs more than the one live row.
+                        if (n > 1 && state.cliInvocationHistory)
+                          return state.cliInvocationHistory.slice(0, n);
+                        return state.cliInvocationRow && !state.cliInvocationRow.consumedAt
+                          ? [state.cliInvocationRow]
+                          : [];
+                      }
+                      return [];
+                    },
+                    // The ledger's read awaits the ordered query with no limit.
+                    ...(tableName === 'task_events'
+                      ? {
+                          then: (onOk: (r: unknown) => unknown, onErr?: (e: unknown) => unknown) =>
+                            Promise.resolve(state.taskEvents ?? []).then(onOk, onErr),
+                        }
+                      : {}),
+                  }),
+                  // Drizzle's query builder is a thenable: awaiting .where() directly, with no
+                  // .limit()/.orderBy(), runs the query. learnedTimeoutMs does exactly that, and
+                  // without this the await yielded the builder object itself — not iterable, so
+                  // the dispatch threw and the step came back `failed`.
+                  then: (onOk: (r: unknown) => unknown, onErr?: (e: unknown) => unknown) =>
+                    allRows().then(onOk, onErr),
+                  // The lock a run is recorded under: the row, while it is still the pass's own.
+                  for: async () =>
+                    tableName === 'task_steps' &&
+                    state.taskStepRow.id &&
+                    !['pending', 'skipped', 'failed'].includes(String(state.taskStepRow.status))
+                      ? [{ id: state.taskStepRow.id }]
+                      : [],
+                }),
+              };
+            },
+          },
     transaction: async (fn: (tx: unknown) => unknown) => {
       // Isolate transaction writes: a hook accidentally using the outer db must
       // leave its insert behind when the owned checkpoint refuses the draft.
@@ -2452,6 +2485,7 @@ describe('advanceStep LLM phase', () => {
   it.each(['cli_auth_busy', 'cli_auth_probe_unknown'] as const)(
     'direct auth %s defers apply and resumes after admission recovers',
     async (code) => {
+      vi.useFakeTimers();
       const state = freshState();
       const step = baseStep();
       delete step.llm;
@@ -2476,7 +2510,9 @@ describe('advanceStep LLM phase', () => {
       }
       expect(state.updates.some((row) => row.status === 'failed')).toBe(false);
       step.apply = async () => ({ recovered: true });
+      await vi.advanceTimersByTimeAsync(30_000);
       expect((await advanceStep(params)).status).toBe('done');
+      vi.useRealTimers();
     },
   );
 
@@ -2514,13 +2550,13 @@ describe('advanceStep LLM phase', () => {
       state.taskStepRow = { ...state.taskStepRow, status: 'waiting_cli' };
       const wait = (id: string) => ({
         id,
-        startedAt: new Date(),
+        startedAt: new Date(Date.now() - 31_000),
         exitCode: -1,
         rawOutput: null,
         parsedOutput: null,
-        endedAt: new Date(),
+        endedAt: new Date(Date.now() - 31_000),
         errorMessage: `${code}: Authentication admission will retry.`,
-        createdAt: new Date(),
+        createdAt: new Date(Date.now() - 31_000),
       });
       state.cliInvocationRow = wait('inv-4');
       state.cliInvocationHistory = ['inv-4', 'inv-3', 'inv-2', 'inv-1'].map(wait);
@@ -3621,5 +3657,126 @@ describe('advanceStep when the config store is unreadable', () => {
     const result = await advance(state, baseStep());
     expect(result.status).toBe('waiting_cli');
     expect(learnedStamps(state)).toHaveLength(1);
+  });
+});
+
+describe('bounded auth admission', () => {
+  it('pins the production unknown limit', () => {
+    expect(MAX_AUTH_PROBE_UNKNOWNS).toBe(20);
+  });
+  it.each(['llm', 'mining', 'dag'])(
+    '%s stops at N unknowns before any further dispatch',
+    async (kind) => {
+      const state = freshState();
+      Object.assign(state.taskStepRow, { status: 'waiting_cli', startedAt: new Date(1) });
+      state.cliInvocationHistory = [1, 2].map((id) => ({
+        id: `auth-${id}`,
+        startedAt: new Date(2),
+        createdAt: new Date(2),
+        endedAt: new Date(),
+        errorMessage: 'cli_auth_probe_unknown: fixture',
+        exitCode: -1,
+      }));
+      state.cliInvocationRow = state.cliInvocationHistory[0]!;
+      const step = baseStep();
+      if (kind !== 'llm') {
+        delete step.llm;
+        Object.assign(step, kind === 'mining' ? { agentMining: {} } : { dagExecute: {} });
+      }
+      const enqueueCliInvocation = vi.fn();
+      const result = await advanceStep({
+        db: makeMockDb(state),
+        taskId: 'task-1',
+        userId: 'user-1',
+        repoPath: '/tmp',
+        workspacePath: '/tmp',
+        cliProviderId: 'prov-1',
+        stepDef: step,
+        providers: [makeProvider()],
+        deps: { enqueueCliInvocation },
+        authProbeUnknownLimit: 2,
+      });
+      expect(result.status).toBe('failed');
+      expect(state.taskStepRow.errorMessage).toContain('cli_auth_probe_exhausted:');
+      expect(state.taskStepRow.errorMessage).toContain('Retry');
+      expect(enqueueCliInvocation).not.toHaveBeenCalled();
+      expect(state.inserts.filter((entry) => entry.table === 'cli_invocations')).toEqual([]);
+    },
+  );
+
+  it.each(['cli_auth_busy', 'cli_auth_probe_unknown'])(
+    '%s is paced before redispatch',
+    async (code) => {
+      vi.useFakeTimers();
+      try {
+        const state = freshState();
+        Object.assign(state.taskStepRow, {
+          status: 'waiting_cli',
+          startedAt: new Date(Date.now() - 1000),
+        });
+        state.cliInvocationRow = {
+          id: 'auth-1',
+          createdAt: new Date(),
+          startedAt: new Date(),
+          endedAt: new Date(),
+          errorMessage: `${code}: fixture`,
+          exitCode: -1,
+        };
+        const enqueueCliInvocation = vi.fn();
+        const params = {
+          db: makeMockDb(state),
+          taskId: 'task-1',
+          userId: 'user-1',
+          repoPath: '/tmp',
+          workspacePath: '/tmp',
+          cliProviderId: 'prov-1',
+          stepDef: baseStep(),
+          providers: [makeProvider()],
+          deps: { enqueueCliInvocation },
+        };
+        const first = await advanceStep(params);
+        expect(first.status).toBe('deferred');
+        if (first.status === 'deferred') expect(first.delayMs).toBe(30_000);
+        expect(enqueueCliInvocation).not.toHaveBeenCalled();
+        await vi.advanceTimersByTimeAsync(30_000);
+        expect((await advanceStep(params)).status).toBe('waiting_cli');
+        expect(enqueueCliInvocation).toHaveBeenCalledOnce();
+      } finally {
+        vi.useRealTimers();
+      }
+    },
+  );
+
+  it('direct apply parks after N unknowns and never enters its code fix loop', async () => {
+    vi.useFakeTimers();
+    try {
+      const state = freshState();
+      const step = baseStep();
+      delete step.llm;
+      step.fixLoopOnError = true;
+      step.apply = vi.fn(async () => {
+        throw new CliAuthRetryableError('cli_auth_probe_unknown');
+      });
+      const params = {
+        db: makeMockDb(state),
+        taskId: 'task-1',
+        userId: 'user-1',
+        repoPath: '/tmp',
+        workspacePath: '/tmp',
+        cliProviderId: 'prov-1',
+        stepDef: step,
+        authProbeUnknownLimit: 2,
+      };
+      expect((await advanceStep(params)).status).toBe('deferred');
+      expect((await advanceStep(params)).status).toBe('deferred');
+      expect(step.apply).toHaveBeenCalledOnce();
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect((await advanceStep(params)).status).toBe('failed');
+      expect(state.taskStepRow.errorMessage).toContain('cli_auth_probe_exhausted:');
+      expect((await advanceStep(params)).status).toBe('failed');
+      expect(step.apply).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

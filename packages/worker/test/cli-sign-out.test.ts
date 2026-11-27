@@ -159,6 +159,9 @@ function makeRunner(
     async volumeCreate(): Promise<DockerVolumeOpResult> {
       return { ok: true, stderr: '' };
     },
+    async volumeList(prefix: string) {
+      return [...existing].filter((name) => name.startsWith(prefix));
+    },
     async volumeExists(name: string) {
       return existing.has(name);
     },
@@ -803,4 +806,25 @@ it('records the scope it starts on with the start marker', async () => {
       timestamp: Date.now() - CLI_SIGN_OUT_AUTH_WAIT_MS - 1,
     } as any),
   ).resolves.toMatchObject({ ok: true });
+});
+
+it('Grok sign-out removes retired copies even after its login volume is gone', async () => {
+  const row = makeProviderRow({ name: 'grok' });
+  const calls: DbCalls = { updateSet: null };
+  const base = 'haive_cli_auth_user1_grok_0';
+  const runner = makeRunner({
+    existing: [
+      `${base}_retired_copy`,
+      `${base}_retired_legacy`,
+      'haive_cli_auth_other_grok_0_retired_copy',
+    ],
+  });
+  const result = await handleSignOutJob(
+    makeDb(row, calls),
+    { providerId: row.id, userId: row.userId },
+    runner,
+  );
+  expect(result.ok).toBe(true);
+  expect(runner.removed).toEqual([`${base}_retired_copy`, `${base}_retired_legacy`]);
+  expect(runner.existing.size).toBe(1);
 });

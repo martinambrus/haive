@@ -34,6 +34,8 @@ function makeMockDb(state: MockState): Database {
           where: () => ({
             limit: async () => (tableName === 'task_steps' ? [state.taskStepRow] : []),
             orderBy: () => ({ limit: async () => [] }),
+            // Awaiting a Drizzle WHERE executes it; the fixture has no auth failures.
+            then: (resolve: (rows: unknown[]) => unknown) => Promise.resolve([]).then(resolve),
           }),
         };
       },
@@ -226,7 +228,8 @@ describe('advanceStep detect marker', () => {
   it('reuses the stored detect when the entry is waiting_cli', async () => {
     const { stepDef, calls } = markerStep({ providerSensitive: true });
     const state = freshState({ status: 'waiting_cli', ...STORED });
-    await run(state, stepDef);
+    const result = await run(state, stepDef);
+    expect(result.status).not.toBe('failed');
     expect(calls.detect).toBe(0);
     expect(state.taskStepRow.detectOutput).toEqual({ stale: true });
     expect(state.taskStepRow.formSchema).toEqual(OLD_FORM);

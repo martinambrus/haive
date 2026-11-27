@@ -19,3 +19,16 @@ export class CliAuthRetryableError extends Error {
     this.name = 'CliAuthRetryableError';
   }
 }
+
+/** Admission could not be verified within its bounded automatic retry allowance. */
+export class CliAuthProbeExhaustedError extends Error {
+  constructor() {
+    super(
+      'cli_auth_probe_exhausted: Authentication could not be verified. Check Docker and the stored login, then Retry.',
+    );
+    this.name = 'CliAuthProbeExhaustedError';
+  }
+}
+
+export const MAX_AUTH_PROBE_UNKNOWNS = 20;
+export const AUTH_ADMISSION_RETRY_DELAY_MS = 30_000;

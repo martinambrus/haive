@@ -51,6 +51,7 @@ import {
   desc,
   eq,
   getTableColumns,
+  gte,
   inArray,
   isNotNull,
   isNull,
@@ -148,7 +149,13 @@ import {
 } from '../queues/cli-exec/failure-class.js';
 import { enqueueUsagePollTick } from '../queues/usage-poll-queue.js';
 import { foldCliParkOnResume, markCliParkBegin } from '../queues/cli-park-timing.js';
-import { CliAuthRetryableError, CliLoginRequiredError } from '../sandbox/cli-auth-errors.js';
+import {
+  AUTH_ADMISSION_RETRY_DELAY_MS,
+  MAX_AUTH_PROBE_UNKNOWNS,
+  CliAuthProbeExhaustedError,
+  CliAuthRetryableError,
+  CliLoginRequiredError,
+} from '../sandbox/cli-auth-errors.js';
 import {
   AdvisedStepError,
   PromptBudgetExceededError,
@@ -404,6 +411,8 @@ export interface WorkerDeps {
 }
 
 export interface AdvanceStepParams {
+  /** Bound automatic unknown admission failures; Retry starts a fresh allowance. */
+  authProbeUnknownLimit?: number;
   db: Database;
   taskId: string;
   userId: string;
@@ -3895,6 +3904,45 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
     }
 
     let current = row;
+    // One gate before every dispatch family (LLM, mining and all DAG roles).
+    // The existing invocation ledger bounds unknowns even after superseding runs.
+    // Retry clears started_at/output, so earlier attempts cannot spend its allowance.
+    if (row.status === 'waiting_cli') {
+      const direct = row.output as { _authProbeUnknowns?: number; _authRetryAt?: number } | null;
+      const [wait] = await db
+        .select({
+          authUnknownCount:
+            sql<number>`count(*) filter (where starts_with(${schema.cliInvocations.errorMessage}, 'cli_auth_probe_unknown:'))`.mapWith(
+              Number,
+            ),
+          authLastWaitAt:
+            sql<number>`coalesce(extract(epoch from max(${schema.cliInvocations.endedAt})) * 1000, 0)`.mapWith(
+              Number,
+            ),
+        })
+        .from(schema.cliInvocations)
+        .where(
+          and(
+            eq(schema.cliInvocations.taskStepId, row.id),
+            isNotNull(schema.cliInvocations.endedAt),
+            row.startedAt ? gte(schema.cliInvocations.createdAt, row.startedAt) : undefined,
+            sql`(starts_with(${schema.cliInvocations.errorMessage}, 'cli_auth_probe_unknown:') or starts_with(${schema.cliInvocations.errorMessage}, 'cli_auth_busy:'))`,
+          ),
+        );
+      if (
+        (wait?.authUnknownCount ?? 0) + (direct?._authProbeUnknowns ?? 0) >=
+        (params.authProbeUnknownLimit ?? MAX_AUTH_PROBE_UNKNOWNS)
+      )
+        throw new CliAuthProbeExhaustedError();
+      const retryAt = Math.max(
+        wait?.authLastWaitAt ? wait.authLastWaitAt + AUTH_ADMISSION_RETRY_DELAY_MS : 0,
+        direct?._authRetryAt ?? 0,
+      );
+      if (retryAt > Date.now()) {
+        await markCliParkBegin(db, row.id);
+        return { status: 'deferred', row, delayMs: retryAt - Date.now() };
+      }
+    }
     if (current.status === 'pending') {
       // Work resumes: close any open runtime-slot park FIRST (fold `now - waiting_started_at`
       // into carried_idle_ms and clear the marker) so the wait stays booked as idle. Without the
@@ -5160,18 +5208,33 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
     // 01b installs plugins directly, outside the CLI invocation handler. Its auth
     // admission waits need the same recovery without failing a task or fixing code.
     if (err instanceof CliAuthRetryableError) {
-      const patch: UpdatePatch = { status: 'waiting_cli', statusMessage: err.message };
-      const parked = await (
-        opened
-          ? updateRow(db, row.id, patch)
-          : openPendingStep(db, taskId, params.epoch, row.id, patch)
-      ).catch((error: unknown) => {
-        if (error instanceof StepSupersededError) return null;
-        throw error;
-      });
-      if (!parked) return supersededPass(row);
-      await markCliParkBegin(db, row.id);
-      return { status: 'deferred', row: parked, delayMs: 30_000 };
+      const prior = row.output as Record<string, unknown> | null;
+      const unknowns =
+        Number(prior?._authProbeUnknowns ?? 0) + (err.code === 'cli_auth_probe_unknown' ? 1 : 0);
+      if (unknowns >= (params.authProbeUnknownLimit ?? MAX_AUTH_PROBE_UNKNOWNS)) {
+        err = new CliAuthProbeExhaustedError();
+      } else {
+        const patch: UpdatePatch = {
+          status: 'waiting_cli',
+          statusMessage: err.message,
+          output: {
+            ...prior,
+            _authProbeUnknowns: unknowns,
+            _authRetryAt: Date.now() + AUTH_ADMISSION_RETRY_DELAY_MS,
+          },
+        };
+        const parked = await (
+          opened
+            ? updateRow(db, row.id, patch)
+            : openPendingStep(db, taskId, params.epoch, row.id, patch)
+        ).catch((error: unknown) => {
+          if (error instanceof StepSupersededError) return null;
+          throw error;
+        });
+        if (!parked) return supersededPass(row);
+        await markCliParkBegin(db, row.id);
+        return { status: 'deferred', row: parked, delayMs: AUTH_ADMISSION_RETRY_DELAY_MS };
+      }
     }
     const cancelled = err instanceof TaskCancelledError;
     // A done fix-loop row stores the diagnosis for reclassification on recovery. Preserve
@@ -5199,6 +5262,7 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
       !(err instanceof StepOutputContractInvalidError) &&
       !(err instanceof DataEdgePlanError) &&
       !(err instanceof CliLoginRequiredError) &&
+      !(err instanceof CliAuthProbeExhaustedError) &&
       routesErrorToFixLoop(stepDef, errorMessage);
     if (!cancelled && routeErrorToFixLoop) {
       if (meta.id === '08-phase-5-verify')

@@ -1420,45 +1420,51 @@ export async function handleSignOutJob(
     const removed: string[] = [];
     const failed: { name: string; stderr: string }[] = [];
     for (let idx = 0; idx < meta.authConfigPaths.length; idx += 1) {
-      const name = authVolumeFor(provider, idx);
-      if (!(await runner.volumeExists(name))) {
-        if (resuming) removed.push(name);
-        continue;
-      }
-      // Exactly the hazard `cleanupTaskAuthVolumes` guards, on the volume class that
-      // outlives every task: a worker killed between `docker create` and `docker start`
-      // leaves a Created auth helper mounting this volume, and `docker volume rm --force`
-      // then fails forever. A task volume gets swept because it is removed at task end;
-      // a per-user one is only ever removed HERE, so without this the strays accumulate
-      // and sign-out is the one operation that can never succeed. MEASURED on the dev
-      // install: two helpers stranded on `haive_cli_auth_<user>_codex_0`. Stopped users
-      // only — a running login or probe container is deliberately spared.
-      await release.assertHeld();
-      const containerCleanup = await runner.removeStoppedContainersUsingVolume?.(name);
-      if (containerCleanup && !containerCleanup.ok) {
-        log.warn(
-          { volume: name, stderr: containerCleanup.stderr },
-          'stopped auth helper container cleanup failed',
-        );
-      } else if (containerCleanup && containerCleanup.removed.length > 0) {
-        log.info(
-          { volume: name, containers: containerCleanup.removed.length },
-          'removed stopped auth helper containers',
-        );
-      }
-      await release.assertHeld();
-      let result = await runner.volumeRemove(name);
-      // A closed login socket can release its scope while its 30 s chown helper still
-      // mounts this volume. Retry refusals with 31 s total backoff, without parsing
-      // Docker's stderr or stopping live containers. Keep the final failure diagnostics.
-      for (const delayMs of [1_000, 2_000, 4_000, 8_000, 16_000]) {
-        if (result.ok) break;
-        await new Promise<void>((resolve) => setTimeout(resolve, delayMs));
+      const primary = authVolumeFor(provider, idx);
+      const prefix = `${primary}_retired_`;
+      if (provider.name === 'grok' && !runner.volumeList)
+        throw new Error('Grok sign-out requires auth volume listing');
+      const retired = provider.name === 'grok' ? await runner.volumeList!(prefix) : [];
+      for (const name of [primary, ...retired.filter((name) => name.startsWith(prefix))]) {
+        if (!(await runner.volumeExists(name))) {
+          if (resuming) removed.push(name);
+          continue;
+        }
+        // Exactly the hazard `cleanupTaskAuthVolumes` guards, on the volume class that
+        // outlives every task: a worker killed between `docker create` and `docker start`
+        // leaves a Created auth helper mounting this volume, and `docker volume rm --force`
+        // then fails forever. A task volume gets swept because it is removed at task end;
+        // a per-user one is only ever removed HERE, so without this the strays accumulate
+        // and sign-out is the one operation that can never succeed. MEASURED on the dev
+        // install: two helpers stranded on `haive_cli_auth_<user>_codex_0`. Stopped users
+        // only — a running login or probe container is deliberately spared.
         await release.assertHeld();
-        result = await runner.volumeRemove(name);
+        const containerCleanup = await runner.removeStoppedContainersUsingVolume?.(name);
+        if (containerCleanup && !containerCleanup.ok) {
+          log.warn(
+            { volume: name, stderr: containerCleanup.stderr },
+            'stopped auth helper container cleanup failed',
+          );
+        } else if (containerCleanup && containerCleanup.removed.length > 0) {
+          log.info(
+            { volume: name, containers: containerCleanup.removed.length },
+            'removed stopped auth helper containers',
+          );
+        }
+        await release.assertHeld();
+        let result = await runner.volumeRemove(name);
+        // A closed login socket can release its scope while its 30 s chown helper still
+        // mounts this volume. Retry refusals with 31 s total backoff, without parsing
+        // Docker's stderr or stopping live containers. Keep the final failure diagnostics.
+        for (const delayMs of [1_000, 2_000, 4_000, 8_000, 16_000]) {
+          if (result.ok) break;
+          await new Promise<void>((resolve) => setTimeout(resolve, delayMs));
+          await release.assertHeld();
+          result = await runner.volumeRemove(name);
+        }
+        if (result.ok) removed.push(name);
+        else failed.push({ name, stderr: result.stderr });
       }
-      if (result.ok) removed.push(name);
-      else failed.push({ name, stderr: result.stderr });
     }
 
     // Claude's subscription login lives in the env-injected CLAUDE_CODE_OAUTH_TOKEN secret

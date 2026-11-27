@@ -189,6 +189,8 @@ export interface DockerRunner {
   /** Strict callers require a successful listing to prove absence; lookup failures throw.
    * Other callers keep the historical best-effort inspect/false contract. */
   volumeExists(name: string, options?: { throwOnFailure?: boolean }): Promise<boolean>;
+  /** Strict listing, rechecked by prefix because Docker name filters match substrings. */
+  volumeList?(prefix: string): Promise<string[]>;
   volumeRemove(name: string): Promise<DockerVolumeOpResult>;
   /** Strict retirement prerequisite: any container can still pin/write the copy. */
   volumeHasContainers?(name: string): Promise<boolean>;
@@ -627,6 +629,17 @@ export const defaultDockerRunner: DockerRunner = {
       return result.stdout.split(/\r?\n/).includes(name);
     }
     return result.exitCode === 0;
+  },
+
+  async volumeList(prefix) {
+    const result = await spawnAndCollect(
+      'docker',
+      ['volume', 'ls', '-q', '--filter', `name=${prefix}`],
+      { timeoutMs: 15_000 },
+    );
+    if (result.exitCode !== 0 || result.timedOut || result.error)
+      throw new Error('auth volume listing failed');
+    return result.stdout.split(/\r?\n/).filter((name) => name.startsWith(prefix));
   },
 
   async volumeRemove(name) {

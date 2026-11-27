@@ -241,9 +241,9 @@ async function refreshGrokVolume(
     fresh = await refreshGrokToken(cred.refreshToken, cred.clientId);
   } catch (err) {
     if (!(err instanceof GrokOauthError && err.code === 'invalid_grant')) {
-      // A received 4xx (except rejected grant below) proves no token was issued.
+      // A received 4xx clears only this attempt's fence, never earlier uncertainty.
       // Network loss, aborts, malformed success and 5xx remain possibly consumed.
-      if (err instanceof GrokOauthError && err.status >= 400 && err.status < 500) {
+      if (!fenced && err instanceof GrokOauthError && err.status >= 400 && err.status < 500) {
         await assertHeld();
         if (!(await writeVolumeFile(vol, GROK_REFRESH_FENCE_FILE, 'none', runner)))
           log.warn({ vol }, 'grok unspent-grant fence clear failed; retrying next tick');
