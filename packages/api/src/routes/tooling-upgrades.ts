@@ -2,7 +2,7 @@ import { isDeepStrictEqual } from 'node:util';
 import { UserPostgresDsnError } from '@haive/shared/egress';
 import { Hono } from 'hono';
 import { and, desc, eq, isNull, or, sql, inArray } from 'drizzle-orm';
-import { isRootClaimLive, lockRepositoryTasksKey, schema } from '@haive/database';
+import { canonicalUuid, isRootClaimLive, lockRepositoryTasksKey, schema } from '@haive/database';
 import { z } from 'zod';
 import {
   deriveRenderTargets,
@@ -1133,7 +1133,7 @@ toolingUpgradeRoutes.post('/:id/cli-targets/remove', async (c) => {
     const [repo] = await boundedLockWait(tx, async () => {
       await lockRepositoryTasksKey(tx, repositoryId);
       await tx.execute(
-        sql`select pg_advisory_xact_lock(hashtextextended(${`project-state:${repositoryId}`}, 0))`,
+        sql`select pg_advisory_xact_lock(hashtextextended(${`project-state:${canonicalUuid(repositoryId)}`}, 0))`,
       );
       return tx
         .select({
