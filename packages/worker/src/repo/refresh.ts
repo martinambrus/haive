@@ -16,7 +16,13 @@ import {
   removeNoFollow,
   renameNoFollow,
 } from '@haive/shared/fs-safe';
-import { lockRepositoryTasksKey, schema, type Database } from '@haive/database';
+import {
+  lockRepositoryTasksKey,
+  schema,
+  withSettledTransaction,
+  type Database,
+} from '@haive/database';
+import { lockPlanPatch } from '@haive/shared/plan';
 import {
   CHECKOUT_HOLDING_TASK_STATUSES,
   HAIVE_DATA_FILES,
@@ -43,7 +49,7 @@ import {
   type KeptFiles,
 } from '../project-state/set-aside.js';
 import { headCommit } from '../plan/merge.js';
-import { seedPlanBaseFromCheckout } from '../plan/mirror.js';
+import { lockPlanMirror, seedPlanBaseFromCheckout } from '../plan/mirror.js';
 import { lockProjectState, recoverProjectStateWrite } from '../project-state/write.js';
 import { handBackAfterMove } from '../step-engine/git-merge.js';
 import { GitOperationUnreadableError } from './git-operation.js';
@@ -778,14 +784,22 @@ async function rebuild(
         const built = await usableCheckout(replacement);
         if (built !== 'usable')
           throw new Error('the private recovery replacement is not a usable checkout');
-        // All writes stay off the public checkout. The writers commit their normal journals and
-        // bases before publication; keep this sibling on failure, including any undo capability.
+        // Keep private filesystem output on failure, but commit no base for an unpublished tree.
+        // The ordinary writers use savepoints on this transaction; only publication permits the
+        // outer commit. A death after rename leaves complete files and the old bases for Retry.
         restoring = true;
-        await restoreProjectData(db, payload.repositoryId, replacement);
-        await db.transaction(async (tx) => {
-          // Reuse the rebuild fence at publication too: a task admitted during the copy must
-          // not see a replacement or race its restore. No pool writer runs under this lock.
+        await withSettledTransaction(db, async (tx) => {
+          // All domain keys precede repository/record rows. In particular, take the plan keys
+          // before the state writer holds the repository row and later calls the plan writer.
           await lockRepositoryTasksKey(tx, payload.repositoryId);
+          await lockProjectState(tx, payload.repositoryId);
+          await lockPlanMirror(tx, payload.repositoryId);
+          await lockPlanPatch(tx, payload.repositoryId);
+          // These helpers accept the Database surface; a Drizzle transaction provides it with
+          // nested transactions implemented as savepoints, retaining every write in this commit.
+          const restoreDb = tx as unknown as Database;
+          await restoreProjectData(restoreDb, payload.repositoryId, replacement);
+          await assertRepoJobOwner(restoreDb, payload.repositoryId);
           const refusal = await checkoutWorktreeRefusal(tx, payload.repositoryId, dest);
           if (refusal) throw new Error(refusal);
           const holding = await checkoutHoldingTasks(tx, payload.repositoryId);

@@ -964,6 +964,17 @@ cleanup as a SQL rollback; background writers keep their column. Merely listing 
 for staging does not count as a mutation, and an editor-owned refused path is never reported as
 written. The journal intentionally does not track or undo another writer's database mutations.
 
+Explicit checkout recovery uses the same writer inside its publication transaction. Its private
+tree cannot expose a partially written public record, so the writer's nested transactions are
+savepoints: intent, imports, context, conflict changes, bases, hashes and acknowledgements commit
+only after the complete replacement is renamed to the checkout path. A restore or publication
+failure rolls them all back while retaining the private bytes and images. A kill after rename
+but before commit leaves complete output against the old bases; the next usable-checkout refresh
+imports it normally. Existing committed private intents from older workers still detach through
+the rebuild's guarded abandonment path. Ordinary public writers keep the separately committed
+undo-journal protocol above. See [Repository refresh](repository-refresh.md) for lock order and
+rollback.
+
 **The record is kept current by an outbox, not only by 12, 02 and 04.** `project_state_outbox`
 (migration 0194, one row per repository, mirroring `plan_mirror_state`) carries `revision`,
 `written_revision` and `last_error`. A mutation of something the record holds calls

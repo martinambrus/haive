@@ -290,7 +290,8 @@ async function importHaiveDataMirror(
 }
 
 /** Restore this install's projections before publication, importing the incoming record or plan
- *  only where this install has none. A failure must fail recovery, never be best-effort. */
+ *  only where this install has none. The rebuild supplies its publication transaction so every
+ *  nested writer is a savepoint. A failure must fail recovery, never be best-effort. */
 export async function restoreProjectData(
   db: Database,
   repositoryId: string,

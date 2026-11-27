@@ -317,6 +317,22 @@ async function runRefresh(payload: RepoJobPayload) {
   return h.processor!({ id: 'refresh-job', name: REPO_JOB_NAMES.REFRESH, data: payload } as Job);
 }
 
+it.each(['checkout_repair_needed', 'source_repair_needed'])(
+  'T602 member 6: keeps %s after a failed recovery build',
+  async (errorCode) => {
+    const { dest, payload } = await fixture();
+    row.errorCode = errorCode;
+    await rm(path.join(dest, '.git'), { recursive: true });
+    h.copyFault = async () => {
+      throw new Error('recovery copy failed');
+    };
+    await expect(runRefresh({ ...payload, recoverCheckout: true })).rejects.toThrow(
+      'recovery copy failed',
+    );
+    expect(row).toMatchObject({ status: 'error', errorCode, refreshPending: false });
+  },
+);
+
 it.each(['usable', 'unusable', 'unknown', 'holding', 'refused'] as const)(
   'refresh %s reaches a terminal repository status',
   async (kind) => {

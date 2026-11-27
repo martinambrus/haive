@@ -97,7 +97,12 @@ user's explicit consent to move the checkout aside although it could not be prov
 only refresh never rebuilds and, whatever fails, keeps the repair code it was admitted with: a
 checkout still unusable says so, a read that never finished stays a retryable failure, and only the
 recovery rebuilds, keeping this install's data. The
-code clears when an ordinary preparation starts or detection succeeds; a recovery keeps it until then, so a second refresh sent while the recovery is queued or running answers 409, and a preparation stranded by a stop keeps it too. A recovery job first re-checks the checkout: one that is
+code clears when an ordinary preparation starts or detection succeeds; a recovery keeps the exact
+admitted code through worker and enqueue failures, including `source_repair_needed`, so the guidance
+continues to name the original cause, unless the failure itself proves one: a source folder that fails
+its proof before any move records `source_repair_needed`. A second refresh sent while the recovery is queued or running
+answers 409, and a preparation stranded by a stop keeps its code too. A recovery job first
+re-checks the checkout: one that is
 usable again (held by a task or not) finishes as an ordinary refresh, moves nothing and clears the
 code. Otherwise it takes the ordinary rebuild path (seed, source proof, move aside, build, verify),
 keeps every repository record and this install's settings, KB and plan data. Before the move it
@@ -108,7 +113,7 @@ recorded journal stage is classified by whether that stage is present under the 
 A current-checkout intent, and an unmarked one with no stage, still settles against the current
 checkout or refuses with the cause and moves nothing. The move transaction re-checks that no
 intent appeared. The private
-replacement drops the legacy mirrors and is restored through the ordinary writers without a commit:
+replacement drops the legacy mirrors and is restored through the ordinary writers without a Git commit:
 the state record is written from the database with its base and watermark, and the plan is
 rendered from the database with `synced_hash` stamped and the agreed `synced_snapshot` left as it
 was, so a later remote plan still merges three-way. When this install holds no plan rows the
@@ -127,6 +132,28 @@ unless `task.cancel_finished` proves its asynchronous teardown ended (or was exp
 Legacy cancels without an event and expired cancels cannot hold a rebuild forever; a recent Cancel alone is insufficient. The
 refusal asks the user to wait for cancellation cleanup before rebuilding. The claim blocks a
 Start or revival after the rename too (the admission rule above).
+
+Recovery restores the private tree and publishes it in one database transaction. The task key,
+project-state key, plan-mirror key and plan-patch key precede repository and projection rows;
+the ordinary writers use that transaction's savepoints, with no pool calls from inside it.
+The keys and the row are held for the whole restore, not only the rename: a task Start waits up to
+its 5 s bound on the tasks key, a plan edit answers busy meanwhile, and a recovery that meets an
+ancestry-changing plan edit holding the patch key past its 1 s bound fails retryably, keeping its
+replacement.
+Only the outer commit, after `renameNoFollow`, advances state bases, watermarks, plan stamps and
+outbox acknowledgements. A refused restore or publication rolls those changes back, retaining
+the private tree and its images. A death before rename leaves the old bases and an unpublished
+replacement; Retry rebuilds again. A death after rename but before commit leaves a complete
+restored checkout with old bases; after the dead claim expires, Retry's usable-checkout path
+imports that output and repairs the stamps when its importers succeed. They are best-effort: one that
+fails is logged as a warning, the row still goes ready, and the old bases wait for a later sweep or
+refresh. No connection spans the clone or copy. The
+transaction callback drains before the root claim/session barrier releases, including after a
+connection failure. Legacy committed private intents still use the abandonment handling above.
+
+T602 rollback: settle all preparations, then revert API and worker together. There is no migration
+or data rollback. Keep every aside, private replacement and journal image. Reverting restores the
+early-base-commit and repair-code relabelling hazards; it restores no checkout automatically.
 
 The list's `canRetry` / `retryUnavailableReason` describe the durable source the retry
 route can use: a local folder, a remote URL, or a completed upload record belonging to the
