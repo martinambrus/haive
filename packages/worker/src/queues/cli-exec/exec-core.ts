@@ -121,6 +121,7 @@ import {
   MODEL_CAPABILITY_HEADLINES,
   PROVIDER_FATAL_HEADLINES,
   fatalClassFromStreamErrorCode,
+  accountActionHintFromStreamErrorCode,
   type ModelCapabilityClass,
   type ProviderFatalClass,
 } from './failure-class.js';
@@ -304,14 +305,7 @@ function buildProviderFatalMessage(
     const override = providerName ? PROVIDER_AUTH_HINT_OVERRIDES[providerName] : null;
     const apiKeyName = providerName ? PROVIDER_API_KEY_HINTS[providerName] : null;
     const loginCmd = providerName ? PROVIDER_LOGIN_HINTS[providerName] : null;
-    const accountHint =
-      streamErrorCode === 'account_on_hold'
-        ? 'account action is needed: resolve the account hold with the provider'
-        : streamErrorCode === 'oauth_org_not_allowed'
-          ? 'account action is needed: ask your organization administrator to enable access or use an allowed API key'
-          : streamErrorCode === 'verification_required'
-            ? 'account action is needed: complete the verification requested by the provider'
-            : null;
+    const accountHint = accountActionHintFromStreamErrorCode(streamErrorCode);
     const hint = accountHint
       ? `${accountHint}, then retry this step`
       : override

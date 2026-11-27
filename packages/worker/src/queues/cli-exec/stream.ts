@@ -12,12 +12,10 @@ import {
 } from '../../cli-executor/request-usage.js';
 import { normalizeClaudeUsage, sumTokenUsage } from '../../cli-executor/usage-extract.js';
 import { createToolUsageTally, type ToolUsageTally } from '../../cli-executor/tool-usage.js';
-import {
-  AUTH_FAILED_ERROR_CODE,
-  buildOutputTruncationMessage,
-  classifyStreamFailure,
-} from './failure-class.js';
+import { buildOutputTruncationMessage, classifyStreamFailure } from './failure-class.js';
 import { isPlaceholderModel, type StreamModelReport } from './model-identity.js';
+
+export const FAILURE_TEXT_LIMIT = 4000;
 
 /** One `api_retry` event, carried verbatim. `errorStatus` is null when no HTTP response arrived
  *  at all, which is what a transport failure looks like from inside the binary. */
@@ -41,13 +39,9 @@ interface StreamJsonCollector {
    *  prefer getNoResultReason() (the binary's own error text) over the stdout tail,
    *  which for a stream-json CLI is raw NDJSON. */
   hadResultError: () => boolean;
-  /** True when the LAST top-level assistant event carried the CLI's own authentication error
-   *  code (see AUTH_FAILED_ERROR_CODE). A structured field, so it holds for a run whose wording
-   *  differs per provider or version. */
-  hadAuthFailure: () => boolean;
   /** The `error` string of the last top-level assistant event, or null. Call after getResult(). */
   getAssistantErrorCode: () => string | null;
-  /** Text of the latest top-level assistant event or result, never raw protocol. */
+  /** Bounded text of the latest turn's top-level assistant events, result and non-JSON stdout. */
   getFailureText: () => string;
   /** Concatenation of every text block from assistant events. Lets us cross-check
    *  the result event's payload against the deltas claude-code actually streamed. */
@@ -115,6 +109,7 @@ export function createStreamJsonCollector(
    *  `tool_use` block. Defaults to a private one with no workdir (only relative paths
    *  classify) for callers that never persist it. */
   toolUsage: ToolUsageTally = createToolUsageTally({ workdir: null }),
+  failureTextLimit = FAILURE_TEXT_LIMIT,
 ): StreamJsonCollector {
   let buffer = '';
   /** True between an api_retry event and the next event of any other kind. */
@@ -139,6 +134,8 @@ export function createStreamJsonCollector(
   // so a run that hit the error and then recovered does not carry it; a sub-agent turn is ignored.
   let lastAssistantError: string | null = null;
   let failureText = '';
+  // The next diagnostic event starts a new turn, even when no second init is emitted.
+  let failureTurnEnded = false;
   let resultUsage: CliTokenUsage | null = null;
   let resultCount = 0;
   let strictWholeRun: RequestUsage | null = null;
@@ -188,6 +185,19 @@ export function createStreamJsonCollector(
     resultTerminalReason = null;
   }
 
+  function beginFailureTurn(): void {
+    if (!failureTurnEnded) return;
+    failureTurnEnded = false;
+    clearResultFailure();
+    lastRateLimit = null;
+    lastAssistantError = null;
+    failureText = '';
+  }
+
+  function appendFailureText(text: string): void {
+    failureText = (failureText + text.slice(-failureTextLimit)).slice(-failureTextLimit);
+  }
+
   function processLine(line: string): void {
     const trimmed = line.trim();
     if (!trimmed) return;
@@ -196,6 +206,12 @@ export function createStreamJsonCollector(
       event = JSON.parse(trimmed) as Record<string, unknown>;
     } catch {
       malformedLineCount++;
+      // The CLI's own plain stdout is diagnostic output, unlike nested JSON tool payloads.
+      // After a failed result it can also be shutdown output: keep that result's structural
+      // diagnosis until a parsed event proves another turn started. A successful result's
+      // answer must not leak into a later plain stdout failure.
+      if (lastResultSubtype === 'success' && !resultIsError) beginFailureTurn();
+      appendFailureText(line + '\n');
       return;
     }
     if (!event || typeof event !== 'object' || typeof event.type !== 'string') {
@@ -225,6 +241,16 @@ export function createStreamJsonCollector(
     } else if (retryPending) {
       retryPending = false;
       onRetryResolved?.();
+    }
+
+    if (
+      event.parent_tool_use_id == null &&
+      (type === 'assistant' ||
+        type === 'result' ||
+        type === 'rate_limit_event' ||
+        (type === 'system' && subtype === 'init'))
+    ) {
+      beginFailureTurn();
     }
 
     if (type === 'rate_limit_event' && event.parent_tool_use_id == null) {
@@ -282,29 +308,19 @@ export function createStreamJsonCollector(
       });
     }
 
-    // Failure diagnostics are scoped to the latest top-level reply. Never let protocol fields,
-    // tool payloads, sub-agent output or a recovered assistant message reach the text fallback.
+    // Accumulate this turn's text blocks: a message can arrive one content block per event.
+    // Protocol fields, tool payloads and sub-agent output never reach the text fallback.
     if (event.parent_tool_use_id == null) {
-      if (type === 'system' && subtype === 'init') {
-        clearResultFailure();
-        lastRateLimit = null;
-        lastAssistantError = null;
-        failureText = '';
-      } else if (type === 'assistant') {
-        // A later assistant reply supersedes an earlier turn's failed result as a diagnosis.
-        if (lastResultSubtype !== null) lastRateLimit = null;
-        clearResultFailure();
+      if (type === 'assistant') {
         const content = record(event.message)?.content;
-        failureText = Array.isArray(content)
-          ? content
-              .map((block) => {
-                const b = record(block);
-                return b?.type === 'text' && typeof b.text === 'string' ? b.text : '';
-              })
-              .join('')
-          : '';
+        if (Array.isArray(content)) {
+          for (const block of content) {
+            const b = record(block);
+            if (b?.type === 'text' && typeof b.text === 'string') appendFailureText(b.text);
+          }
+        }
       } else if (type === 'result') {
-        failureText =
+        const text =
           typeof event.result === 'string' && event.result.trim()
             ? event.result
             : typeof event.error === 'string' && event.error.trim()
@@ -313,6 +329,8 @@ export function createStreamJsonCollector(
                 ? event.errors.filter((e): e is string => typeof e === 'string').join('; ') ||
                   failureText
                 : failureText;
+        failureText = text.slice(-failureTextLimit);
+        failureTurnEnded = true;
       }
     }
 
@@ -532,7 +550,13 @@ export function createStreamJsonCollector(
       return eventCount > 0;
     },
     getNoResultReason(): string | null {
-      if (resultText !== null) return null;
+      if (
+        resultText !== null &&
+        failureTurnEnded &&
+        !resultIsError &&
+        lastResultSubtype === 'success'
+      )
+        return null;
       if (eventCount === 0) return null;
       if (lastResultSubtype && lastResultSubtype !== 'success') {
         const cls =
@@ -593,9 +617,6 @@ export function createStreamJsonCollector(
     },
     hadResultError(): boolean {
       return resultIsError;
-    },
-    hadAuthFailure(): boolean {
-      return lastAssistantError === AUTH_FAILED_ERROR_CODE;
     },
     getAssistantErrorCode(): string | null {
       return lastAssistantError;

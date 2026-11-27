@@ -88,19 +88,21 @@ afterEach(() => vi.restoreAllMocks());
 describe('the collector reads the CLI authentication error code', () => {
   it.each(RECORDINGS)('flags the %s recording and still reports no result', (_n, file) => {
     const c = collect(recording(file));
-    expect(c.hadAuthFailure()).toBe(true);
+    expect(c.getAssistantErrorCode()).toBe('authentication_failed');
     expect(c.getResult()).toBeNull();
   });
 
   it('does not flag a stream whose assistant events carry no error code', () => {
-    expect(collect(init + assistant('hello') + okResult('hello')).hadAuthFailure()).toBe(false);
+    expect(
+      collect(init + assistant('hello') + okResult('hello')).getAssistantErrorCode(),
+    ).toBeNull();
   });
 
   it.each(['rate_limit', 'server_error', 'overloaded', 'billing_error'])(
-    'does not flag the %s code',
+    'preserves the distinct %s code',
     (code) => {
       const c = collect(init + assistant('x', { error: code }) + failedResult('x'));
-      expect(c.hadAuthFailure()).toBe(false);
+      expect(c.getAssistantErrorCode()).toBe(code);
     },
   );
 });
@@ -147,7 +149,7 @@ describe('only the structural field makes a run an authentication failure', () =
       assistant('x', { error: 'authentication_failed' }) +
       assistant('all good') +
       okResult('all good');
-    expect(collect(stdout).hadAuthFailure()).toBe(false);
+    expect(collect(stdout).getAssistantErrorCode()).toBeNull();
     const { outcome, message } = await run(stdout, 0, 'claude-code');
     expect(outcome.streamFailureClass).toBeUndefined();
     expect(message).toBe(outcome.errorMessage ?? null);
@@ -160,7 +162,7 @@ describe('only the structural field makes a run an authentication failure', () =
       assistant('x', { error: 'authentication_failed' }) +
       assistant('retrying') +
       failedResult('something else broke');
-    expect(collect(stdout).hadAuthFailure()).toBe(false);
+    expect(collect(stdout).getAssistantErrorCode()).toBeNull();
     const { outcome, message } = await run(stdout, 1, 'claude-code');
     expect(outcome.streamFailureClass).toBeUndefined();
     expect(fatalClassFromMessage(message)).toBeNull();
@@ -172,7 +174,7 @@ describe('only the structural field makes a run an authentication failure', () =
       assistant('main') +
       assistant('sub', { error: 'authentication_failed', parent_tool_use_id: 'toolu_1' }) +
       failedResult('something else broke');
-    expect(collect(stdout).hadAuthFailure()).toBe(false);
+    expect(collect(stdout).getAssistantErrorCode()).toBeNull();
     const { outcome, message } = await run(stdout, 1, 'claude-code');
     expect(outcome.streamFailureClass).toBeUndefined();
     expect(fatalClassFromMessage(message)).toBeNull();
@@ -184,7 +186,7 @@ describe('only the structural field makes a run an authentication failure', () =
       assistant('x', { error: 'authentication_failed' }) +
       assistant('sub', { parent_tool_use_id: 'toolu_1' }) +
       failedResult('x');
-    expect(collect(stdout).hadAuthFailure()).toBe(true);
+    expect(collect(stdout).getAssistantErrorCode()).toBe('authentication_failed');
   });
 
   it.each([137, 130, 143])('exit %i still returns the stopped sentence', async (code) => {

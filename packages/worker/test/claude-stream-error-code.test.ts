@@ -206,11 +206,6 @@ describe('the collector reads the last top-level assistant error code', () => {
     expect(collect(assistant('a', { error: 7 })).getAssistantErrorCode()).toBeNull();
     expect(collect(assistant('a', { error: { code: 'x' } })).getAssistantErrorCode()).toBeNull();
   });
-
-  it('keeps hadAuthFailure true only for authentication_failed', () => {
-    expect(collect(assistant('a', { error: 'authentication_failed' })).hadAuthFailure()).toBe(true);
-    expect(collect(assistant('a', { error: 'account_on_hold' })).hadAuthFailure()).toBe(false);
-  });
 });
 
 function expectClass(
