@@ -1224,7 +1224,7 @@ In `martinambrus/haive-module-translator`. The owner's English-to-Slovak run fai
 
 ### T781 · new-work-fence-db revival tests race a 5 s lock bound against a 5 s observer
 
-status: open · kind: test-flake · found: PR #1354 CI (T308 fix-3 analysis) 2026-11-27 · priority: P3
+status: done 2026-11-27, merged #1357 (test only: both lock bounds injected, observer derived from them; 20/20 green under jitter) · kind: test-flake · found: PR #1354 CI (T308 fix-3 analysis) 2026-11-27 · priority: P3
 
 `api/test/new-work-fence-db.test.ts` "a revival beside a repository lock another transaction holds" cases assert the request is not still pending after 5 s while the route's lock wait is also bounded at about 5 s. On origin/main four local runs gave 56/56, 54/56, 55/56, 55/56; CI run 45921364127 failed the submit case. Evidence: `.claude/tmp/codex-run/T308-S/fix-3/ci-verdicts.txt` and `postgres-main-new-work-repeat*.log`.
 
