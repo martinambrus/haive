@@ -22,16 +22,22 @@ const h = vi.hoisted(() => ({
   state: 'normal',
   reads: [] as string[],
   queued: [] as string[],
-  lockTimeoutMs: 30_000,
+  lockTimeoutMs: undefined as number | undefined,
 }));
 
 vi.mock('../src/db.js', () => ({ getDb: () => h.db }));
-vi.mock('@haive/database', async (importOriginal) => ({
-  ...(await importOriginal<typeof import('@haive/database')>()),
-  get REPOSITORY_TASKS_LOCK_TIMEOUT_MS() {
-    return h.lockTimeoutMs;
-  },
-}));
+vi.mock('@haive/database', async (importOriginal) => {
+  const database = await importOriginal<typeof import('@haive/database')>();
+  return {
+    ...database,
+    get REPOSITORY_TASKS_LOCK_TIMEOUT_MS() {
+      return h.lockTimeoutMs ?? database.REPOSITORY_TASKS_LOCK_TIMEOUT_MS;
+    },
+    get TASK_START_LOCK_TIMEOUT_MS() {
+      return h.lockTimeoutMs ?? database.TASK_START_LOCK_TIMEOUT_MS;
+    },
+  };
+});
 vi.mock('../src/queues.js', () => {
   const queue = () => ({
     getRanges: async () => [],
@@ -548,6 +554,8 @@ describe.skipIf(!url)('the new-work fence on Postgres', () => {
 
   describe('a revival beside a repository lock another transaction holds', () => {
     const BOUND_MS = 400;
+    // Both route lock bounds use BOUND_MS; leave room for rollback and the response after it.
+    const OBSERVER_TIMEOUT_MS = 10 * BOUND_MS;
     const BUSY = { error: 'The repository is busy, try again', code: null };
     const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -555,7 +563,7 @@ describe.skipIf(!url)('the new-work fence on Postgres', () => {
       h.lockTimeoutMs = BOUND_MS;
     });
     afterAll(() => {
-      h.lockTimeoutMs = 30_000;
+      h.lockTimeoutMs = undefined;
     });
 
     const hold = async (
@@ -647,7 +655,7 @@ describe.skipIf(!url)('the new-work fence on Postgres', () => {
           await untilBlocked('ExclusiveLock');
           outcome = await Promise.race([
             request.then((res) => ({ res, ms: Date.now() - started })),
-            sleep(5_000).then(() => 'pending' as const),
+            sleep(OBSERVER_TIMEOUT_MS).then(() => 'pending' as const),
           ]);
         } finally {
           moving.release();
@@ -655,7 +663,9 @@ describe.skipIf(!url)('the new-work fence on Postgres', () => {
           await request?.catch(() => undefined);
         }
 
-        expect(outcome, 'the request is still pending after 5 s').not.toBe('pending');
+        expect(outcome, `the request is still pending after ${OBSERVER_TIMEOUT_MS} ms`).not.toBe(
+          'pending',
+        );
         const { res, ms } = outcome as { res: Response; ms: number };
         expect(res.status).toBe(409);
         expect(await res.json()).toEqual(BUSY);
