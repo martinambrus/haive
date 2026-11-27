@@ -1222,6 +1222,15 @@ In `martinambrus/haive-module-translator`. The owner's English-to-Slovak run fai
 
 1. Accept a declined form (same stem, up to 2 trailing letters changed on words of 5+ letters) at every keep-term check; a translated name still fails; codes and short words stay exact. Then the owner Retries the step.
 
+### T778 · Settlement siblings still act on a Retry-revived task
+
+status: open · kind: bug · found: T542 review 2026-11-27 (found-not-fixed) · priority: P3
+
+T542 fences the five destructive settlement members under the task row lock. Siblings in the same settlement functions still act without the status recheck: `reconcileKbAuthorEntryOnTaskEnd(db, taskId, 'failed')` (`worker/src/queues/task-queue.ts` ~:1136, `_global-kb-promote.ts` ~:745-789) can mark a Retry-revived task's kb_author entry `failed`; `defaultContainerCleanup` (dormant in production) and `resyncAfterTaskEnd` (idempotent writes) are lower risk. Boot-time `auth-volume-reaper.ts` is T543.
+
+1. Gate `reconcileKbAuthorEntryOnTaskEnd` on the same task fence T542 added (`shared/src/task-fence.ts`), with a control where Retry races the failed settlement.
+2. Confirm or rule out the other two with file:line.
+
 ### T777 · Collapsed step terminal keeps a stale "1 live" after the run ends
 
 status: open · kind: bug · found: session live check e06ad873 2026-11-27 · priority: P3
