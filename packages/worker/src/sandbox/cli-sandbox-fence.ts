@@ -1,5 +1,5 @@
 import { and, eq, isNull, sql } from 'drizzle-orm';
-import { schema, type Database } from '@haive/database';
+import { canonicalUuid, schema, type Database } from '@haive/database';
 import type { DbHandle } from '../step-engine/merge-dir-claim.js';
 
 const LOCK_RETRY_FIRST_MS = 100;
@@ -16,7 +16,7 @@ async function inTaskSandboxFence<T>(
   for (;;) {
     const got = await db.transaction(async (tx) => {
       const rows = await tx.execute<{ ok: boolean }>(
-        sql`select pg_try_advisory_xact_lock(hashtextextended(${`cli-sandbox:${taskId}`}, 0)) as ok`,
+        sql`select pg_try_advisory_xact_lock(hashtextextended(${`cli-sandbox:${canonicalUuid(taskId)}`}, 0)) as ok`,
       );
       return rows[0]?.ok ? { value: await fn(tx) } : null;
     });

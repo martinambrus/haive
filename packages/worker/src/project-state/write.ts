@@ -9,7 +9,13 @@ import { admitWatchedCheckout } from './watch-admission.js';
 import { randomUUID } from 'node:crypto';
 import { basename } from 'node:path';
 import { and, asc, eq, inArray, isNull, sql } from 'drizzle-orm';
-import { isRootClaimLive, lockRepositoryTasksKey, schema, type Database } from '@haive/database';
+import {
+  canonicalUuid,
+  isRootClaimLive,
+  lockRepositoryTasksKey,
+  schema,
+  type Database,
+} from '@haive/database';
 import {
   lstatNoFollow,
   openDirNoFollow,
@@ -89,7 +95,7 @@ type Tx = Parameters<Parameters<Database['transaction']>[0]>[0];
 /** Before project-state reads and writes; when the task-creation key is needed, take it first. */
 export async function lockProjectState(tx: Tx, repositoryId: string): Promise<void> {
   await tx.execute(
-    sql`select pg_advisory_xact_lock(hashtextextended(${`project-state:${repositoryId}`}, 0))`,
+    sql`select pg_advisory_xact_lock(hashtextextended(${`project-state:${canonicalUuid(repositoryId)}`}, 0))`,
   );
 }
 
