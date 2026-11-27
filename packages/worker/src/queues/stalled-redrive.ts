@@ -33,7 +33,7 @@ import { BundleOrphanSweeper, type BundleOrphanSweepOptions } from '../repo/bund
 import { resyncAfterTaskEnd } from '../project-state/set-aside.js';
 import { supersedeTaskRuns } from '../sandbox/cli-sandbox-fence.js';
 import { killCliSandboxesForTask, listCliSandboxesForTask } from '../sandbox/sandbox-kill.js';
-import { recordLeftOpenMerges } from '../step-engine/left-open-merge.js';
+import { MID_MERGE_PHASES, recordLeftOpenMerges } from '../step-engine/left-open-merge.js';
 import { releaseTaskMergeClaims } from '../step-engine/merge-dir-claim.js';
 import { discardPlanMerge } from '../step-engine/steps/plan/01-plan-merge.js';
 import {
@@ -797,42 +797,76 @@ async function abandonTeardown(db: Database, taskId: string, reason: string): Pr
   return true;
 }
 
-/** Finishes as abandoned the cancel of a task still holding a merge dir claim that the re-drive no
- *  longer retries: capped with its last attempt past the cutoff, or cancelled before the window. */
+/** Finishes as abandoned the cancel of a task holding a claim or recording a merge in flight that the
+ *  re-drive no longer retries: capped with its last attempt past the cutoff, or cancelled before the window. */
 export async function abandonCancelledTeardowns(
   db: Database,
   deps: Pick<CancelRedriveDeps, 'queuedCancelTaskIds'> = defaultCancelDeps,
-  opts: { staleMs: number },
+  opts: { staleMs: number; batchSize?: number },
 ): Promise<number> {
   const now = Date.now();
   const cutoff = new Date(now - opts.staleMs);
   const since = new Date(now - CANCEL_REDRIVE_LOOKBACK_MS);
   const event = taskEventsOf(db);
   const attemptCount = sql`(select count(*)::int from ${schema.taskEvents} where ${schema.taskEvents.taskId} = ${schema.tasks.id} and ${schema.taskEvents.eventType} = ${CANCEL_REDRIVEN_EVENT})`;
-  const candidates = await db
-    .select({ taskId: schema.tasks.id, attempts: sql<number>`${attemptCount}` })
-    .from(schema.tasks)
-    .where(
+  const eligible = and(
+    eq(schema.tasks.status, 'cancelled'),
+    not(exists(event('task.cancel_finished'))),
+    // A live/recent CANCEL retains its turn, including one that ran at the re-drive cap.
+    not(exists(event('task.cancelled', gte(schema.taskEvents.createdAt, cutoff)))),
+    // Restamped before each attempt, so a failure (or worker death) cannot monopolize LIMIT.
+    lt(schema.tasks.updatedAt, cutoff),
+    or(
+      exists(
+        db
+          .select({ one: sql`1` })
+          .from(schema.mergeDirClaims)
+          .where(eq(schema.mergeDirClaims.taskId, schema.tasks.id)),
+      ),
+      exists(
+        db
+          .select({ one: sql`1` })
+          .from(schema.taskSteps)
+          .where(
+            and(
+              eq(schema.taskSteps.taskId, schema.tasks.id),
+              inArray(sql`${schema.taskSteps.mergeResolveState}->>'phase'`, [...MID_MERGE_PHASES]),
+            ),
+          ),
+      ),
       and(
-        eq(schema.tasks.status, 'cancelled'),
-        not(exists(event('task.cancel_finished'))),
+        isNotNull(schema.tasks.worktreePath),
         exists(
           db
             .select({ one: sql`1` })
-            .from(schema.mergeDirClaims)
-            .where(eq(schema.mergeDirClaims.taskId, schema.tasks.id)),
-        ),
-        or(
-          and(
-            sql`${attemptCount} >= ${CANCEL_REDRIVE_MAX}`,
-            not(exists(event(CANCEL_REDRIVEN_EVENT, gte(schema.taskEvents.createdAt, cutoff)))),
-          ),
-          not(exists(event('task.cancelled', gt(schema.taskEvents.createdAt, since)))),
+            .from(schema.taskDagLevels)
+            .innerJoin(
+              schema.taskDagPlans,
+              eq(schema.taskDagPlans.id, schema.taskDagLevels.dagPlanId),
+            )
+            .where(
+              and(
+                eq(schema.taskDagPlans.taskId, schema.tasks.id),
+                sql`coalesce(${schema.taskDagLevels.mergeState}->>'activeConflict', '') <> ''`,
+              ),
+            ),
         ),
       ),
-    )
+    ),
+    or(
+      and(
+        sql`${attemptCount} >= ${CANCEL_REDRIVE_MAX}`,
+        not(exists(event(CANCEL_REDRIVEN_EVENT, gte(schema.taskEvents.createdAt, cutoff)))),
+      ),
+      not(exists(event('task.cancelled', gt(schema.taskEvents.createdAt, since)))),
+    ),
+  );
+  const candidates = await db
+    .select({ taskId: schema.tasks.id, attempts: sql<number>`${attemptCount}` })
+    .from(schema.tasks)
+    .where(eligible)
     .orderBy(asc(schema.tasks.updatedAt))
-    .limit(CANCEL_REDRIVE_BATCH);
+    .limit(opts.batchSize ?? CANCEL_REDRIVE_BATCH);
   if (candidates.length === 0) return 0;
 
   const queued = await deps.queuedCancelTaskIds();
@@ -846,10 +880,18 @@ export async function abandonCancelledTeardowns(
         ? 're-drive cap reached'
         : 'cancelled before the re-drive window';
     try {
+      // Claim only after the queue was readable and this task had no live CANCEL. Repeat the
+      // eligibility check so a fresh cancel or a competing pass cannot lose its turn.
+      const [claimed] = await db
+        .update(schema.tasks)
+        .set({ updatedAt: new Date() })
+        .where(and(eq(schema.tasks.id, t.taskId), eligible))
+        .returning({ id: schema.tasks.id });
+      if (!claimed) continue;
       if (await abandonTeardown(db, t.taskId, reason)) abandoned++;
     } catch (err) {
       log.error(
-        { err, taskId: t.taskId },
+        { err, taskId: t.taskId, code: 'cancel_abandon_failed' },
         'the teardown of a cancelled task could not be abandoned',
       );
     }

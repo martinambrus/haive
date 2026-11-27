@@ -81,7 +81,7 @@ import { writeStepCliChoice } from '../../lib/step-cli-choice.js';
 import { refuseDeadTask } from '../../lib/task-dead.js';
 import { loadStepFlags, loadTaskStepFlags } from '../../lib/step-flags.js';
 import {
-  clearCancelledTaskPause,
+  auditCancelledTaskPause,
   appendTaskEvent,
   enrichStepsWithActiveRole,
   enrichStepsWithAgentCounts,
@@ -2152,8 +2152,8 @@ stepRoutes.post('/:id/steps/:stepId/action', async (c) => {
     await stopActiveCliInvocations(db, id, { failTask: false });
     const result = await db.transaction((tx) => cancelTaskIfOpen(tx, id, { by: userId }));
     if (!result.cancelled) return c.json({ ok: true, status: result.status });
-    // Cancel ends the pause as well; step actions refuse this terminal task.
-    await clearCancelledTaskPause(db, id, userId, task.userId);
+    // The cancel transaction ended the pause; retain its administrator-resume audit.
+    if (result.clearedPause) await auditCancelledTaskPause(db, id, userId, task.userId);
     await enqueueCancelJob(id, userId);
     await appendTaskEvent(db, id, step.id, 'step.abort', { stepId, note: body.note ?? null });
     return c.json({ ok: true, status: 'cancelled' });

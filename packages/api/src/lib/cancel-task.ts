@@ -62,6 +62,8 @@ export async function cancelTaskRow(
     .update(schema.tasks)
     .set({
       status: 'cancelled',
+      // Cancel ends the hold in the same write, including repository deletion.
+      pausedAt: null,
       completedAt: now,
       // Invalidate every advance-step job still queued or delayed for this task. Cancel does not
       // purge the BullMQ queue, so a runtime-slot park kept re-driving itself on a cancelled task
@@ -190,19 +192,23 @@ export async function cancelOpenTasksForRepo(
 /** Cancel one task unless a completion or another cancel already ended it. The decision is made
  *  under the task's locks, not from a status the caller read earlier; a `failed` task stays
  *  cancellable. On `cancelled: false` the caller writes no event and queues no teardown, since
- *  another writer ended the task; `status` is what was found then (undefined for a task that is gone). */
+ *  another writer ended the task; `status` is what was found then (undefined for a task that is gone).
+ *  `clearedPause` comes from the locked read, so post-commit auditing needs no second task write. */
 export async function cancelTaskIfOpen(
   tx: DbTx,
   taskId: string,
   opts: { by: string; reason?: string },
-): Promise<{ cancelled: true } | { cancelled: false; status: TaskStatus | undefined }> {
+): Promise<
+  { cancelled: true; clearedPause?: true } | { cancelled: false; status: TaskStatus | undefined }
+> {
   const open = await cancelStillOpen(
     tx,
     [taskId],
     notInArray(schema.tasks.status, ['completed', 'cancelled']),
     opts,
   );
-  if (open.length > 0) return { cancelled: true };
+  if (open.length > 0)
+    return { cancelled: true, ...(open[0]!.clearedPause ? { clearedPause: true as const } : {}) };
   const [found] = await tx
     .select({ status: schema.tasks.status })
     .from(schema.tasks)
@@ -224,10 +230,10 @@ async function cancelStillOpen(
   ids: string[],
   isOpen: SQL | undefined,
   opts: { by: string; reason?: string },
-): Promise<Array<{ id: string }>> {
+): Promise<Array<{ id: string; clearedPause?: true }>> {
   const locked = await lockStepRows(tx, inArray(schema.taskSteps.taskId, ids));
   const open = await tx
-    .select({ id: schema.tasks.id })
+    .select({ id: schema.tasks.id, pausedAt: schema.tasks.pausedAt })
     .from(schema.tasks)
     .where(and(inArray(schema.tasks.id, ids), isOpen))
     .orderBy(schema.tasks.id)
@@ -236,7 +242,7 @@ async function cancelStillOpen(
     const rows = locked.filter((row) => row.taskId === t.id).map((row) => row.id);
     await cancelTaskRow(tx, t.id, opts, rows);
   }
-  return open;
+  return open.map((t) => ({ id: t.id, ...(t.pausedAt ? { clearedPause: true as const } : {}) }));
 }
 
 /** Collect the unique project names that the deleted repository's tasks

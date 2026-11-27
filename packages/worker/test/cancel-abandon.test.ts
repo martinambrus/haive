@@ -62,7 +62,6 @@ vi.mock('../src/project-state/set-aside.js', async (importOriginal) => ({
 import {
   abandonCancelledTeardowns,
   CANCEL_REDRIVE_BATCH,
-  CANCEL_REDRIVE_LOOKBACK_MS,
   CANCEL_REDRIVE_MAX,
   redriveCancelledTasks,
   StalledTaskSweeper,
@@ -87,6 +86,7 @@ interface Seen {
   where?: unknown;
   limit?: number;
   inserted: Record<string, unknown>[];
+  claims: { sql: string; params: unknown[] }[];
 }
 
 const finished = (events: { taskId?: unknown; eventType?: unknown }[], taskId: string) =>
@@ -98,9 +98,9 @@ const finished = (events: { taskId?: unknown; eventType?: unknown }[], taskId: s
  *  steps and the record can be read off one list. */
 function makeDb(
   rows: { taskId: string; attempts: number }[],
-  opts: { insertFailsFor?: string } = {},
+  opts: { insertFailsFor?: string; claimRefused?: boolean } = {},
 ): { db: Database; seen: Seen } {
-  const seen: Seen = { inserted: [] };
+  const seen: Seen = { inserted: [], claims: [] };
   const real = drizzle.mock();
   const outer = {
     from: () => ({
@@ -120,6 +120,16 @@ function makeDb(
   const db = {
     select: (fields: Parameters<typeof real.select>[0] & object) =>
       'taskId' in fields ? outer : real.select(fields),
+    update: () => ({
+      set: () => ({
+        where: (cond: unknown) => ({
+          returning: async () => {
+            seen.claims.push(rendered(cond));
+            return opts.claimRefused ? [] : [{ id: 'claimed' }];
+          },
+        }),
+      }),
+    }),
     insert: () => ({
       values: async (v: Record<string, unknown>) => {
         if (v.taskId === opts.insertFailsFor) throw new Error('db blinked');
@@ -180,6 +190,9 @@ function makeRedriveDb(taskIds: string[], priorAttempts = 0) {
         ? candidates((id) => redriven(id) < CANCEL_REDRIVE_MAX, true)
         : candidates((id) => redriven(id) >= CANCEL_REDRIVE_MAX && !finished(events, id), false);
     },
+    update: () => ({
+      set: () => ({ where: () => ({ returning: async () => [{ id: 'claimed' }] }) }),
+    }),
     insert: () => ({
       values: (v: Omit<CountedEvent, 'id'>) => {
         const row = { id: `event-${(next += 1)}`, ...v };
@@ -390,11 +403,23 @@ describe('abandonCancelledTeardowns', () => {
     expect(await abandonCancelledTeardowns(db, queued(['task-1']), OPTS)).toBe(1);
     expect(seen.inserted).toEqual([finishRecord('task-2', 're-drive cap reached')]);
     expect(h.log.every((l) => l.endsWith(':task-2'))).toBe(true);
+    expect(seen.claims).toHaveLength(1);
+    expect(seen.claims[0]!.params).toContain('task-2');
+    expect(seen.claims[0]!.params).not.toContain('task-1');
   });
 
   it('does nothing when the task queue cannot be read', async () => {
     const { db, seen } = makeDb([{ taskId: 'task-1', attempts: 3 }]);
     expect(await abandonCancelledTeardowns(db, queued(null), OPTS)).toBe(0);
+    expect(h.log).toEqual([]);
+    expect(seen.inserted).toEqual([]);
+    expect(seen.claims).toEqual([]);
+  });
+
+  it('touches no sandbox, report or finish record when the eligibility compare-and-swap refuses', async () => {
+    const { db, seen } = makeDb([{ taskId: 'task-1', attempts: 3 }], { claimRefused: true });
+    expect(await abandonCancelledTeardowns(db, queued(), OPTS)).toBe(0);
+    expect(seen.claims).toHaveLength(1);
     expect(h.log).toEqual([]);
     expect(seen.inserted).toEqual([]);
   });
@@ -423,7 +448,6 @@ describe('abandonCancelledTeardowns', () => {
   });
 
   it('selects a cancelled task with no finish record that holds a claim, capped or past the window', async () => {
-    const before = Date.now();
     const { db, seen } = makeDb([]);
     await abandonCancelledTeardowns(db, queued(), OPTS);
     const { sql, params } = rendered(seen.where);
@@ -439,14 +463,7 @@ describe('abandonCancelledTeardowns', () => {
         CANCEL_REDRIVE_MAX,
       ]),
     );
-    const ages = params
-      .filter((v): v is string => typeof v === 'string' && /^\d{4}-\d\d-\d\dT/.test(v))
-      .map((v) => before - new Date(v).getTime())
-      .sort((x, y) => x - y);
-    expect(ages).toHaveLength(2);
-    expect(ages[0]).toBeGreaterThanOrEqual(OPTS.staleMs - 1000);
-    expect(ages[0]).toBeLessThan(OPTS.staleMs + 5000);
-    expect(ages[1]).toBeGreaterThanOrEqual(CANCEL_REDRIVE_LOOKBACK_MS - 1000);
+    // Cooldown and lookback boundary behaviour is pinned on Postgres in task-cancel-guard-db.test.ts.
     expect(seen.limit).toBe(CANCEL_REDRIVE_BATCH);
   });
 
@@ -511,6 +528,9 @@ describe('StalledTaskSweeper', () => {
     return {
       select: (fields?: object) =>
         fields && 'attempts' in fields && !('userId' in fields) ? abandonCandidates : empty,
+      update: () => ({
+        set: () => ({ where: () => ({ returning: async () => [{ id: 'claimed' }] }) }),
+      }),
       insert: () => ({
         values: async (v: Record<string, unknown>) => {
           h.log.push(`insert:${String(v.eventType)}:${String(v.taskId)}`);

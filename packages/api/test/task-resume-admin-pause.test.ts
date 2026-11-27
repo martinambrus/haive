@@ -528,7 +528,31 @@ describe.each(['cancel', 'abort', 'discard'] as const)('%s clearing a pause', (a
     expect(events(fake)).toEqual([]);
   });
 
-  it('keeps the clear and queues cancellation when the audit savepoint fails', async () => {
+  it('clears the pause in the cancel write, with no post-commit task write, and preserves the abort event', async () => {
+    const fake = seed();
+    expect((await adminPause()).status).toBe(200);
+    let refused = false;
+    fake.hooks.beforeUpdate = async (table) => {
+      if (table !== schema.tasks || fake.rows(schema.tasks)[0]?.status !== 'cancelled') return;
+      refused = true;
+      throw Object.assign(new Error('database unavailable'), { code: '08006' });
+    };
+    const res = await act();
+    expect(refused).toBe(false);
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject(
+      action === 'discard' ? { cancelled: true } : { status: 'cancelled' },
+    );
+    expect(fake.rows(schema.tasks)[0]).toMatchObject({ status: 'cancelled', pausedAt: null });
+    expect(h.add.mock.calls.filter(([name]) => name === TASK_JOB_NAMES.CANCEL)).toHaveLength(1);
+    if (action === 'abort') {
+      expect(
+        fake.rows(schema.taskEvents).filter((e) => e.eventType === 'step.abort'),
+      ).toMatchObject([{ taskStepId: TARGET_ROW, payload: { stepId: 'test-step', note: null } }]);
+    }
+  });
+
+  it('keeps the clear and queues cancellation when the audit transaction fails', async () => {
     const fake = seed();
     expect((await adminPause()).status).toBe(200);
     let attempted = false;
@@ -538,16 +562,19 @@ describe.each(['cancel', 'abort', 'discard'] as const)('%s clearing a pause', (a
       expect(fake.rows(schema.tasks)[0]).toMatchObject({ status: 'cancelled', pausedAt: null });
       throw new Error('audit insert refused');
     };
-    const warn = vi.spyOn(logger, 'warn').mockImplementation(() => undefined);
+    const error = vi.spyOn(logger, 'error').mockImplementation(() => undefined);
     try {
       expect((await act()).status).toBe(200);
       expect(attempted).toBe(true);
       expectCancelled(fake);
       expect(audits(fake)).toEqual([]);
       expect(events(fake)).toEqual([]);
-      expect(warn).toHaveBeenCalledTimes(1);
+      expect(error).toHaveBeenCalledWith(
+        expect.objectContaining({ code: 'cancel_pause_audit_failed', taskId: TASK }),
+        expect.any(String),
+      );
     } finally {
-      warn.mockRestore();
+      error.mockRestore();
     }
   });
 });

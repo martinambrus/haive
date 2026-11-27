@@ -129,6 +129,7 @@ describe('cancelTaskRow', () => {
     expect(recorded.updateCalls[0]?.table).toBe(schema.tasks);
     expect(recorded.updateCalls[0]?.set).toMatchObject({
       status: 'cancelled',
+      pausedAt: null,
       completedAt: fixedNow,
       updatedAt: fixedNow,
     });
@@ -260,12 +261,11 @@ describe('cancelOpenTasksForRepo', () => {
     expect(recorded.insertCalls).toEqual([]);
   });
 
-  it('queries with the right column projection and table', async () => {
+  it('reads the id and pause marker under the task lock', async () => {
     const { tx, recorded } = makeFakeTx([{ id: 't1' }]);
     await cancelOpenTasksForRepo(tx, 'repo-1', 'user-1');
-    // Only the id column is selected — we don't need anything else to drive
-    // the cancel + enqueue path.
-    expect(recorded.selectArgs).toEqual({ id: schema.tasks.id });
+    // The locked read also identifies the pause this cancel clears for post-commit auditing.
+    expect(recorded.selectArgs).toEqual({ id: schema.tasks.id, pausedAt: schema.tasks.pausedAt });
     expect(recorded.fromArg).toBe(schema.tasks);
   });
 });
