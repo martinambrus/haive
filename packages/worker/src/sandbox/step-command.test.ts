@@ -336,7 +336,22 @@ describe('runStepCommandInSandbox', () => {
     const onWait = vi.fn();
     const signal = new AbortController().signal;
     await runStepCommandInSandbox(ctx({ signal }), { argv: ['pnpm'], timeoutMs: 1, onWait });
-    expect(acquireAgentLease.mock.calls[0]![1]).toEqual({ signal, onWait });
+    const options = acquireAgentLease.mock.calls[0]![1]!;
+    expect(options.signal).toBe(signal);
+    options.onWait?.(1, 2);
+    expect(onWait).toHaveBeenCalledWith(1, 2);
+  });
+
+  it('shows Redis outage copy without claiming the agent pool is full', async () => {
+    ran(0);
+    const onWait = vi.fn();
+    const emitProgress = vi.fn(async () => {});
+    await runStepCommandInSandbox(ctx({ emitProgress }), { argv: ['pnpm'], timeoutMs: 1, onWait });
+    acquireAgentLease.mock.calls[0]![1]!.onWait?.(0, 2, 'redis_unavailable');
+    expect(emitProgress).toHaveBeenCalledWith(
+      'Waiting for Redis to recover before acquiring an agent slot...',
+    );
+    expect(onWait).not.toHaveBeenCalled();
   });
 
   it("gives the sandbox the task's app reach as an agent gets it", async () => {

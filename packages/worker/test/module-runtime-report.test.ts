@@ -101,6 +101,19 @@ describe('the per-module runtime in the worker report', () => {
     vi.restoreAllMocks();
   });
 
+  it('publishes boot on the patient client and later changes on the finite client', async () => {
+    const m = makeModule('rt-clients');
+    const patient = fakeRedis();
+    const finite = fakeRedis();
+    await publishWorkerBootReport(patient.redis, [m.loaded], {}, {}, finite.redis);
+    expect(patient.set).toHaveBeenCalledOnce();
+    expect(finite.set).not.toHaveBeenCalled();
+    const handle = await startModuleJobs([m.loaded], [m.entry]);
+    expect(finite.set).toHaveBeenCalled();
+    expect(patient.set).toHaveBeenCalledOnce();
+    await handle.stopAll();
+  });
+
   it('W1 reports a module whose jobs started at boot as ready, and leaves the other fields as published', async () => {
     const m = makeModule('rt-w1');
     const { set, handle } = await boot([m]);

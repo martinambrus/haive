@@ -11,7 +11,7 @@ import {
 } from '@haive/shared';
 import { waitForDatabaseReady } from '@haive/database';
 import { initDatabase } from './db.js';
-import { initRedis, getRedis } from './redis.js';
+import { initRedis, getPatientRedis } from './redis.js';
 import { runDataMigrations } from './data-migrations.js';
 import { syncTemplateManifestCache } from './step-engine/template-manifest.js';
 
@@ -59,7 +59,7 @@ export async function bootstrap(): Promise<BootstrapResult> {
       version: getHaiveVersion(),
       startedAt: new Date().toISOString(),
     };
-    await getRedis().set(WORKER_RUNTIME_VERSION_KEY, JSON.stringify(runtime));
+    await getPatientRedis().set(WORKER_RUNTIME_VERSION_KEY, JSON.stringify(runtime));
   } catch (err) {
     logger.warn({ err }, 'could not publish worker runtime version');
   }

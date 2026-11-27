@@ -23,7 +23,7 @@ const h = vi.hoisted(() => {
   return { redis, reset: () => (calls = []), calls: () => calls };
 });
 
-vi.mock('../redis.js', () => ({ getRedis: () => h.redis }));
+vi.mock('../redis.js', () => ({ getRedis: () => h.redis, getPatientRedis: () => h.redis }));
 
 import {
   publishCliChunk,

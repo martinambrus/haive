@@ -25,3 +25,11 @@ A CLI run takes the same fence for its whole length (`whileTaskRunnersBusy` in `
 for a decision in progress before it starts, and counts as busy while it runs.
 `runner-exec-fence-guard.test.ts` fails any attached `docker exec` in the runner modules that does
 not run inside `whileRunnerBusy`, or in a function only ever called there.
+
+Cold-boot reservation reads follow the unreadable-limits policy: a coded Redis outage polls
+every two seconds for up to eight minutes (injectable read bounds), honoring Stop/abort,
+then throws the retryable outage. Recovery reads the same task reservation before joining
+the local queue, so a brief outage neither boots past unknown capacity nor queues a task
+behind its own reservation. A polling agent-lease acquire similarly keeps one UUID across
+attempts: a timed-out EVAL may already have reserved that field. Outage progress identifies
+Redis recovery rather than reporting an occupied agent pool.

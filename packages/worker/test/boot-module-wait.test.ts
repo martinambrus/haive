@@ -17,6 +17,9 @@ const h = vi.hoisted(() => {
 
 vi.mock('../src/redis.js', () => ({
   getRedis: () => ({ set: async (_key: string, value: string) => void h.reports.push(value) }),
+  getPatientRedis: () => ({
+    set: async (_key: string, value: string) => void h.reports.push(value),
+  }),
   getBullRedis: () => ({}),
 }));
 vi.mock('../src/db.js', () => ({ getDb: () => ({}) }));

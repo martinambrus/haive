@@ -13,8 +13,8 @@ const log = logger.child({ module: 'login-container-reaper' });
 // Old API: up to 2 min before start, then 10 min session + 30 s teardown; round up.
 export const LEGACY_LOGIN_GRACE_MS = 13 * 60_000;
 export const LOGIN_REAPER_INTERVAL_MS = 30_000;
-// The worker's Redis client has no command timeout and queues offline, so a stalled server
-// would otherwise hold the pass, and with it every later pass, indefinitely.
+// Backstop for an injected patient client; the worker's finite client usually rejects sooner.
+// An unreadable lease keeps every container for this pass.
 export const LOGIN_LEASE_READ_TIMEOUT_MS = 5_000;
 const DOCKER_TIMEOUT_MS = 10_000;
 

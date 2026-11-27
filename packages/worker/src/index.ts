@@ -7,7 +7,7 @@ import { bootstrap } from './bootstrap.js';
 import { startBackgroundDataMigrations } from './data-migrations.js';
 import { initBuildStamp } from './build-stamp.js';
 import { getDb } from './db.js';
-import { getRedis } from './redis.js';
+import { getPatientRedis, getRedis } from './redis.js';
 import { scheduleBundleGitSyncTick, startBundleWorker } from './queues/bundle-queue.js';
 import {
   scheduleGlobalKbPurge,
@@ -135,10 +135,10 @@ async function main(): Promise<void> {
   // Drop runtime slot reservations left by the previous process. The reap above removed every
   // runtime runner, so a reservation from before this boot can only describe a boot that no
   // longer exists — leaving it would hold a slot out of the pool until its 45-min expiry.
-  await clearRuntimeReservations();
-  await clearAgentLeases();
+  await clearRuntimeReservations(getPatientRedis());
+  await clearAgentLeases(getPatientRedis());
   // Same reasoning for the browser-desktop surcharges: every runner they described is gone.
-  await clearBrowserSurcharges();
+  await clearBrowserSurcharges(getPatientRedis());
   // Before this process starts a worker, whose connection would read as the owner of every active job.
   await requeueOrphanedActiveJobs(getTaskQueue(), () => true);
   await requeueOrphanedActiveJobs(getCliExecQueue(), cliExecJobRequeuedAtBoot);
@@ -253,7 +253,7 @@ async function main(): Promise<void> {
   // Terminal subsystem: session manager subscribes to terminal:request and
   // owns per-WS PTY exec. Reaper sweeps every 30s for refcount==0 entries
   // older than the grace window. Both are no-ops until an open arrives.
-  const terminalManager = new TerminalSessionManager({ db: getDb(), redis: getRedis() });
+  const terminalManager = new TerminalSessionManager({ db: getDb(), redis: getPatientRedis() });
   await terminalManager.start();
   const terminalReaper = new TerminalSessionReaper({ redis: getRedis() });
   terminalReaper.start();

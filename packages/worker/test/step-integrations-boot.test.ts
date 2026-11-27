@@ -4,7 +4,10 @@ import type { ComposableStepEntry, IntegrationRequirement } from '@haive/shared/
 import type { StepDefinition } from '../src/step-engine/step-definition.js';
 import { realStepIntegrations } from './support/step-integrations-contract.js';
 
-vi.mock('../src/redis.js', () => ({ getRedis: () => ({ set: async () => 'OK' }) }));
+vi.mock('../src/redis.js', () => ({
+  getRedis: () => ({ set: async () => 'OK' }),
+  getPatientRedis: () => ({ set: async () => 'OK' }),
+}));
 vi.mock('../src/step-engine/task-type-seed.js', () => ({
   syncTaskTypeDefinitions: async () => ({}),
 }));

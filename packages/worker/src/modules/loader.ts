@@ -865,7 +865,8 @@ export async function publishWorkerBootReport(
   loaded: readonly LoadedWorkerModule[],
   schemas: Record<string, ModuleSchemaOutcome>,
   taskTypes: Record<string, ModuleTaskTypeOutcome>,
+  reportRedis: Redis = redis,
 ): Promise<void> {
-  reportState = { redis, loaded, schemas, taskTypes, published: JSON.stringify({}) };
+  reportState = { redis: reportRedis, loaded, schemas, taskTypes, published: JSON.stringify({}) };
   await redis.set(MODULES_LOADED_WORKER_KEY, buildReport({}));
 }

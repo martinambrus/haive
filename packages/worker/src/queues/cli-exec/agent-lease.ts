@@ -1,4 +1,6 @@
+import { REDIS_UNAVAILABLE_CODE } from '@haive/shared/constants';
 import { randomUUID } from 'node:crypto';
+import type { Redis } from 'ioredis';
 import type { Database } from '@haive/database';
 import { getRedis } from '../../redis.js';
 import { log } from './_shared.js';
@@ -76,7 +78,7 @@ export interface AgentLease {
 }
 
 export interface AcquireAgentLeaseOptions {
-  onWait?: (busy: number, cap: number) => void;
+  onWait?: (busy: number, cap: number, reason?: typeof REDIS_UNAVAILABLE_CODE) => void;
   signal?: AbortSignal;
   waitMs?: number;
   pollMs?: number;
@@ -133,17 +135,29 @@ export async function reserveAgentSlot(field: string, cap: number): Promise<Agen
 
 async function attempt(
   deps: AgentLeaseDeps,
-): Promise<{ lease: AgentLease } | { busy: number; cap: number }> {
+  id: string,
+  retryUnavailable = false,
+): Promise<
+  { lease: AgentLease } | { busy: number; cap: number; reason?: typeof REDIS_UNAVAILABLE_CODE }
+> {
   const cap = await deps.agentCap();
-  const id = randomUUID();
-  const got = await reserve(`lease:${id}`, cap);
+  let got: Awaited<ReturnType<typeof reserve>>;
+  try {
+    got = await reserve(`lease:${id}`, cap);
+  } catch (err) {
+    if (!retryUnavailable || (err as { code?: unknown } | null)?.code !== REDIS_UNAVAILABLE_CODE)
+      throw err;
+    log.warn({ err }, 'agent lease attempt got no answer; retrying');
+    // The count is unknown. Keep polling without claiming a slot or running the command.
+    return { busy: 0, cap, reason: REDIS_UNAVAILABLE_CODE };
+  }
   if ('slot' in got) return { lease: { id, release: () => got.slot.release() } };
   return { busy: got.live, cap };
 }
 
 /** A lease if a slot is free right now, else null. */
 export async function tryAcquireAgentLease(deps: AgentLeaseDeps): Promise<AgentLease | null> {
-  const got = await attempt(deps);
+  const got = await attempt(deps, randomUUID());
   return 'lease' in got ? got.lease : null;
 }
 
@@ -157,12 +171,15 @@ export async function acquireAgentLease(
   const waitMs = options.waitMs ?? AGENT_LEASE_WAIT_MS;
   const pollMs = options.pollMs ?? POLL_MS;
   const startedAt = Date.now();
+  // A timed-out EVAL may have inserted it: retries must refresh the same field.
+  const id = randomUUID();
   for (;;) {
     if (signal?.aborted) throw new AgentLeaseAbortedError();
-    const got = await attempt(deps);
+    const got = await attempt(deps, id, true);
     if ('lease' in got) return got.lease;
     if (Date.now() - startedAt >= waitMs) throw new AgentLeaseTimeoutError(waitMs);
-    onWait?.(got.busy, got.cap);
+    if (got.reason) onWait?.(got.busy, got.cap, got.reason);
+    else onWait?.(got.busy, got.cap);
     await new Promise<void>((resolve) => {
       const timer = setTimeout(done, pollMs);
       function done(): void {
@@ -177,9 +194,9 @@ export async function acquireAgentLease(
 
 /** Wipe every lease. Called on worker boot, where every sandbox the previous process started is
  *  reaped, so a lease left behind describes a run that no longer exists. */
-export async function clearAgentLeases(): Promise<void> {
+export async function clearAgentLeases(redis?: Redis): Promise<void> {
   try {
-    await getRedis().del(LEASE_KEY);
+    await (redis ?? getRedis()).del(LEASE_KEY);
   } catch (err) {
     log.warn({ err }, 'clearing agent leases on boot failed');
   }

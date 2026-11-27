@@ -1,3 +1,4 @@
+import { REDIS_UNAVAILABLE_CODE } from '@haive/shared/constants';
 import { composedLspAllowedSet } from '@haive/shared/cli-preferred-provider';
 import { ExecutionContractError } from '@haive/shared/modularity';
 import { gate3InsightCycle, gate3QaDeferred, recordGate3Check } from './insight-gate3-return.js';
@@ -1283,27 +1284,16 @@ async function worktreeMayHoldWork(worktreePath: string | null, taskId: string):
   return true;
 }
 
-/** The worktree half of task cleanup, split out so its decision is testable without docker. */
-export async function releaseTaskWorktree(
+/** The completion policy shared by removal and its deferred-cleanup event. */
+async function completionWorktreeCleanup(
   db: Database,
   taskId: string,
-  reason: 'completed' | 'failed' | 'cancelled',
-): Promise<void> {
-  // Remove the feature worktree. On cancel: always (a task cancelled before its
-  // worktree-cleanup step would leak the dir into the haive_repos volume). On
-  // completion: only for a task whose run list has no worktree-cleanup step of its own.
-  let completed: {
-    type: string;
-    runListSnapshot: string[] | null;
-    worktreePath: string | null;
-  } | null = null;
-  if (reason === 'completed') {
-    const t = await db.query.tasks.findFirst({
+): Promise<{ removeWorktree: boolean; worktreePath: string | null }> {
+  const completed =
+    (await db.query.tasks.findFirst({
       where: eq(schema.tasks.id, taskId),
       columns: { type: true, runListSnapshot: true, worktreePath: true },
-    });
-    completed = t ?? null;
-  }
+    })) ?? null;
 
   // run_app has no 12-worktree-cleanup, so its Finish would otherwise leak the
   // worktree; workflow completion still defers to step 12 (whose `keep` choice must
@@ -1318,10 +1308,23 @@ export async function releaseTaskWorktree(
     runList.includes('01-worktree-setup') &&
     !runList.includes('12-worktree-cleanup') &&
     !runList.includes('12-no-change-cleanup');
-  let removeWorktree = reason === 'cancelled' || completed?.type === 'run_app';
+  let removeWorktree = completed?.type === 'run_app';
   if (customWithoutCleanup) {
     removeWorktree = !(await worktreeMayHoldWork(completed?.worktreePath ?? null, taskId));
   }
+  return { removeWorktree, worktreePath: completed?.worktreePath ?? null };
+}
+
+/** The worktree half of task cleanup, split out so its decision is testable without docker. */
+export async function releaseTaskWorktree(
+  db: Database,
+  taskId: string,
+  reason: 'completed' | 'failed' | 'cancelled',
+): Promise<void> {
+  const removeWorktree =
+    reason === 'completed'
+      ? (await completionWorktreeCleanup(db, taskId)).removeWorktree
+      : reason === 'cancelled';
   if (removeWorktree) {
     try {
       const wt = await removeTaskWorktree(db, taskId);
@@ -1341,6 +1344,32 @@ export async function releaseTaskWorktree(
       }
     } catch (err) {
       logger.warn({ err, taskId, reason }, 'cleanup-task-worktree failed');
+    }
+  }
+}
+
+export const TASK_TERMINAL_REAP_ATTEMPTS = 3;
+export const TASK_TERMINAL_REAP_RETRY_MS = 250;
+
+/** Each attempt uses the finite client: the reap holds a task-row settlement lock. */
+export async function reapTaskTerminals(
+  db: Database,
+  taskId: string,
+  tuning: { attempts?: number; retryMs?: number } = {},
+): Promise<number> {
+  const attempts = tuning.attempts ?? TASK_TERMINAL_REAP_ATTEMPTS;
+  for (let attempt = 1; ; attempt++) {
+    try {
+      return await reapAllSessionsForTask(getRedis(), new Docker(), taskId, db);
+    } catch (err) {
+      if (
+        attempt >= attempts ||
+        (err as { code?: unknown } | null)?.code !== REDIS_UNAVAILABLE_CODE
+      )
+        throw err;
+      await new Promise<void>((resolve) =>
+        setTimeout(resolve, tuning.retryMs ?? TASK_TERMINAL_REAP_RETRY_MS),
+      );
     }
   }
 }
@@ -1512,7 +1541,7 @@ async function cleanupTaskContainers(
   // for recovery) — it only drops the live tmux session, and the next attach
   // rebuilds a container via ensureShellContainer.
   try {
-    const reaped = await reapAllSessionsForTask(getRedis(), new Docker(), taskId, db);
+    const reaped = await reapTaskTerminals(db, taskId);
     if (reaped > 0) {
       await appendEvent(db, taskId, null, 'terminal_sessions.destroyed', {
         reason,
@@ -1520,7 +1549,23 @@ async function cleanupTaskContainers(
       });
     }
   } catch (err) {
-    logger.warn({ err, taskId, reason }, 'cleanup-terminal-sessions failed');
+    logger.warn({ err, taskId, reason }, 'cleanup-terminal-sessions failed; keeping worktree');
+    if (reason === 'cancelled') throw err;
+    if (reason === 'completed') {
+      // Completion has no teardown redrive. Activity exposes a structural retained-tree event.
+      try {
+        const decision = await completionWorktreeCleanup(db, taskId);
+        if (decision.removeWorktree && decision.worktreePath)
+          await appendEvent(db, taskId, null, 'worktree.cleanup_deferred', {
+            reason: 'terminal_reap_failed',
+            taskEndReason: reason,
+            worktreePath: decision.worktreePath,
+          });
+      } catch (eventError) {
+        logger.error({ err: eventError, taskId }, 'retained worktree event not recorded');
+      }
+    }
+    return;
   }
 
   // After the reap, so no live shell can write into the tree between the clean check and removal.
@@ -5127,14 +5172,21 @@ async function handleCancelTask(db: Database, payload: TaskJobPayload): Promise<
   });
   // Before the kill and the listing: a run still queued reads this right before it creates its sandbox.
   await supersedeTaskRuns(db, payload.taskId);
-  await cleanupTaskContainers(db, payload.taskId, 'cancelled');
+  let terminalCleanupFailed = false;
+  let terminalCleanupFailure: unknown;
+  try {
+    await cleanupTaskContainers(db, payload.taskId, 'cancelled');
+  } catch (err) {
+    terminalCleanupFailed = true;
+    terminalCleanupFailure = err;
+  }
   await killCliSandboxesForTask(payload.taskId);
   // The cleanup above swallows docker failures, so the claims and the finish record wait for a
   // listing that shows no sandbox of the task left: a fixer still running may write into the dir.
   const sandboxesGone = (await listCliSandboxesForTask(payload.taskId))?.length === 0;
   let discardFailed = false;
   let discardFailure: unknown;
-  if (sandboxesGone) {
+  if (sandboxesGone && !terminalCleanupFailed) {
     await recordLeftOpenMerges(db, payload.taskId);
     await releaseTaskMergeClaims(db, payload.taskId);
     await discardPlanMerge(db, payload.taskId);
@@ -5161,6 +5213,7 @@ async function handleCancelTask(db: Database, payload: TaskJobPayload): Promise<
       'the cancelled task still has a sandbox container or docker could not list them; its merge dir claims are kept and the stalled re-drive repeats the cancel',
     );
   }
+  if (terminalCleanupFailed) throw terminalCleanupFailure;
   if (discardFailed) throw discardFailure;
   // The teardown above reads this task's rows, so whoever deletes them waits for this record.
   await appendEvent(db, payload.taskId, null, 'task.cancel_finished', { source: 'worker' });

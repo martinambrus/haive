@@ -12,6 +12,9 @@ export * from './secret-env.js';
 
 export const APP_NAME = 'Haive';
 
+/** Stable transport contract shared by Redis outage writers and readers. */
+export const REDIS_UNAVAILABLE_CODE = 'redis_unavailable';
+
 /** Shared manual insight page bound, including copies returned by task polls. */
 export const INSIGHTS_AT_GATE = 30;
 

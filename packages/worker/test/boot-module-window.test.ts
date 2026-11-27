@@ -13,7 +13,10 @@ const h = vi.hoisted(() => ({
   probe: undefined as unknown as (at: string) => Promise<{ at: string; types: unknown[] }>,
 }));
 
-vi.mock('../src/redis.js', () => ({ getRedis: () => ({ set: async () => 'OK' }) }));
+vi.mock('../src/redis.js', () => ({
+  getRedis: () => ({ set: async () => 'OK' }),
+  getPatientRedis: () => ({ set: async () => 'OK' }),
+}));
 vi.mock('../src/modules.generated.js', () => ({
   moduleRegistry: [
     {
