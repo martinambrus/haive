@@ -99,8 +99,11 @@ route can use: a local folder, a remote URL, or a completed upload record belong
 repository's owner whose archive has not been recorded as unavailable. A blank project or a
 clone without a remote cannot be refreshed; the card replaces stale Retry copy with instructions
 to delete and create the repository again from a URL or folder. An ordinary refresh of a `ready` repository keeps it `ready` while queued or running, leaving
-its Terminal, Plan and task links available; a genuine preparation or recovery still uses
-`cloning`. `refresh_pending` (0250, declared last) is set in the admission transaction so the
+its Terminal, Plan and task links available. If the worker proves that checkout unusable and
+escalates to a rebuild, it commits `cloning` before the rename transaction moves the old checkout
+aside, so archive downloads, new Terminal connections and repository Editor starts refuse the
+unfinished checkout. Detection restores `ready` after verification. A genuine preparation or
+recovery also uses `cloning`. `refresh_pending` (0250, declared last) is set in the admission transaction so the
 maintenance page and updater still count queued and running refresh work, including delayed
 retries, independently of availability. A second admission refuses while it is set. A successful
 handler, final failure or failed enqueue clears it; the ordinary stranded-preparation sweep also

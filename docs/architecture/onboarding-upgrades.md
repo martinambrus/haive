@@ -434,10 +434,11 @@ creation and revival of an onboarding, upgrade or rollback takes (advisory key, 
 answered form and the allowance auto-resume run `checkRevive`, and for an upgrade or rollback
 `upgradeAdmission` (`@haive/shared/onboarding-admission`, which the api re-exports), on the locked
 repository row in the transaction that revives. A worker refusal leaves the task failed and records
-`upgrade.revive_refused` with its reason, except for allowance auto-resume: its admission refusals
-throw `RevivalBusy`, leave the watch armed and retry on the existing usage-poll cadence. They
-neither stamp `allowance_replenished_at` nor spend an auto-resume attempt, so a temporary root
-claim cannot turn restored allowance into a final refusal. Live task step Retry, Skip and rerun
+`upgrade.revive_refused` with its reason. For allowance auto-resume, only a root-claim refusal
+throws `RevivalBusy`, leaves the watch armed and retries on the existing usage-poll cadence.
+It neither stamps `allowance_replenished_at` nor spends an auto-resume attempt, so a temporary root
+claim cannot turn restored allowance into a final refusal. Other admission refusals stay final,
+with the recovery notice and `allowance_replenished_at` stamped. Live task step Retry, Skip and rerun
 retain their existing admission; failed or dead tasks must pass the root-claim check again.
 In the api, `revive-write-ratchet.test.ts`
 fails any `.update(schema.tasks)` that may set a live status (a computed one included) unless an

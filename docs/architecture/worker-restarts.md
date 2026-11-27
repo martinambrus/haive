@@ -589,10 +589,11 @@ failure, and `taskQueueOwed` skips it so a retained job holds no stalled redrive
 loses takes back every write before it. While new work is refused it does nothing at all, whatever status it read — no write,
 no job, no attempt spent — and the next poll resumes the task once the state is normal again. When the state cannot be read
 under the fence, or the resume throws anything else, that task stays failed with its watch armed and
-the poll goes on to the next armed task (`checkProviderRecovery`). Revival admission refusals,
-including a root claim, use `RevivalBusy` and retain that watch too: they retry on the existing
-usage-poll cadence (five minutes), without stamping a final allowance notification or spending
-an auto-resume attempt. Live task step Retry, Skip and rerun keep their existing admission;
+the poll goes on to the next armed task (`checkProviderRecovery`). Only a root-claim revival
+refusal uses `RevivalBusy` and retains that watch too: it retries on the existing usage-poll
+cadence (five minutes), without stamping a final allowance notification or spending
+an auto-resume attempt. Other revival admission refusals stay final with the recovery notice and
+`allowance_replenished_at` stamped. Live task step Retry, Skip and rerun keep their existing admission;
 failed or dead tasks must pass root-claim admission again.
 A repository delete cancels its open tasks the same way, step rows before task rows, and takes what
 a Retry takes before that: a plain read that the repository is the caller's own (so a caller who

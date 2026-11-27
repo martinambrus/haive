@@ -128,6 +128,13 @@ describe.skipIf(!url)('Repository security settings commit with their audit, on 
     .route('/repos', repoRoutes);
   const stored = () =>
     db.query.repositories.findFirst({ where: eq(schema.repositories.id, repository) });
+  // pg_stat_activity.query is truncated (1023 bytes by default). Adding a repository
+  // column can push FROM beyond it, so identify the blocker rather than match SQL text.
+  const waitersOn = (pid: number) =>
+    db.execute<{ query: string }>(sql`
+      select a.query from pg_stat_activity a
+      where a.datname = current_database() and ${pid} = any(pg_blocking_pids(a.pid))
+    `);
   beforeAll(() => {
     db = createDatabase(url!);
     h.db = db;
@@ -364,6 +371,7 @@ describe.skipIf(!url)('Repository security settings commit with their audit, on 
       release = resolve;
     });
     let first = true;
+    let holderPid = 0;
     let second: Promise<Response> | undefined;
     h.db = new Proxy(db, {
       get(target, key) {
@@ -372,8 +380,12 @@ describe.skipIf(!url)('Repository security settings commit with their audit, on 
             if (!first) return target.transaction(fn);
             first = false;
             try {
-              return await target.transaction((tx) =>
-                fn(
+              return await target.transaction(async (tx) => {
+                const [holder] = await tx.execute<{ pid: number }>(
+                  sql`select pg_backend_pid() as pid`,
+                );
+                holderPid = holder!.pid;
+                return fn(
                   new Proxy(tx, {
                     get(t, prop) {
                       if (prop === 'update')
@@ -390,8 +402,8 @@ describe.skipIf(!url)('Repository security settings commit with their audit, on 
                       return typeof value === 'function' ? value.bind(t) : value;
                     },
                   }),
-                ),
-              );
+                );
+              });
             } catch (err) {
               // Hold the rejected transaction's caller until its queued successor commits.
               // Restoration after ROLLBACK would then clobber the successor's checkout.
@@ -416,17 +428,7 @@ describe.skipIf(!url)('Repository security settings commit with their audit, on 
       await atUpdate;
       second = remote('https://second.test/r');
       await expect
-        .poll(
-          async () =>
-            (
-              await db.execute(sql`
-        select 1 from pg_stat_activity a join pg_locks l on l.pid = a.pid
-        where a.datname = current_database() and not l.granted
-          and a.query like 'select %"repositories"%'
-      `)
-            ).length,
-          { timeout: 15_000 },
-        )
+        .poll(async () => (await waitersOn(holderPid)).length, { timeout: 15_000 })
         .toBeGreaterThan(0);
     } finally {
       release();
@@ -932,7 +934,10 @@ describe.skipIf(!url)('Repository security settings commit with their audit, on 
       });
       // An independent repository save, like an imported settings write, holds only
       // the row lock. Route-specific advisory locks cannot substitute for this read.
+      let holderPid = 0;
       const prior = db.transaction(async (tx) => {
+        const [holder] = await tx.execute<{ pid: number }>(sql`select pg_backend_pid() as pid`);
+        holderPid = holder!.pid;
         await tx
           .update(schema.repositories)
           .set(change)
@@ -950,11 +955,7 @@ describe.skipIf(!url)('Repository security settings commit with their audit, on 
         await expect
           .poll(
             async () => {
-              const rows = await db.execute<{ query: string }>(sql`
-            select a.query from pg_stat_activity a join pg_locks l on l.pid = a.pid
-            where a.datname = current_database() and not l.granted
-              and a.query like '%"repositories"%'
-          `);
+              const rows = await waitersOn(holderPid);
               waiting = rows[0]?.query;
               return Boolean(waiting);
             },
