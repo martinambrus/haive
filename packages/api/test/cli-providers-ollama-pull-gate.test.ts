@@ -89,6 +89,25 @@ beforeEach(() => {
 afterEach(() => vi.restoreAllMocks());
 
 describe('in-stack Ollama provider save policy', () => {
+  it('checks the allowlist before retrying an unchanged failed model', async () => {
+    const fake = setup({ name: 'ollama', model: 'blocked' });
+    fake.patch(schema.cliProviders, PROVIDER, { modelProvisionStatus: 'failed' });
+    const before = structuredClone(fake.rows(schema.cliProviders));
+    expect((await patch({ model: 'blocked' })).status).toBe(403);
+    expect(fake.rows(schema.cliProviders)).toEqual(before);
+    expect(h.add).not.toHaveBeenCalled();
+  });
+
+  it('refuses an unchanged failed-model retry during maintenance', async () => {
+    const fake = setup({ name: 'ollama', model: 'allowed' });
+    fake.patch(schema.cliProviders, PROVIDER, { modelProvisionStatus: 'failed' });
+    vi.mocked(configService.getFresh).mockResolvedValue('draining');
+    const before = structuredClone(fake.rows(schema.cliProviders));
+    expect((await patch({ model: 'allowed' })).status).toBe(503);
+    expect(fake.rows(schema.cliProviders)).toEqual(before);
+    expect(h.add).not.toHaveBeenCalled();
+  });
+
   it.each(['create', 'patch', 'clone'])(
     'refuses a foreign embedding registry in the model and FROM on %s',
     async (operation) => {

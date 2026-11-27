@@ -131,6 +131,10 @@ export const cliProviders = pgTable(
     updatedAt: timestamp('updated_at').notNull().defaultNow(),
     // Changes only after a login credential is durable, never when an attempt starts.
     authGeneration: uuid('auth_generation').notNull().defaultRandom(),
+    // Independent API enqueue attempts: a late rejection must not fail a newer
+    // build/pull or lose compensation just because the other kind was saved.
+    sandboxImageEnqueueId: uuid('sandbox_image_enqueue_id'),
+    modelProvisionEnqueueId: uuid('model_provision_enqueue_id'),
   },
   (table) => [index('cli_providers_user_id_idx').on(table.userId)],
 );

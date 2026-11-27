@@ -317,10 +317,20 @@ on that timeout, since the job may still land; a known rejection still removes o
 audit. Both timeout responses use 503 `queue_outcome_unknown`: the action may still complete
 and is safe to retry; rejections keep their existing response. The web maps that code to the same
 unknown-outcome guidance. Bundle queue lookups (including replacement job state) share a five-second
-read deadline and answer 503 rather than interpreting a failed lookup as an absent job. Bundle imports keep their existing failure response and compensate the owned syncing row,
-including ZIP replacement rollback. Provider saves attempt image and model jobs independently and
+read deadline and answer 503 rather than interpreting a failed lookup as an absent job. ZIP replacement
+imports answer a timeout with 503 `queue_outcome_unknown` and keep the promoted source for a late ingest.
+A known rejection keeps the existing failure response and compensates the owned syncing row,
+including ZIP replacement rollback. Other bundle imports retain their failure response and retryable
+failed status on both timeout and rejection. A replacement retry accepts a completed job only when the
+bundle still points at that upload's archive and is active; a completed no-op or failed import is
+refused rather than declaring the upload complete. Provider saves attempt image and model jobs independently and
 mark a failed enqueue's still-pending status failed, so a committed provider does not stay building
-or provisioning forever; an already-ready worker result is kept. Runtime access keeps its 202
+or provisioning forever; an already-ready worker result is kept. The per-kind UUID in
+`sandbox_image_enqueue_id` / `model_provision_enqueue_id` also serves as the BullMQ job id and fences
+compensation to its own attempt. The independent nullable columns (migration 0252) are needed because
+`updated_at` changes on unrelated edits and worker results, and one shared revision loses image
+compensation when only a model save overlaps it. An unchanged save retries failed model provisioning
+through the same pull policy and maintenance admission checks. Runtime access keeps its 202
 pending response, VNC its starting refusal, and plan/data Save and Pull their existing refusal
 contracts. Optional wake-ups (plan/project-state sweeps, module-source outbox, global-KB pending
 embeds and usage polls) are best effort. The API queue-add ratchet resolves the called BullMQ method declaration

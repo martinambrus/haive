@@ -155,6 +155,79 @@ afterEach(() => {
 });
 
 describe('T550: provider enqueue compensation', () => {
+  it('retries a failed model enqueue on an unchanged save', async () => {
+    const fake = setup({ name: 'ollama', model: 'qwen3-coder:30b' });
+    h.add.mockRejectedValueOnce(new Error('transport failed'));
+    expect((await patch({ model: 'qwen3-coder:32b' })).status).toBe(500);
+    expect(fake.rows(schema.cliProviders)[0]?.modelProvisionStatus).toBe('failed');
+    expect((await patch({ model: 'qwen3-coder:32b' })).status).toBe(200);
+    expect(h.add).toHaveBeenCalledTimes(2);
+    expect(fake.rows(schema.cliProviders)[0]).toMatchObject({
+      modelProvisionStatus: 'provisioning',
+      modelProvisionError: null,
+    });
+  });
+
+  it.each(['image', 'model'])(
+    'keeps overlapping %s attempt B pending when A times out in the same millisecond',
+    async (kind) => {
+      vi.useFakeTimers();
+      const fake = setup({ name: 'ollama', model: 'qwen3-coder:30b' });
+      const entered = Promise.withResolvers<void>();
+      h.add.mockImplementationOnce(() => {
+        entered.resolve();
+        return new Promise(() => {});
+      });
+      let attempt = 0;
+      const run = () =>
+        kind === 'image'
+          ? app.request(`/${PROVIDER}/sandbox-image/build`, { method: 'POST' })
+          : patch({ modelfile: `FROM qwen3-coder:30b\nPARAMETER num_ctx ${++attempt * 32}` });
+      const attemptA = run();
+      await entered.promise;
+      const tokenKey = kind === 'image' ? 'sandboxImageEnqueueId' : 'modelProvisionEnqueueId';
+      const stampA = fake.rows(schema.cliProviders)[0]?.[tokenKey];
+      expect((await run()).status).toBe(kind === 'image' ? 202 : 200);
+      expect(h.add).toHaveBeenCalledTimes(2);
+      const stampB = fake.rows(schema.cliProviders)[0]?.[tokenKey];
+      await vi.advanceTimersByTimeAsync(2000);
+      expect((await attemptA).status).toBe(500);
+      expect(fake.rows(schema.cliProviders)[0]).toMatchObject(
+        kind === 'image'
+          ? { sandboxImageBuildStatus: 'building', sandboxImageBuildError: null }
+          : { modelProvisionStatus: 'provisioning', modelProvisionError: null },
+      );
+      expect(stampB).not.toEqual(stampA);
+    },
+  );
+
+  it.each(['model save', 'metadata save'])(
+    'still compensates the image attempt across an independent %s',
+    async (operation) => {
+      const fake = setup({ name: 'ollama', model: 'qwen3-coder:30b' });
+      const entered = Promise.withResolvers<void>();
+      const held = Promise.withResolvers<undefined>();
+      h.add.mockImplementationOnce(() => {
+        entered.resolve();
+        return held.promise;
+      });
+      const attemptA = app.request(`/${PROVIDER}/sandbox-image/build`, { method: 'POST' });
+      await entered.promise;
+      expect(
+        (
+          await patch(
+            operation === 'model save' ? { model: 'qwen3-coder:32b' } : { label: 'renamed' },
+          )
+        ).status,
+      ).toBe(200);
+      held.reject(new Error('known rejection'));
+      expect((await attemptA).status).toBe(500);
+      expect(fake.rows(schema.cliProviders)[0]?.sandboxImageBuildStatus).toBe('failed');
+      if (operation === 'model save')
+        expect(fake.rows(schema.cliProviders)[0]?.modelProvisionStatus).toBe('provisioning');
+    },
+  );
+
   it.each(['create', 'clone', 'update', 'force-build'])(
     'bounds a hung %s and releases every pending status',
     async (site) => {

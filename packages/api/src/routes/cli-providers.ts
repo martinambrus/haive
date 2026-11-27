@@ -235,8 +235,14 @@ export function assertAuthModeSupported(
 }
 
 /** A lost enqueue has no periodic outbox here. Keep the saved provider, but release its
- * pending status so the form offers a retry. A late worker result can still settle it. */
-async function recordProviderEnqueueFailure(providerId: string, kind: 'image' | 'model') {
+ * pending status so the form offers a retry. A late worker result can still settle it.
+ * Each kind has its own attempt id: metadata edits and the other kind's enqueue
+ * must not invalidate this compensation, and a newer attempt must not be failed. */
+async function recordProviderEnqueueFailure(
+  providerId: string,
+  kind: 'image' | 'model',
+  attemptId: string,
+) {
   const columns = schema.cliProviders;
   await getDb()
     .update(columns)
@@ -259,6 +265,9 @@ async function recordProviderEnqueueFailure(providerId: string, kind: 'image' | 
       and(
         eq(columns.id, providerId),
         kind === 'image'
+          ? eq(columns.sandboxImageEnqueueId, attemptId)
+          : eq(columns.modelProvisionEnqueueId, attemptId),
+        kind === 'image'
           ? eq(columns.sandboxImageBuildStatus, 'building')
           : eq(columns.modelProvisionStatus, 'provisioning'),
       ),
@@ -270,29 +279,35 @@ async function recordProviderEnqueueFailure(providerId: string, kind: 'image' | 
 async function enqueueProviderSetup(
   providerId: string,
   userId: string,
-  build: boolean,
-  model: boolean,
+  attempts: { image?: string; model?: string },
 ) {
   const outcomes = await Promise.allSettled([
-    ...(build ? [enqueueBuildForProvider(providerId, userId)] : []),
-    ...(model ? [enqueueOllamaProvisionForProvider(providerId, userId)] : []),
+    ...(attempts.image ? [enqueueBuildForProvider(providerId, userId, attempts.image)] : []),
+    ...(attempts.model
+      ? [enqueueOllamaProvisionForProvider(providerId, userId, attempts.model)]
+      : []),
   ]);
   for (const outcome of outcomes) if (outcome.status === 'rejected') throw outcome.reason;
 }
 
 /** The caller has already written `building`, in the transaction that admitted the build. */
-async function enqueueBuildForProvider(providerId: string, userId: string): Promise<void> {
+async function enqueueBuildForProvider(
+  providerId: string,
+  userId: string,
+  attemptId: string,
+): Promise<void> {
   const payload: SandboxImageBuildJobPayload = { providerId, userId };
   const queue = getCliExecQueue();
   try {
     await boundedAdd(() =>
       queue.add(CLI_EXEC_JOB_NAMES.BUILD_SANDBOX_IMAGE, payload, {
+        jobId: attemptId,
         removeOnComplete: true,
         removeOnFail: CLI_POLLABLE_JOB_OPTS.removeOnFail,
       }),
     );
   } catch (err) {
-    await recordProviderEnqueueFailure(providerId, 'image');
+    await recordProviderEnqueueFailure(providerId, 'image', attemptId);
     throw err;
   }
 }
@@ -330,18 +345,20 @@ async function assertOllamaSaveAllowed(
 async function enqueueOllamaProvisionForProvider(
   providerId: string,
   userId: string,
+  attemptId: string,
 ): Promise<void> {
   const payload: OllamaProvisionJobPayload = { providerId, userId };
   const queue = getCliExecQueue();
   try {
     await boundedAdd(() =>
       queue.add(CLI_EXEC_JOB_NAMES.PROVISION_OLLAMA_MODEL, payload, {
+        jobId: attemptId,
         removeOnComplete: true,
         removeOnFail: CLI_POLLABLE_JOB_OPTS.removeOnFail,
       }),
     );
   } catch (err) {
-    await recordProviderEnqueueFailure(providerId, 'model');
+    await recordProviderEnqueueFailure(providerId, 'model', attemptId);
     throw err;
   }
 }
@@ -604,7 +621,10 @@ cliProviderRoutes.post('/', requireNewWorkAllowed, async (c) => {
             disableThinking: body.disableThinking ?? false,
             rulesContent: body.rulesContent ?? DEFAULT_AGENT_RULES,
             sandboxImageBuildStatus: 'building',
-            ...(provisioningModel ? { modelProvisionStatus: 'provisioning' } : {}),
+            sandboxImageEnqueueId: randomUUID(),
+            ...(provisioningModel
+              ? { modelProvisionStatus: 'provisioning', modelProvisionEnqueueId: randomUUID() }
+              : {}),
           })
           .returning();
         // First lock on an existing provider row; the new row is invisible until commit.
@@ -686,7 +706,10 @@ cliProviderRoutes.post('/', requireNewWorkAllowed, async (c) => {
   if (secretEvent) logAuditEvent(secretEvent);
   for (const e of setEvents) logAuditEvent(e);
   if (usageSeeded) await requestUsagePollTick();
-  await enqueueProviderSetup(created.id, userId, true, provisioningModel);
+  await enqueueProviderSetup(created.id, userId, {
+    image: created.sandboxImageEnqueueId!,
+    model: provisioningModel ? created.modelProvisionEnqueueId! : undefined,
+  });
   return c.json(
     {
       provider: {
@@ -798,8 +821,10 @@ cliProviderRoutes.patch('/:id', async (c) => {
   ) {
     modelInputsChanged = true;
   }
-  // Relabels and unchanged form inputs grant no pull authority. Only changed
-  // model/base inputs or a move into the shared daemon need the save policy.
+  // A failed enqueue is retried by saving, even with unchanged model inputs.
+  // Such a retry needs the same policy and admission checks as a new pull.
+  const retryModel =
+    existing.modelProvisionStatus === 'failed' && shouldProvisionOllamaModel(candidate);
   const from = (modelfile: string | null) =>
     modelfile ? parseModelfile(modelfile).from : undefined;
   const policyInputsChanged =
@@ -808,18 +833,22 @@ cliProviderRoutes.patch('/:id', async (c) => {
     !!candidate.modelfile !== !!existing.modelfile ||
     (!isInStackOllamaBaseUrl(existing.envVars?.ANTHROPIC_BASE_URL) &&
       isInStackOllamaBaseUrl(candidate.envVars?.ANTHROPIC_BASE_URL));
-  if (policyInputsChanged) await assertOllamaSaveAllowed(c.get('userRole'), candidate);
-  const provisioningModel = modelInputsChanged && shouldProvisionOllamaModel(candidate);
+  if (policyInputsChanged || retryModel)
+    await assertOllamaSaveAllowed(c.get('userRole'), candidate);
+  const provisioningModel =
+    (modelInputsChanged || retryModel) && shouldProvisionOllamaModel(candidate);
   const startsJob = imageInputsChanged || provisioningModel;
   if (startsJob) {
     await assertNewWorkAllowed();
     if (imageInputsChanged) {
       updates.sandboxImageBuildStatus = 'building';
       updates.sandboxImageBuildError = null;
+      updates.sandboxImageEnqueueId = randomUUID();
     }
     if (provisioningModel) {
       updates.modelProvisionStatus = 'provisioning';
       updates.modelProvisionError = null;
+      updates.modelProvisionEnqueueId = randomUUID();
     }
   }
 
@@ -989,7 +1018,10 @@ cliProviderRoutes.patch('/:id', async (c) => {
   for (const e of setEvents) logAuditEvent(e);
   if (usageSeeded) await requestUsagePollTick();
 
-  await enqueueProviderSetup(id, userId, imageInputsChanged, provisioningModel);
+  await enqueueProviderSetup(id, userId, {
+    image: imageInputsChanged ? updates.sandboxImageEnqueueId! : undefined,
+    model: provisioningModel ? updates.modelProvisionEnqueueId! : undefined,
+  });
   const modelStatusOverride = provisioningModel
     ? { modelProvisionStatus: 'provisioning' as const, modelProvisionError: null }
     : {};
@@ -1057,6 +1089,7 @@ cliProviderRoutes.post('/:id/sandbox-image/build', requireNewWorkAllowed, async 
   });
   if (!provider) throw new HttpError(404, 'CLI provider not found');
 
+  const attemptId = randomUUID();
   await db.transaction(async (tx) => {
     await admitNewWork(tx);
     await tx
@@ -1064,6 +1097,7 @@ cliProviderRoutes.post('/:id/sandbox-image/build', requireNewWorkAllowed, async 
       .set({
         sandboxImageBuildStatus: 'building',
         sandboxImageBuildError: null,
+        sandboxImageEnqueueId: attemptId,
         updatedAt: new Date(),
       })
       .where(eq(schema.cliProviders.id, provider.id));
@@ -1079,12 +1113,13 @@ cliProviderRoutes.post('/:id/sandbox-image/build', requireNewWorkAllowed, async 
   try {
     await boundedAdd(() =>
       queue.add(CLI_EXEC_JOB_NAMES.BUILD_SANDBOX_IMAGE, payload, {
+        jobId: attemptId,
         removeOnComplete: true,
         removeOnFail: CLI_POLLABLE_JOB_OPTS.removeOnFail,
       }),
     );
   } catch (err) {
-    await recordProviderEnqueueFailure(id, 'image');
+    await recordProviderEnqueueFailure(id, 'image', attemptId);
     throw err;
   }
   return c.json({ ok: true, status: 'building' }, 202);
@@ -1304,7 +1339,10 @@ cliProviderRoutes.post('/:id/clone', requireNewWorkAllowed, async (c) => {
             disableThinking: source.disableThinking,
             rulesContent: source.rulesContent,
             sandboxImageBuildStatus: 'building',
-            ...(provisioningModel ? { modelProvisionStatus: 'provisioning' } : {}),
+            sandboxImageEnqueueId: randomUUID(),
+            ...(provisioningModel
+              ? { modelProvisionStatus: 'provisioning', modelProvisionEnqueueId: randomUUID() }
+              : {}),
           })
           .returning();
         const row = inserted[0]!;
@@ -1382,7 +1420,10 @@ cliProviderRoutes.post('/:id/clone', requireNewWorkAllowed, async (c) => {
   logAuditEvent(cloneEvent!);
   for (const e of setEvents) logAuditEvent(e);
   if (usageSeeded) await requestUsagePollTick();
-  await enqueueProviderSetup(created.id, userId, true, provisioningModel);
+  await enqueueProviderSetup(created.id, userId, {
+    image: created.sandboxImageEnqueueId!,
+    model: provisioningModel ? created.modelProvisionEnqueueId! : undefined,
+  });
   return c.json(
     {
       provider: {

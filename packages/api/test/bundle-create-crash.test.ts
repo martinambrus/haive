@@ -267,6 +267,61 @@ it.each(['replace', 'resync'])(
 );
 
 describe('T487: explicit replacement mode', () => {
+  it('keeps a timed-out replacement promoted for its late job and safely completes a retry', async () => {
+    const dir = await seedZipBundle();
+    await stage(REPLACE, 'NEW-ARCHIVE', { bundleId: BUNDLE });
+    const url = `/${BUNDLE}/replace/${REPLACE}/complete`;
+    const entered = Promise.withResolvers<void>();
+    const late = Promise.withResolvers<void>();
+    const realAdd = queue.add.bind(queue);
+    vi.spyOn(queue, 'add').mockImplementation(async (...args) => {
+      entered.resolve();
+      await late.promise;
+      return realAdd(...args);
+    });
+    vi.useFakeTimers();
+    const pending = post(url, { mode: 'keep_until_success' });
+    try {
+      await entered.promise;
+      await vi.advanceTimersByTimeAsync(2000);
+      const response = await pending;
+      expect(response.status).toBe(503);
+      expect(await response.json()).toMatchObject({ code: 'queue_outcome_unknown' });
+      expect(fake.rows(schema.customBundles)[0]).toMatchObject({
+        status: 'syncing',
+        archivePath: path.join(dir, `source.${REPLACE}.zip`),
+      });
+      expect(fake.rows(schema.customBundleUploads)[0]?.status).toBe('uploading');
+      late.resolve();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(ingestJobs()).toHaveLength(1);
+      // The late worker sees the promoted path, so it can apply the replacement.
+      fake.patch(schema.customBundles, BUNDLE, { status: 'active' });
+      ingestJobs()[0]!.getState = async () => 'completed';
+      expect2xx(await post(url, { mode: 'keep_until_success' }));
+      expect(fake.rows(schema.customBundleUploads)[0]?.status).toBe('complete');
+      expect(ingestJobs()).toHaveLength(1);
+    } finally {
+      late.resolve();
+      await pending;
+      vi.useRealTimers();
+    }
+  });
+
+  it('refuses a completed job that never applied its replacement', async () => {
+    const dir = await seedZipBundle();
+    await stage(REPLACE, 'NEW-ARCHIVE', { bundleId: BUNDLE });
+    const url = `/${BUNDLE}/replace/${REPLACE}/complete`;
+    queue.state.ackLost = true;
+    expect((await post(url, { mode: 'keep_until_success' })).status).toBe(500);
+    // Reproduce an old compensated enqueue: its late worker no-opped on the old path.
+    expect(fake.rows(schema.customBundles)[0]?.archivePath).toBe(path.join(dir, 'source.zip'));
+    ingestJobs()[0]!.getState = async () => 'completed';
+    queue.state.ackLost = false;
+    expect((await post(url, { mode: 'keep_until_success' })).status).toBe(409);
+    expect(fake.rows(schema.customBundleUploads)[0]?.status).toBe('uploading');
+  });
+
   it.each([undefined, {}, { mode: 'automatic' }])(
     'refuses an absent or invalid mode: %j',
     async (body) => {
@@ -682,7 +737,7 @@ describe('C3: the queue refuses the job', () => {
 
   it.each(sites)(
     '%s: a hung add is bounded and the committed bundle is retryable',
-    async (_site, run) => {
+    async (site, run) => {
       vi.useFakeTimers();
       const adding = Promise.withResolvers<void>();
       vi.spyOn(queue, 'add').mockImplementation(() => {
@@ -697,8 +752,13 @@ describe('C3: the queue refuses the job', () => {
         await adding.promise;
         await vi.advanceTimersByTimeAsync(2_000);
         await pending;
-        expect(response?.status).toBe(500);
-        expect(fake.rows(schema.customBundles)[0]).toMatchObject({ status: 'failed' });
+        const replacement = site === 'replace complete';
+        expect(response?.status).toBe(replacement ? 503 : 500);
+        if (replacement)
+          expect(await response!.json()).toMatchObject({ code: 'queue_outcome_unknown' });
+        expect(fake.rows(schema.customBundles)[0]).toMatchObject({
+          status: replacement ? 'syncing' : 'failed',
+        });
         expect(
           fake.rows(schema.customBundleUploads).every((row) => row.status !== 'completing'),
         ).toBe(true);

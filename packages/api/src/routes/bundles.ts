@@ -1,4 +1,8 @@
-import { boundedAdd } from '../lib/queue-bounded.js';
+import {
+  boundedAdd,
+  QueueAddTimeoutError,
+  QueueOutcomeUnknownError,
+} from '../lib/queue-bounded.js';
 import { randomUUID } from 'node:crypto';
 import path from 'node:path';
 import { Hono, type Handler } from 'hono';
@@ -377,11 +381,17 @@ async function addBundleJobOrMarkFailed(
   bundleId: string,
   add: () => Promise<unknown>,
   fence?: SQL,
-  failurePatch?: Partial<typeof schema.customBundles.$inferInsert>,
+  replacement?: BundleReplacement,
 ): Promise<void> {
   try {
     await boundedAdd(add);
   } catch (err) {
+    // A late ingest must still see the promoted archive. Rolling it back here would
+    // make that job no-op while a retry mistook its completion for a successful import.
+    if (replacement && err instanceof QueueAddTimeoutError) {
+      logger.warn({ err, bundleId }, 'ZIP replacement enqueue outcome unknown');
+      throw new QueueOutcomeUnknownError();
+    }
     await db
       .update(schema.customBundles)
       .set({
@@ -390,7 +400,15 @@ async function addBundleJobOrMarkFailed(
         lastSyncError:
           'Could not queue the job that imports this bundle. Use Resync (git) or Replace ZIP to try again, or remove the bundle.',
         updatedAt: new Date(),
-        ...failurePatch,
+        ...(replacement?.mode === 'keep_until_success' && replacement.previousArchive
+          ? {
+              ...replacement.previousArchive,
+              status: 'active' as const,
+              lastSyncError: null,
+              lastReplacementNote:
+                'Replacement could not be queued; the previous bundle remains in use. Try Replace ZIP again.',
+            }
+          : {}),
       })
       .where(
         and(
@@ -891,10 +909,26 @@ bundleRoutes.post('/:id/replace/:uploadId/complete', requireNewWorkAllowed, asyn
     });
     if (state !== null && state !== 'failed' && state !== 'unknown') {
       // A prior attempt enqueued before losing its response. Its worker owns the extracted tree.
-      await claim.write(db, {
-        status: 'complete',
-        archivePath: finalArchive,
-        updatedAt: new Date(),
+      await db.transaction(async (tx) => {
+        const [current] = await tx
+          .select()
+          .from(schema.customBundles)
+          .where(eq(schema.customBundles.id, bundleId))
+          .for('update');
+        if (
+          current?.archivePath !== finalArchive ||
+          (state === 'completed' && current.status !== 'active')
+        ) {
+          throw new HttpError(
+            409,
+            'The previous import did not apply this replacement. Start a new replacement.',
+          );
+        }
+        await claim.write(tx, {
+          status: 'complete',
+          archivePath: finalArchive,
+          updatedAt: new Date(),
+        });
       });
       return;
     }
@@ -1036,15 +1070,7 @@ bundleRoutes.post('/:id/replace/:uploadId/complete', requireNewWorkAllowed, asyn
           removeOnFail: 100,
         }),
       eq(schema.customBundles.archivePath, finalArchive),
-      replacement!.mode === 'keep_until_success' && replacement!.previousArchive
-        ? {
-            ...replacement!.previousArchive,
-            status: 'active',
-            lastSyncError: null,
-            lastReplacementNote:
-              'Replacement could not be queued; the previous bundle remains in use. Try Replace ZIP again.',
-          }
-        : undefined,
+      replacement!,
     );
     await claim.write(db, { status: 'complete', archivePath: finalArchive, updatedAt: new Date() });
   });
