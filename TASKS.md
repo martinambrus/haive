@@ -485,7 +485,7 @@ The owner scheduled one capped validation attempt; this block is an evidence dep
 
 ### T319 · FNF[set-aside-batch] · set-aside spends 20-24 git spawns per dirty path (+1)
 
-status: open · kind: performance · user decision: resolved 2026-11-01 · priority: P2
+status: done 2026-11-27, merged #1368 c3372e885 and live (worker reload): re-measured first (512 paths 49 s, 4,096 paths 729 s on main), now 85 spawns per call (about 9 s and under 70 s), readStateTree 2 spawns; outcomes identical incl. named refusals · kind: performance · user decision: resolved 2026-11-01 · priority: P2
 
 1. set-aside.ts:264/:281/:474/:574 per-path git reads (prototype: 6,620 spawns → 20). 2. readStateTree one cat-file per file (projection-merge.ts:157); batch with `cat-file --batch`.
 
