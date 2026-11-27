@@ -3095,7 +3095,7 @@ From the T365 sixth review (2026-10-31). PRE-EXISTING, minor (development only).
 
 ### T518 · FNF[composer-poll-races] · the bundle composer's poll can write back a stale answer, overlap itself, and miss a reload after a click
 
-status: open · gate: bounded verification · priority: P2
+status: open for item 3 only (theoretical render-lane click edge, outside the execution fence); items 1 and 2 DONE 2026-11-27 in #1376 (9069fb6b7: a poll started before an accepted Resync or Replace ZIP is discarded; single-flight polling with the handled transition remembered before render, so one reload; one bounded abort deadline over request and body) · gate: bounded verification · priority: P2
 From the T365 close-out (PR #974, 2026-11-01). PRE-EXISTING, minor, found by reading: web components/bundle-composer.tsx, lines as on main after #974.
 
 1. `fetchOnce` (~:256-318) compares a poll answer computed at request time with the value it reads after its awaits, so a poll in flight when the person accepts a Resync or Replace ZIP writes the older server status over the newer local `syncing` and starts the listing reload early (T365 review 6). A Codex round that fixed it was cut off by a crash; its partial patch is `.claude/tmp/codex-run/T365/codex-7/interrupted-uncommitted.patch` on the machine that ran it. Fix direction: drop an answer whose request started before the last local status change (a counter bumped on Resync and Replace).
