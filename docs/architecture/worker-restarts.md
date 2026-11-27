@@ -1333,10 +1333,15 @@ is added or reversed.
 
 The one-time background `WorktreeAliasSweeper` is independent of task jobs. Its discovery cursor
 and sparse multiply-linked-name journal commit together in Postgres (migration 0250). A replacement
-worker resumes discovery from that cursor; copying restarts discovery to recover any interrupted
-alias parks and include retained copies in its inode counts. A failed pass clears its checkpoint
-and retries after other repositories. No completion stamp is written until the scan and every
-required copy have succeeded. The stop path waits for the current bounded batch and closes the
-iterator. The dedicated park namespace permits immediate recovery by the next serialized sweep;
-ordinary fs-safe parks retain their age policy. Details and limits are in
+worker resumes discovery from that cursor; interrupted copying re-lists the pass for explicit
+artifact recovery. New replacements copy before atomic rename, so a death cannot leave their
+public name missing. Old parks are recovered when their directory is visited.
+
+Per-entry failures retain progress and are counted. Repository-level failures never reset the
+checkpoint or journal: a persisted failure streak and exponential deadline back off from 60 seconds
+to six hours, surviving restart, with one warning per streak. Completion stamps either clean done
+or done-with-skips and class counts; only the latter keeps a summary in the checkpoint column.
+A pass that detaches anything owes another full discovery, at most four passes. The stop path waits
+for the current bounded batch and closes the iterator. Reads perform no recovery; the sweep calls
+an explicit fs-safe mutation. Generic parks retain their age policy. Details and residuals are in
 [Secret and git-data masking](sandbox-masking.md).

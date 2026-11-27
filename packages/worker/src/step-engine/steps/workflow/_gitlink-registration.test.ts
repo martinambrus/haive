@@ -306,6 +306,8 @@ describe('stageAllArgs', () => {
       '--',
       '.',
       ':(top,exclude,glob)**/.*.haive-tmp-*',
+      ':(top,exclude,glob)**/.*.haive-alias-*',
+      ':(top,exclude,glob)**/.*.haive-park-*',
     ]);
   });
 
@@ -316,6 +318,8 @@ describe('stageAllArgs', () => {
       '--',
       '.',
       ':(top,exclude,glob)**/.*.haive-tmp-*',
+      ':(top,exclude,glob)**/.*.haive-alias-*',
+      ':(top,exclude,glob)**/.*.haive-park-*',
       ':(top,exclude,literal)a',
       ':(top,exclude,literal)b c',
     ]);

@@ -11,6 +11,13 @@ not reproduce without `-c core.excludesFile=`. A copy the repository already tra
 Do not add the file to the secret-mask globs instead: that glob set is also what `carry-untracked.ts`
 copies into every new worktree.
 
+The shared `stageAllArgs` pathspecs also exclude atomic `.haive-tmp`, `.haive-alias-*` and
+`.haive-park-*` artifacts at every depth (including companion name records). Gate 3 and DAG issue
+commits use that argv for the real and scratch adds; Run app uses the same exclusions in its
+preview scope. These partial copies and retained versions never become task deliverables while
+waiting for the legacy alias sweep's explicit recovery. Recovered old bytes live under the existing
+ignored `.haive/alias-recovery/` directory.
+
 Before `git add -A`, both gate 3 and the DAG issue committer run `assertDependencyCommitSafe`.
 It checks uncapped untracked paths and tracked changes against the task's fork point, including
 earlier issue commits, deletions and both sides of renames. Modified infrastructure and

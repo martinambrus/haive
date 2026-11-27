@@ -15,6 +15,11 @@ it('a root add excludes the atomic projection writer temp names at every depth',
     '.haive-data/.plan.json.haive-tmp-123-abcdef',
     '.haive-data/state/.record.json.haive-tmp-123-abcdef',
     '.root.haive-tmp-123-abcdef',
+    '.root.haive-alias-kept-abcdef',
+    'nested/.root.haive-alias-park-123-abcdef',
+    '.root.haive-alias-park-123-abcdef.name',
+    '.root.haive-park-123-abcdef',
+    '.root.haive-alias-tmp-123-abcdef',
   ];
   for (const name of temps)
     await writeFileNoFollow(repo, name, 'partial projection', { createParents: true });

@@ -304,6 +304,11 @@ export const repositories = pgTable(
       cursor: string;
       examined: number;
       complete: boolean;
+      pass?: number;
+      detached?: number;
+      skipped?: Record<string, number>;
+      retry?: { attempts: number; retryAt: number };
+      outcome?: 'done' | 'done-with-skips';
     }>(),
   },
   (table) => [

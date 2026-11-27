@@ -9,6 +9,7 @@ import {
   rename,
   symlink,
   open,
+  readdir,
 } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -81,18 +82,28 @@ describe('interrupted alias replacement recovery', () => {
       const parked = '.file.haive-alias-park-123-11111111-1111-1111-1111-111111111111';
       await rename(path.join(root, 'tree/file'), path.join(root, 'tree', parked));
       if (published) await writeFile(path.join(root, 'tree/file'), 'new public bytes');
+      await safe.recoverWorktreeAliasArtifactsNoFollow(
+        root,
+        'tree',
+        await readdir(path.join(root, 'tree')),
+      );
       const entries = await safe.readdirNoFollow(root, 'tree', {
         strict: true,
         maxEntries: 4,
-        recoverParks: true,
       });
       expect(entries?.some((entry) => entry.name === parked)).toBe(false);
       expect(await readFile(path.join(root, 'tree/file'), 'utf8')).toBe(
         published ? 'new public bytes' : 'original',
       );
       if (published) {
-        const kept = entries!.find((entry) => entry.name.includes('.haive-alias-kept-'))!;
-        expect(await readFile(path.join(root, 'tree', kept.name), 'utf8')).toBe('original');
+        const parent = await lstat(path.join(root, 'tree'));
+        const recoveredParent = await lstat(path.join(root, 'tree/.haive'));
+        expect(recoveredParent.mode & 0o777).toBe(0o755);
+        expect([recoveredParent.uid, recoveredParent.gid]).toEqual([parent.uid, parent.gid]);
+        const [kept] = await readdir(path.join(root, 'tree/.haive/alias-recovery'));
+        expect(await readFile(path.join(root, 'tree/.haive/alias-recovery', kept!), 'utf8')).toBe(
+          'original',
+        );
       }
       expect(await readFile(path.join(root, 'outside'), 'utf8')).toBe('original');
     },
@@ -127,6 +138,47 @@ it('recovers a truncated alias park with its companion record in either listing 
   const parked = `.${leaf.slice(0, 100)}.haive-alias-park-123-11111111-1111-1111-1111-111111111111`;
   await rename(path.join(root, 'tree/file'), path.join(root, 'tree', parked));
   await writeFile(path.join(root, 'tree', `${parked}.name`), leaf);
-  await safe.readdirNoFollow(root, 'tree', { strict: true, maxEntries: 4, recoverParks: true });
+  await safe.recoverWorktreeAliasArtifactsNoFollow(
+    root,
+    'tree',
+    await readdir(path.join(root, 'tree')),
+  );
   expect(await readFile(path.join(root, 'tree', leaf), 'utf8')).toBe('original');
+});
+
+it('M3 keeps the public name readable throughout copying and fsync', async () => {
+  const { root, identity } = await fixture();
+  const sample = await open(path.join(root, 'outside'));
+  const proto = Object.getPrototypeOf(sample);
+  const sync = proto.sync;
+  await sample.close();
+  let observations = 0;
+  vi.spyOn(proto, 'sync').mockImplementation(async function (
+    this: import('node:fs/promises').FileHandle,
+  ) {
+    expect(await readFile(path.join(root, 'tree/file'), 'utf8')).toBe('original');
+    observations++;
+    return sync.call(this);
+  });
+  await safe.copyReplaceFileIfIdentityNoFollow(root, 'tree/file', identity, { internalNames: 1 });
+  expect(observations).toBeGreaterThan(0);
+});
+it('L1 strips privileged permission bits while retaining ordinary permissions', async () => {
+  const { root } = await fixture();
+  const fh = await open(path.join(root, 'outside'), 'r+');
+  await fh.chmod(0o7640);
+  const identity = await fh.stat({ bigint: true });
+  await fh.close();
+  await safe.copyReplaceFileIfIdentityNoFollow(root, 'tree/file', identity, { internalNames: 1 });
+  expect((await lstat(path.join(root, 'tree/file'))).mode & 0o7777).toBe(0o640);
+});
+it('L3 directory reads never recover parks', async () => {
+  const { root } = await fixture();
+  const parked = '.file.haive-alias-park-123-11111111-1111-1111-1111-111111111111';
+  await rename(path.join(root, 'tree/file'), path.join(root, 'tree', parked));
+  // An older JavaScript caller may still pass the removed option. A read must remain a read.
+  const legacyOptions = { strict: true, maxEntries: 4, recoverParks: true };
+  const entries = await safe.readdirNoFollow(root, 'tree', legacyOptions);
+  expect(entries?.map((e) => e.name)).toContain(parked);
+  await expect(lstat(path.join(root, 'tree/file'))).rejects.toMatchObject({ code: 'ENOENT' });
 });

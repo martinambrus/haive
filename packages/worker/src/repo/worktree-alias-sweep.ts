@@ -1,8 +1,10 @@
 import { WORKTREE_SUBDIR } from '@haive/shared';
 import {
   copyReplaceFileIfIdentityNoFollow,
+  isResourceLimitError,
   lstatNoFollow,
   readdirNoFollow,
+  recoverWorktreeAliasArtifactsNoFollow,
   type FileIdentity,
 } from '@haive/shared/fs-safe';
 
@@ -11,13 +13,16 @@ export const WORKTREE_ALIAS_LIMITS = {
   maxLinkedNames: 200_000,
   maxEntries: 2_000_000,
   maxDepth: 128,
+  maxPasses: 4,
 } as const;
 export interface WorktreeAliasOptions {
   maxDirectoryEntries?: number;
   maxLinkedNames?: number;
   maxEntries?: number;
   maxDepth?: number;
+  maxPasses?: number;
   maxBytes?: number;
+  staleTempMs?: number;
   resume?: AliasCheckpoint;
 }
 export interface AliasName {
@@ -25,10 +30,19 @@ export interface AliasName {
   dev: string;
   ino: string;
 }
+export interface AliasRetry {
+  attempts: number;
+  retryAt: number;
+}
 export interface AliasScanState {
   cursor: string;
   examined: number;
   complete: boolean;
+  pass?: number;
+  detached?: number;
+  skipped?: Record<string, number>;
+  retry?: AliasRetry;
+  outcome?: 'done' | 'done-with-skips';
 }
 export interface AliasCheckpoint {
   scan: AliasScanState;
@@ -37,11 +51,11 @@ export interface AliasCheckpoint {
 export interface AliasProgress {
   examined: number;
   replaced: number;
+  skipped?: Record<string, number>;
   scan?: AliasScanState;
   discovered?: AliasName;
 }
 
-// DFS orders whole segments, not pathname strings (a/x precedes its sibling a-file).
 function comparePaths(a: string, b: string): number {
   const left = a.split('/'),
     right = b.split('/');
@@ -50,11 +64,13 @@ function comparePaths(a: string, b: string): number {
   }
   return left.length - right.length;
 }
+const codeOf = (err: unknown): string | undefined => (err as { code?: string })?.code;
+// A park-like directory is untrusted content, never a directory the sweep should enter.
+export const isAliasArtifact = (name: string): boolean =>
+  /\.haive-(?:alias-(?:park|kept|tmp)|park|tmp)-/.test(name);
 
-/** Incremental one-time scan. A worker restart resumes checkpointed discovery, while completed replacements
- * remain detached: no untrusted on-disk cursor or inode map is accepted as authority. Memory,
- * directory allocations, descriptor depth and each copy have explicit bounds. The caller drives
- * only a small window per tick; a limit or unreadable path never certifies completion. */
+/** Bounded, resumable passes. Entry failures are counted; only repository/root failures escape
+ * to the persisted backoff. Each pass that detaches anything owes a fresh complete discovery. */
 export async function* sweepWorktreeAliases(
   anchor: string,
   opts: WorktreeAliasOptions = {},
@@ -64,117 +80,226 @@ export async function* sweepWorktreeAliases(
     maxLinkedNames: opts.maxLinkedNames ?? WORKTREE_ALIAS_LIMITS.maxLinkedNames,
     maxEntries: opts.maxEntries ?? WORKTREE_ALIAS_LIMITS.maxEntries,
     maxDepth: opts.maxDepth ?? WORKTREE_ALIAS_LIMITS.maxDepth,
+    maxPasses: opts.maxPasses ?? WORKTREE_ALIAS_LIMITS.maxPasses,
   };
-  for (const value of Object.values(limits)) {
+  for (const value of Object.values(limits))
     if (!Number.isSafeInteger(value) || value < 0) throw new RangeError('Invalid sweep limit');
-  }
-  const groups = new Map<string, { identity: FileIdentity; names: string[] }>();
-  const resume = opts.resume?.scan.complete ? undefined : opts.resume;
-  const scan = { cursor: '', examined: 0, complete: false, ...resume?.scan };
+  if (!limits.maxPasses) throw new RangeError('Invalid pass limit');
+  // A missing volume must not certify repositories as empty.
+  if ((await lstatNoFollow(anchor, '', { strict: true }))?.kind !== 'directory')
+    throw new Error('Repository anchor is unavailable');
+  const tree = await lstatNoFollow(anchor, WORKTREE_SUBDIR, { strict: true });
+  if (tree !== null && tree.kind !== 'directory') throw new Error('Worktrees must be a directory');
+  let scan: AliasScanState = {
+    cursor: '',
+    examined: 0,
+    complete: false,
+    pass: 1,
+    detached: 0,
+    ...opts.resume?.scan,
+  };
   if (scan.cursor && !scan.cursor.startsWith(`${WORKTREE_SUBDIR}/`))
     throw new Error('Invalid worktree scan cursor');
   if (
     !Number.isSafeInteger(scan.examined) ||
     scan.examined < 0 ||
-    scan.examined > limits.maxEntries
+    scan.examined > limits.maxEntries ||
+    !Number.isSafeInteger(scan.pass) ||
+    scan.pass! < 1 ||
+    scan.pass! > limits.maxPasses
   )
-    throw new RangeError('Worktree scan entry limit');
-  const progress = { examined: scan.examined, replaced: 0 };
-  let linkedNames = 0;
-  const known = new Set<string>();
-  const remember = (name: AliasName) => {
-    if (!name.path.startsWith(`${WORKTREE_SUBDIR}/`))
-      throw new Error('Invalid worktree alias path');
-    if (known.has(name.path)) return;
-    known.add(name.path);
-    if (++linkedNames > limits.maxLinkedNames) throw new RangeError('Worktree linked-name limit');
-    const dev = BigInt(name.dev),
-      ino = BigInt(name.ino);
-    const key = `${dev}:${ino}`;
-    const group = groups.get(key) ?? { identity: { dev, ino }, names: [] };
-    group.names.push(name.path);
-    groups.set(key, group);
+    throw new RangeError('Invalid worktree scan state');
+  // Discovery completed before an interruption can contain old parked names. Re-list for
+  // recovery, retaining pass, skipped counts and detached debt; failures never erase the DB cursor.
+  if (opts.resume?.scan.complete) scan = { ...scan, cursor: '', examined: 0, complete: false };
+  const skipped = { ...scan.skipped };
+  const skip = (kind: string) => {
+    skipped[kind] = (skipped[kind] ?? 0) + 1;
   };
-  for (const name of resume?.names ?? []) remember(name);
-  async function* visit(rel: string, depth: number): AsyncGenerator<AliasProgress> {
-    const entries = await readdirNoFollow(anchor, rel, {
-      strict: true,
-      recoverParks: true,
-      strictNames: true,
-      maxEntries: limits.maxDirectoryEntries,
-    });
-    if (entries === null) throw new Error('Worktree directory changed; rescan required');
-    entries.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
-    for (const entry of entries) {
-      const child = `${rel}/${entry.name}`;
-      if (comparePaths(child, scan.cursor) <= 0) {
-        if (entry.isDirectory() && (child === scan.cursor || scan.cursor.startsWith(`${child}/`))) {
-          if (depth >= limits.maxDepth) throw new RangeError('Worktree scan depth limit');
-          yield* visit(child, depth + 1);
-        }
-        continue;
-      }
-      if (++progress.examined > limits.maxEntries)
-        throw new RangeError('Worktree scan entry limit');
-      const info = await lstatNoFollow(anchor, child, { strict: true, bigint: true });
-      if (info === null) throw new Error('Worktree entry changed; rescan required');
-      scan.cursor = child;
-      scan.examined = progress.examined;
-      if (info?.kind === 'directory') {
-        if (depth >= limits.maxDepth) throw new RangeError('Worktree scan depth limit');
-        yield { ...progress, scan: { ...scan } };
-        yield* visit(child, depth + 1);
-      } else {
-        let discovered: AliasName | undefined;
-        if (info?.kind === 'file' && info.stats.nlink > 1n) {
-          discovered = {
-            path: child,
-            dev: info.stats.dev.toString(),
-            ino: info.stats.ino.toString(),
-          };
-          remember(discovered);
-        }
-        yield { ...progress, scan: { ...scan }, discovered };
-      }
-    }
+  let replaced = 0;
+  const snapshot = (discovered?: AliasName): AliasProgress => ({
+    examined: scan.examined,
+    replaced,
+    skipped: { ...skipped },
+    scan: { ...scan, skipped: { ...skipped } },
+    discovered,
+  });
+  if (tree === null) {
+    yield snapshot();
+    return;
   }
-  // A final directory link is refused rather than treated as an empty migration.
-  const tree = await lstatNoFollow(anchor, WORKTREE_SUBDIR, { strict: true });
-  if (tree === null) return;
-  if (tree.kind !== 'directory') throw new Error('Worktrees must be a directory');
-  if (!scan.complete) {
-    yield* visit(WORKTREE_SUBDIR, 0);
-    scan.complete = true;
-    yield { ...progress, scan: { ...scan } };
-  }
-  for (const group of groups.values()) {
-    // Refresh the count: a concurrently removed internal name must not hide an outside alias.
-    const names: string[] = [];
-    for (const name of group.names) {
-      const current = await lstatNoFollow(anchor, name, { strict: true, bigint: true });
-      if (
-        current?.kind !== 'file' ||
-        current.stats.dev !== group.identity.dev ||
-        current.stats.ino !== group.identity.ino
-      ) {
-        throw new Error('Worktree changed; rescan required');
+  for (;;) {
+    const groups = new Map<string, { identity: FileIdentity; names: string[] }>();
+    const known = new Set<string>();
+    const remember = (name: AliasName): boolean => {
+      if (!name.path.startsWith(`${WORKTREE_SUBDIR}/`))
+        throw new Error('Invalid worktree alias path');
+      if (known.has(name.path)) return false;
+      if (known.size >= limits.maxLinkedNames) {
+        skip('linked_name_limit');
+        return false;
       }
-      names.push(name);
-      yield { ...progress };
-    }
-    let remaining = names.length;
-    for (const name of names) {
-      const result = await copyReplaceFileIfIdentityNoFollow(anchor, name, group.identity, {
-        internalNames: remaining,
-        maxBytes: opts.maxBytes,
-      });
-      if (result === 'changed' || result === 'absent')
-        throw new Error('Worktree changed; rescan required');
-      if (result === 'replaced') {
-        progress.replaced += 1;
-        remaining -= 1;
+      known.add(name.path);
+      const dev = BigInt(name.dev),
+        ino = BigInt(name.ino);
+      const owner = name.path.slice(WORKTREE_SUBDIR.length + 1).split('/')[0];
+      const key = `${owner}:${dev}:${ino}`;
+      const group = groups.get(key) ?? { identity: { dev, ino }, names: [] };
+      group.names.push(name.path);
+      groups.set(key, group);
+      return true;
+    };
+    for (const name of opts.resume?.names ?? []) remember(name);
+    // A resumed name journal applies to the first pass only.
+    opts = { ...opts, resume: undefined };
+    async function* visit(rel: string, depth: number): AsyncGenerator<AliasProgress> {
+      let entries;
+      try {
+        entries = await readdirNoFollow(anchor, rel, {
+          strict: true,
+          strictNames: true,
+          onInvalidName: () => skip('non_utf8_name'),
+          maxEntries: limits.maxDirectoryEntries,
+        });
+        if (entries === null) {
+          skip('vanished');
+          yield snapshot();
+          return;
+        }
+        const recovery = await recoverWorktreeAliasArtifactsNoFollow(
+          anchor,
+          rel,
+          entries.map((e) => e.name),
+          { staleTempMs: opts.staleTempMs },
+        );
+        if (recovery.foreignParks)
+          skipped.foreign_park = (skipped.foreign_park ?? 0) + recovery.foreignParks;
+        if (recovery.changed)
+          entries = await readdirNoFollow(anchor, rel, {
+            strict: true,
+            strictNames: true,
+            onInvalidName: () => skip('non_utf8_name'),
+            maxEntries: limits.maxDirectoryEntries,
+          });
+        if (entries === null) {
+          skip('vanished');
+          yield snapshot();
+          return;
+        }
+      } catch (err) {
+        if (isResourceLimitError(err)) throw err;
+        skip(codeOf(err) === 'EDIRENTRYLIMIT' ? 'oversized_directory' : 'unreadable_directory');
+        yield snapshot();
+        return;
       }
-      yield { ...progress };
+      entries.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+      for (const entry of entries) {
+        const child = `${rel}/${entry.name}`;
+        const behind = comparePaths(child, scan.cursor) <= 0;
+        if (behind && !(child === scan.cursor || scan.cursor.startsWith(`${child}/`))) continue;
+        if (!behind && scan.examined >= limits.maxEntries) {
+          skip('entry_limit');
+          yield snapshot();
+          return;
+        }
+        if (!behind) {
+          scan.examined++;
+          scan.cursor = child;
+        }
+        if (isAliasArtifact(entry.name)) {
+          if (!behind) yield snapshot();
+          continue;
+        }
+        try {
+          // Do not trust d_type: DT_UNKNOWN must still descend toward a durable cursor.
+          const info = await lstatNoFollow(anchor, child, { strict: true, bigint: true });
+          if (info === null) {
+            skip('vanished');
+            yield snapshot();
+            continue;
+          }
+          if (info.kind === 'directory') {
+            if (depth >= limits.maxDepth) {
+              skip('depth_limit');
+              yield snapshot();
+              continue;
+            }
+            if (!behind) yield snapshot();
+            yield* visit(child, depth + 1);
+          } else if (!behind) {
+            let discovered: AliasName | undefined;
+            if (info.kind === 'file' && info.stats.nlink > 1n) {
+              const candidate = {
+                path: child,
+                dev: info.stats.dev.toString(),
+                ino: info.stats.ino.toString(),
+              };
+              if (remember(candidate)) discovered = candidate;
+            }
+            yield snapshot(discovered);
+          }
+        } catch (err) {
+          if (isResourceLimitError(err)) throw err;
+          skip('unreadable_entry');
+          yield snapshot();
+        }
+      }
     }
+    if (!scan.complete) {
+      yield* visit(WORKTREE_SUBDIR, 0);
+      scan.complete = true;
+      yield snapshot();
+    }
+    for (const group of groups.values()) {
+      const names: string[] = [];
+      for (const name of group.names) {
+        try {
+          const current = await lstatNoFollow(anchor, name, { strict: true, bigint: true });
+          if (
+            current?.kind === 'file' &&
+            current.stats.dev === group.identity.dev &&
+            current.stats.ino === group.identity.ino
+          )
+            names.push(name);
+          else skip(current === null ? 'vanished' : 'changed_entry');
+        } catch (err) {
+          if (isResourceLimitError(err)) throw err;
+          skip('unreadable_entry');
+        }
+        yield snapshot();
+      }
+      let remaining = names.length;
+      for (const name of names) {
+        try {
+          const result = await copyReplaceFileIfIdentityNoFollow(anchor, name, group.identity, {
+            internalNames: remaining,
+            maxBytes: opts.maxBytes,
+          });
+          if (result === 'replaced') {
+            replaced++;
+            scan.detached = (scan.detached ?? 0) + 1;
+            remaining--;
+          } else if (result === 'absent' || result === 'changed') {
+            skip(result === 'absent' ? 'vanished' : 'changed_entry');
+            remaining--;
+          }
+        } catch (err) {
+          if (isResourceLimitError(err)) throw err;
+          skip(err instanceof RangeError ? 'oversized_file' : 'unreadable_file');
+        }
+        yield snapshot();
+      }
+    }
+    if (!scan.detached) {
+      yield snapshot();
+      return;
+    }
+    if (scan.pass! >= limits.maxPasses) {
+      skip('pass_limit');
+      yield snapshot();
+      return;
+    }
+    scan = { cursor: '', examined: 0, complete: false, pass: scan.pass! + 1, detached: 0 };
+    yield snapshot();
   }
 }

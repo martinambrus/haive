@@ -149,9 +149,56 @@ describe.skipIf(!url)('legacy worktree alias sweep on Postgres', () => {
       expect((await lstat(path.join(anchor, 'outside'))).nlink).toBe(1);
       const names = await readdir(tree);
       expect(names.some((name) => name.includes('.haive-alias-park-'))).toBe(false);
-      expect(names.some((name) => name.includes('.haive-alias-kept-'))).toBe(published);
+      expect(names.some((name) => name.includes('.haive-alias-kept-'))).toBe(false);
+      if (published) {
+        const [kept] = await readdir(path.join(tree, '.haive/alias-recovery'));
+        expect(await readFile(path.join(tree, '.haive/alias-recovery', kept!), 'utf8')).toBe(
+          'original',
+        );
+      }
     },
   );
+  it('M1/M6 persists backoff without losing the cursor or inode journal, including after another checkpoint', async () => {
+    const store = worktreeAliasStore(db, root);
+    const repo = (await store.next(''))!;
+    const scan = { cursor: '.haive/worktrees/task/a', examined: 2, complete: false };
+    await store.checkpoint!(repo, scan, [{ path: scan.cursor, dev: '1', ino: '2' }]);
+    const retry = { attempts: 2, retryAt: Date.now() + 3600_000 };
+    await store.fail!(repo, retry);
+    expect(await worktreeAliasStore(db, root).next('')).toBeNull();
+    expect((await store.load!(repo))?.scan).toMatchObject({ ...scan, retry });
+    expect((await store.load!(repo))?.names).toHaveLength(1);
+    await store.checkpoint!(repo, { ...scan, examined: 3 }, []);
+    expect((await row()).worktreeAliasScan).toMatchObject({ retry, examined: 3 });
+  });
+  it('M2 records a counted done-with-skips result and clears the name journal', async () => {
+    const anchor = path.join(root, userId, repoId);
+    const tree = path.join(anchor, '.haive/worktrees/task');
+    await mkdir(tree, { recursive: true });
+    await mkdir(
+      path.join(tree, '.foreign.haive-alias-park-123-11111111-1111-1111-1111-111111111111'),
+    );
+    const worker = new WorktreeAliasSweeper(worktreeAliasStore(db, root), { maxSteps: 32 });
+    await worker.tick();
+    await worker.stop();
+    const finished = await row();
+    expect(finished.worktreeAliasesSweptAt).toBeInstanceOf(Date);
+    expect(finished.worktreeAliasScan).toMatchObject({
+      outcome: 'done-with-skips',
+      skipped: { foreign_park: 1 },
+    });
+    expect(await db.select().from(schema.worktreeAliasNames)).toHaveLength(0);
+  });
+  it('L6 accepts normalized storage paths consistently at selection and completion', async () => {
+    await db
+      .update(schema.repositories)
+      .set({ storagePath: path.join(root, userId, repoId) + '/' })
+      .where(eq(schema.repositories.id, repoId));
+    const store = worktreeAliasStore(db, root);
+    const repo = (await store.next(''))!;
+    expect(repo.refusal).toBeUndefined();
+    expect(await store.complete(repo)).toBe(true);
+  });
   it('excludes a read-only local folder and advances past an invalid stored root', async () => {
     const store = worktreeAliasStore(db, root);
     await db

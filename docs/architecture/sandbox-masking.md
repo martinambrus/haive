@@ -180,38 +180,66 @@ for `.haive-data`), but a link planted before #800 survives. T308 reproduced the
 in an owned fixture: after `worktreesBoundary` prepares its mounts, an fs-safe host in-place write
 to a checkout alias changes the task's source file too.
 
-`WorktreeAliasSweeper` now repairs managed writable repositories once in the background, starting
+`WorktreeAliasSweeper` repairs managed writable repositories once in the background, starting
 with the worker and stopping with it. Read-only local-folder imports are excluded. Migration 0250
 adds the trusted `repositories.worktree_aliases_swept_at` completion stamp, the discovery cursor
-`worktree_alias_scan`, and `worktree_alias_names` (only multiply-linked names, bigint device/inode
-identities encoded as decimal text). Cursor and newly discovered names commit together. Discovery
-resumes after its committed DFS cursor; a restart during copying rediscovers the tree so any
-recovery artifacts join the count. Successful completion clears the cursor and name journal in the
-stamp's transaction. A failed scan or checkpoint never stamps completion; failed repositories rotate
-behind the others. This follows the install's existing single-worker assumption.
+`worktree_alias_scan`, and `worktree_alias_names` (multiply-linked names, bigint identities encoded
+as decimal text). Cursor and newly discovered names commit together. Discovery resumes after its
+committed DFS cursor; interruption during copying re-lists that pass for artifact recovery. This
+follows the install's existing single-worker assumption.
 
-The walker uses only fs-safe lookups and bounded listings under the repository-root anchor. It
-refuses undecodable filenames, never follows a link and never changes a name outside `.haive/worktrees`. It counts all in-tree
-names per inode and copy-replaces a name only when its current `st_nlink` exceeds the remaining
-in-tree names; internal-only aliases retain their inode. Each replacement parks and verifies the
-original by bigint identity, streams through held descriptors into a new inode, preserves owner,
-mode and mtime (microsecond precision), checks for source changes, fsyncs and publishes exclusively.
-An overlapping save at the public name is preserved. Detected moves or writes require a new scan.
+Repository/root failures retain the cursor and journal and persist an exponential retry deadline
+in the checkpoint: 60 seconds doubling to six hours, with one warning per failure streak, including
+across a worker restart. A successful completion ends the streak. Empty installs are queried once
+per minute. Missing repository anchors refuse completion; selection and completion normalize stored
+storage paths consistently. A checkpoint failure cannot erase already committed progress.
 
-Alias parks use a dedicated namespace: the next serialized sweep recovers them immediately,
-restoring a missing public name. If publication or a concurrent save already filled it, the old
-bytes are retained as `.NAME.haive-alias-kept-<uuid>` and that ordinary file joins discovery and
-is detached too. Neither version is discarded. Generic fs-safe parks keep their existing recovery
-age. Retained copies can be inspected and removed by the operator after recovery.
+The walker uses fs-safe lookups and bounded listings under the repository-root anchor. It never
+follows a link or changes a name outside `.haive/worktrees`. Alias counts are per task worktree
+(the first directory below that tree), so aliases between tasks are external. Same-task internal-only
+aliases retain their inode. Each externally shared name becomes an independent copy; an internal
+pair with an outside alias may therefore become two independent copies too.
+
+Each replacement opens and verifies the original by bigint identity, streams a full copy into a
+private temp in the same held directory, preserves owner, ordinary permissions and mtime
+(microsecond precision), verifies source identity/size/timestamps, fsyncs the copy, then atomically
+renames it over the public name. The public name stays present throughout. Setuid, setgid and sticky
+bits are stripped like `copyFileNoFollow`; xattrs, ACLs and capabilities are not copied, and sparse
+files become dense. A save observed before the final verification is preserved/refused. Node has no
+identity-bound rename: a save between the final name check and rename can still be replaced. An
+already-open descriptor continues to access the old inode; the sweep does not revoke it.
+
+`readdirNoFollow` remains read-only. A separate explicit recovery call removes abandoned sweep
+`.haive-alias-tmp` copies immediately, and generic `.haive-tmp` files only after 24 hours by mtime
+(they may belong to another live writer). Old alias parks restore a missing public name immediately
+when visited. If that name exists, or a legacy `.haive-alias-kept` version remains, recovery moves
+the old version into that directory's `.haive/alias-recovery/<uuid>`; the sweep detaches any outside
+alias there too. Neither byte version is discarded. Generic parks keep their existing age policy;
+fresh/foreign parks are counted and skipped. Gate 3, DAG issue commits and Run app's preview exclude
+all temp/park/kept names through shared Git pathspecs, even before recovery. Recovered versions stay
+under the existing ignored `.haive/` directory for operator inspection. Newly created recovery
+parents keep the held directory's owner and use 0755, so a root worker does not create an
+inaccessible 0700 `.haive` parent in a task's workspace.
 
 Bounds are injectable: 256 generator steps or 100 ms between operations per one-second tick, at
-most one replacement per batch, 10,000 entries per directory, 128 directory levels, 2,000,000 total
-entries, 200,000 multiply-linked names, and 256 MiB per copied file with a 64 KiB buffer. The time
-budget cannot interrupt one syscall or copy. A limit or unreadable path keeps the repository
-unfinished and logs a warning. There is no synchronous invocation gate: existing aliases remain
-reachable until that repository's sweep completes. This one-time migration does not provide an
-atomic snapshot against arbitrary concurrent filesystem writers or revoke already-open descriptors;
-run it while a legacy checkout is quiet. New cross-mount aliases remain prevented by #800.
+most one replacement per batch, 10,000 raw entries per directory, 128 directory levels, 2,000,000
+entries per pass, 200,000 multiply-linked names, 256 MiB per copy with a 64 KiB buffer, and at most
+four passes (`WORKTREE_ALIAS_LIMITS.maxPasses`). The time budget cannot interrupt a syscall or copy.
+Undecodable names, oversized directories/files, foreign parks, vanished/unreadable entries and
+reached bounds are skipped and counted by class; healthy siblings still get detached. A directory
+over its listing bound is skipped as a whole. A pass that detached anything owes a fresh full pass,
+until a full pass detaches nothing or the named pass cap is reached. This catches a file moved behind
+the earlier cursor when the pass did useful detachment, without promising an atomic snapshot.
+Skip counts are occurrences across passes, not unique-path counts. Completion with skips retains
+`outcome: done-with-skips` and class counts in the checkpoint JSON and writes one aggregate log line;
+clean completion clears it. Both clear the name journal and stamp completion transactionally.
+
+There is no synchronous invocation gate: existing aliases remain reachable until the sweep reaches
+them, and skipped entries can remain aliased after done-with-skips. Arbitrary concurrent writers
+and already-open descriptors are residuals; run a legacy checkout quietly. A moving writer can
+still evade a zero-detachment pass, or exhaust the pass cap. New cross-mount aliases remain
+prevented by #800. At the hostile depth/listing bounds the retained directory arrays can reach
+1.28 million entries; the ordinary-tree measurements below do not establish that worst-case RSS.
 
 MEASURED before implementation, on an owned 50,000-file/200-package synthetic dependency tree:
 the existing held walk plus bigint lookup took 39.33 s and 39.14 s, process RSS 122 MiB. The new
@@ -219,7 +247,14 @@ unthrottled discovery measured 35.98 s and 52.34 s (RSS 205–209 MiB, alongside
 with the 100 ms budget potentially adding batches. This is why it runs once in the background.
 A final run using the 100 ms budget took 35.33 s of processing across 352 windows (longest 106 ms,
 RSS 204 MiB), projecting about 351 s at the production tick before database overhead. These
-figures include the benchmark process, not incremental worker heap. The detailed benchmark
+figures include the benchmark process, not incremental worker heap.
+
+MEASURED after the review fixes on a fresh 50,000-file/200-directory fixture plus 128 legacy aliases
+of a 64 KiB source: two full passes, 128 replacements (8 MiB copied), zero skips, 117.415 s of
+processing, 1,284 capped windows (longest 111 ms), peak RSS 218.67 MiB and end RSS 201.96 MiB.
+Both passes peaked at the same RSS; the outside inode ended at nlink 1. Unit suites/typechecks were
+running concurrently. This is an unthrottled processing measurement; the production one-second
+cadence and database checkpoints add elapsed time. The detailed benchmark
 and test reports are in the T308 execution evidence.
 
 Rollback: let the current batch finish and recover any pending alias parks with a compatible

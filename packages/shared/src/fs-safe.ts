@@ -499,10 +499,10 @@ export async function readTextNoFollow(
 }
 
 export interface ReadDirOptions extends StrictOption {
-  /** Worker migration: recover old parks, and refuse a still-live/interrupted park. */
-  recoverParks?: boolean;
   /** Refuse undecodable raw names; requires maxEntries to keep the listing bounded. */
   strictNames?: boolean;
+  /** Skip an undecodable entry and count it without exposing raw bytes. Requires strictNames. */
+  onInvalidName?: () => void;
   /** Bound allocation by iterating the held directory. Exceeding the cap refuses the whole
    * listing (EDIRENTRYLIMIT when strict, null otherwise), never returns an incomplete prefix. */
   maxEntries?: number;
@@ -538,8 +538,9 @@ export async function readdirNoFollow(
             encoding: opts.strictNames ? 'latin1' : 'utf8',
           });
           // The async iterator closes the listing on completion, early return, or throw.
+          let visited = 0;
           for await (const entry of listing) {
-            if (entries.length === opts.maxEntries) {
+            if (visited++ === opts.maxEntries) {
               throw Object.assign(
                 new Error(`Directory ${safe || '.'} exceeds the ${opts.maxEntries}-entry limit`),
                 { code: 'EDIRENTRYLIMIT' },
@@ -547,42 +548,14 @@ export async function readdirNoFollow(
             }
             if (opts.strictNames) {
               const decoded = decodeUtf8Strict(Buffer.from(entry.name, 'latin1'));
-              if (decoded === null) throw new NotUtf8Error(safe);
+              if (decoded === null) {
+                if (!opts.onInvalidName) throw new NotUtf8Error(safe);
+                opts.onInvalidName();
+                continue;
+              }
               entry.name = decoded;
             }
             entries.push(entry);
-          }
-          if (opts.recoverParks) {
-            const parks = entries.filter(
-              (entry) =>
-                PARK_NAME.test(entry.name) ||
-                ALIAS_PARK_NAME.test(
-                  entry.name.endsWith('.name') ? entry.name.slice(0, -5) : entry.name,
-                ),
-            );
-            if (parks.length > 0) {
-              const st = await dir.fh.stat({ bigint: true });
-              const key = `${st.dev}:${st.ino}`;
-              for (const entry of parks) {
-                if (
-                  ALIAS_PARK_NAME.test(
-                    entry.name.endsWith('.name') ? entry.name.slice(0, -5) : entry.name,
-                  )
-                ) {
-                  await recoverAliasPark(dir, anchor, safe, entry.name);
-                } else await recoverStalePark(dir, anchor, safe, entry.name, key);
-                const remains = await lstat(at(dir.fh.fd, entry.name)).catch((err: unknown) => {
-                  if (errno(err) === 'ENOENT') return null;
-                  throw err;
-                });
-                if (remains !== null)
-                  throw Object.assign(new Error('File park awaits recovery'), {
-                    code: 'EPARKPENDING',
-                  });
-              }
-              // Recovery can restore names. Re-open a fresh bounded listing before counting.
-              return (await readdirNoFollow(anchor, safe, { ...opts, recoverParks: false }))!;
-            }
           }
           return entries;
         }
@@ -2038,11 +2011,13 @@ async function recoverStalePark(
   rel: string,
   parked: string,
   directoryKey: string,
+  quiet = false,
 ): Promise<void> {
   const nameOnly = parked.endsWith('.name');
   const match = PARK_NAME.exec(nameOnly ? parked.slice(0, -5) : parked);
   if (!match) return;
   const warn = (message: string, err?: unknown) => {
+    if (quiet) return;
     const key = JSON.stringify([directoryKey, parked]);
     if (warnedParks.has(key)) return;
     warnedParks.add(key);
@@ -2837,11 +2812,9 @@ export async function readLinkNoFollow(
 
 export const COPY_REPLACE_MAX_BYTES = 256 * 1024 * 1024;
 
-/** Detach one legacy hard-link name without writing the shared inode. The original is parked
- * first and judged by bigint identity; publication uses an exclusive link, so a concurrent save
- * at the public name is never overwritten. An interrupted park is recovered by the existing
- * worker write-path recovery. Only the name in this tree is removed, never any outside alias.
- * A changing source or an over-limit copy refuses completion instead of publishing stale bytes. */
+/** Detach a legacy alias through held descriptors. Copy and verify while the public name
+ * remains present, then atomically rename the complete private copy over it. A writer already
+ * holding the old inode can still write it; this does not revoke open descriptors. */
 export async function copyReplaceFileIfIdentityNoFollow(
   anchor: string,
   rel: string,
@@ -2861,25 +2834,12 @@ export async function copyReplaceFileIfIdentityNoFollow(
   const leaf = segs.pop();
   if (!leaf) throw new PathContainmentError('invalid-path', anchor, rel, rel);
   const dir = await walkDir(anchor, safe, segs);
-  const parked = `.${parkLeaf(leaf)}.haive-alias-park-${process.pid}-${randomUUID()}`;
-  const tmp = `.${parkLeaf(leaf)}.haive-tmp-${process.pid}-${randomUUID()}`;
+  // A namespace owned by this serialized sweep permits immediate crash cleanup. Ordinary
+  // atomic-writer temps may still be live and retain their age policy.
+  const tmp = `.${parkLeaf(leaf)}.haive-alias-tmp-${process.pid}-${randomUUID()}`;
   let original: FileHandle | undefined;
   let copy: FileHandle | undefined;
-  let parkedRemains = false;
   let tempExists = false;
-  let nameRecord = false;
-  let published = false;
-  const restore = async (cause?: unknown) => {
-    try {
-      await assertHeldAt(dir.fh, dir.real, anchor, safe, segs.join('/'));
-      await restoreNoReplace(dir, parked, leaf);
-      parkedRemains = false;
-    } catch (err) {
-      throw new ParkedFileError(safe, [...segs, parked].join('/'), errno(err), {
-        cause: cause ?? err,
-      });
-    }
-  };
   try {
     const before = await lstat(at(dir.fh.fd, leaf), { bigint: true }).catch((err: unknown) => {
       if (errno(err) === 'ENOENT') return null;
@@ -2890,35 +2850,11 @@ export async function copyReplaceFileIfIdentityNoFollow(
       return 'changed';
     if (before.nlink <= BigInt(opts.internalNames)) return 'unneeded';
     if (before.size > BigInt(maxBytes)) throw new RangeError('Hard-link copy exceeds byte limit');
-    // The recovery record is required for names that parkLeaf truncates.
-    if (Buffer.byteLength(leaf) >= PARK_LEAF_MAX_BYTES - 3) {
-      const record = await open(
-        at(dir.fh.fd, `${parked}.name`),
-        O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW,
-        0o600,
-      );
-      nameRecord = true;
-      try {
-        await record.writeFile(leaf);
-        await record.sync();
-      } finally {
-        await record.close();
-      }
-    }
-    await assertHeldAt(dir.fh, dir.real, anchor, safe, segs.join('/'));
-    await rename(at(dir.fh.fd, leaf), at(dir.fh.fd, parked));
-    parkedRemains = true;
-    original = await open(at(dir.fh.fd, parked), O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_NOCTTY);
+    original = await open(at(dir.fh.fd, leaf), O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_NOCTTY);
     const st = await original.stat({ bigint: true });
-    if (!st.isFile() || st.dev !== identity.dev || st.ino !== identity.ino) {
-      await restore();
-      return 'changed';
-    }
-    await assertHeldAt(original, below(dir.real, parked), anchor, safe, safe);
-    if (st.nlink <= BigInt(opts.internalNames)) {
-      await restore();
-      return 'unneeded';
-    }
+    if (!st.isFile() || st.dev !== identity.dev || st.ino !== identity.ino) return 'changed';
+    await assertHeldAt(original, below(dir.real, leaf), anchor, safe, safe);
+    if (st.nlink <= BigInt(opts.internalNames)) return 'unneeded';
     if (st.size > BigInt(maxBytes)) throw new RangeError('Hard-link copy exceeds byte limit');
     copy = await open(at(dir.fh.fd, tmp), O_RDWR | O_CREAT | O_EXCL | O_NOFOLLOW, 0o600);
     tempExists = true;
@@ -2940,46 +2876,115 @@ export async function copyReplaceFileIfIdentityNoFollow(
       }
       position += bytesRead;
     }
-    const after = await original.stat({ bigint: true });
-    if (after.size !== st.size || after.mtimeNs !== st.mtimeNs || after.ctimeNs !== st.ctimeNs) {
-      throw new Error('Hard-link source changed during copy');
-    }
     await copy.chown(Number(st.uid), Number(st.gid));
-    await copy.chmod(Number(st.mode & 0o7777n));
+    await copy.chmod(Number(st.mode & 0o777n));
     await copy.utimes(Number(st.atimeNs) / 1e9, Number(st.mtimeNs) / 1e9);
     await copy.sync();
     await assertHeldAt(dir.fh, dir.real, anchor, safe, segs.join('/'));
     await assertHeldAt(copy, below(dir.real, tmp), anchor, safe, safe);
-    await assertHeldAt(original, below(dir.real, parked), anchor, safe, safe);
+    await assertHeldAt(original, below(dir.real, leaf), anchor, safe, safe);
     const finalSource = await original.stat({ bigint: true });
     if (
       finalSource.size !== st.size ||
       finalSource.mtimeNs !== st.mtimeNs ||
       finalSource.ctimeNs !== st.ctimeNs
-    ) {
+    )
       throw new Error('Hard-link source changed during copy');
-    }
-    await link(at(dir.fh.fd, tmp), at(dir.fh.fd, leaf));
-    published = true;
-    await unlink(at(dir.fh.fd, parked));
-    parkedRemains = false;
+    const publicSource = await lstat(at(dir.fh.fd, leaf), { bigint: true });
+    if (publicSource.dev !== identity.dev || publicSource.ino !== identity.ino) return 'changed';
+    // rename replaces the directory entry atomically; there is never a missing public name.
+    // A save between the final identity check and rename is the unavoidable name-based syscall race.
+    await rename(at(dir.fh.fd, tmp), at(dir.fh.fd, leaf));
+    tempExists = false;
     return 'replaced';
-  } catch (err) {
-    if (parkedRemains && !published) await restore(err);
-    throw err;
   } finally {
     await original?.close();
     await copy?.close();
     if (tempExists) await unlink(at(dir.fh.fd, tmp)).catch(() => undefined);
-    if (nameRecord && !parkedRemains)
-      await unlink(at(dir.fh.fd, `${parked}.name`)).catch(() => undefined);
+    await closeQuietly(dir.fh);
+  }
+}
+
+/** Explicit worker sweep recovery. Reads never invoke this mutation. Per-entry failures are
+ * counted, so a foreign park cannot prevent recovery of its siblings. Retained old versions
+ * are recovered under this directory's ignored .haive/alias-recovery, never discarded. */
+export async function recoverWorktreeAliasArtifactsNoFollow(
+  anchor: string,
+  rel: string,
+  names: readonly string[],
+  opts: { staleTempMs?: number } = {},
+): Promise<{ changed: boolean; foreignParks: number }> {
+  const safe = toSafeRel(rel);
+  const dir = await walkDir(anchor, safe, segments(safe));
+  let changed = false,
+    foreignParks = 0;
+  try {
+    for (const name of names) {
+      if (name.includes('/') || name === '.' || name === '..' || name.includes('\0'))
+        throw new PathContainmentError('invalid-path', anchor, rel, name);
+      const base = name.endsWith('.name') ? name.slice(0, -5) : name;
+      const aliasPark = ALIAS_PARK_NAME.test(base);
+      const park = PARK_NAME.test(base);
+      const kept = /^\..+\.haive-alias-kept-[0-9a-f-]+$/.test(name);
+      const aliasTemp = /^\..+\.haive-alias-tmp-[1-9][0-9]*-[0-9a-f-]+$/.test(name);
+      const temp = /^\..+\.haive-tmp-[1-9][0-9]*-[0-9a-f-]+$/.test(name);
+      if (!aliasPark && !park && !kept && !temp && !aliasTemp) {
+        if (/\.haive-(?:alias-(?:park|kept|tmp)|park|tmp)-/.test(name)) foreignParks++;
+        continue;
+      }
+      try {
+        const st = await lstat(at(dir.fh.fd, name));
+        if (!st.isFile()) {
+          foreignParks++;
+          continue;
+        }
+        await assertHeldAt(dir.fh, dir.real, anchor, safe, safe);
+        if (aliasTemp || (temp && Date.now() - st.mtimeMs >= (opts.staleTempMs ?? STALE_PARK_MS))) {
+          await unlink(at(dir.fh.fd, name));
+          changed = true;
+        } else if (kept) {
+          const parent = await dir.fh.stat();
+          await renameNoFollow(
+            anchor,
+            `${safe}/${name}`,
+            `${safe}/.haive/alias-recovery/${randomUUID()}`,
+            {
+              createParents: true,
+              noReplace: true,
+              mode: 0o755,
+              owner: { uid: parent.uid, gid: parent.gid },
+            },
+          );
+          changed = true;
+        } else if (aliasPark) {
+          await recoverAliasPark(dir, anchor, safe, name);
+          changed = true;
+        } else if (park) {
+          // Keep the ordinary age/reconstruction policy, but let this sweep aggregate its
+          // warnings without exposing absolute anchor paths or emitting per-entry logs.
+          const held = await dir.fh.stat({ bigint: true });
+          await recoverStalePark(dir, anchor, safe, name, `${held.dev}:${held.ino}`, true);
+          const remains = await lstat(at(dir.fh.fd, name)).catch((err: unknown) => {
+            if (errno(err) === 'ENOENT') return null;
+            throw err;
+          });
+          if (remains) foreignParks++;
+          else changed = true;
+        } else if (temp) foreignParks++;
+      } catch (err) {
+        if (isResourceLimitError(err)) throw err;
+        if (errno(err) !== 'ENOENT') foreignParks++;
+      }
+    }
+    return { changed, foreignParks };
+  } finally {
     await closeQuietly(dir.fh);
   }
 }
 
 /** Alias parks belong only to the serialized one-time sweep, so its next pass can recover them
  * immediately. If publication or another save already filled the public name, retain BOTH byte
- * versions. The kept name becomes ordinary scan input and is detached if it still links outside. */
+ * versions under an ignored recovery directory, detached by the same sweep if linked outside. */
 async function recoverAliasPark(
   dir: HeldDir,
   anchor: string,
@@ -3011,7 +3016,18 @@ async function recoverAliasPark(
     await restoreNoReplace(dir, parked, leaf);
   } catch (err) {
     if (errno(err) !== 'EEXIST') throw err;
-    await restoreNoReplace(dir, parked, `.${parkLeaf(leaf)}.haive-alias-kept-${randomUUID()}`);
+    const parent = await dir.fh.stat();
+    await renameNoFollow(
+      anchor,
+      `${rel}/${parked}`,
+      `${rel}/.haive/alias-recovery/${randomUUID()}`,
+      {
+        createParents: true,
+        noReplace: true,
+        mode: 0o755,
+        owner: { uid: parent.uid, gid: parent.gid },
+      },
+    );
   }
   await unlink(at(dir.fh.fd, `${parked}.name`)).catch((err: unknown) => {
     if (errno(err) !== 'ENOENT') throw err;

@@ -35,6 +35,7 @@ describe('one-time legacy worktree alias sweep', () => {
       maxLinkedNames: 200_000,
       maxEntries: 2_000_000,
       maxDepth: 128,
+      maxPasses: 4,
     });
     const root = await fixture();
     const tree = path.join(root, '.haive/worktrees/task');
@@ -61,7 +62,11 @@ describe('one-time legacy worktree alias sweep', () => {
     await link(path.join(root, 'outside'), path.join(tree, 'one'));
     await link(path.join(root, 'outside'), path.join(tree, 'two'));
     await symlink(root, path.join(tree, 'loop'));
-    await expect(drain(root, { maxLinkedNames: 1 })).rejects.toThrow(/limit/);
+    expect((await drain(root, { maxLinkedNames: 1 })).at(-1)).toMatchObject({
+      skipped: { linked_name_limit: expect.any(Number) },
+    });
+    await link(path.join(root, 'outside'), path.join(tree, 'three'));
+    await link(path.join(root, 'outside'), path.join(tree, 'four'));
     const interrupted = sweepWorktreeAliases(root);
     for await (const progress of interrupted) {
       if (progress.replaced === 1) break;
@@ -69,7 +74,9 @@ describe('one-time legacy worktree alias sweep', () => {
     expect((await lstat(path.join(root, 'outside'))).nlink).toBe(2);
     await drain(root);
     expect((await lstat(path.join(root, 'outside'))).nlink).toBe(1);
-    await expect(drain(root, { maxDirectoryEntries: 1 })).rejects.toThrow(/limit/);
+    expect((await drain(root, { maxDirectoryEntries: 1 })).at(-1)).toMatchObject({
+      skipped: { oversized_directory: expect.any(Number) },
+    });
     await rm(path.join(root, '.haive'), { recursive: true });
     await symlink(root, path.join(root, '.haive'));
     await expect(drain(root)).rejects.toMatchObject({ code: 'EPATHCONTAINMENT' });
@@ -98,7 +105,7 @@ it('resumes discovery from a durable cursor, including a directory prefix beside
   expect((await lstat(path.join(root, 'outside'))).nlink).toBe(1);
 });
 
-it('refuses completion when a discovered name moves before copying', async () => {
+it('counts a discovered name that moves before copying', async () => {
   const root = await fixture();
   const tree = path.join(root, '.haive/worktrees/task');
   await writeFile(path.join(root, 'outside'), 'original');
@@ -109,12 +116,12 @@ it('refuses completion when a discovered name moves before copying', async () =>
     if (next.done || next.value.scan?.complete) break;
   }
   await rename(path.join(tree, 'source'), path.join(tree, 'renamed'));
-  await expect(walk.next()).rejects.toThrow(/rescan/);
+  for await (const ignored of walk) void ignored;
   await drain(root);
   expect((await lstat(path.join(root, 'outside'))).nlink).toBe(1);
 });
 
-it('refuses completion when a discovered directory moves before its listing', async () => {
+it('counts a discovered directory that vanishes before its listing', async () => {
   const root = await fixture();
   const tree = path.join(root, '.haive/worktrees/task');
   await writeFile(path.join(root, 'outside'), 'original');
@@ -122,19 +129,21 @@ it('refuses completion when a discovered directory moves before its listing', as
   const walk = sweepWorktreeAliases(root);
   expect((await walk.next()).value).toMatchObject({ scan: { cursor: '.haive/worktrees/task' } });
   await rename(tree, `${tree}-moved`);
-  await expect(walk.next()).rejects.toThrow(/rescan/);
+  for await (const ignored of walk) void ignored;
   await drain(root);
   expect((await lstat(path.join(root, 'outside'))).nlink).toBe(1);
 });
 
-it('refuses undecodable filenames even beside a real replacement-character name', async () => {
+it('counts undecodable filenames without hiding a healthy sibling', async () => {
   const root = await fixture();
   const tree = path.join(root, '.haive/worktrees/task');
   await writeFile(path.join(root, 'outside'), 'original');
   const raw = Buffer.concat([Buffer.from(`${tree}/`), Buffer.from([0xff])]);
   await link(path.join(root, 'outside'), raw);
   await writeFile(path.join(tree, '\ufffd'), 'valid sibling');
-  await expect(drain(root)).rejects.toMatchObject({ code: 'ENOTUTF8' });
+  expect((await drain(root)).at(-1)).toMatchObject({
+    skipped: { non_utf8_name: expect.any(Number) },
+  });
   expect((await lstat(path.join(root, 'outside'))).nlink).toBe(2);
   expect(await readFile(path.join(tree, '\ufffd'), 'utf8')).toBe('valid sibling');
   await rm(raw);
@@ -143,4 +152,113 @@ it('refuses undecodable filenames even beside a real replacement-character name'
   await drain(root);
   expect((await lstat(path.join(root, 'outside'))).nlink).toBe(1);
   expect(await readFile(path.join(tree, '\ufffd'), 'utf8')).toBe('original');
+});
+
+it('M4 detaches links shared between different task worktrees', async () => {
+  const root = await fixture();
+  const first = path.join(root, '.haive/worktrees/task/f');
+  const second = path.join(root, '.haive/worktrees/other/f');
+  await mkdir(path.dirname(second));
+  await writeFile(first, 'before');
+  await link(first, second);
+  await drain(root);
+  await writeFile(first, 'after');
+  expect(await readFile(second, 'utf8')).toBe('before');
+});
+it('M2 skips an oversized aliased file and continues with its healthy sibling', async () => {
+  const root = await fixture();
+  const tree = path.join(root, '.haive/worktrees/task');
+  await writeFile(path.join(root, 'big'), 'oversized');
+  await link(path.join(root, 'big'), path.join(tree, 'a-big'));
+  await writeFile(path.join(root, 'small'), 'ok');
+  await link(path.join(root, 'small'), path.join(tree, 'z-small'));
+  const progress = await drain(root, { maxBytes: 3 });
+  expect((await lstat(path.join(root, 'small'))).nlink).toBe(1);
+  expect(progress.at(-1)).toMatchObject({ skipped: { oversized_file: expect.any(Number) } });
+});
+it('M2 repeats discovery after detaching to catch an alias moved behind the cursor', async () => {
+  const root = await fixture();
+  const tree = path.join(root, '.haive/worktrees/task');
+  await mkdir(path.join(tree, 'a'));
+  await mkdir(path.join(tree, 'z'));
+  await writeFile(path.join(root, 'outside'), 'bytes');
+  await link(path.join(root, 'outside'), path.join(tree, 'middle'));
+  await link(path.join(root, 'outside'), path.join(tree, 'z/hidden'));
+  const walk = sweepWorktreeAliases(root);
+  let moved = false;
+  for await (const p of walk) {
+    if (!moved && p.scan?.cursor.endsWith('/middle')) {
+      moved = true;
+      await rename(path.join(tree, 'z/hidden'), path.join(tree, 'a/hidden'));
+    }
+  }
+  expect((await lstat(path.join(root, 'outside'))).nlink).toBe(1);
+});
+it('M6 skips a vanished entry without abandoning healthy discoveries', async () => {
+  const root = await fixture();
+  const tree = path.join(root, '.haive/worktrees/task');
+  await writeFile(path.join(root, 'outside'), 'bytes');
+  await link(path.join(root, 'outside'), path.join(tree, 'a'));
+  await writeFile(path.join(tree, 'z'), 'temporary');
+  for await (const p of sweepWorktreeAliases(root)) {
+    if (p.discovered?.path.endsWith('/a')) await rm(path.join(tree, 'z'), { force: true });
+  }
+  expect((await lstat(path.join(root, 'outside'))).nlink).toBe(1);
+});
+it('L2 removes abandoned private copy temps without staging them as ordinary aliases', async () => {
+  const root = await fixture();
+  const tree = path.join(root, '.haive/worktrees/task');
+  const temp = path.join(tree, '.file.haive-tmp-123-11111111-1111-1111-1111-111111111111');
+  await writeFile(temp, 'partial private copy');
+  await drain(root, { staleTempMs: 0 });
+  await expect(lstat(temp)).rejects.toMatchObject({ code: 'ENOENT' });
+});
+
+it('M2 isolates a raw non-UTF8 name, a foreign park directory and an oversized directory', async () => {
+  const root = await fixture();
+  const tree = path.join(root, '.haive/worktrees/task');
+  await writeFile(path.join(root, 'outside'), 'bytes');
+  await link(path.join(root, 'outside'), path.join(tree, 'healthy'));
+  await writeFile(Buffer.concat([Buffer.from(`${tree}/`), Buffer.from([0xff])]), 'bad name');
+  await mkdir(path.join(tree, '.fake.haive-alias-park-123-11111111-1111-1111-1111-111111111111'));
+  await mkdir(path.join(tree, 'large'));
+  for (let i = 0; i < 5; i++) await writeFile(path.join(tree, 'large', String(i)), 'file');
+  const progress = await drain(root, { maxDirectoryEntries: 4 });
+  expect((await lstat(path.join(root, 'outside'))).nlink).toBe(1);
+  expect(progress.at(-1)).toMatchObject({
+    skipped: {
+      non_utf8_name: expect.any(Number),
+      foreign_park: expect.any(Number),
+      oversized_directory: expect.any(Number),
+    },
+  });
+});
+it('M2 bounds repeated passes and records the pass cap when aliases keep arriving', async () => {
+  const root = await fixture();
+  const tree = path.join(root, '.haive/worktrees/task');
+  await writeFile(path.join(root, 'outside'), 'bytes');
+  await link(path.join(root, 'outside'), path.join(tree, 'initial'));
+  let injected = 0;
+  let last;
+  for await (const p of sweepWorktreeAliases(root, { maxPasses: 2 })) {
+    if (p.scan?.complete && p.scan.pass! > injected) {
+      injected = p.scan.pass!;
+      await link(path.join(root, 'outside'), path.join(tree, `later-${injected}`));
+    }
+    last = p;
+  }
+  expect(last).toMatchObject({ scan: { pass: 2 }, skipped: { pass_limit: 1 } });
+});
+it('L9 refuses an absent repository anchor rather than stamping an empty tree', async () => {
+  const root = await fixture();
+  await rm(root, { recursive: true });
+  await expect(drain(root)).rejects.toThrow('Repository anchor is unavailable');
+});
+it('M2 counts foreign park-like names that do not match any recovery namespace', async () => {
+  const root = await fixture();
+  await writeFile(
+    path.join(root, '.haive/worktrees/task/.file.haive-alias-park-foreign'),
+    'foreign',
+  );
+  expect((await drain(root)).at(-1)).toMatchObject({ skipped: { foreign_park: 1 } });
 });
