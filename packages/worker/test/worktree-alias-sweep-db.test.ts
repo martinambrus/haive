@@ -18,6 +18,8 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } 
 import { createDatabase, schema, type Database } from '@haive/database';
 import { WorktreeAliasSweeper, worktreeAliasStore } from '../src/repo/worktree-alias-background.js';
 
+// These tests bound ticks by steps; database/filesystem latency must not end a batch early.
+const maxBatchMs = Number.POSITIVE_INFINITY;
 const url = process.env.WORKTREE_ALIAS_TEST_URL;
 if (url && !new URL(url).pathname.startsWith('/worktree_alias_test'))
   throw new Error('Use a dedicated worktree_alias_test database');
@@ -65,7 +67,7 @@ describe.skipIf(!url)('legacy worktree alias sweep on Postgres', () => {
     await link(path.join(anchor, 'outside'), path.join(anchor, '.haive/worktrees/task/a'));
     await writeFile(path.join(anchor, '.haive/worktrees/task/b'), 'ordinary');
     const store = worktreeAliasStore(db, root);
-    const first = new WorktreeAliasSweeper(store, { maxSteps: 2 });
+    const first = new WorktreeAliasSweeper(store, { maxSteps: 2, maxBatchMs });
     await first.tick();
     await first.stop();
     expect((await row()).worktreeAliasScan).toMatchObject({
@@ -74,7 +76,7 @@ describe.skipIf(!url)('legacy worktree alias sweep on Postgres', () => {
     });
     expect(await db.select().from(schema.worktreeAliasNames)).toHaveLength(1);
     expect((await lstat(path.join(anchor, 'outside'))).nlink).toBe(2);
-    const resumed = new WorktreeAliasSweeper(store, { maxSteps: 16 });
+    const resumed = new WorktreeAliasSweeper(store, { maxSteps: 16, maxBatchMs });
     await resumed.tick();
     expect((await row()).worktreeAliasesSweptAt).toBeInstanceOf(Date);
     await resumed.tick();
@@ -102,7 +104,7 @@ describe.skipIf(!url)('legacy worktree alias sweep on Postgres', () => {
       Object.assign(new Error('injected'), { code: 'ENOSPC' }),
     );
     const store = worktreeAliasStore(db, root);
-    const worker = new WorktreeAliasSweeper(store);
+    const worker = new WorktreeAliasSweeper(store, { maxBatchMs });
     await worker.tick();
     await worker.stop();
     const failed = await row();
@@ -166,7 +168,7 @@ describe.skipIf(!url)('legacy worktree alias sweep on Postgres', () => {
         path.join(tree, '.source.haive-alias-park-123-11111111-1111-1111-1111-111111111111'),
       );
       if (published) await writeFile(path.join(tree, 'source'), 'published');
-      const restarted = new WorktreeAliasSweeper(store, { maxSteps: 32 });
+      const restarted = new WorktreeAliasSweeper(store, { maxSteps: 32, maxBatchMs });
       for (let i = 0; i < 5 && !(await row()).worktreeAliasesSweptAt; i++) await restarted.tick();
       await restarted.stop();
       expect((await row()).worktreeAliasesSweptAt).toBeInstanceOf(Date);
@@ -218,7 +220,10 @@ describe.skipIf(!url)('legacy worktree alias sweep on Postgres', () => {
     await mkdir(
       path.join(tree, '.foreign.haive-alias-park-123-11111111-1111-1111-1111-111111111111'),
     );
-    const worker = new WorktreeAliasSweeper(worktreeAliasStore(db, root), { maxSteps: 32 });
+    const worker = new WorktreeAliasSweeper(worktreeAliasStore(db, root), {
+      maxSteps: 32,
+      maxBatchMs,
+    });
     await worker.tick();
     await worker.stop();
     const finished = await row();
@@ -251,7 +256,7 @@ describe.skipIf(!url)('legacy worktree alias sweep on Postgres', () => {
       .set({ source: 'blank', storagePath: '/unmanaged' })
       .where(eq(schema.repositories.id, repoId));
     expect(await store.next('')).toMatchObject({ id: repoId, refusal: expect.any(String) });
-    const worker = new WorktreeAliasSweeper(store);
+    const worker = new WorktreeAliasSweeper(store, { maxBatchMs });
     await worker.tick();
     await worker.tick();
     await worker.stop();
