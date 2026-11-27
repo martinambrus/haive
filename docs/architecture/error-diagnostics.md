@@ -329,6 +329,11 @@ defaults are unchanged.
 gate's ALWAYS_OPEN by exact path (`/^\/admin\/health$/`), still behind `requireAuth` and
 `requireAdmin`, so an unreadable config store does not hide the page that says why. The static
 `/health` never touches Redis.
+The web client maps 503 `config_unavailable` and `redis_unavailable` to temporary-outage copy
+with a retry hint, keyed on the response code rather than its wording; other failures keep their
+existing text. This includes the custom-tool Start gate through the same request wrapper.
+The admin overview shows Redis health and applies the health response even if another settings
+request fails, so the outage does not hide the down status.
 The stalled sweep re-drives step, cancel and start work; a lost stop-settle has no re-drive.
 `addOrRefuse` throws 503 `queue_unavailable` with a generic body: use it when nothing else will queue
 the work and a repeat is safe (auto-continue, merge abort).

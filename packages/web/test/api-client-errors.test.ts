@@ -16,6 +16,7 @@ import {
   updateTaskType,
   type ApiError,
 } from '../src/lib/api-client.js';
+import { startTaskWithAttachmentConfirmation } from '../src/lib/start-task.js';
 
 const failWith = (status: number, body: unknown) =>
   vi.stubGlobal(
@@ -34,6 +35,50 @@ const thrown = async (): Promise<ApiError> => {
 
 describe('api error message', () => {
   afterEach(() => vi.unstubAllGlobals());
+
+  it.each(['config_unavailable', 'redis_unavailable'])(
+    'names a temporary outage for %s regardless of the server wording',
+    async (code) => {
+      const body = { error: 'Different server wording', code };
+      failWith(503, body);
+      const err = await thrown();
+      expect(err.message).toBe('Temporary service outage. Please try again in a moment.');
+      expect(err.status).toBe(503);
+      expect(err.code).toBe(code);
+      expect(err.body).toEqual(body);
+      expect(fetch).toHaveBeenCalledOnce();
+    },
+  );
+
+  it.each([undefined, 'unknown_outage'])(
+    'keeps generic 503 copy for an unrecognized code: %s',
+    async (code) => {
+      failWith(503, { error: 'Service temporarily unavailable', code });
+      expect((await thrown()).message).toBe('Service temporarily unavailable');
+    },
+  );
+
+  it('keeps the HTTP fallback for a 503 without an error body', async () => {
+    failWith(503, {});
+    expect((await thrown()).message).toBe('HTTP 503');
+  });
+
+  it.each(['config_unavailable', 'redis_unavailable'])(
+    'carries the %s outage hint through the custom-tool Start gate path',
+    async (code) => {
+      failWith(503, { error: 'Service temporarily unavailable', code });
+      await expect(startTaskWithAttachmentConfirmation('custom-tool-task')).rejects.toMatchObject({
+        message: 'Temporary service outage. Please try again in a moment.',
+        status: 503,
+        code,
+      });
+      expect(fetch).toHaveBeenCalledOnce();
+      expect(fetch).toHaveBeenCalledWith(
+        expect.stringMatching(/\/tasks\/custom-tool-task\/action$/),
+        expect.objectContaining({ method: 'POST', body: JSON.stringify({ action: 'start' }) }),
+      );
+    },
+  );
 
   it('never prints undefined for issues that carry no message, and keeps them on the body', async () => {
     const issues = [
