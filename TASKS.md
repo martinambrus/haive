@@ -2934,7 +2934,7 @@ Reconciled 2026-11-01: only member4 remains a candidate for execution. Reproduce
 
 ### T500 · FNF[handoff-silent-writes] · three handleResult neighbours write silently or re-fail a stopped task (+5)
 
-status: open · gate: bounded verification · user decision: recheck risk-bearing members, 2026-11-01 · priority: P2
+status: done 2026-11-27 (members 3 and 4 DONE in #1379, 40542fe20: the task failure write skips tasks already failed, cancelled or completed in the same statement, so a late unroutable fix-loop routing no longer rewrites a Stop-failed task; a rejected CLI enqueue supersedes exactly its own reservation through one helper, cross-code in the merge resolver and DAG fix-agent dispatch; members 1, 2, 5 parked in T525) · gate: bounded verification · user decision: recheck risk-bearing members, 2026-11-01 · priority: P2
 From the T385/T348 driver (2026-10-31). PRE-EXISTING, minor. Same family as T385 item 6 (the lost hand-off log).
 
 1. MOVED to T525 (parked optional recovery coverage/display/diagnostics); original evidence retained there.
