@@ -1222,6 +1222,20 @@ In `martinambrus/haive-module-translator`. The owner's English-to-Slovak run fai
 
 1. Accept a declined form (same stem, up to 2 trailing letters changed on words of 5+ letters) at every keep-term check; a translated name still fails; codes and short words stay exact. Then the owner Retries the step.
 
+### T789 · FNF[global-kb-deadline-leftovers] · leftovers of the T630 global KB deadlines and the step-08 re-route journal
+
+status: open · kind: fix · found: T630 reviews 1 and 2 (#1390) 2026-11-27 · priority: P3
+
+1. Bounded global KB callers run with `fetch_types: false` (shared `global-kb/client.ts` ~:143), so a JS array bind would fail with 22P02. No touched caller binds one today; nothing prevents a future one. Add a control or a lint note.
+2. `rethrowIfGlobalKbTimeout` and the `runWithGlobalKb` catch classify by code, so an ETIMEDOUT or 57014 from non-KB work inside the callback (an Ollama fetch, the main database) is relabelled `GLOBAL_KB_DEADLINE` with no budget in its message. Misattribution only.
+3. `recomputeAliasedTopicKeys` (worker `data-migrations.ts` ~:794) returns when the KB is disabled, and nothing re-runs it when the KB is enabled later until the next boot.
+4. Sync job concurrency 2 with a 60-minute budget: two long syncs hold both slots and the 5-minute reconcile and the daily purge queue behind them for up to an hour. Not new (sync was unbounded) and no overlap hazard, but the reconcile cadence is not 5 minutes under load.
+5. The re-route recovery journal (`.haive/kb-reroute-recovery/<sha256(taskId)>.json`) is never pruned (success, reset, task end), keeps one full original body per re-routed file per task, and is readable by sandboxed agents (the bodies were already in the local KB file).
+6. An explicit Retry of step 08 after success restores every moved file locally from the journal although its global entry now exists.
+7. The web shows the `global_kb_config_outcome_unknown` 503 as plain error text in the config message slot and does not reload the form; a manual reload shows the saved state.
+8. A timeout-class classify error (57014, ETIMEDOUT, CONNECT_TIMEOUT, the 60 s deadline) still aborts the later reconcile sweep stages; pinned by a control, bounded, no worse than before.
+9. A journal that cannot be read or validated (corrupt or planted) is kept and blocks local deletion for that task's step-08 runs until a person removes or repairs it; re-routed files then stay local as well as promoted.
+
 ### T788 · FNF[checkout-suspend-leftovers] · leftovers of the T780 stop + warn checkout replacement
 
 status: open · kind: fix · found: T780 PR3 review 4 (#1377, #1381, #1384, #1387) 2026-11-27 · priority: P3
@@ -2289,7 +2303,7 @@ PRE-EXISTING. shared global-kb/client.ts `withGlobalKb` (~:121) via `recomputeAl
 
 ### T630 · FNF[global-kb-unbounded-calls] · global KB store calls outside boot still have no deadline (+2)
 
-status: open · kind: fix · found: T571 review 2026-11-12 · priority: P3
+status: done 2026-11-27, merged #1390 (f7b946c3f) and live (`pnpm docker libs`, drain checks zero): all three members fixed (deadlines and owner signals through steps, the sweep, api and maintenance; bounded internal database creation on a disposable admin connection, memo cleared on 3D000; the data migration propagates only aborts and coded deadlines); review found and fixed a re-route file loss on Retry (step 08 now journals original bodies) and the unknown-outcome config save; leftovers filed as T789 · kind: fix · found: T571 review 2026-11-12 · priority: P3
 PRE-EXISTING, more reachable since #1116 made the bounded path the norm at boot. (1) `withGlobalKb` without `deadlineMs` in steps and the sweep: `_global-kb-promote.ts`, `kb-author/01-enrich.ts`, `09_6_4`/`09_6_5`, `global-kb-sync-queue.ts`; a store that accepts and stalls holds the step or sweep. Fix: pass a deadline and signal as the boot repairs do. (2) shared global-kb/connection.ts `resolveInternal` (~:148-152): the main-db `SELECT 1 FROM pg_database` / `CREATE DATABASE` has no client-side bound, so each timed-out background attempt can leave one query on the worker pool while main Postgres stalls (Greptile P2 on #1116, comment 4556974731). Fix: client-side bound; `SET LOCAL statement_timeout` cannot cover `CREATE DATABASE`. (3) worker data-migrations.ts `dropHeadingOnlyGlobalKbChunks` (~:1253) swallows a typed outage internally; and the recompute is not gated on `resolveGlobalKbEnabled` (the classify migration is).
 
 ### T631 · fix · git-template test helper cleanup times out on a loaded runner
