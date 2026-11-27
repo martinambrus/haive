@@ -102,18 +102,45 @@ left. The following rules keep it that way, each MEASURED on git 2.43 and 2.54:
   with the merge commit's sha (`squashMergeSha`) ahead of any reset, so a crash between the reset and
   the commit re-enters it. `squashMergeCommit` decides in a fixed
   order, on parents, trees and ancestry only: a feature already contained in the base tip recorded
-  at the first open (`baseShaBefore`) has nothing to squash, unless `ORIG_HEAD` or HEAD shows this
-  merge's interrupted squash (a two-parent commit on that tip, or the recorded merge), which goes to
+  at the first open (`baseShaBefore`) has nothing to squash, unless the recorded merge, `ORIG_HEAD`
+  or HEAD shows this merge's interrupted squash (a two-parent commit on that tip), which goes to
   the proofs below instead; HEAD at that tip is a reset already
-  made, committed only when `ORIG_HEAD` is the recorded merge commit (or, for a row saved without
-  one, a merge of base and feature) with the staged tree; HEAD with that tip as its one parent is a
-  squash already made, accepted on the same proof against its tree. A feature branch that moved
-  after the merge does not break either proof;
+  made, committed only when the recorded merge commit has that base as its first parent and
+  matches the staged tree (a legacy row without a recorded sha requires `ORIG_HEAD` to prove a
+  merge of base and feature); HEAD with that tip as its one parent is a squash already made,
+  accepted on the same proof against its tree. A recorded merge sha suffices when `ORIG_HEAD`
+  is missing or overwritten: a crash after the soft reset resumes the commit, and a crash after
+  the commit accepts it without resetting or recommitting. Parent and tree mismatches still halt.
+  A feature branch that moved after the merge does not break either proof;
   HEAD as the feature's merge is reset and recommitted unless its tree equals the base's. An
   unproven reset or squash halts the step with its claim kept. Otherwise (a person's commit on
   top of the merge, a moved base, an empty net diff) it keeps the merge commit and records why
   (`squashSkipReason`, shown by `12-worktree-cleanup`), so a squash never folds in a commit that is
   not the merge's own.
+  Known limitation T785: a crash after the merge lands but before its state save can replay
+  with the landed tip as `baseShaBefore`, silently omit the squash (and push unsquashed history),
+  omit `merge.landed`, and leave the wrong undo base; the replay control pins content exactly once.
+  After a squash, cleanup deletes a feature or DAG issue branch only when its current tip is
+  contained in the recorded merge's second parent, using compare-and-delete against that tip.
+  A moved or unreadable branch, missing recorded evidence, a symbolic ref, a checkout holder or a
+  refused delete keeps the branch, with structured `branchLeftovers` output, a
+  `worktree.branch_leftovers` event and a step warning. Cleanup checks detached worktrees' own
+  `rebase-merge/head-name`, `rebase-apply/head-name` and `BISECT_START` through fs-safe under the
+  repository anchor, preserving `branch -D`'s rebase/bisect refusal. An unreadable worktree listing
+  or operation state retains the branch as `unreadable-worktrees`; it never throws out of apply
+  after the merge landed. Git has no atomic checkout-and-ref check, so a checkout or operation
+  started after the final holder read can still race deletion. Symbolic refs are refused before
+  deletion, and `update-ref --no-deref` also prevents following one introduced after that check.
+  Ref absence is checked before requiring recorded merge evidence: Retry after pruning the merge
+  object succeeds for an already-gone branch, while a junk loose ref (`rev-parse` exit 1 but
+  `show-ref --verify --quiet` exit 128) stays as `unreadable-branch`. After deletion, including an
+  already-absent ref on Retry, `git config --remove-section branch.<name>` removes upstream config;
+  exit 128 means no section and succeeds idempotently. Other config failures are reported as
+  `config-cleanup-refused`, even though the ref is gone. Leftover copy gives a human explanation
+  and repository-terminal recovery guidance; structured reason slugs stay in fields. Events record
+  observed tips and Retry appends no duplicate for the same branch and tip (legacy events without
+  tips cannot deduplicate). Legacy squash rows without a recorded merge keep existing branches.
+  No decision reads message text.
   The pre-push fetch also runs outside a section, into a ref only that pass names
   (`refs/haive/pre-push/<step>/<uuid>`, no `FETCH_HEAD`, no tags); the section then records
   `origin/<base>` from it and counts how far the base is behind, so a pass that lost the claim moves
