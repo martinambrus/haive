@@ -255,8 +255,45 @@ it('keeps the disabled own CLI visible when dispatch would hold it', async () =>
   expect(await effective()).toBe(OWN);
 });
 
-it('uses the pre-lock task view for a malformed composed pin', async () => {
+it('keeps the raw CLI view and coded picker restrictions for a malformed composed pin', async () => {
   const fake = composed(null, [provider(OLDEST, 1), { ...provider(OWN, 2), name: 'claude-code' }]);
   fake.patch(schema.tasks, TASK, { metadata: { composedLspImageRefs: { schemaVersion: 999 } } });
   expect(await effective()).toBe(OLDEST);
+  const res = await app.request(`/${TASK}`);
+  const { task } = (await res.json()) as {
+    task: { cliProviderRestrictions: Record<string, { code: string; message: string }> };
+  };
+  expect(task.cliProviderRestrictions[OLDEST]).toMatchObject({ code: 'unverified_provider' });
+});
+
+it('returns the explicit-choice lock verdicts for the task pickers', async () => {
+  composed(OWN, [
+    { ...provider(OWN, 1), name: 'claude-code' },
+    { ...provider(OLDEST, 2), name: 'claude-code' },
+  ]);
+  const res = await app.request(`/${TASK}`);
+  expect(res.status).toBe(200);
+  const { task } = (await res.json()) as {
+    task: { cliProviderRestrictions: Record<string, { code: string; message: string }> };
+  };
+  expect(task.cliProviderRestrictions[OWN]).toBeUndefined();
+  expect(task.cliProviderRestrictions[OLDEST]).toMatchObject({ code: 'multiple_providers' });
+});
+
+it('picker restrictions follow the effective-image set even when the task default differs', async () => {
+  composed(
+    OLDEST,
+    [
+      { ...provider(OWN, 1), name: 'claude-code' },
+      { ...provider(OLDEST, 2), name: 'claude-code' },
+    ],
+    [OWN],
+  );
+  const res = await app.request(`/${TASK}`);
+  expect(res.status).toBe(200);
+  const { task } = (await res.json()) as {
+    task: { cliProviderRestrictions: Record<string, { code: string; message: string }> };
+  };
+  expect(task.cliProviderRestrictions[OWN]).toBeUndefined();
+  expect(task.cliProviderRestrictions[OLDEST]).toMatchObject({ code: 'multiple_providers' });
 });

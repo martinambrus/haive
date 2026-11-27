@@ -3,7 +3,10 @@ import { schema, type Database, type DbTx } from '@haive/database';
 import { CLI_DISPATCH_STEP_IDS } from '@haive/shared';
 import {
   checkTaskComposedLspProvider,
-  lockTaskForComposedLsp,
+  ComposedLspProviderDisabledError,
+  ComposedLspProviderLockedError,
+  withComposedLspTransaction,
+  writeLockedStepCliChoice,
 } from '@haive/shared/composed-lsp-provider-lock';
 import type { CliProviderRecord } from '../../../cli-adapters/types.js';
 import { ProviderBuildError } from '../../../cli-adapters/prompt-delivery.js';
@@ -180,25 +183,19 @@ export async function recordFixRoundCliChoice(
     throw new FixRoundCliUnavailable(
       `Next fix round CLI "${provider.label}" cannot run ${target.metadata.id}; choose another CLI.`,
     );
-  // Lock the task row, then decide: see lockTaskForComposedLsp for the lock order.
-  await lockTaskForComposedLsp(db, { userId, taskId });
-  const lock = await checkTaskComposedLspProvider(db, { userId, taskId, providerId: provider.id });
-  if (lock && !lock.ok) throw new FixRoundCliLocked(lock.message);
-  await db
-    .insert(schema.taskStepCliChoices)
-    .values({
+  await withComposedLspTransaction(db, (tx) =>
+    writeLockedStepCliChoice(tx, {
+      userId,
       taskId,
       stepId: target.metadata.id,
       role: fixRoundCliRole(round),
       cliProviderId: provider.id,
       effortLevel: null,
-    })
-    .onConflictDoUpdate({
-      target: [
-        schema.taskStepCliChoices.taskId,
-        schema.taskStepCliChoices.stepId,
-        schema.taskStepCliChoices.role,
-      ],
-      set: { cliProviderId: provider.id, effortLevel: null, updatedAt: new Date() },
-    });
+    }),
+  ).catch((error: unknown) => {
+    if (error instanceof ComposedLspProviderLockedError) throw new FixRoundCliLocked(error.message);
+    if (error instanceof ComposedLspProviderDisabledError)
+      throw new FixRoundCliUnavailable(error.message);
+    throw error;
+  });
 }

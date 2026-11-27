@@ -295,7 +295,11 @@ async function hidesInsightTriageSeat(
 }
 
 /** Read the same retained effective references as worker lspDispatchState, without readiness I/O. */
-export async function loadComposedProviderSets(db: ReturnType<typeof getDb>, taskIds: string[]) {
+export async function loadComposedProviderSets(
+  db: ReturnType<typeof getDb>,
+  taskIds: string[],
+  onMalformedPin?: (taskId: string) => void,
+) {
   const out = new Map<string, string[]>();
   if (!taskIds.length) return out;
   const tasks = await db
@@ -328,6 +332,7 @@ export async function loadComposedProviderSets(db: ReturnType<typeof getDb>, tas
             .map((e) => e.providerId),
         );
       } catch {
+        onMalformedPin?.(task.id);
         logger.warn({ taskId: task.id }, 'Cannot read composed provider pin; using raw CLI view');
       }
     }

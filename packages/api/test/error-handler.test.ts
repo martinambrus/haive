@@ -1,4 +1,5 @@
 import { Hono } from 'hono';
+import { ComposedLspProviderDisabledError } from '@haive/shared/composed-lsp-provider-lock';
 import { HTTPException } from 'hono/http-exception';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ConfigUnavailableError, logger } from '@haive/shared';
@@ -51,6 +52,13 @@ describe('errorHandler', () => {
       expect(await res.json()).toEqual({ error: 'Refused', code: 'refused' });
     },
   );
+
+  it('answers a persistently disabled provider with its stable code and no concurrency retry', async () => {
+    const res = await appThrowing(new ComposedLspProviderDisabledError()).request('/');
+    expect(res.status).toBe(400);
+    expect(await res.json()).toMatchObject({ code: 'cli_provider_disabled' });
+    expect(res.headers.get('Retry-After')).toBeNull();
+  });
 
   it('keeps answering anything else as a 500', async () => {
     const res = await appThrowing(new Error('boom')).request('/');

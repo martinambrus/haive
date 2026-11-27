@@ -9,6 +9,14 @@ continuation that finds its answers saved uses them as they are, and the row sta
 Values the job carries are ignored there, since a parked step's only source of them is a submit
 redelivered after it was applied. A submission, a retry and a first run still flip to `running`.
 
+Human-only form values saved on a row remain valid across a stalled-sweep redrive of a running
+step, including a replacement tick saved before a worker died ahead of its transaction. The runner
+strips only job-carried human-only values on redelivery; it never writes a stripped saved answer
+back. A job redelivered beside those durable values cannot replace them.
+A refused decision can request `ReopenStepFormError({ reuseFormValues: true })`: the existing
+`reconcileReusedFormValues` and default overlay prefill the refreshed form, excluding human-only
+fields. These freshly submitted values take precedence over reconciled defaults, including an explicit "none". It still parks with null answers and a fresh marker, so only a new submit can continue.
+
 **Nothing starts before the configuration store answers.** `bootstrap()` runs through
 `retryWhileConfigUnavailable` (see [Error diagnostics](error-diagnostics.md), "Configuration store
 outage"), and the step engine, the sandbox reap, the reconcile, the queues, the module jobs and
@@ -222,6 +230,8 @@ derived badge reads it only on the current pending row with a live `waiting_star
 a running task that is neither paused nor dead. Reset paths that close the park marker therefore
 cannot keep the badge alive. The task list explicitly selects this column; detail reads the
 whole step row.
+
+A disable preview's composed-LSP failure list includes a task only when its effective run list still has a fresh CLI-dispatching step at or after the current pointer. A live task with only deterministic work left is not described as failing at a next CLI step. The existing provider-sensitive hold counts remain separate.
 
 Before saving a provider disable, Save and Rebuild read the authenticated, owner-scoped
 `GET /cli-providers/:id/disable-impact`. It counts remaining fresh default-slot bindings to that

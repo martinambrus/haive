@@ -104,7 +104,12 @@ import {
   assertNewWorkAllowed,
   requireNewWorkAllowed,
 } from '../../middleware/maintenance.js';
-import { lockTaskForComposedLsp } from '@haive/shared/composed-lsp-provider-lock';
+import {
+  assertComposedLspWriteProviderAvailable,
+  composedLspProviderRestrictions,
+  lockTaskForComposedLsp,
+  withComposedLspTransaction,
+} from '@haive/shared/composed-lsp-provider-lock';
 import { assertComposedLspProviderAllowed, loadUsableProvider } from '../../lib/step-cli-choice.js';
 import { HttpError, type AppEnv } from '../../context.js';
 import {
@@ -1293,11 +1298,19 @@ taskRoutes.get('/:id', async (c) => {
     executionContract: _execution,
     ...taskFields
   } = task;
+  let malformedComposedPin = false;
   const composedIds = task.envTemplateId
-    ? (await loadComposedProviderSets(db, [id])).get(id)
+    ? (
+        await loadComposedProviderSets(db, [id], () => {
+          malformedComposedPin = true;
+        })
+      ).get(id)
     : undefined;
+  // Read-only CLI views retain their raw fallback, while known contract-2 pickers must
+  // still carry the writer's conservative restrictions when image metadata is unreadable.
+  const pickerComposedIds = malformedComposedPin ? [] : composedIds;
   const providerRows =
-    task.cliProviderId === null || composedIds !== undefined
+    task.cliProviderId === null || pickerComposedIds !== undefined
       ? await db
           .select({
             id: schema.cliProviders.id,
@@ -1324,9 +1337,15 @@ taskRoutes.get('/:id', async (c) => {
             preferred.providerId,
             allowed ? providerRows.filter((p) => allowed.has(p.id)) : providerRows,
           );
+  const cliProviderRestrictions = composedLspProviderRestrictions({
+    taskCliProviderId: task.cliProviderId,
+    providers: providerRows,
+    composedProviderIds: pickerComposedIds,
+  });
   const taskWithActive = {
     ...taskFields,
     effectiveCliProviderId,
+    ...(cliProviderRestrictions === undefined ? {} : { cliProviderRestrictions }),
     typeLabel: typeLabels.get(task.type) ?? null,
     pausedByAdmin: adminPausedIds.has(id),
     pauseLocked: adminPauseLocks(adminPausedIds.has(id), c.get('userRole')),
@@ -2018,10 +2037,11 @@ taskRoutes.patch('/:id/summary-cli', async (c) => {
   // instead of what was just picked here.
   patch.summaryCliChoiceAt = new Date();
 
-  await db.transaction(async (tx) => {
+  await withComposedLspTransaction(db, async (tx) => {
     if (body.summaryCliProviderId) {
       // Lock the task row, then decide: see lockTaskForComposedLsp for the lock order.
       await lockTaskForComposedLsp(tx, { userId, taskId: id });
+      await assertComposedLspWriteProviderAvailable(tx, userId, body.summaryCliProviderId);
       await assertComposedLspProviderAllowed(tx, userId, id, body.summaryCliProviderId);
     }
     await tx.update(schema.tasks).set(patch).where(eq(schema.tasks.id, id));

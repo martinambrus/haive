@@ -135,6 +135,12 @@ function buildFake(storedDeps: Deps | null) {
       status: 'ready',
     });
   }
+  fake.insert(schema.taskSteps, {
+    id: uuid(99),
+    taskId: TASK,
+    stepId: '01-declare-deps',
+    status: 'running',
+  });
   return fake;
 }
 
@@ -142,6 +148,7 @@ function makeRun(storedDeps: Deps | null, replace: boolean) {
   const fake = buildFake(storedDeps);
   const ctx = {
     taskId: TASK,
+    taskStepId: uuid(99),
     userId: USER,
     cliProviderId: CLAUDE,
     repoPath,

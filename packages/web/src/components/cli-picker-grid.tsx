@@ -2,7 +2,7 @@
 
 import { InlineMarkdown } from '@/components/markdown/inline-markdown';
 import { useState, type ReactNode } from 'react';
-import type { CliProvider } from '@/lib/api-client';
+import type { CliProvider, CliProviderRestriction } from '@/lib/api-client';
 
 /** A loop role or a fan-out seat: the addressable slot a CLI choice attaches to. */
 type CliSlot = { id: string; label: string };
@@ -17,6 +17,7 @@ type CliSlot = { id: string; label: string };
  *  applies to this task alone unless "Also for my later tasks" is ticked. */
 export function CliPickerGrid({
   providers,
+  providerRestrictions = {},
   idPrefix,
   roles,
   seats,
@@ -34,6 +35,7 @@ export function CliPickerGrid({
   onChange,
 }: {
   providers: CliProvider[];
+  providerRestrictions?: Record<string, CliProviderRestriction>;
   /** Prefix for the generated input ids/labels; must be unique per rendered step. */
   idPrefix: string;
   roles?: readonly CliSlot[];
@@ -74,8 +76,18 @@ export function CliPickerGrid({
   // label is ever truncated, and the cell narrows to 22rem so more fit per row.
   const cliLabelClass = 'truncate text-xs font-medium text-neutral-400';
   const providerOptions = providers.map((p) => (
-    <option key={p.id} value={p.id} disabled={!p.enabled}>
-      {p.label} ({p.name}){!p.enabled ? ' — disabled' : ''}
+    <option
+      key={p.id}
+      value={p.id}
+      disabled={!p.enabled || providerRestrictions[p.id]?.code !== undefined}
+      title={providerRestrictions[p.id]?.message}
+    >
+      {p.label} ({p.name})
+      {!p.enabled
+        ? ' — disabled'
+        : providerRestrictions[p.id]?.code
+          ? ' — unavailable for this environment'
+          : ''}
     </option>
   ));
   const fallbackProvider = fallbackProviderId
@@ -135,7 +147,9 @@ export function CliPickerGrid({
             ? `${prov.label} is disabled, so this step's effort cannot be changed. Enable it again or choose another CLI for the step.`
             : "Reasoning/effort level for this step's CLI (overrides the CLI's default)"
         }
-        disabled={locked || busy || switchedOff}
+        disabled={
+          locked || busy || switchedOff || providerRestrictions[providerId]?.code !== undefined
+        }
         value={value}
         onChange={(e) => void onChange(providerId || null, roleId, e.target.value, remember)}
         className={effortSelectClass}
@@ -156,6 +170,12 @@ export function CliPickerGrid({
        drops cells per row as the window narrows; the cell width never changes,
        so nothing re-flows on a CLI switch. */
     <div className="grid gap-x-4 gap-y-2 [grid-template-columns:repeat(auto-fill,minmax(min(22rem,100%),1fr))]">
+      {Object.keys(providerRestrictions).length > 0 && (
+        <InlineMarkdown
+          className="col-span-full text-xs text-amber-300"
+          body="This environment restricts CLI choices. Unavailable providers are disabled in the pickers."
+        />
+      )}
       {roundCliUnavailable && (
         <InlineMarkdown
           className="col-span-full text-xs text-amber-300"

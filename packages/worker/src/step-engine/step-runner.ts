@@ -4286,7 +4286,9 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
       const submitted =
         redetected || current.pauseFormOnRetry || insightApprovalRequired
           ? undefined
-          : params.formValues;
+          : row.status !== 'waiting_form' && current.formValues != null
+            ? withoutHumanOnlyFields(params.formValues, stepDef.humanOnlyFormFields)
+            : params.formValues;
 
       // Manual mode: EVERY step pauses before apply. Formless steps get a
       // synthesized confirm-only schema so the existing waiting_form plumbing
@@ -4305,6 +4307,8 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
               ),
             )
           : validated;
+      // The row holds the owner's accepted answers, including across a stalled-sweep redrive.
+      // A redelivered job must never strip or replace those durable human-only decisions.
       let formValues = current.formValues as FormValues | null;
       if (formValues) {
         const normalized = normalizeStepFormValues(meta.id, formValues);
@@ -4434,7 +4438,11 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
       const continuing = row.status === 'waiting_cli' && current.formValues != null;
       // A latched owner answer comes from the attested saved values, never the job.
       // Validate it and close the form through the ordinary submitted-answer path.
-      const submittedAnswer = insightHumanSubmission ? formValues : submitted;
+      const submittedAnswer = insightHumanSubmission
+        ? formValues
+        : row.status !== 'waiting_form' && formValues && stepDef.humanOnlyFormFields?.length
+          ? undefined
+          : submitted;
       if (persistedSchema && submittedAnswer && !continuing) {
         const expanded = validateFormValues(persistedSchema, submittedAnswer);
         const validation = expanded.success
@@ -4672,7 +4680,7 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
             if (stepDef.prepareForm) {
               await stepDef.prepareForm(ctx, refreshedDetected, llmOutput);
             }
-            const refreshedSchema = normalizeStepSchemaDefaults(
+            let refreshedSchema = normalizeStepSchemaDefaults(
               meta.id,
               stepDef.form(ctx, refreshedDetected, llmOutput),
             );
@@ -4695,6 +4703,23 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
               throw new Error(
                 `${meta.id} requested another form, but refreshed detection produced no form`,
               );
+            }
+            if (applyErr.reuseFormValues) {
+              const prior = withoutHumanOnlyFields(
+                formValues ?? undefined,
+                stepDef.humanOnlyFormFields,
+              );
+              if (prior) {
+                const reconciled = stepDef.reconcileReusedFormValues
+                  ? await stepDef.reconcileReusedFormValues(ctx, refreshedDetected, prior)
+                  : prior;
+                // These are this person's fresh answers, so even an explicit "none" wins
+                // over reconciliation intended for an older task's stale defaults.
+                refreshedSchema = overlayPreAnswerDefaults(refreshedSchema, {
+                  ...reconciled,
+                  ...prior,
+                });
+              }
             }
             const notice = reopenFormNotice(applyErr);
             if (notice !== undefined) {

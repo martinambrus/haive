@@ -1,3 +1,8 @@
+import {
+  ComposedLspProviderLockedError,
+  ComposedLspProviderDisabledError,
+  ComposedLspWriteBusyError,
+} from '@haive/shared/composed-lsp-provider-lock';
 import { DataEdgePlanError } from '@haive/shared/data-edge-plan';
 import { DerivedRunPlanError } from '@haive/shared/modularity';
 import { DerivedTaskAdmissionError } from '../lib/derived-errors.js';
@@ -16,6 +21,25 @@ import { isUuid } from '../lib/uuid.js';
 const INVALID_TEXT_REPRESENTATION = '22P02';
 
 export const errorHandler: ErrorHandler<AppEnv> = (err, c) => {
+  if (err instanceof ComposedLspProviderDisabledError)
+    return c.json({ error: err.message, code: err.code }, 400);
+  if (err instanceof ComposedLspProviderLockedError)
+    return c.json({ error: err.message, code: err.code }, 409);
+  if (err instanceof ComposedLspWriteBusyError) {
+    c.header('Retry-After', '1');
+    return c.json({ error: err.message, code: err.code, retryable: true }, 503);
+  }
+  if (hasPgCode(err, '40P01')) {
+    c.header('Retry-After', '1');
+    return c.json(
+      {
+        error: 'This action conflicted with another update. Retry this action.',
+        code: 'transaction_retry_required',
+        retryable: true,
+      },
+      503,
+    );
+  }
   if (err instanceof UserPostgresDsnError)
     return c.json({ error: err.message, code: err.code }, 400);
   if (err instanceof ModuleAdmissionError)

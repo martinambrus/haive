@@ -1,4 +1,9 @@
 import {
+  ComposedLspProviderDisabledError,
+  withComposedLspTransaction,
+  writeLockedStepCliChoice,
+} from '@haive/shared/composed-lsp-provider-lock';
+import {
   RESOURCE_LIMITS,
   lstatNoFollow,
   readdirNoFollow,
@@ -9,7 +14,11 @@ import { and, eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import type { FormSchema, InfoSection } from '@haive/shared';
 import { mapWithConcurrency, orderByDefaultPriority } from '@haive/shared';
-import type { StepContext, StepDefinition } from '../../step-definition.js';
+import {
+  ReopenStepFormError,
+  type StepContext,
+  type StepDefinition,
+} from '../../step-definition.js';
 import { resolveParallelCap } from '../../_parallel-cap.js';
 import { readFrontmatterFields } from '../_yaml-scalar.js';
 import { isSkillPathId, loadPreviousStepOutput, resolveTaskSkillTargetDirs } from './_helpers.js';
@@ -504,23 +513,26 @@ export const skillVerificationStep: StepDefinition<
       enabledIds: detected.cliOptions.map((o) => o.id),
     });
     if (cliChoice) {
-      await ctx.db
-        .insert(schema.taskStepCliChoices)
-        .values({
-          taskId: ctx.taskId,
-          stepId: cliChoice.targetStepId,
-          role: 'default',
-          cliProviderId: cliChoice.cliProviderId,
-          effortLevel: null,
-        })
-        .onConflictDoUpdate({
-          target: [
-            schema.taskStepCliChoices.taskId,
-            schema.taskStepCliChoices.stepId,
-            schema.taskStepCliChoices.role,
-          ],
-          set: { cliProviderId: cliChoice.cliProviderId, effortLevel: null, updatedAt: new Date() },
-        });
+      try {
+        await withComposedLspTransaction(ctx.db, (tx) =>
+          writeLockedStepCliChoice(tx, {
+            userId: ctx.userId,
+            taskId: ctx.taskId,
+            stepId: cliChoice.targetStepId,
+            role: 'default',
+            cliProviderId: cliChoice.cliProviderId,
+            effortLevel: null,
+          }),
+        );
+      } catch (error) {
+        if (
+          error instanceof ComposedLspProviderDisabledError &&
+          error.code === 'cli_provider_disabled'
+        ) {
+          throw new ReopenStepFormError(error.message, { notice: true, reuseFormValues: true });
+        }
+        throw error;
+      }
     }
 
     ctx.logger.info(
