@@ -181,7 +181,7 @@ left. The following rules keep it that way, each MEASURED on git 2.43 and 2.54:
   anything has moved nothing in the relocation throws on running out of descriptors (a throw lost
   them, and a Retry put a 0600 file back 0644): a file whose mode cannot be read is left in place
   and a path that cannot be read is not put back, both reported as leftovers, and an unread parent
-  counts as existing, so its owner is left as it is. Only the manifest probe, which runs before any move, rethrows. The commit then
+  counts as existing, so its owner is left as it is. The manifest and directory-owner probes run before any move and may rethrow. The commit then
   stages only the paths the fixer was sent to resolve, so neither a stray nor a person's own
   uncommitted work at a same-branch root is swept into it, where `add -A` took both. What a fixer
   staged itself outside those paths is put back in the index as the merge had it, byte for byte so a
@@ -204,7 +204,13 @@ left. The following rules keep it that way, each MEASURED on git 2.43 and 2.54:
   identity (whoever owns the tree, since a tree the sandbox reaches through its mode bits is accepted
   as it stands), one `diff --name-only -z` per call, and the index is refreshed since a chown moves ctime and
   `merge --abort` refuses stat data that moved; a name that is not UTF-8 stays the worker's and is
-  logged. A fast-forward of the checkout is handed back the same way from the commit before it
+  logged. Each hand-back stat is strict: a proven missing path needs no ownership change, but
+  an unreadable path is recorded as a failed hand-back. Strict callers (projection put-back and merge Undo) throw `MERGE_HAND_BACK_FAILED` and remain retryable; ordinary callers warn. A successful
+  retry hands back the same changed paths. The fixer relocation reads the directory owner strictly
+  before any move or restore and throws `MERGE_OWNER_UNREADABLE` on failure or disappearance,
+  preserving the baseline and all fixer bytes for Retry. It never restores with an unknown owner;
+  conservative reads after a move still retain the in-memory undo, as described above.
+  A fast-forward of the checkout is handed back the same way from the commit before it
   (`handBackAfterMove`): 00a's on the checked-out branch, a repository refresh's, and a plan Pull's,
   Save's or confirm's, which their callers run after `landPlanMerge`'s transaction commits, so the
   task-creation lock covers the move only. In the checkout, Haive's projection files and their directories

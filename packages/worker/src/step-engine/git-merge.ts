@@ -247,6 +247,7 @@ async function handBackWritten(
   const skipped: string[] = [];
   const kept: string[] = [];
   let changed = false;
+  let failure: unknown;
   for (const raw of names) {
     const name = utf8Name(raw);
     if (name === null) {
@@ -260,13 +261,20 @@ async function handBackWritten(
       const rel = `${plan.prefix}${at}`;
       if (seen.has(rel)) continue;
       seen.add(rel);
-      const entry = await lstatNoFollow(plan.anchor, rel).catch(() => null);
+      const entry = await lstatNoFollow(plan.anchor, rel, { strict: true }).catch(
+        (err: unknown) => {
+          failure ??= err;
+          kept.push(rel);
+          return null;
+        },
+      );
       if (entry === null || entry.kind === 'symlink' || entry.stats.uid !== plan.writer) continue;
       await chownNoFollow(plan.anchor, rel, plan.owner).then(
         () => {
           changed = true;
         },
-        () => {
+        (err: unknown) => {
+          failure ??= err;
           kept.push(rel);
         },
       );
@@ -274,7 +282,18 @@ async function handBackWritten(
   }
   if (changed) await gitRun(dir, ['update-index', '-q', '--refresh']);
   if (strict && kept.length > 0) {
-    throw new Error(`could not hand back to the sandbox user: ${kept.slice(0, 5).join(', ')}`);
+    throw Object.assign(
+      new Error(`could not hand back to the sandbox user: ${kept.slice(0, 5).join(', ')}`, {
+        cause: failure,
+      }),
+      { code: 'MERGE_HAND_BACK_FAILED' },
+    );
+  }
+  if (kept.length > 0) {
+    logger.warn(
+      { dir, names: kept.slice(0, 20), count: kept.length, err: failure },
+      'paths could not be handed back to the sandbox user',
+    );
   }
   if (skipped.length > 0) {
     logger.warn(
@@ -996,10 +1015,22 @@ export async function relocateFixerChanges(
   ) {
     return nothingChecked('the merge it was sent into is no longer open');
   }
+  // No files have moved yet: an unknown owner must stop here, before a restore can create
+  // worker-owned files that the sandbox cannot edit. Reads after a move remain conservative.
+  const ownerUnreadable = (cause?: unknown) =>
+    Object.assign(
+      new Error('the merge directory owner could not be read; no fixer changes were moved', {
+        cause,
+      }),
+      { code: 'MERGE_OWNER_UNREADABLE' },
+    );
   const tree = await lstatNoFollow(root, prefix.replace(/\/$/, ''), { strict: true }).catch(
-    () => null,
+    (err: unknown) => {
+      throw ownerUnreadable(err);
+    },
   );
-  const owner = tree ? { uid: tree.stats.uid, gid: tree.stats.gid } : undefined;
+  if (!tree) throw ownerUnreadable();
+  const owner = { uid: tree.stats.uid, gid: tree.stats.gid };
   const resolving = new Set(baseline.resolving);
   const outside = (c: { srcMode: string; dstMode: string; path: string }): boolean =>
     !covered(resolving, c.path) &&
