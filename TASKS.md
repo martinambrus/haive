@@ -574,7 +574,7 @@ From the T355 build. With no offline queue, a reconnect window fails every confi
 
 ### T550 · FNF[queue-add-unbounded-rest] · about 34 api `Queue.add` sites still unbounded
 
-status: open · kind: fix · priority: P3
+status: done 2026-11-27, merged #1363 dff637d2e and live (libs; migration 0252 applied): 49 sites bounded, timeout answers 503 `queue_outcome_unknown` without compensating, provider attempt ids fence stale compensation; the three repos.ts sites (~:587, ~:859, ~:3856) are pinned by `queue-add-ratchet.test.ts` and move with T780 PR2 · kind: fix · priority: P3
 PRE-EXISTING, from the T355 build. Use `boundedAdd`/`addBestEffort`/`addOrRefuse` (api lib/queue-bounded.ts) and check each failure path. Sites: repos.ts ~:228, ~:560, ~:831, ~:3605; bundles.ts ~:360, ~:434, ~:697, ~:920, ~:965; cli-providers.ts list paths; plan-mirror.ts; browser-access.ts; browser-vnc.ts ~:225; cli-login-banner.ts; ide.ts ~:453; ddev-control.ts ~:55; modules/sources.ts ~:194; loader.ts ~:389; project-state-resolve.ts ~:14; cli-version-refresh.ts; reprice-cli-jobs.ts ~:38; cli-job-poll.ts ~:26.
 
 ### T551 · FNF[outage-503-web-copy] · web shows a generic error for 503 config_unavailable
