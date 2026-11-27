@@ -1,5 +1,6 @@
 import { and, eq, inArray, ne, sql } from 'drizzle-orm';
 import * as schema from './schema/index.js';
+import { canonicalUuid } from './canonical-uuid.js';
 import { isRootClaimLive, type RootClaimKind } from './repo-root-claim.js';
 import type { DbTx } from './task-attachments-lock.js';
 import type { Database } from './index.js';
@@ -54,7 +55,7 @@ export async function boundedLockWait<T>(
  *  created between its last check and the move, while plain inserts still go through. */
 export async function lockRepositoryTasksKey(tx: DbTx, repositoryId: string): Promise<void> {
   await tx.execute(
-    sql`select pg_advisory_xact_lock(hashtextextended(${`onboarding-upgrade:${repositoryId}`}, 0))`,
+    sql`select pg_advisory_xact_lock(hashtextextended(${`onboarding-upgrade:${canonicalUuid(repositoryId)}`}, 0))`,
   );
 }
 

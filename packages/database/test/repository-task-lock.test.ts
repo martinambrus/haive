@@ -1,6 +1,13 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { eq } from 'drizzle-orm';
-import { createDatabase, type Database, schema } from '../src/index.js';
+import { randomUUID } from 'node:crypto';
+import {
+  boundedLockWait,
+  createDatabase,
+  isLockNotAvailable,
+  type Database,
+  schema,
+} from '../src/index.js';
 import { checkRevive, lockRepositoryTasksKey } from '../src/repository-task-lock.js';
 
 const url = process.env.REPOSITORY_TASK_LOCK_TEST_URL;
@@ -80,4 +87,48 @@ describe.skipIf(!url)('Retry waiting behind repository deletion, on Postgres', (
       expect(stored).toMatchObject({ status: 'failed', repositoryId: null });
     },
   );
+});
+
+describe.skipIf(!url)('lock key spelling, on Postgres', () => {
+  let db: Database;
+  beforeAll(() => {
+    db = createDatabase(url!);
+  });
+  afterAll(async () => {
+    await db.$client.end({ timeout: 5 });
+  });
+  const id = randomUUID();
+  const waitFor = (spelled: string) =>
+    db.transaction((waiter) =>
+      boundedLockWait(waiter, () => lockRepositoryTasksKey(waiter, id), 50).then(() => spelled),
+    );
+  it.each([
+    ['uppercase', id.toUpperCase()],
+    ['unhyphenated', id.replaceAll('-', '').toUpperCase()],
+    ['braced', `{${id}}`],
+  ])(
+    'a holder of the %s spelling excludes a waiter on the canonical id',
+    async (_label, spelled) => {
+      let refused: unknown;
+      await db.transaction(async (holder) => {
+        await lockRepositoryTasksKey(holder, spelled);
+        refused = await waitFor(spelled).catch((err: unknown) => err);
+      });
+      // The text of a key is not a row: an unfixed key lets the waiter in beside the holder.
+      expect(
+        isLockNotAvailable(refused),
+        `the waiter was not refused beside the holder of ${spelled}: it took its own key`,
+      ).toBe(true);
+      expect(await waitFor('after')).toBe('after');
+    },
+  );
+  it('a holder of the canonical id excludes a waiter until it commits', async () => {
+    let refused: unknown;
+    await db.transaction(async (holder) => {
+      await lockRepositoryTasksKey(holder, id);
+      refused = await waitFor('during').catch((err: unknown) => err);
+    });
+    expect(isLockNotAvailable(refused)).toBe(true);
+    expect(await waitFor('after')).toBe('after');
+  });
 });
