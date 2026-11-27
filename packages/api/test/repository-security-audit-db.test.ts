@@ -883,11 +883,15 @@ describe.skipIf(!url)('Repository security settings commit with their audit, on 
       },
     ]);
   }, 30_000);
-  // PostgreSQL matches a uuid in any letter case, so a relink addressed by another spelling of the
-  // id still reaches the row; its advisory key must match the one gate 4 takes from the database.
+  // PostgreSQL reads every documented uuid spelling (letter case, braces, hyphens omitted or after any
+  // group of four digits), so a relink addressed by another spelling still reaches the row; its
+  // advisory key must match the one gate 4 takes from the database.
   it.each([
     ['canonical', (id: string) => id],
     ['uppercase', (id: string) => id.toUpperCase()],
+    ['unhyphenated', (id: string) => id.replaceAll('-', '')],
+    ['braced', (id: string) => `{${id}}`],
+    ['regrouped', (id: string) => id.replaceAll('-', '').replace(/(.{4})(?=.)/g, '$1-')],
   ] as const)(
     'bounds gate-4 origin writes behind a relink parked in Git (%s id)',
     async (_, spell) => {
