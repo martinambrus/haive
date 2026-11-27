@@ -1284,27 +1284,16 @@ async function worktreeMayHoldWork(worktreePath: string | null, taskId: string):
   return true;
 }
 
-/** The worktree half of task cleanup, split out so its decision is testable without docker. */
-export async function releaseTaskWorktree(
+/** The completion policy shared by removal and its deferred-cleanup event. */
+async function completionWorktreeCleanup(
   db: Database,
   taskId: string,
-  reason: 'completed' | 'failed' | 'cancelled',
-): Promise<void> {
-  // Remove the feature worktree. On cancel: always (a task cancelled before its
-  // worktree-cleanup step would leak the dir into the haive_repos volume). On
-  // completion: only for a task whose run list has no worktree-cleanup step of its own.
-  let completed: {
-    type: string;
-    runListSnapshot: string[] | null;
-    worktreePath: string | null;
-  } | null = null;
-  if (reason === 'completed') {
-    const t = await db.query.tasks.findFirst({
+): Promise<{ removeWorktree: boolean; worktreePath: string | null }> {
+  const completed =
+    (await db.query.tasks.findFirst({
       where: eq(schema.tasks.id, taskId),
       columns: { type: true, runListSnapshot: true, worktreePath: true },
-    });
-    completed = t ?? null;
-  }
+    })) ?? null;
 
   // run_app has no 12-worktree-cleanup, so its Finish would otherwise leak the
   // worktree; workflow completion still defers to step 12 (whose `keep` choice must
@@ -1319,10 +1308,23 @@ export async function releaseTaskWorktree(
     runList.includes('01-worktree-setup') &&
     !runList.includes('12-worktree-cleanup') &&
     !runList.includes('12-no-change-cleanup');
-  let removeWorktree = reason === 'cancelled' || completed?.type === 'run_app';
+  let removeWorktree = completed?.type === 'run_app';
   if (customWithoutCleanup) {
     removeWorktree = !(await worktreeMayHoldWork(completed?.worktreePath ?? null, taskId));
   }
+  return { removeWorktree, worktreePath: completed?.worktreePath ?? null };
+}
+
+/** The worktree half of task cleanup, split out so its decision is testable without docker. */
+export async function releaseTaskWorktree(
+  db: Database,
+  taskId: string,
+  reason: 'completed' | 'failed' | 'cancelled',
+): Promise<void> {
+  const removeWorktree =
+    reason === 'completed'
+      ? (await completionWorktreeCleanup(db, taskId)).removeWorktree
+      : reason === 'cancelled';
   if (removeWorktree) {
     try {
       const wt = await removeTaskWorktree(db, taskId);
@@ -1552,15 +1554,12 @@ async function cleanupTaskContainers(
     if (reason === 'completed') {
       // Completion has no teardown redrive. Activity exposes a structural retained-tree event.
       try {
-        const task = await db.query.tasks.findFirst({
-          where: eq(schema.tasks.id, taskId),
-          columns: { worktreePath: true },
-        });
-        if (task?.worktreePath)
+        const decision = await completionWorktreeCleanup(db, taskId);
+        if (decision.removeWorktree && decision.worktreePath)
           await appendEvent(db, taskId, null, 'worktree.cleanup_deferred', {
             reason: 'terminal_reap_failed',
             taskEndReason: reason,
-            worktreePath: task.worktreePath,
+            worktreePath: decision.worktreePath,
           });
       } catch (eventError) {
         logger.error({ err: eventError, taskId }, 'retained worktree event not recorded');

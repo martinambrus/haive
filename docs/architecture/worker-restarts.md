@@ -751,8 +751,9 @@ already issued before expiry; it cannot retract that operation, but starts no fu
 call after observing transaction termination. A removal completing after rollback can therefore
 leave no `auth_volumes.destroyed` audit row (the next probe finds the volume absent).
 
-Resource-section failures are logged and still allow the Stop or Cancel finish marker, as on main.
-Those markers acknowledge that the teardown pass ran, not that every resource disappeared.
+Resource-section failures are logged and normally allow the Stop or Cancel finish marker,
+except for the Cancel safety failures below, including terminal reap exhaustion.
+A written marker acknowledges that the teardown pass ran, not that every resource disappeared.
 Auth-volume leftovers are retried by the last terminal summary and boot's `reapOrphanedAuthVolumes`;
 stopped helper containers are removed by that boot reaper before the volumes. Shell containers and
 registry keys stay for `TerminalSessionReaper` once disconnected and idle; the next shell ensure
@@ -764,10 +765,16 @@ cleanup until boot. Cancel still withholds its finish marker when a CLI sandbox 
 listing is unknown, or no-change directory discard fails, since merge-directory safety depends
 on those checks. The existing Cancel re-drive is capped at three, as described above; resource
 section failures normally do not consume that recovery path. Terminal reap exhaustion is an
-exception: its bounded retries keep the worktree, safe model/KB cleanup still runs, and Cancel
-rethrows before its finish marker so the existing re-drive repeats the worktree step. Completion
-instead records `worktree.cleanup_deferred` with the retained path and structural reason in Activity;
-it remains completed and has no automatic teardown re-drive. Volume existence
+exception: on Cancel it defers the whole resource section to that capped re-drive: merge
+reports and claim release, plan-merge discard, task-end re-sync, scratch and no-change directory
+cleanup, and worktree removal. Model unloads and KB cleanup still run, then Cancel rethrows
+before its finish marker so the re-drive repeats the teardown. A checkout rebuild is refused
+for that task while its cancellation remains unfinished. The abandon pass described above
+can later write an `abandoned: true` finish marker while the worktree is still on disk.
+Completion instead records `worktree.cleanup_deferred` with the retained path and structural
+reason in Activity only when its ordinary cleanup policy would remove the worktree; a workflow
+or custom type with its own cleanup step records no such event. It remains completed and has
+no automatic teardown re-drive. Volume existence
 probes and the embed live-task scan run before the transaction; the task's settlement is
 rechecked after those reads, under the row lock. Auth sync-back remains outside
 the row lock: it may wait for the CLI auth session lock, which must never be awaited while

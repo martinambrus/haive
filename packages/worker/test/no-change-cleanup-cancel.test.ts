@@ -7,7 +7,10 @@ import { TASK_JOB_NAMES, logger } from '@haive/shared';
 import {
   markTaskCompleted,
   processTaskJob,
+  reapTaskTerminals,
   setContainerCleanupRunner,
+  TASK_TERMINAL_REAP_ATTEMPTS,
+  TASK_TERMINAL_REAP_RETRY_MS,
 } from '../src/queues/task-queue.js';
 
 const h = vi.hoisted(() => ({
@@ -16,6 +19,8 @@ const h = vi.hoisted(() => ({
   reapFailures: Infinity,
   completing: false,
   type: 'run_app',
+  runList: ['01-worktree-setup'],
+  uncommitted: 0,
   events: [] as { eventType: string; payload: unknown }[],
   seen: (name: string, _taskId?: string) => {
     h.calls.push(name);
@@ -26,6 +31,9 @@ const h = vi.hoisted(() => ({
 }));
 vi.mock('../src/db.js', () => ({ getDb: () => h.db }));
 vi.mock('../src/redis.js', () => ({ getRedis: () => ({ del: async () => 0 }) }));
+vi.mock('../src/repo/worktree-changes.js', () => ({
+  readUncommittedChanges: async () => ({ count: h.uncommitted }),
+}));
 vi.mock('node:child_process', async (original) => ({
   ...(await original<object>()),
   spawn: () => {
@@ -159,6 +167,8 @@ beforeEach(() => {
   h.reapFailures = Infinity;
   h.completing = false;
   h.type = 'run_app';
+  h.runList = ['01-worktree-setup'];
+  h.uncommitted = 0;
   h.events = [];
   h.sandboxes = [];
   h.journal = [{ payload: { version: 999 } }];
@@ -182,7 +192,7 @@ beforeEach(() => {
           status: h.completing ? 'completed' : 'cancelled',
           type: h.type,
           worktreePath: '/wt',
-          runListSnapshot: h.completing ? ['01-worktree-setup'] : ['12-no-change-cleanup'],
+          runListSnapshot: h.completing ? h.runList : ['12-no-change-cleanup'],
         }),
       },
       taskEvents: {
@@ -321,3 +331,50 @@ it.each(['run_app', 'review_only'])(
     expect(h.calls).toContain('task.completed');
   },
 );
+
+it.each([
+  { type: 'workflow', runList: ['01-worktree-setup'], uncommitted: 0 },
+  { type: 'workflow', runList: ['01-worktree-setup', '12-worktree-cleanup'], uncommitted: 0 },
+  { type: 'review_only', runList: ['01-worktree-setup', '12-worktree-cleanup'], uncommitted: 0 },
+  { type: 'review_only', runList: ['01-worktree-setup', '12-no-change-cleanup'], uncommitted: 0 },
+  { type: 'review_only', runList: ['01-worktree-setup'], uncommitted: 1 },
+  { type: 'review_only', runList: [], uncommitted: 0 },
+])('does not report deferred removal when completion owes none: %j', async (control) => {
+  vi.useFakeTimers();
+  h.journal = [];
+  h.completing = true;
+  h.type = control.type;
+  h.runList = control.runList;
+  h.uncommitted = control.uncommitted;
+  h.reapError = Object.assign(new Error('store unavailable'), { code: 'redis_unavailable' });
+  const result = markTaskCompleted(h.db, 'task', { epoch: 1 });
+  await vi.advanceTimersByTimeAsync(1000);
+  await result;
+  expect(h.calls).not.toContain('removeTaskWorktree');
+  expect(h.events.map((event) => event.eventType)).not.toContain('worktree.cleanup_deferred');
+  expect(h.calls).toContain('task.completed');
+});
+
+it('pins the production terminal reap retry policy', () => {
+  expect(TASK_TERMINAL_REAP_ATTEMPTS).toBe(3);
+  expect(TASK_TERMINAL_REAP_RETRY_MS).toBe(250);
+});
+
+it('honors injected terminal reap attempt and delay bounds', async () => {
+  vi.useFakeTimers();
+  h.reapError = Object.assign(new Error('store unavailable'), { code: 'redis_unavailable' });
+  let settled = false;
+  const result = reapTaskTerminals(h.db, 'task', { attempts: 2, retryMs: 7 }).catch((error) => {
+    settled = true;
+    return error;
+  });
+  await vi.advanceTimersByTimeAsync(0);
+  expect(h.calls).toEqual(['reapAllSessionsForTask']);
+  await vi.advanceTimersByTimeAsync(6);
+  expect(h.calls).toEqual(['reapAllSessionsForTask']);
+  expect(settled).toBe(false);
+  await vi.advanceTimersByTimeAsync(1);
+  expect(await result).toBe(h.reapError);
+  expect(h.calls).toEqual(['reapAllSessionsForTask', 'reapAllSessionsForTask']);
+  expect(vi.getTimerCount()).toBe(0);
+});

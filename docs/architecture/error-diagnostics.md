@@ -417,10 +417,15 @@ cache/hint writes and the soft-timeout wind-down publish stay finite and can be 
 an outage. Terminal teardown retries a coded Redis outage up to `TASK_TERMINAL_REAP_ATTEMPTS`
 (three), separated by `TASK_TERMINAL_REAP_RETRY_MS` (250 ms); both are injectable. Every attempt
 uses the finite client because reap holds a Postgres task-row settlement lock. Exhaustion keeps
-the worktree. Cancel finishes other safe cleanup, then rethrows before `task.cancel_finished`,
-leaving the existing capped cancel re-drive eligible. Completion has no automatic retry:
-`worktree.cleanup_deferred` in the task's Activity records the retained worktree path and
-structural reason `terminal_reap_failed`, while the task stays completed. The cancel-only
+the worktree. On Cancel, exhaustion defers the whole resource section: merge reports and
+claim release, plan-merge discard, task-end re-sync, scratch and no-change directory cleanup,
+and worktree removal. Model unloads and KB cleanup still run before the error is rethrown;
+`task.cancel_finished` is withheld so the existing capped cancel re-drive repeats the teardown.
+A checkout rebuild is refused for that task while its cancellation remains unfinished.
+Completion has no automatic retry: only when its ordinary cleanup policy would remove the
+worktree does `worktree.cleanup_deferred` in Activity record the retained path and structural
+reason `terminal_reap_failed`. A workflow or custom type with its own cleanup step records no
+such event. The task stays completed. The cancel-only
 task-label sweep may already have removed task shells, but is best effort, and completion
 does not run it.
 

@@ -2,6 +2,8 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { CONFIG_KEYS, ConfigUnavailableError, configService } from '@haive/shared';
 import { getRedis } from '../redis.js';
 import {
+  ADMISSION_TIMEOUT_MS,
+  CONFIG_RETRY_MS,
   RuntimeSlotAbortedError,
   acquireRuntimeSlot,
   runtimeAdmission,
@@ -27,6 +29,11 @@ vi.mock('../redis.js', () => ({
 const BUDGET = 11469;
 const DDEV = 4096;
 const APP = 2048;
+
+it('pins the production admission timeout and unreadable-store poll interval', () => {
+  expect(ADMISSION_TIMEOUT_MS).toBe(8 * 60_000);
+  expect(CONFIG_RETRY_MS).toBe(2_000);
+});
 
 function decide(over: Partial<RuntimeAdmissionInput> = {}): 'proceed' | 'park' {
   return runtimeAdmissionDecision({
