@@ -1,20 +1,25 @@
 import { beforeEach, expect, it, vi } from 'vitest';
 import { schema, type Database } from '@haive/database';
 import { leftCommittedMerges } from '@haive/shared/merge-left-open';
+import { planCheckoutAccess } from '../repo/checkout-access-scope.js';
 import { undoLeftMerge } from './undo-left-merge.js';
 
-const h = vi.hoisted(() => ({
-  sync: vi.fn(),
-  git: vi.fn(),
-  revParse: vi.fn(),
-  handBack: vi.fn(),
-  release: vi.fn(),
-  insert: vi.fn(),
-  holder: false,
-}));
+const h = vi.hoisted(() => {
+  const release = vi.fn();
+  return {
+    sync: vi.fn(),
+    git: vi.fn(),
+    revParse: vi.fn(),
+    handBack: vi.fn(),
+    release,
+    claim: { release },
+    insert: vi.fn(),
+    holder: false,
+  };
+});
 vi.mock('@haive/database', async (original) => ({
   ...(await original<object>()),
-  acquireRootClaim: async () => ({ release: h.release }),
+  acquireRootClaim: async () => h.claim,
   lockRepositoryTasksKey: async () => undefined,
 }));
 vi.mock('@haive/shared/fs-safe', async (original) => ({
@@ -109,6 +114,18 @@ it('hands back a settled checkout before re-sync without git writes and complete
   expect(h.handBack.mock.invocationCallOrder[0]).toBeLessThan(h.sync.mock.invocationCallOrder[0]!);
   expect(events.filter((e) => e.eventType === 'merge.left_committed_resynced')).toHaveLength(1);
   expect(leftCommittedMerges(events)[0]?.resyncOwed).toBe(false);
+});
+it("re-syncs the plan under the Undo's own edit claim, which would otherwise refuse it as a foreign owner", async () => {
+  let access: ReturnType<typeof planCheckoutAccess> | undefined;
+  h.sync.mockImplementationOnce(async () => {
+    access = planCheckoutAccess();
+    return true;
+  });
+  await run();
+  expect(access).toMatchObject({ mode: 'projection' });
+  expect((access as { owner?: unknown }).owner).toBe(h.claim);
+  // The scope ends with the re-sync: nothing after it inherits the claim.
+  expect(planCheckoutAccess()).toEqual({ mode: 'projection' });
 });
 it('retries a failed hand-back before re-sync and keeps recovery owed meanwhile', async () => {
   h.handBack.mockRejectedValueOnce(new Error('hand-back failed'));
