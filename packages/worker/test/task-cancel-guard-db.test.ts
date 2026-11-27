@@ -108,6 +108,7 @@ vi.mock('../src/sandbox/task-auth-volume.js', async (importOriginal) => ({
   ...(await importOriginal<object>()),
   syncRefreshedAuthToUserVolumes: async (_db: unknown, taskId: string) =>
     h.seen('syncRefreshedAuthToUserVolumes', taskId),
+  findTaskAuthVolumes: async () => [],
   cleanupTaskAuthVolumes: async (taskId: string) => {
     h.seen('cleanupTaskAuthVolumes', taskId);
     return { removed: [], failed: [] };

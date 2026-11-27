@@ -21,4 +21,10 @@ export * from './merge-left-open.js';
 export * from './merge-dir-claim.js';
 export * from './committed-snapshot.js';
 export { CANCEL_REDRIVE_LOOKBACK_MS } from './cancel-teardown.js';
-export { TERMINAL_TASK_STATUSES, taskWriteTarget, type TaskFence } from './task-fence.js';
+export {
+  TERMINAL_TASK_STATUSES,
+  taskWriteTarget,
+  setTaskSettlementTimeout,
+  TASK_SETTLEMENT_TIMEOUT_MS,
+  type TaskFence,
+} from './task-fence.js';

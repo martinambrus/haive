@@ -10,6 +10,7 @@ import {
 } from '../src/queues/task-queue.js';
 import {
   cleanupTaskAuthVolumes,
+  findTaskAuthVolumes,
   syncRefreshedAuthToUserVolumes,
 } from '../src/sandbox/task-auth-volume.js';
 import { reapAllSessionsForTask } from '../src/sandbox/terminal-session-reaper.js';
@@ -28,6 +29,7 @@ vi.mock('../src/db.js', () => ({
 // The failed-task teardown would otherwise inspect every CLI's auth volume on the host's Docker.
 vi.mock('../src/sandbox/task-auth-volume.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../src/sandbox/task-auth-volume.js')>()),
+  findTaskAuthVolumes: vi.fn(async () => []),
   cleanupTaskAuthVolumes: vi.fn(async () => ({ removed: [], failed: [] })),
   syncRefreshedAuthToUserVolumes: vi.fn(async () => undefined),
 }));
@@ -56,6 +58,7 @@ vi.mock('../src/step-engine/steps/_global-kb-promote.js', async (importOriginal)
   reconcileKbAuthorEntryOnTaskEnd: vi.fn(async () => undefined),
 }));
 
+const TASK_UUID = '00000000-0000-4000-8000-000000000003';
 const STEP_ID = 'epoch-fence-step';
 stepRegistry.register({
   metadata: {
@@ -135,7 +138,9 @@ function taskDb(
         }),
       };
     },
-    transaction: async (fn: (tx: Database) => Promise<unknown>) => fn(db),
+    execute: async () => undefined,
+    transaction: async (fn: (tx: Database) => Promise<unknown>) =>
+      fn({ ...db, execute: async () => undefined } as unknown as Database),
     insert: (table: unknown) => {
       statements.push(`insert ${tableNameOf(table)}`);
       return {
@@ -146,7 +151,8 @@ function taskDb(
     },
     select: () => {
       statements.push('select');
-      const rows = opts.selectRows ?? [];
+      if (!opts.selectRows) throw new Error('this test reads nothing but the epoch');
+      const rows = opts.selectRows;
       // Awaited directly by some reads and cut with .limit() by others, ordered or not.
       const result = {
         then: (res: (v: unknown) => unknown, rej: (e: unknown) => unknown) =>
@@ -228,6 +234,67 @@ describe('a result handed off after a Retry moved the task on', () => {
     }
   });
 
+  it('records changed removal counts after an earlier failed audit', async () => {
+    const fake = createFakeDb(
+      { tasks: schema.tasks, taskEvents: schema.taskEvents },
+      { rowLocks: true },
+    );
+    fake.insert(schema.tasks, {
+      id: TASK_UUID,
+      status: 'failed',
+      orchestrationEpoch: 5,
+      completedAt: new Date(0),
+    });
+    setContainerCleanupRunner(cleanup);
+    vi.mocked(cleanupTaskAuthVolumes)
+      .mockResolvedValueOnce({ removed: [], failed: [{ name: 'busy', stderr: 'in use' }] })
+      .mockResolvedValueOnce({ removed: ['busy'], failed: [] });
+    for (let i = 0; i < 2; i++)
+      await handleResult(
+        fake.db as unknown as Database,
+        { taskId: TASK_UUID, userId: 'user-1', orchestrationEpoch: 5 } as never,
+        STEP_ID,
+        { status: 'superseded', row } as never,
+      );
+    expect(
+      fake
+        .rows(schema.taskEvents)
+        .filter((e) => e.eventType === 'auth_volumes.destroyed')
+        .map((e) => e.payload),
+    ).toEqual([
+      expect.objectContaining({ removed: 0, failed: 1 }),
+      expect.objectContaining({ removed: 1, failed: 0 }),
+    ]);
+  });
+
+  it('probes auth volumes before holding the settlement row and rechecks after the probes', async () => {
+    const fake = createFakeDb(
+      { tasks: schema.tasks, taskEvents: schema.taskEvents },
+      { rowLocks: true },
+    );
+    fake.insert(schema.tasks, {
+      id: TASK_UUID,
+      status: 'failed',
+      orchestrationEpoch: 5,
+      completedAt: new Date(0),
+    });
+    setContainerCleanupRunner(cleanup);
+    vi.mocked(cleanupTaskAuthVolumes).mockClear();
+    vi.mocked(findTaskAuthVolumes).mockImplementationOnce(async () => {
+      expect(fake.rowLocked(schema.tasks, TASK_UUID)).toBe(false);
+      fake.patch(schema.tasks, TASK_UUID, { status: 'running', orchestrationEpoch: 6 });
+      return ['volume'];
+    });
+    await handleResult(
+      fake.db as unknown as Database,
+      { taskId: TASK_UUID, userId: 'user-1', orchestrationEpoch: 5 } as never,
+      STEP_ID,
+      { status: 'superseded', row } as never,
+    );
+    expect(findTaskAuthVolumes).toHaveBeenCalled();
+    expect(cleanupTaskAuthVolumes).not.toHaveBeenCalled();
+  });
+
   it('superseded settlement preserves auth state when Retry wins after the failed-task check', async () => {
     const fake = createFakeDb({ tasks: schema.tasks, taskEvents: schema.taskEvents });
     const taskId = '00000000-0000-4000-8000-000000000001';
@@ -254,13 +321,17 @@ describe('a result handed off after a Retry moved the task on', () => {
 
   it('does not settle a newer failed attempt from a superseded pass', async () => {
     setContainerCleanupRunner(cleanup);
-    const { db } = taskDb(6, 6, { selectRows: [] });
-    vi.spyOn(db.query.tasks, 'findFirst').mockResolvedValue({
-      status: 'failed',
-      orchestrationEpoch: 6,
-      completedAt: new Date(),
-    } as never);
-    await handleResult(db, ctx, STEP_ID, { status: 'superseded', row } as never);
+    const fake = createFakeDb({ tasks: schema.tasks });
+    fake.insert(schema.tasks, { id: TASK_UUID, status: 'failed', orchestrationEpoch: 6 });
+    const db = fake.db as unknown as Database;
+    const reads = vi.spyOn(db.query.tasks, 'findFirst');
+    await handleResult(
+      db,
+      { taskId: TASK_UUID, userId: 'user-1', orchestrationEpoch: 5 } as never,
+      STEP_ID,
+      { status: 'superseded', row } as never,
+    );
+    expect(reads).toHaveResolvedWith(undefined);
     expect(cleanup).not.toHaveBeenCalled();
   });
 
@@ -331,7 +402,7 @@ describe('failed-task settlement bookkeeping is best-effort', () => {
   it.each(['capture', 'finish'] as const)(
     'runs the full teardown and does not throw when the %s fails',
     async (stage) => {
-      const { db } = taskDb(5);
+      const { db } = taskDb(5, 5, { selectRows: [] });
       const cleanup = vi.fn(async () => 0);
       setContainerCleanupRunner(cleanup);
       const capture = vi.spyOn(db.query.tasks, 'findFirst');
@@ -346,7 +417,7 @@ describe('failed-task settlement bookkeeping is best-effort', () => {
 
       expect(cleanup).toHaveBeenCalledWith(db, 'task-1');
       expect(syncRefreshedAuthToUserVolumes).toHaveBeenCalledWith(db, 'task-1');
-      expect(cleanupTaskAuthVolumes).toHaveBeenCalledWith('task-1');
+      expect(cleanupTaskAuthVolumes).toHaveBeenCalledWith('task-1', undefined, []);
       expect(reapAllSessionsForTask).toHaveBeenCalledWith(
         expect.anything(),
         expect.anything(),

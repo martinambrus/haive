@@ -8,12 +8,14 @@ import { reapAllSessionsForTask } from '../src/sandbox/terminal-session-reaper.j
 import { unloadTaskOllamaCliModels } from '../src/sandbox/ollama-provision.js';
 import {
   cleanupTaskAuthVolumes,
+  findTaskAuthVolumes,
   clearTaskAuthPreparationState,
   syncRefreshedAuthToUserVolumes,
 } from '../src/sandbox/task-auth-volume.js';
 
 vi.mock('../src/sandbox/task-auth-volume.js', async (original) => ({
   ...(await original<object>()),
+  findTaskAuthVolumes: vi.fn(async () => []),
   cleanupTaskAuthVolumes: vi.fn(async () => ({ removed: [], failed: [] })),
   clearTaskAuthPreparationState: vi.fn(),
   syncRefreshedAuthToUserVolumes: vi.fn(async () => undefined),
@@ -151,4 +153,16 @@ it('CLI model cleanup unloads an unused ended-task model while holding the task 
     model: 'qwen:4b',
     keep_alive: 0,
   });
+});
+
+it('summary probes volumes outside the row lock and rechecks before removal', async () => {
+  const { db, fake, revive } = taskDb();
+  vi.mocked(findTaskAuthVolumes).mockImplementationOnce(async () => {
+    expect(fake.rowLocked(schema.tasks, TASK)).toBe(false);
+    revive();
+    return ['volume'];
+  });
+  await cleanupAuthAfterTerminalSummary(db, TASK);
+  expect(findTaskAuthVolumes).toHaveBeenCalledOnce();
+  expect(cleanupTaskAuthVolumes).not.toHaveBeenCalled();
 });

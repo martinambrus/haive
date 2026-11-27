@@ -57,6 +57,7 @@ vi.mock('../src/sandbox/task-auth-volume.js', async (importOriginal) => ({
   ...(await importOriginal<object>()),
   syncRefreshedAuthToUserVolumes: async (_db: unknown, taskId: string) =>
     h.seen('syncRefreshedAuthToUserVolumes', taskId),
+  findTaskAuthVolumes: async () => [],
   cleanupTaskAuthVolumes: async (taskId: string) => {
     h.seen('cleanupTaskAuthVolumes', taskId);
     return { removed: [], failed: [] };
@@ -173,6 +174,7 @@ beforeEach(() => {
     select: () => builder,
     update: () => ({ set: () => builder }),
     insert: () => ({ values: async (event: { eventType: string }) => h.seen(event.eventType) }),
+    execute: async () => undefined,
     transaction: async (fn: (tx: unknown) => unknown) => fn(db),
   };
   h.db = db as unknown as Database;

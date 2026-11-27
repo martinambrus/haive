@@ -1,5 +1,5 @@
-import { and, eq, inArray, notInArray } from 'drizzle-orm';
-import { schema } from '@haive/database';
+import { and, eq, inArray, notInArray, sql } from 'drizzle-orm';
+import { schema, type DbTx } from '@haive/database';
 
 /** Statuses a task never comes back from. Cancel is the user's final word and completion is
  *  done; only `failed` is revivable (retry / allowance auto-resume). Every write that could flip
@@ -40,4 +40,17 @@ export function taskWriteTarget(
     ]),
     ...(fence ? [eq(schema.tasks.orchestrationEpoch, fence.epoch)] : []),
   );
+}
+
+/** Bound the entire settlement section, including time spent waiting on external IO.
+ * PostgreSQL 18 terminates the transaction's connection and releases its locks; postgres.js
+ * races the callback against that closed lease, so a hung Docker/Redis await rejects too. */
+export const TASK_SETTLEMENT_TIMEOUT_MS = 60_000;
+export async function setTaskSettlementTimeout(
+  tx: DbTx,
+  timeoutMs = TASK_SETTLEMENT_TIMEOUT_MS,
+): Promise<void> {
+  if (!Number.isInteger(timeoutMs) || timeoutMs <= 0 || timeoutMs > 2_147_483_647)
+    throw new Error('Invalid task settlement transaction timeout');
+  await tx.execute(sql.raw(`SET LOCAL transaction_timeout = '${timeoutMs}ms'`));
 }

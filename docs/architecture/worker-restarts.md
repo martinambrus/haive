@@ -678,21 +678,29 @@ rechecks settlement through `taskWriteTarget` (`shared/task-fence.ts`, re-export
 existing worker step-ownership path). Auth-volume removal/cache invalidation, each terminal
 session removal and each CLI-model unload hold the task row FOR NO KEY UPDATE from that
 check through the destructive call. The task-triggered embed release takes the same fence;
-it also includes the settling task in the live-model scan instead of excluding a possibly
-revived task. A Retry that committed first therefore keeps its volumes, shell and models;
+its live-model scan runs before taking the row, then the locked status check refuses a
+revived settling task. A Retry that committed first therefore keeps its volumes, shell and models;
 a Retry arriving during removal waits for the section to end before publishing its revival.
-These sections acquire no step/run rows or repository locks. Auth sync-back remains outside
+These sections acquire no step/run rows or repository locks. Each sets LOCAL
+`transaction_timeout` to 60s (PostgreSQL 18, also used in CI) before taking the row:
+a wedged Docker or Redis await cannot pin it indefinitely. postgres.js races the callback
+against connection closure, so expiry rejects into the existing catch/log path. A failed
+section leaves the Stop or Cancel finish marker unwritten for the ordinary re-drive. Volume existence
+probes and the embed live-task scan run before the transaction; the task's settlement is
+rechecked after those reads, under the row lock. Auth sync-back remains outside
 the row lock: it may wait for the CLI auth session lock, which must never be awaited while
 holding a row lock. The summary's deferred auth cleanup repeats the terminal check under
 this fence after sync-back, before invalidating preparations. The superseded pass also
 refuses to initiate a settlement at a newer task epoch.
 
 Auth-volume audit appends use the existing append-once helper under that task row lock,
-keyed by completion stamp and epoch, so two settlements of one failure record one event.
-Removal is still retried even when the event already exists; the first event's counts
-remain its observation. A terminal row without a completion stamp cannot deduplicate.
+keyed by completion stamp, epoch and removal/failure counts. Identical observations of
+one failure record one event; changed counts record a new event so a successful retry is
+visible after an earlier failed removal. Removal is retried even when the event already exists. A terminal row without a completion stamp cannot deduplicate.
 Rollback reverts the worker and shared code together, with no migration or data rollback;
-removed resources cannot be restored by reverting and the next ensure recreates them. The hint it leaves on the row (`writeStepHint`) lands
+removed resources cannot be restored by reverting and the next ensure recreates them.
+
+The failure hint a hand-off leaves on the step row (`writeStepHint`) lands
 only while the row still reads `failed` and the task is still failed at that epoch, since a reset
 clears a hint written before it but not one written after; a finished fan-out's timeout hint lands
 only on a row still `done` under the pass's fence, and a login hint only while its run stands.

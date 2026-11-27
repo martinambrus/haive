@@ -1,4 +1,4 @@
-import { taskWriteTarget } from '@haive/shared';
+import { taskWriteTarget, setTaskSettlementTimeout } from '@haive/shared';
 import { safeProcessor } from '../safe-processor.js';
 import { randomUUID } from 'node:crypto';
 import { mkdir, rm, writeFile } from 'node:fs/promises';
@@ -131,6 +131,7 @@ import { houseRulesOf } from '../../orchestrator/house-rules.js';
 import { scoreHouseRulesInBackground } from '../../orchestrator/house-rules-similarity.js';
 import {
   cleanupTaskAuthVolumes,
+  findTaskAuthVolumes,
   clearTaskAuthPreparationState,
   syncRefreshedAuthToUserVolumes,
 } from '../../sandbox/task-auth-volume.js';
@@ -656,7 +657,9 @@ export async function cleanupAuthAfterTerminalSummary(db: Database, taskId: stri
     // that runs for that task.
     try {
       await syncRefreshedAuthToUserVolumes(db, taskId);
+      const volumes = await findTaskAuthVolumes(taskId);
       await db.transaction(async (tx) => {
+        await setTaskSettlementTimeout(tx);
         const [task] = await tx
           .select({ id: schema.tasks.id })
           .from(schema.tasks)
@@ -664,7 +667,7 @@ export async function cleanupAuthAfterTerminalSummary(db: Database, taskId: stri
           .for('no key update');
         if (!task) return;
         clearTaskAuthPreparationState(taskId);
-        const result = await cleanupTaskAuthVolumes(taskId);
+        const result = await cleanupTaskAuthVolumes(taskId, undefined, volumes);
         if (result.removed.length > 0) {
           log.info(
             { taskId, volumes: result.removed.length },

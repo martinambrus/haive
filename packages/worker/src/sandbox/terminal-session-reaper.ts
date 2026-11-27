@@ -1,5 +1,9 @@
 import { schema, type Database } from '@haive/database';
-import { taskWriteTarget } from '@haive/shared';
+import {
+  taskWriteTarget,
+  setTaskSettlementTimeout,
+  TASK_SETTLEMENT_TIMEOUT_MS,
+} from '@haive/shared';
 import Docker from 'dockerode';
 import {
   DEFAULT_GIT_CRED_TOKEN_TTL_SECONDS,
@@ -165,6 +169,7 @@ export async function reapAllSessionsForTask(
   docker: Docker,
   taskId: string,
   db: Database,
+  transactionTimeoutMs = TASK_SETTLEMENT_TIMEOUT_MS,
 ): Promise<number> {
   let cursor = '0';
   let killed = 0;
@@ -180,6 +185,7 @@ export async function reapAllSessionsForTask(
     for (const key of keys) {
       const entry = await redis.hgetall(key);
       await db.transaction(async (tx) => {
+        await setTaskSettlementTimeout(tx, transactionTimeoutMs);
         const [task] = await tx
           .select({ id: schema.tasks.id })
           .from(schema.tasks)

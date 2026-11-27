@@ -43,6 +43,7 @@ vi.mock('../src/sandbox/sandbox-kill.js', async (importOriginal) => ({
 }));
 vi.mock('../src/sandbox/task-auth-volume.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../src/sandbox/task-auth-volume.js')>()),
+  findTaskAuthVolumes: async () => [],
   cleanupTaskAuthVolumes: async () => ({ removed: [], failed: [] }),
   syncRefreshedAuthToUserVolumes: async () => undefined,
 }));

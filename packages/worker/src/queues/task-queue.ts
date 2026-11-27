@@ -64,6 +64,7 @@ import {
   TASK_DEAD_EVENT,
   TASK_JOB_NAMES,
   STOP_SETTLE_EVENTS,
+  setTaskSettlementTimeout,
   ideSessionKey,
   repoIdeSessionId,
   logger,
@@ -140,6 +141,7 @@ import { ContainerManager } from '../sandbox/container-manager.js';
 import { defaultDockerRunner } from '../sandbox/docker-runner.js';
 import {
   cleanupTaskAuthVolumes,
+  findTaskAuthVolumes,
   clearTaskAuthPreparationState,
   syncRefreshedAuthToUserVolumes,
 } from '../sandbox/task-auth-volume.js';
@@ -370,7 +372,8 @@ function endedAtOf(row: { endedAt: Date | null }): string | null {
   return row.endedAt?.toISOString() ?? null;
 }
 
-/** Appends the event once per pass (row, type, `endedAt`); a missing `endedAt` never matches. */
+/** Appends once per pass (row, type, `endedAt`); auth-volume observations also match
+ * epoch and removal counts. A missing `endedAt` never matches. */
 async function appendEventOnce(
   db: Database | DbHandle,
   taskId: string,
@@ -389,6 +392,12 @@ async function appendEventOnce(
             ? isNull(schema.taskEvents.taskStepId)
             : eq(schema.taskEvents.taskStepId, taskStepId),
           eq(schema.taskEvents.eventType, eventType),
+          eventType === 'auth_volumes.destroyed'
+            ? and(
+                sql`${schema.taskEvents.payload} ->> 'removed' = ${String(payload.removed)}`,
+                sql`${schema.taskEvents.payload} ->> 'failed' = ${String(payload.failed)}`,
+              )
+            : undefined,
           sql`${schema.taskEvents.payload} ->> 'endedAt' = ${payload.endedAt}`,
           taskStepId === null
             ? sql`${schema.taskEvents.payload} ->> 'epoch' = ${String(payload.epoch)}`
@@ -1127,14 +1136,21 @@ async function settleFailedTask(
       logger.warn({ err, taskId }, 'failed-task settlement could not capture the failure');
     }
   }
-  await cleanupTaskContainers(db, taskId, 'failed');
+  const containersSettled = await cleanupTaskContainers(db, taskId, 'failed');
   await resyncAfterTaskEnd(db, taskId);
-  await maybeUnloadTaskEmbedModel(db, taskId);
-  await unloadTaskOllamaCliModels(db, taskId);
+  const embedSettled = await maybeUnloadTaskEmbedModel(db, taskId);
+  const cliModelsSettled = await unloadTaskOllamaCliModels(db, taskId);
   // A failed kb_author enrich leaves its global KB entry stuck in 'enriching'; mark
   // it 'failed' so the KB view can show a retry / go-to-task affordance.
   await reconcileKbAuthorEntryOnTaskEnd(db, taskId, 'failed', logger);
-  if (failure?.status === 'failed' && failure.completedAt) {
+  // A bounded section that failed must not acknowledge the Stop: the sweep retries it.
+  if (
+    containersSettled !== false &&
+    embedSettled !== false &&
+    cliModelsSettled !== false &&
+    failure?.status === 'failed' &&
+    failure.completedAt
+  ) {
     const failedAt = failure.completedAt.toISOString();
     // An ordinary failed task has no request. Both its pass and the Stop job may settle it;
     // recording their completion is harmless, and cannot acknowledge a different failure.
@@ -1170,18 +1186,20 @@ async function settleFailedTask(
  *  and self-contained: never throws, so it cannot break the terminal transition.
  *  Repo-RAG only; the global-KB model has its own lifecycle and keep_alive
  *  backstop. */
-async function maybeUnloadTaskEmbedModel(db: Database, taskId: string): Promise<void> {
+async function maybeUnloadTaskEmbedModel(db: Database, taskId: string): Promise<boolean> {
   try {
     const target = await resolveTaskEmbedTarget(db, taskId);
-    if (!target) return;
+    if (!target) return true;
     const status = await releaseEmbedModelIfUnused(db, {
       url: target.url,
       model: target.model,
-      excludeTaskId: taskId,
+      settlingTaskId: taskId,
     });
     logger.info({ taskId, model: target.model, status }, 'ollama embed model release');
+    return true;
   } catch (err) {
     logger.warn({ err, taskId }, 'ollama embed model unload failed');
+    return false;
   }
 }
 
@@ -1335,7 +1353,8 @@ async function cleanupTaskContainers(
   db: Database,
   taskId: string,
   reason: 'completed' | 'failed' | 'cancelled',
-): Promise<void> {
+): Promise<boolean> {
+  let settled = true;
   if (reason === 'cancelled') {
     try {
       const killed = await killSandboxContainersByTaskLabel(taskId);
@@ -1417,7 +1436,9 @@ async function cleanupTaskContainers(
   }
 
   try {
+    const volumes = await findTaskAuthVolumes(taskId);
     await db.transaction(async (tx) => {
+      await setTaskSettlementTimeout(tx);
       const [task] = await tx
         .select({
           id: schema.tasks.id,
@@ -1431,7 +1452,7 @@ async function cleanupTaskContainers(
       // Retry writes this row last. Hold it through removal and cache invalidation;
       // no step/run row or repository lock is acquired inside this section.
       try {
-        const { removed, failed } = await cleanupTaskAuthVolumes(taskId);
+        const { removed, failed } = await cleanupTaskAuthVolumes(taskId, undefined, volumes);
         if (removed.length > 0 || failed.length > 0) {
           await appendEventOnce(tx, taskId, null, 'auth_volumes.destroyed', {
             endedAt: task.completedAt?.toISOString() ?? null,
@@ -1446,6 +1467,7 @@ async function cleanupTaskContainers(
       }
     });
   } catch (err) {
+    settled = false;
     logger.warn({ err, taskId, reason }, 'cleanup-task-auth-volumes failed');
   }
 
@@ -1489,11 +1511,13 @@ async function cleanupTaskContainers(
       });
     }
   } catch (err) {
+    settled = false;
     logger.warn({ err, taskId, reason }, 'cleanup-terminal-sessions failed');
   }
 
   // After the reap, so no live shell can write into the tree between the clean check and removal.
   await releaseTaskWorktree(db, taskId, reason);
+  return settled;
 }
 
 async function cleanupTaskEnvImage(
@@ -5093,7 +5117,7 @@ async function handleCancelTask(db: Database, payload: TaskJobPayload): Promise<
   });
   // Before the kill and the listing: a run still queued reads this right before it creates its sandbox.
   await supersedeTaskRuns(db, payload.taskId);
-  await cleanupTaskContainers(db, payload.taskId, 'cancelled');
+  const containersSettled = await cleanupTaskContainers(db, payload.taskId, 'cancelled');
   await killCliSandboxesForTask(payload.taskId);
   // The cleanup above swallows docker failures, so the claims and the finish record wait for a
   // listing that shows no sandbox of the task left: a fixer still running may write into the dir.
@@ -5117,8 +5141,8 @@ async function handleCancelTask(db: Database, payload: TaskJobPayload): Promise<
       discardFailure = err;
     }
   }
-  await maybeUnloadTaskEmbedModel(db, payload.taskId);
-  await unloadTaskOllamaCliModels(db, payload.taskId);
+  const embedSettled = await maybeUnloadTaskEmbedModel(db, payload.taskId);
+  const cliModelsSettled = await unloadTaskOllamaCliModels(db, payload.taskId);
   // A cancelled kb_author enrich should not leave an orphan global KB entry behind;
   // delete its unfinished entry, including one already marked failed by a Stop or worker failure.
   await reconcileKbAuthorEntryOnTaskEnd(db, payload.taskId, 'cancelled', logger);
@@ -5128,6 +5152,8 @@ async function handleCancelTask(db: Database, payload: TaskJobPayload): Promise<
     );
   }
   if (discardFailed) throw discardFailure;
+  if (containersSettled === false || embedSettled === false || cliModelsSettled === false)
+    throw new Error('task resource settlement failed; the cancel remains pending for re-drive');
   // The teardown above reads this task's rows, so whoever deletes them waits for this record.
   await appendEvent(db, payload.taskId, null, 'task.cancel_finished', { source: 'worker' });
 }

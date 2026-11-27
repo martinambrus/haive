@@ -132,20 +132,26 @@ describe('releaseEmbedModelIfUnused', () => {
 
   it('keeps the settling task model when Retry revives that same task', async () => {
     const calls = stubFetch({ resident: [MODEL] });
-    const fake = createFakeDb({ tasks: schema.tasks }, { rowLocks: true });
+    const fake = createFakeDb(
+      { tasks: schema.tasks, taskSteps: schema.taskSteps },
+      { rowLocks: true },
+    );
     fake.insert(schema.tasks, { id: '00000000-0000-4000-8000-000000000001', status: 'running' });
     const db = fake.db as unknown as Database;
     const status = await releaseEmbedModelIfUnused(db, {
       url: URL,
       model: MODEL,
-      excludeTaskId: '00000000-0000-4000-8000-000000000001',
+      settlingTaskId: '00000000-0000-4000-8000-000000000001',
     });
     expect(status).toBe('in_use');
     expect(calls.unload).toBe(0);
   });
 
   it('holds the ended task row through the embed unload', async () => {
-    const fake = createFakeDb({ tasks: schema.tasks }, { rowLocks: true });
+    const fake = createFakeDb(
+      { tasks: schema.tasks, taskSteps: schema.taskSteps },
+      { rowLocks: true },
+    );
     fake.insert(schema.tasks, { id: '00000000-0000-4000-8000-000000000002', status: 'failed' });
     const calls = stubFetch({ resident: [MODEL] });
     const fetch = vi.mocked(globalThis.fetch);
@@ -159,10 +165,38 @@ describe('releaseEmbedModelIfUnused', () => {
       await releaseEmbedModelIfUnused(fake.db as unknown as Database, {
         url: URL,
         model: MODEL,
-        excludeTaskId: '00000000-0000-4000-8000-000000000002',
+        settlingTaskId: '00000000-0000-4000-8000-000000000002',
       }),
     ).toBe('unloaded');
     expect(calls.unload).toBe(1);
+  });
+
+  it('scans live tasks before taking the settling task row and rechecks a Retry after the scan', async () => {
+    const calls = stubFetch({ resident: [MODEL] });
+    const id = '00000000-0000-4000-8000-000000000003';
+    const fake = createFakeDb(
+      { tasks: schema.tasks, taskSteps: schema.taskSteps },
+      { rowLocks: true },
+    );
+    fake.insert(schema.tasks, { id, status: 'failed' });
+    fake.insert(schema.tasks, {
+      id: '00000000-0000-4000-8000-000000000004',
+      status: 'running',
+      repositoryId: null,
+    });
+    const db = fake.db as unknown as Database;
+    const read = vi
+      .spyOn(fake.db.query.taskSteps!, 'findFirst')
+      .mockImplementationOnce(async () => {
+        expect(fake.rowLocked(schema.tasks, id)).toBe(false);
+        fake.patch(schema.tasks, id, { status: 'running' });
+        return undefined;
+      });
+    expect(
+      await releaseEmbedModelIfUnused(db, { url: URL, model: MODEL, settlingTaskId: id }),
+    ).toBe('in_use');
+    expect(read).toHaveBeenCalled();
+    expect(calls.unload).toBe(0);
   });
 
   it('unloaded: resident and no task uses it → sends keep_alive:0', async () => {

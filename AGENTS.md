@@ -251,7 +251,7 @@ listed here, and keep this file under 32 KiB: Codex CLI reads no more of it than
   sending, compare-and-swap on agent rows. `dispatchMiningAgents`, `handleCliExecJob`.
 - [Worker restarts](docs/architecture/worker-restarts.md): boot recovery, stalled tasks, START
   claims, step ownership, Retry/Stop/Resume fencing, dead tasks. `task-queue.ts`, `step-runner.ts`,
-  `step-ownership.ts`, `queues/boot-requeue.ts`, `queues/stalled-redrive.ts`, `dead-task-boot.ts`.
+  `step-ownership.ts`, `task-fence.ts`, `queues/boot-requeue.ts`, `queues/stalled-redrive.ts`, `dead-task-boot.ts`.
 - [Merge conflicts](docs/architecture/merge-conflicts.md): the shared git merge core, fixer
   baselines and leftovers. `git-merge.ts`, `12-worktree-cleanup`, `01-plan-merge`.
 - [Learning reconcile](docs/architecture/learning-reconcile.md): step 11 telemetry event.

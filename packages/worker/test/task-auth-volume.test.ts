@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   cleanupTaskAuthVolumes,
+  findTaskAuthVolumes,
   clearTaskAuthPreparationState,
   ensureTaskAuthVolumes,
   mergeCliMcpIntoTaskVolume,
@@ -625,6 +626,20 @@ describe('cleanupTaskAuthVolumes', () => {
     );
     expect(result.failed).toEqual([]);
     expect(runner.stoppedContainerCleanupCalls.sort()).toEqual(result.removed.sort());
+  });
+
+  it('uses pre-probed volumes without inspecting again during removal', async () => {
+    const taskId = 'task-probed';
+    const volume = 'haive_cli_auth_task_taskprobed_codex_0';
+    const runner = makeRunner({ preExistingVolumes: [volume] });
+    const volumes = await findTaskAuthVolumes(taskId, runner);
+    expect(volumes).toEqual([volume]);
+    const inspect = vi.spyOn(runner, 'volumeExists');
+    expect(await cleanupTaskAuthVolumes(taskId, runner, volumes)).toEqual({
+      removed: [volume],
+      failed: [],
+    });
+    expect(inspect).not.toHaveBeenCalled();
   });
 
   it('is a no-op when no task volumes exist', async () => {

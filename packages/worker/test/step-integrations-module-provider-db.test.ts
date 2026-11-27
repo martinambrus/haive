@@ -133,6 +133,7 @@ vi.mock('bullmq', async (importOriginal) => ({
 }));
 vi.mock('../src/sandbox/task-auth-volume.js', async (importOriginal) => ({
   ...(await importOriginal<object>()),
+  findTaskAuthVolumes: async () => [],
   cleanupTaskAuthVolumes: async () => ({ removed: [], failed: [] }),
   syncRefreshedAuthToUserVolumes: async () => undefined,
 }));

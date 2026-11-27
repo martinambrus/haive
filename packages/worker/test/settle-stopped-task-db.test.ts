@@ -4,6 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import postgres from 'postgres';
 import { drizzle } from 'drizzle-orm/postgres-js';
+import { PgDialect } from 'drizzle-orm/pg-core';
 import { asc, eq, sql } from 'drizzle-orm';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { schema, type Database } from '@haive/database';
@@ -26,6 +27,7 @@ const h = vi.hoisted(() => {
     /** When set, the db the job is handed instead of `db`. */
     wrap: undefined as unknown,
     calls,
+    authCleanup: undefined as (() => Promise<void>) | undefined,
     seen: (seam: string, taskId: string): void => {
       calls.push(`${seam}:${taskId}`);
     },
@@ -65,8 +67,8 @@ vi.mock('node:child_process', async (importOriginal) => {
 vi.mock('@haive/shared/rag', async (importOriginal) => ({
   ...(await importOriginal<object>()),
   resolveTaskEmbedTarget: async () => ({ url: 'http://ollama.invalid', model: 'embed-test' }),
-  releaseEmbedModelIfUnused: async (_db: unknown, opts: { excludeTaskId: string }) => {
-    h.seen('releaseEmbedModelIfUnused', opts.excludeTaskId);
+  releaseEmbedModelIfUnused: async (_db: unknown, opts: { settlingTaskId: string }) => {
+    h.seen('releaseEmbedModelIfUnused', opts.settlingTaskId);
     return 'unloaded';
   },
 }));
@@ -89,8 +91,10 @@ vi.mock('../src/sandbox/task-auth-volume.js', async (importOriginal) => ({
   ...(await importOriginal<object>()),
   syncRefreshedAuthToUserVolumes: async (_db: unknown, taskId: string) =>
     h.seen('syncRefreshedAuthToUserVolumes', taskId),
+  findTaskAuthVolumes: async () => [],
   cleanupTaskAuthVolumes: async (taskId: string) => {
     h.seen('cleanupTaskAuthVolumes', taskId);
+    await h.authCleanup?.();
     return { removed: [], failed: [] };
   },
 }));
@@ -276,6 +280,7 @@ describe.skipIf(!url)('the worker settle job for a task the api Stop failed, on 
   beforeEach(async () => {
     h.calls.length = 0;
     h.wrap = undefined;
+    h.authCleanup = undefined;
     await db.delete(schema.tasks).where(eq(schema.tasks.userId, userId));
   });
 
@@ -418,6 +423,123 @@ describe.skipIf(!url)('the worker settle job for a task the api Stop failed, on 
     expect(await reapAllSessionsForTask(redis as never, docker as never, taskId, db)).toBe(0);
     expect(remove).not.toHaveBeenCalled();
     expect(del).not.toHaveBeenCalled();
+  });
+
+  it.each(['docker', 'redis'] as const)(
+    'releases a task row when %s hangs and leaves settlement re-drivable',
+    async (hang) => {
+      const { reapAllSessionsForTask } = await vi.importActual<
+        typeof import('../src/sandbox/terminal-session-reaper.js')
+      >('../src/sandbox/terminal-session-reaper.js');
+      const taskId = await seedTask('failed');
+      let release!: () => void;
+      let entered!: () => void;
+      const blocked = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const started = new Promise<void>((resolve) => {
+        entered = resolve;
+      });
+      const stall = async () => {
+        entered();
+        await blocked;
+      };
+      const redis = {
+        scan: async () => ['0', ['session']],
+        hgetall: async () => ({ containerName: 'shell' }),
+        del: hang === 'redis' ? stall : async () => 1,
+      };
+      const docker = {
+        getContainer: () => ({ remove: hang === 'docker' ? stall : async () => undefined }),
+      };
+      const cleanup = outcomeOf(
+        reapAllSessionsForTask(redis as never, docker as never, taskId, db, 100),
+      );
+      await started;
+      try {
+        // This write queues behind the held task row. Its 1s deadline exceeds the injected 100ms holder bound.
+        await db.transaction(async (tx) => {
+          await tx.execute(sql`set local lock_timeout = '1s'`);
+          await tx
+            .update(schema.tasks)
+            .set({ status: 'running' })
+            .where(eq(schema.tasks.id, taskId));
+        });
+        expect((await cleanup).ok).toBe(false);
+        expect(
+          await db.query.taskEvents.findFirst({
+            where: eq(schema.taskEvents.eventType, STOP_SETTLE_EVENTS.FINISHED),
+          }),
+        ).toBeUndefined();
+      } finally {
+        release();
+        await cleanup;
+      }
+    },
+  );
+
+  it('does not acknowledge a timed-out auth section and the Stop sweep re-drives it', async () => {
+    const taskId = await seedTask('failed');
+    await db.insert(schema.taskEvents).values({
+      taskId,
+      eventType: STOP_SETTLE_EVENTS.REQUESTED,
+      payload: { failedAt: FAILED_AT.toISOString() },
+      createdAt: T0,
+    });
+    let release!: () => void;
+    const blocked = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    h.authCleanup = () => blocked;
+    // Shorten only the production section's timeout. No test database or dev stack is used
+    // outside this file's throwaway-harness guard.
+    h.wrap = new Proxy(db, {
+      get(target, prop) {
+        if (prop === 'transaction')
+          return (fn: (tx: Database) => Promise<unknown>) =>
+            target.transaction(async (tx) => {
+              await tx.execute(sql`SET LOCAL transaction_timeout = '100ms'`);
+              const short = new Proxy(tx, {
+                get(handle, key) {
+                  if (key === 'execute')
+                    return (query: Parameters<typeof tx.execute>[0]) => {
+                      const statement = new PgDialect().sqlToQuery(query as never).sql;
+                      return handle.execute(
+                        statement.startsWith('SET LOCAL transaction_timeout')
+                          ? sql`SET LOCAL transaction_timeout = '100ms'`
+                          : query,
+                      );
+                    };
+                  const value = Reflect.get(handle, key);
+                  return typeof value === 'function' ? value.bind(handle) : value;
+                },
+              });
+              return fn(short as unknown as Database);
+            });
+        const value = Reflect.get(target, prop);
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    });
+    try {
+      expect(describeOutcome(await run(payloadFor(taskId)))).toBe('resolved');
+      const events = await db.query.taskEvents.findMany({
+        where: eq(schema.taskEvents.taskId, taskId),
+      });
+      expect(events.some((e) => e.eventType === STOP_SETTLE_EVENTS.FINISHED)).toBe(false);
+      const enqueueStopSettle = vi.fn(async () => undefined);
+      expect(
+        await stalled.redriveStoppedTasks(
+          db,
+          { enqueueStopSettle, queuedStoppedTaskIds: async () => new Set<string>() },
+          { staleMs: 300_000 },
+        ),
+      ).toBe(1);
+      expect(enqueueStopSettle).toHaveBeenCalledWith(taskId, userId, FAILED_AT.toISOString());
+    } finally {
+      release();
+      h.authCleanup = undefined;
+      h.wrap = undefined;
+    }
   });
 
   it(

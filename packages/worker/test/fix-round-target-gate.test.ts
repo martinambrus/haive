@@ -374,6 +374,7 @@ vi.mock('../src/queues/_step-reset.js', async (importOriginal) => ({
 // failure, and the runners and the IDE's volume on a definitive end.
 vi.mock('../src/sandbox/task-auth-volume.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../src/sandbox/task-auth-volume.js')>()),
+  findTaskAuthVolumes: async () => [],
   cleanupTaskAuthVolumes: vi.fn(async () => ({ removed: [], failed: [] })),
   syncRefreshedAuthToUserVolumes: vi.fn(async () => undefined),
 }));
