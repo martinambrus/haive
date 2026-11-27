@@ -1204,7 +1204,7 @@ C3. Accept with no next step still writes the findings in a separate statement a
 
 ### T767 · Translator: books of any size with one glossary and one style
 
-status: open; PR1 (batch storage mode, quota wait, migration 0011) merged module #21 559205f and deployed 2026-11-26; PR2 (batched scheduling, bounded indexed lookups, cached accounting reconciled by invocation identity after restore, migration 0015) merged module #27 f9d6d84 and deployed 2026-11-27 09:54Z; PR3 (volumes) and PR4 (term catalog) next
+status: open; PR1 (batch storage mode, quota wait, migration 0011) merged module #21 559205f and deployed 2026-11-26; PR2 (batched scheduling, bounded indexed lookups, cached accounting reconciled by invocation identity after restore, migration 0015) merged module #27 f9d6d84 and deployed 2026-11-27 09:54Z; PR3 (volumes: deterministic partition, staged incremental render, volume-scoped replacement, bounded book-plan metadata, migrations 0016+0017) merged module #28 bed2d41 and deployed 2026-11-27 17:37Z, its review lows filed as T787; PR4 (term catalog) next
 
 In `martinambrus/haive-module-translator`. Owner (2026-11-26): "the translator module should be able to translate book of any size, so if we have to update it to do it in parts because of a possible big size, that's fine as well, we just need to keep the vocabulary and terms and the such intact between them".
 
@@ -1221,6 +1221,12 @@ status: done 2026-11-26, module #20 (d8a8db7, deployed with `pnpm docker libs`):
 In `martinambrus/haive-module-translator`. The owner's English-to-Slovak run failed at `tr-translate`: unit 0's accuracy pass was accepted, its restructure pass was refused with `Source-present keep term missing`. `keepTermLost` (`src/protocol/passes.ts` ~:115, used ~:142, `review.ts` ~:123, `patch.ts` ~:50) needs the literal keep term in the target as often as in the source, so a declined name (Marek to Marka) fails. One attempt is left on that pass key.
 
 1. Accept a declined form (same stem, up to 2 trailing letters changed on words of 5+ letters) at every keep-term check; a translated name still fails; codes and short words stay exact. Then the owner Retries the step.
+
+### T787 · FNF[translator-volume-lows] · translator volume and book-plan budget lows after T767 PR3
+
+status: open · kind: fix · found: T767 PR3 review 3 (module #28) 2026-11-27 · priority: P4
+
+In `martinambrus/haive-module-translator`. None loses work or admits a write past the hard ceiling. 1. The control-headroom clause of `checkBookPlanBudget` (`src/db/books.ts` ~:22) subtracts retained superseded plan bytes as well as the allowance clause does; only the allowance clause needed that, so on an install holding large historical plans the headroom clause under-counts physical retained bytes. Later writes still park at `assertResources` (16 MiB is a hard ceiling), so this is guard quality, not safety; pin it with a control. 2. The rollback control (`test/book-plan-budget-db.test.mjs` ~:139) covers only a first consent: re-consent after saturating headroom and assert the superseded holds' balances and receipt count are unchanged (a mutant moving the release loop in `setup.ts` ~:98-101 to its own transaction survives today). 3. `planVolumes`'s metadata-bound refusal (`src/render/volumes.ts` ~:105) and clause 1 of `checkBookPlanBudget` cannot fire for any plan `planVolumes` returns (defense in depth; line 105 has no control); the comment at `volumes.ts` ~:26-28 is imprecise for html. 4. Scale timings across the two review runs are not comparable (load differed); rerun the 1,000,000-word render control at base and head back to back on one idle server, or record the max `pg_stat_statements` row, to show the new `volumePlan` join's cost (recorded margin to the 5 s statement timeout 3.4x).
 
 ### T786 · FNF[plan-delete-cycle-lows] · plan writer wait and mirror hold lows after T483
 
