@@ -18,8 +18,9 @@ const planPatchLockKey = (repositoryId: string): string => `plan-patch:${reposit
  * Reconciles/imports take this lock for ancestry writes; a file-only flush does not.
  * Field-only patches do not take it and never wait for it holding a row.
  *
- * The bound covers acquiring this advisory lock only; subsequent writes retain
- * the database's usual lock timeout, as in the API's boundedLockWait.
+ * This bound covers the advisory lock only. Repository KEY SHARE has the separate
+ * caller-selected bound (5 s normally, 250 ms under a mining claim); subsequent
+ * plan writes retain the ordinary lock timeout.
  */
 export async function lockPlanPatch(tx: PlanPatchTx, repositoryId: string): Promise<void> {
   await tx.execute(sql.raw(`SET LOCAL lock_timeout = '${PLAN_PATCH_LOCK_TIMEOUT_MS}ms'`));

@@ -70,7 +70,7 @@ import {
   syncProjectStateFromCheckout,
   writeApplicableTemplateIds,
 } from './sync.js';
-import { lockPlanMerge } from '@haive/shared/plan';
+import { lockPlanMerge, PlanPatchError } from '@haive/shared/plan';
 import { answerPlanQuestion } from '../plan/answer.js';
 import { flushPlanMirrorForRepository, lockPlanMirror } from '../plan/mirror.js';
 import { insertImportMarker, loadMarkerContext } from './import-marker.js';
@@ -137,7 +137,11 @@ export async function resolveProjectStateConflict(
     result = await answerInTransaction(db, payload, after);
     after.auditEvents.forEach(logAuditEvent);
   } catch (err) {
-    if (err instanceof RenderFileMovedError) {
+    // The plan answer's bounded repository wait aborts its transaction. Translate only
+    // after rollback, preserving the answer protocol's existing retryable busy outcome.
+    if (err instanceof PlanPatchError && err.kind === 'busy') {
+      result = { kind: 'busy' };
+    } else if (err instanceof RenderFileMovedError) {
       result = { kind: 'moved' };
       after.resync = err.repoPath;
     } else {

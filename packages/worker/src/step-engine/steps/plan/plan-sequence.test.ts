@@ -392,6 +392,15 @@ describe('foldSequenceResults', () => {
     vi.mocked(applyAgentPatch).mockReset();
   });
 
+  it('propagates repository deletion without a failed-apply stamp', async () => {
+    const gone = new PlanPatchError('repository_gone', 'gone');
+    vi.mocked(applyAgentPatch).mockRejectedValue(gone);
+    const { db, stamps } = fakeDb();
+    await expect(foldSequenceResults(ctx(db), 'r', [agentReply(ORDER)])).rejects.toBe(gone);
+    expect(applyAgentPatch).toHaveBeenCalledTimes(1);
+    expect(stamps).toEqual([]);
+  });
+
   it('retries a busy ordering fold without discarding its reply', async () => {
     vi.useFakeTimers();
     try {
@@ -429,6 +438,9 @@ describe('foldSequenceResults', () => {
     expect(
       (vi.mocked(applyAgentPatch).mock.calls[0]![0] as { inTransaction?: boolean }).inTransaction,
     ).toBe(true);
+    expect(vi.mocked(applyAgentPatch).mock.calls[0]![2]).toMatchObject({
+      repositoryLockTimeoutMs: 250,
+    });
     expect(stamps).toEqual([{ errorMessage: `plan patch partially applied: ${gone}` }]);
   });
 

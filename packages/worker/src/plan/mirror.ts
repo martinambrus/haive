@@ -29,6 +29,7 @@ import {
   PlanPatchError,
   loadPlanEdges,
   loadPlanNodes,
+  lockRepositoryForPlanWrite,
   markPlanMirrorDirty,
   renderPlanMarkdownFrom,
   planNodePath,
@@ -112,6 +113,20 @@ const HELD_NO_BASE =
   "the checkout's plan.json holds changes Haive has not read in, and this plan has unwritten changes of its own with no earlier copy to tell them apart; Pull the plan to bring them in. Nothing was written.";
 const HELD_RACED =
   "the plan was edited while the checkout's plan.json was being merged in; nothing was merged. It is merged again on the next pass.";
+/** A missing repository is a no-op; contention holds exactly like a raced ancestry apply.
+ * Never run another statement on a transaction aborted by the lock timeout. */
+async function admitMirrorRepository(tx: PlanMirrorTx, repositoryId: string): Promise<boolean> {
+  try {
+    await lockRepositoryForPlanWrite(tx, repositoryId);
+    return true;
+  } catch (err) {
+    if (!(err instanceof PlanPatchError)) throw err;
+    if (err.kind === 'busy') throw new PlanMirrorHeldError(HELD_RACED);
+    if (err.kind === 'repository_gone') return false;
+    throw err;
+  }
+}
+
 const HELD_MOVED =
   "the checkout's plan.json changed while the plan was being written; nothing was written. It is written again on the next pass.";
 const heldUnreadable = (reason: string): string =>
@@ -406,6 +421,7 @@ async function writePlanMirrorLocked(
   repoPath: string,
   changes?: PlanMirrorChanges,
 ): Promise<{ written: string[]; failed?: unknown }> {
+  await lockRepositoryForPlanWrite(db, repositoryId);
   let state = await loadMirrorState(db, repositoryId);
   if (!state) {
     await db
@@ -677,7 +693,7 @@ export async function importPlanMirror(
     }
   }
 
-  await db.transaction(async (tx) => {
+  const imported = await db.transaction(async (tx) => {
     if (expectedCheckout) {
       await lockRepositoryTasksKey(tx, repositoryId);
       await lockPlanMirror(tx, repositoryId);
@@ -692,6 +708,7 @@ export async function importPlanMirror(
       if (!(await admitWatchedRepository(tx, repositoryId)))
         throw new PlanMirrorHeldError(HELD_MOVED, 'checkout_changed');
     }
+    if (!(await admitMirrorRepository(tx, repositoryId))) return false;
     await tx.insert(schema.planNodes).values(
       ordered.map((n) => ({
         id: n.id,
@@ -766,7 +783,10 @@ export async function importPlanMirror(
         },
       });
     await assertCheckoutStillHolds(storagePath, rawBytes, expectedCheckout);
+    return true;
   });
+  if (!imported)
+    return { imported: false, code: 'no_mirror', reason: 'repository no longer exists' };
 
   logger.info(
     {
@@ -1079,6 +1099,7 @@ async function reconcilePlanLocked(
   opts: { requireStamp?: boolean; expectedCheckout?: NamedCheckout },
   beforeApply: () => Promise<void>,
 ): Promise<PlanPullOutcome> {
+  if (!(await admitMirrorRepository(tx, repositoryId))) return noOutcome(null);
   const [state] = await tx
     .select({
       syncedHash: schema.planMirrorState.syncedHash,
