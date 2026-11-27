@@ -393,7 +393,7 @@ Execution fence 2026-11-01: first establish an affected legacy/current supported
 
 ### T309 · FNF[cancel-cap-2] · a capped cancel with no claim row never finishes (+8)
 
-status: open for members 2, 3, 5, 6, 7; members 1, 4, 9 DONE in #1365 (b32cea910, live 2026-11-27, migration 0253 applied: abandon pass selects recorded merge states, cooldown via updated_at, pause cleared inside the cancel transaction on every path); member 8 does not reproduce (terminal guard, pinned by a control) · gate: bounded verification · user decision: recheck risk-bearing members, 2026-11-01 · priority: P2
+status: fenced scope done 2026-11-27 (the fence prioritized 1/4/8/9: all settled); members 2, 3, 5, 6, 7 deferred by the fence (cosmetic, isolated coverage and cleanup; 7 is resolver-area); members 1, 4, 9 DONE in #1365 (b32cea910, live 2026-11-27, migration 0253 applied: abandon pass selects recorded merge states, cooldown via updated_at, pause cleared inside the cancel transaction on every path); member 8 does not reproduce (terminal guard, pinned by a control) · gate: bounded verification · user decision: recheck risk-bearing members, 2026-11-01 · priority: P2
 All PRE-EXISTING, low.
 
 1. abandonCancelledTeardowns selects only tasks with merge_dir_claims rows; a DAG-mode capped cancel never gets cancel_finished, and worktreeSharer keeps counting it. Select also recorded mid-merge / DAG activeConflict within the re-drive window.
