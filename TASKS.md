@@ -1222,6 +1222,15 @@ In `martinambrus/haive-module-translator`. The owner's English-to-Slovak run fai
 
 1. Accept a declined form (same stem, up to 2 trailing letters changed on words of 5+ letters) at every keep-term check; a translated name still fails; codes and short words stay exact. Then the owner Retries the step.
 
+### T777 · Collapsed step terminal keeps a stale "1 live" after the run ends
+
+status: open · kind: bug · found: session live check e06ad873 2026-11-27 · priority: P3
+
+When a step leaves its active state (here `tr-glossary` to `waiting_form`), `StepTerminal` collapses itself (`web/src/components/terminal/StepTerminal.tsx` ~:98-102), and the poll effect returns early while collapsed (~:188), so the header keeps the last poll's `isActive` and reads "1 run · 1 live" for a run whose `cli_invocations.ended_at` is set. A reload clears it.
+
+1. Refresh once when the step goes idle (or when collapsing), so the collapsed header's count reflects ended runs; no polling while collapsed and idle.
+2. Control: an active run, then the step leaves active with the panel collapsing; the header drops "live".
+
 ### T776 · RAG stats panel mixes rounds of a re-run step
 
 status: done 2026-11-26, merged #1352 6a832e551 and live · kind: bug · found: T769 build 2026-11-26 (Codex found-not-fixed) · priority: P3
