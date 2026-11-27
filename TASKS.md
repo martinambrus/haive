@@ -1228,6 +1228,17 @@ In `martinambrus/haive-module-translator`. The owner's English-to-Slovak run fai
 
 1. Accept a declined form (same stem, up to 2 trailing letters changed on words of 5+ letters) at every keep-term check; a translated name still fails; codes and short words stay exact. Then the owner Retries the step.
 
+### T790 · FNF[relink-hold-leftovers] · leftovers of the T516 relink row hold
+
+status: open · kind: fix · found: T516 review 1 and PR gates (#1392) 2026-11-27 · priority: P3
+
+1. Residual 409: delete and onboarding/upgrade admission keep a bounded `FOR UPDATE` (`lockRepositoryRow`), so they queue behind a relink's KEY SHARE for up to 30 s while holding their task key, and a concurrent task Start reaches its shorter 5 s bound and answers busy. Documented in integrations.md.
+2. Lock ratchet blind spots (`api/test/repository-lock-ratchet.test.ts`): an identifier receiver, a helper-returned builder, joins, non-literal lock modes, raw SQL, table aliases or named imports, and worker sources outside its api-only scan. None affects the current tree.
+3. Other advisory keys interpolate an id (`project-state`, `onboarding-upgrade`, `plan-merge`, `integration-allow-list`, `database-snapshots`, `task-attachments`, `task-integrations` and others). Check which can receive a route parameter as written; PostgreSQL accepts several uuid spellings for one row (#1392 fixed `remote-relink` only, via the canonical form). Fix direction: build each key from the database's id or the canonical form.
+4. The relink route derives the git cwd from its pre-transaction read while the final compare checks only the in-transaction row; a move between the two is not compared (review L2).
+5. `reconcileRemote` reaches its pending-intent probe only when SKIP LOCKED finds the row `FOR UPDATE` locked (delete/admission), since a relink hold no longer blocks it (review L5).
+6. The deadlock-freedom of the final upgrade is probed for one interleaving in the committed control (S1); the lock-only NO KEY UPDATE third party (S3) was probed by the reviewer but is not pinned.
+
 ### T789 · FNF[global-kb-deadline-leftovers] · leftovers of the T630 global KB deadlines and the step-08 re-route journal
 
 status: open · kind: fix · found: T630 reviews 1 and 2 (#1390) 2026-11-27 · priority: P3
@@ -3130,7 +3141,7 @@ Executable verification scope: Current epoch/stale-submit producers and accepted
 
 ### T516 · FNF[relink-row-hold] · writers of a repository row wait behind a relink that holds it across git, bounded only by the relink's own git deadlines (+3)
 
-status: open · kind: fix · policy: covered by accepted bounded-wait/consistency rules · priority: P2
+status: done 2026-11-27 (fenced: members 1 and 2), merged #1392 (c96051ded) and live (`pnpm docker libs`, api and worker restarted together): relinks serialize on a per-repository advisory key built from the canonical uuid form, hold the row FOR KEY SHARE through Git and take the bounded writer lock only for the final compare-and-update; non-key writers take FOR NO KEY UPDATE; gate 4's origin write takes the same key first; the ratchet flags unbounded direct writer-lock selects. Members 3 and 4 stay as constraints; leftovers filed as T790 · kind: fix · policy: covered by accepted bounded-wait/consistency rules · priority: P2
 From the T376 seventh review (2026-10-31). REGRESSION of the T376 branch (origin/main's relink took the row only for its final update), minor to moderate, by reading and PostgreSQL semantics, not reproduced. Arrives with T376.
 
 1. The relink holds the repository row `FOR NO KEY UPDATE` across its git calls (api routes/repos.ts). T376 bounds four explicit row takes, but plain `UPDATE repositories` statements still queue behind it with no bound: repos.ts ~:240 (`addRepoJobOrMarkError`), ~:3138 (mark-onboarded stamp), ~:3410 (artifact reset), ~:3679 (refresh-tree), tooling-upgrades.ts ~:284, ~:780, and the root claims (database src/repo-root-claim.ts ~:102, ~:144, ~:192, taken by mark-onboarded, the onboarding-artifacts DELETE and every repository-root file save). Worker transactions take the task-creation and project-state keys and then the row `FOR UPDATE` unbounded (project-state/write.ts ~:714-727 and ~:1319-1392, 04-upgrade-rollback.ts ~:1092-1103, 12-post-onboarding.ts ~:424-434), so an api task start answers 409 busy while a relink holds the row. 02-upgrade-apply.ts ~:826-843 is the bounded exception. Today the wait ends with the relink's git deadlines (10 s plus a 2 s grace per call) and not at all for a git child in uninterruptible I/O (T508). Design direction from the review: serialize relinks with a per-repository advisory key taken in `boundedLockWait`, hold the row `FOR KEY SHARE` through git (it blocks the delete, which takes `FOR UPDATE`), and take `FOR NO KEY UPDATE` only for the final UPDATE; the audit metadata (`credentialsChanged`, `branchChanged`) then needs a re-read at the end. Note (session): `FOR KEY SHARE` removes the plain-UPDATE waits only; it still conflicts with the worker's and the four writers' `FOR UPDATE` takes, so those would need `FOR NO KEY UPDATE` or the bound.
