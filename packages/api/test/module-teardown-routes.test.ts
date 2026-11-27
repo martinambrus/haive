@@ -316,7 +316,7 @@ it('rolls back teardown audit when enqueue fails', async () => {
   expect(h.audits).toEqual([]);
 });
 
-it('keeps a committed teardown row while enqueue waits without a transaction', async () => {
+it('keeps a committed teardown row after a bounded enqueue timeout without a transaction', async () => {
   vi.useFakeTimers();
   let release!: () => void;
   let reached!: () => void;
@@ -335,16 +335,16 @@ it('keeps a committed teardown row while enqueue waits without a transaction', a
     expect(h.transactionOpen).toBe(false);
     expect(h.audits).toHaveLength(1);
     expect(h.auditLog).not.toHaveBeenCalled();
-    await vi.advanceTimersByTimeAsync(60_000);
+    await vi.advanceTimersByTimeAsync(2_000);
     expect(h.audits).toHaveLength(1);
     expect(h.transactionOpen).toBe(false);
-    expect(h.auditLog).not.toHaveBeenCalled();
+    expect(h.auditLog).toHaveBeenCalledOnce();
   } finally {
     release();
     await request;
     vi.useRealTimers();
   }
-  expect((await request).status).toBe(200);
+  expect((await request).status).toBe(500);
   expect(h.audits).toHaveLength(1);
   expect(h.auditLog).toHaveBeenCalledOnce();
 });

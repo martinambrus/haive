@@ -1,3 +1,4 @@
+import { addOrRefuse } from '../lib/queue-bounded.js';
 import { Hono, type Context } from 'hono';
 import { z } from 'zod';
 import {
@@ -52,10 +53,14 @@ async function runAction(
 ): Promise<DdevControlResult> {
   const enabled = await configService.getBoolean(CONFIG_KEYS.DDEV_CONTROL_MCP_ENABLED, true);
   if (!enabled) throw new HttpError(403, 'ddev-control is disabled');
-  const job = await getDdevControlQueue().add(
-    DDEV_CONTROL_JOB_NAMES.RUN,
-    { taskId, action, ...extra } satisfies DdevControlPayload,
-    { removeOnComplete: true, removeOnFail: true },
+  const job = await addOrRefuse(
+    () =>
+      getDdevControlQueue().add(
+        DDEV_CONTROL_JOB_NAMES.RUN,
+        { taskId, action, ...extra } satisfies DdevControlPayload,
+        { removeOnComplete: true, removeOnFail: true },
+      ),
+    'DDEV control',
   );
   return (await job.waitUntilFinished(
     getDdevControlQueueEvents(),

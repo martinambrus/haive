@@ -1,3 +1,4 @@
+import { addBestEffort } from '../lib/queue-bounded.js';
 import { asc, eq, sql } from 'drizzle-orm';
 import { Hono } from 'hono';
 import { z } from 'zod';
@@ -154,14 +155,22 @@ export function moduleSourceRoutes(): Hono<AppEnv> {
       .catch(sourceWriteError);
     logAuditEvent(event);
     try {
-      await getModuleSourceQueue().add(
-        MODULE_SOURCE_JOB_NAMES.FETCH,
-        { sourceId: id, moduleId: source.moduleId, requestedAt: source.updatedAt.toISOString() },
-        {
-          jobId: 'source-' + id + '-' + source.updatedAt.getTime(),
-          removeOnComplete: true,
-          removeOnFail: true,
-        },
+      await addBestEffort(
+        () =>
+          getModuleSourceQueue().add(
+            MODULE_SOURCE_JOB_NAMES.FETCH,
+            {
+              sourceId: id,
+              moduleId: source.moduleId,
+              requestedAt: source.updatedAt.toISOString(),
+            },
+            {
+              jobId: 'source-' + id + '-' + source.updatedAt.getTime(),
+              removeOnComplete: true,
+              removeOnFail: true,
+            },
+          ),
+        'module fetch wake-up failed; outbox sweep will retry',
       );
     } catch {
       // The worker's outbox sweep retries the committed queued state.

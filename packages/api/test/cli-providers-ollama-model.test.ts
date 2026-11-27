@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const USER = vi.hoisted(() => '00000000-0000-4000-8000-0000000000a1');
 const h = vi.hoisted(() => ({
@@ -146,5 +146,76 @@ describe('cloning an ollama provider', () => {
     const rows = fake.rows(schema.cliProviders);
     expect(rows).toHaveLength(2);
     expect(rows.map((r) => r.model)).toEqual(['qwen3-coder:30b', 'qwen3-coder:30b']);
+  });
+});
+
+afterEach(() => {
+  vi.restoreAllMocks();
+  vi.useRealTimers();
+});
+
+describe('T550: provider enqueue compensation', () => {
+  it.each(['create', 'clone', 'update', 'force-build'])(
+    'bounds a hung %s and releases every pending status',
+    async (site) => {
+      vi.useFakeTimers();
+      const fake = setup(
+        site === 'create' ? undefined : { name: 'ollama', model: 'qwen3-coder:30b' },
+      );
+      h.add.mockImplementation(() => new Promise(() => {}));
+      const run =
+        site === 'create'
+          ? post({ name: 'ollama', model: 'qwen3-coder:30b' })
+          : site === 'clone'
+            ? app.request(`/${PROVIDER}/clone`, { method: 'POST' })
+            : site === 'update'
+              ? patch({ model: 'qwen3-coder:32b' })
+              : app.request(`/${PROVIDER}/sandbox-image/build`, { method: 'POST' });
+      let response: Response | undefined;
+      const pending = Promise.resolve(run).then((r) => {
+        response = r;
+      });
+      await vi.advanceTimersByTimeAsync(2000);
+      expect(response?.status).toBe(500);
+      await pending;
+      const rows = fake.rows(schema.cliProviders);
+      expect(
+        rows.some(
+          (row) =>
+            row.sandboxImageBuildStatus === 'building' ||
+            row.modelProvisionStatus === 'provisioning',
+        ),
+      ).toBe(false);
+      const saved = site === 'clone' ? rows.find((row) => row.id !== PROVIDER)! : rows[0]!;
+      if (site !== 'force-build') expect(saved.modelProvisionStatus).toBe('failed');
+      if (site !== 'update') expect(saved.sandboxImageBuildStatus).toBe('failed');
+      expect(h.add).toHaveBeenCalledTimes(site === 'create' || site === 'clone' ? 2 : 1);
+    },
+  );
+  it('attempts model provisioning even when the image add rejects immediately', async () => {
+    const fake = setup();
+    h.add.mockRejectedValue(new Error('transport failed'));
+    expect((await post({ name: 'ollama', model: 'qwen3-coder:30b' })).status).toBe(500);
+    expect(h.add).toHaveBeenCalledTimes(2);
+    expect(fake.rows(schema.cliProviders)[0]).toMatchObject({
+      sandboxImageBuildStatus: 'failed',
+      modelProvisionStatus: 'failed',
+    });
+  });
+  it('keeps a worker result that lands before a lost acknowledgement', async () => {
+    const fake = setup();
+    h.add.mockImplementation(async () => {
+      for (const row of fake.rows(schema.cliProviders))
+        fake.patch(schema.cliProviders, String(row.id), {
+          sandboxImageBuildStatus: 'ready',
+          modelProvisionStatus: 'ready',
+        });
+      throw new Error('acknowledgement lost');
+    });
+    expect((await post({ name: 'ollama', model: 'qwen3-coder:30b' })).status).toBe(500);
+    expect(fake.rows(schema.cliProviders)[0]).toMatchObject({
+      sandboxImageBuildStatus: 'ready',
+      modelProvisionStatus: 'ready',
+    });
   });
 });

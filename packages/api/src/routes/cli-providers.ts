@@ -1,3 +1,9 @@
+import {
+  boundedAdd,
+  addBestEffort,
+  addOrRefuse,
+  QueueAddTimeoutError,
+} from '../lib/queue-bounded.js';
 import { CLI_SIGN_OUT_AUTH_WAIT_MS, CLI_SIGN_OUT_EXPIRED_MESSAGE } from '@haive/shared/constants';
 import { randomUUID } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
@@ -227,14 +233,67 @@ export function assertAuthModeSupported(
   }
 }
 
+/** A lost enqueue has no periodic outbox here. Keep the saved provider, but release its
+ * pending status so the form offers a retry. A late worker result can still settle it. */
+async function recordProviderEnqueueFailure(providerId: string, kind: 'image' | 'model') {
+  const columns = schema.cliProviders;
+  await getDb()
+    .update(columns)
+    .set(
+      kind === 'image'
+        ? {
+            sandboxImageBuildStatus: 'failed',
+            sandboxImageBuildError:
+              'Could not confirm the sandbox image build was queued. Retry the build.',
+            updatedAt: new Date(),
+          }
+        : {
+            modelProvisionStatus: 'failed',
+            modelProvisionError:
+              'Could not confirm model provisioning was queued. Save the provider to retry.',
+            updatedAt: new Date(),
+          },
+    )
+    .where(
+      and(
+        eq(columns.id, providerId),
+        kind === 'image'
+          ? eq(columns.sandboxImageBuildStatus, 'building')
+          : eq(columns.modelProvisionStatus, 'provisioning'),
+      ),
+    );
+}
+
+/** Attempt both owed jobs, even if one enqueue fails. Neither pending status may be
+ * stranded just because the other transport call rejected first. */
+async function enqueueProviderSetup(
+  providerId: string,
+  userId: string,
+  build: boolean,
+  model: boolean,
+) {
+  const outcomes = await Promise.allSettled([
+    ...(build ? [enqueueBuildForProvider(providerId, userId)] : []),
+    ...(model ? [enqueueOllamaProvisionForProvider(providerId, userId)] : []),
+  ]);
+  for (const outcome of outcomes) if (outcome.status === 'rejected') throw outcome.reason;
+}
+
 /** The caller has already written `building`, in the transaction that admitted the build. */
 async function enqueueBuildForProvider(providerId: string, userId: string): Promise<void> {
   const payload: SandboxImageBuildJobPayload = { providerId, userId };
   const queue = getCliExecQueue();
-  await queue.add(CLI_EXEC_JOB_NAMES.BUILD_SANDBOX_IMAGE, payload, {
-    removeOnComplete: true,
-    removeOnFail: CLI_POLLABLE_JOB_OPTS.removeOnFail,
-  });
+  try {
+    await boundedAdd(() =>
+      queue.add(CLI_EXEC_JOB_NAMES.BUILD_SANDBOX_IMAGE, payload, {
+        removeOnComplete: true,
+        removeOnFail: CLI_POLLABLE_JOB_OPTS.removeOnFail,
+      }),
+    );
+  } catch (err) {
+    await recordProviderEnqueueFailure(providerId, 'image');
+    throw err;
+  }
 }
 
 /** Cloud models are never provisioned. External endpoints retain their queued
@@ -273,10 +332,17 @@ async function enqueueOllamaProvisionForProvider(
 ): Promise<void> {
   const payload: OllamaProvisionJobPayload = { providerId, userId };
   const queue = getCliExecQueue();
-  await queue.add(CLI_EXEC_JOB_NAMES.PROVISION_OLLAMA_MODEL, payload, {
-    removeOnComplete: true,
-    removeOnFail: CLI_POLLABLE_JOB_OPTS.removeOnFail,
-  });
+  try {
+    await boundedAdd(() =>
+      queue.add(CLI_EXEC_JOB_NAMES.PROVISION_OLLAMA_MODEL, payload, {
+        removeOnComplete: true,
+        removeOnFail: CLI_POLLABLE_JOB_OPTS.removeOnFail,
+      }),
+    );
+  } catch (err) {
+    await recordProviderEnqueueFailure(providerId, 'model');
+    throw err;
+  }
 }
 
 export const cliProviderRoutes = new Hono<AppEnv>();
@@ -460,9 +526,11 @@ const PROVIDER_SECURITY_FIELDS = [
 
 /** Kick an immediate usage poll so a changed grant shows within seconds, not at the next tick. */
 const requestUsagePollTick = () =>
-  getUsagePollQueue()
-    .add('usage-poll-tick', {}, { removeOnComplete: true, removeOnFail: 10 })
-    .catch(() => {});
+  addBestEffort(
+    () =>
+      getUsagePollQueue().add('usage-poll-tick', {}, { removeOnComplete: true, removeOnFail: 10 }),
+    'optional provider side effect not queued',
+  ).catch(() => {});
 
 cliProviderRoutes.post('/', requireNewWorkAllowed, async (c) => {
   const userId = c.get('userId');
@@ -617,8 +685,7 @@ cliProviderRoutes.post('/', requireNewWorkAllowed, async (c) => {
   if (secretEvent) logAuditEvent(secretEvent);
   for (const e of setEvents) logAuditEvent(e);
   if (usageSeeded) await requestUsagePollTick();
-  await enqueueBuildForProvider(created.id, userId);
-  if (provisioningModel) await enqueueOllamaProvisionForProvider(created.id, userId);
+  await enqueueProviderSetup(created.id, userId, true, provisioningModel);
   return c.json(
     {
       provider: {
@@ -921,13 +988,12 @@ cliProviderRoutes.patch('/:id', async (c) => {
   for (const e of setEvents) logAuditEvent(e);
   if (usageSeeded) await requestUsagePollTick();
 
-  if (provisioningModel) await enqueueOllamaProvisionForProvider(id, userId);
+  await enqueueProviderSetup(id, userId, imageInputsChanged, provisioningModel);
   const modelStatusOverride = provisioningModel
     ? { modelProvisionStatus: 'provisioning' as const, modelProvisionError: null }
     : {};
 
   if (imageInputsChanged) {
-    await enqueueBuildForProvider(id, userId);
     return c.json({
       provider: {
         ...withRulesState(updatedRow),
@@ -966,15 +1032,17 @@ cliProviderRoutes.delete('/:id', async (c) => {
   if (imageTag) {
     const payload: SandboxImageRemoveJobPayload = { providerId: id, imageTag };
     // The provider is gone either way, and a removal never queued only leaves its image behind.
-    // Not awaited: the queue waits for redis rather than failing, which would hold this answer.
-    void getCliExecQueue()
-      .add(CLI_EXEC_JOB_NAMES.REMOVE_SANDBOX_IMAGE, payload, {
-        removeOnComplete: true,
-        removeOnFail: CLI_POLLABLE_JOB_OPTS.removeOnFail,
-      })
-      .catch((err: unknown) =>
-        log.warn({ err, providerId: id, imageTag }, 'could not queue the sandbox image removal'),
-      );
+    // Not awaited: removal is optional; its bounded wait must not hold the delete answer.
+    void addBestEffort(
+      () =>
+        getCliExecQueue().add(CLI_EXEC_JOB_NAMES.REMOVE_SANDBOX_IMAGE, payload, {
+          removeOnComplete: true,
+          removeOnFail: CLI_POLLABLE_JOB_OPTS.removeOnFail,
+        }),
+      'optional provider side effect not queued',
+    ).catch((err: unknown) =>
+      log.warn({ err, providerId: id, imageTag }, 'could not queue the sandbox image removal'),
+    );
   }
   return c.json({ ok: true });
 });
@@ -1008,11 +1076,17 @@ cliProviderRoutes.post('/:id/sandbox-image/build', requireNewWorkAllowed, async 
   };
 
   const queue = getCliExecQueue();
-  await queue.add(CLI_EXEC_JOB_NAMES.BUILD_SANDBOX_IMAGE, payload, {
-    removeOnComplete: true,
-    removeOnFail: CLI_POLLABLE_JOB_OPTS.removeOnFail,
-  });
-
+  try {
+    await boundedAdd(() =>
+      queue.add(CLI_EXEC_JOB_NAMES.BUILD_SANDBOX_IMAGE, payload, {
+        removeOnComplete: true,
+        removeOnFail: CLI_POLLABLE_JOB_OPTS.removeOnFail,
+      }),
+    );
+  } catch (err) {
+    await recordProviderEnqueueFailure(id, 'image');
+    throw err;
+  }
   return c.json({ ok: true, status: 'building' }, 202);
 });
 
@@ -1032,7 +1106,10 @@ cliProviderRoutes.post('/:id/test', async (c) => {
   };
 
   const queue = getCliExecQueue();
-  const job = await queue.add(CLI_EXEC_JOB_NAMES.PROBE, payload, CLI_POLLABLE_JOB_OPTS);
+  const job = await addOrRefuse(
+    () => queue.add(CLI_EXEC_JOB_NAMES.PROBE, payload, CLI_POLLABLE_JOB_OPTS),
+    'CLI probe',
+  );
   if (!job.id) throw new HttpError(500, 'probe was not queued', 'probe_enqueue_failed');
 
   return c.json({ jobId: job.id }, 202);
@@ -1105,12 +1182,19 @@ cliProviderRoutes.post('/:id/sign-out', async (c) => {
   };
   const auditId = randomUUID();
   await db.transaction((tx) => insertAuditEvent(tx, event, { id: auditId }));
-  // Redis can wait indefinitely: keep the required row committed without holding a connection.
+  // Commit the launch audit before the bounded Redis wait, without holding a connection.
   let job: Awaited<ReturnType<typeof queue.add>>;
   try {
-    job = await queue.add(CLI_EXEC_JOB_NAMES.SIGN_OUT, payload, CLI_POLLABLE_JOB_OPTS);
+    job = await boundedAdd(() =>
+      queue.add(CLI_EXEC_JOB_NAMES.SIGN_OUT, payload, CLI_POLLABLE_JOB_OPTS),
+    );
     if (!job.id) throw new HttpError(500, 'sign-out was not queued', 'sign_out_enqueue_failed');
   } catch (err) {
+    if (err instanceof QueueAddTimeoutError) {
+      // The launch may still land. Its committed audit must remain available.
+      logAuditEvent(event);
+      throw err;
+    }
     try {
       await db.delete(schema.auditEvents).where(eq(schema.auditEvents.id, auditId));
     } catch (cleanupError) {
@@ -1298,8 +1382,7 @@ cliProviderRoutes.post('/:id/clone', requireNewWorkAllowed, async (c) => {
   logAuditEvent(cloneEvent!);
   for (const e of setEvents) logAuditEvent(e);
   if (usageSeeded) await requestUsagePollTick();
-  await enqueueBuildForProvider(created.id, userId);
-  if (provisioningModel) await enqueueOllamaProvisionForProvider(created.id, userId);
+  await enqueueProviderSetup(created.id, userId, true, provisioningModel);
   return c.json(
     {
       provider: {

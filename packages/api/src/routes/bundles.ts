@@ -1,3 +1,4 @@
+import { boundedAdd } from '../lib/queue-bounded.js';
 import { randomUUID } from 'node:crypto';
 import path from 'node:path';
 import { Hono, type Handler } from 'hono';
@@ -376,7 +377,7 @@ async function addBundleJobOrMarkFailed(
   failurePatch?: Partial<typeof schema.customBundles.$inferInsert>,
 ): Promise<void> {
   try {
-    await add();
+    await boundedAdd(add);
   } catch (err) {
     await db
       .update(schema.customBundles)

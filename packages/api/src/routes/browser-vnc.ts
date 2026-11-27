@@ -1,3 +1,4 @@
+import { boundedAdd } from '../lib/queue-bounded.js';
 import net from 'node:net';
 import type { Server } from 'node:http';
 import { WebSocketServer, WebSocket } from 'ws';
@@ -222,10 +223,12 @@ async function reachableDesktopHost(taskId: string, port: number): Promise<strin
  *  running, so a later retry connects once it completes. */
 async function ensureRuntimeUp(taskId: string, userId: string): Promise<boolean> {
   try {
-    const job = await getRuntimeEnsureQueue().add(
-      RUNTIME_ENSURE_JOB_NAMES.ENSURE,
-      { taskId, userId } satisfies RuntimeEnsurePayload,
-      { jobId: `ensure-${taskId}`, removeOnComplete: true, removeOnFail: true },
+    const job = await boundedAdd(() =>
+      getRuntimeEnsureQueue().add(
+        RUNTIME_ENSURE_JOB_NAMES.ENSURE,
+        { taskId, userId } satisfies RuntimeEnsurePayload,
+        { jobId: `ensure-${taskId}`, removeOnComplete: true, removeOnFail: true },
+      ),
     );
     const result = (await job.waitUntilFinished(
       getRuntimeEnsureQueueEvents(),

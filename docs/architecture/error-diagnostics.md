@@ -311,7 +311,18 @@ BullMQ connection queues the call and resolves it when the store is back.
 
 Request-path queue adds use `api/src/lib/queue-bounded.ts` (`QUEUE_ADD_WAIT_MS` 2000). `boundedAdd`
 rejects on timeout or on the add's own rejection. The add is not cancelled and can still land, so the
-work must be idempotent or guarded by the worker. `addBestEffort` never throws and returns a boolean:
+work must be idempotent or guarded by the worker. `QueueAddTimeoutError` identifies an
+unknown enqueue outcome by class. Sign-out and module teardown keep their committed launch audit
+on that timeout, since the job may still land; a known rejection still removes only that launch's
+audit. Bundle imports keep their existing failure response and compensate the owned syncing row,
+including ZIP replacement rollback. Provider saves attempt image and model jobs independently and
+mark a failed enqueue's still-pending status failed, so a committed provider does not stay building
+or provisioning forever; an already-ready worker result is kept. Runtime access keeps its 202
+pending response, VNC its starting refusal, and plan/data Save and Pull their existing refusal
+contracts. Optional wake-ups (plan/project-state sweeps, module-source outbox, global-KB pending
+embeds and usage polls) are best effort. The API queue-add ratchet resolves BullMQ receiver types
+across routes, libraries and modules; `routes/repos.ts` remains explicitly excluded for its
+separate enqueue work. `addBestEffort` never throws and returns a boolean:
 use it when committed state already records the work (step actions, cancel, task start, stop-settle).
 
 The api's shared client (`getRedis()`, `api/src/redis.ts`) has the same deadline options as

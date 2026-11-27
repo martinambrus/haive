@@ -680,6 +680,34 @@ describe('C3: the queue refuses the job', () => {
     },
   );
 
+  it.each(sites)(
+    '%s: a hung add is bounded and the committed bundle is retryable',
+    async (_site, run) => {
+      vi.useFakeTimers();
+      const adding = Promise.withResolvers<void>();
+      vi.spyOn(queue, 'add').mockImplementation(() => {
+        adding.resolve();
+        return new Promise(() => {});
+      });
+      let response: Response | undefined;
+      const pending = run().then((res) => {
+        response = res;
+      });
+      try {
+        await adding.promise;
+        await vi.advanceTimersByTimeAsync(2_000);
+        await pending;
+        expect(response?.status).toBe(500);
+        expect(fake.rows(schema.customBundles)[0]).toMatchObject({ status: 'failed' });
+        expect(
+          fake.rows(schema.customBundleUploads).every((row) => row.status !== 'completing'),
+        ).toBe(true);
+      } finally {
+        vi.useRealTimers();
+      }
+    },
+  );
+
   it('lets a zip complete be retried when the queue is back: syncing again, one job', async () => {
     await stage(SESSION, 'zip bytes');
     queue.state.refuse = new Error('redis is down');

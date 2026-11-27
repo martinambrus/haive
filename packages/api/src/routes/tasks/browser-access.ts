@@ -1,3 +1,4 @@
+import { boundedAdd } from '../../lib/queue-bounded.js';
 import { readFile } from 'node:fs/promises';
 import { Hono } from 'hono';
 import { and, eq, inArray, isNotNull, isNull } from 'drizzle-orm';
@@ -56,10 +57,12 @@ browserAccessRoutes.post('/:id/access-urls', async (c) => {
   if (!enabled) return c.json({ enabled: false, accessUrls: [] as TaskAccessEndpoint[] });
 
   try {
-    const job = await getRuntimeEnsureQueue().add(
-      RUNTIME_ENSURE_JOB_NAMES.ENSURE,
-      { taskId, userId } satisfies RuntimeEnsurePayload,
-      { jobId: `ensure-${taskId}`, removeOnComplete: true, removeOnFail: true },
+    const job = await boundedAdd(() =>
+      getRuntimeEnsureQueue().add(
+        RUNTIME_ENSURE_JOB_NAMES.ENSURE,
+        { taskId, userId } satisfies RuntimeEnsurePayload,
+        { jobId: `ensure-${taskId}`, removeOnComplete: true, removeOnFail: true },
+      ),
     );
     const result = (await job.waitUntilFinished(
       getRuntimeEnsureQueueEvents(),
@@ -85,10 +88,12 @@ browserAccessRoutes.post('/:id/db-access', async (c) => {
   if (!enabled) return c.json({ enabled: false, accessUrls: [] as TaskAccessEndpoint[] });
 
   try {
-    const job = await getRuntimeEnsureQueue().add(
-      RUNTIME_ENSURE_JOB_NAMES.ENSURE,
-      { taskId, userId } satisfies RuntimeEnsurePayload,
-      { jobId: `ensure-${taskId}`, removeOnComplete: true, removeOnFail: true },
+    const job = await boundedAdd(() =>
+      getRuntimeEnsureQueue().add(
+        RUNTIME_ENSURE_JOB_NAMES.ENSURE,
+        { taskId, userId } satisfies RuntimeEnsurePayload,
+        { jobId: `ensure-${taskId}`, removeOnComplete: true, removeOnFail: true },
+      ),
     );
     const result = (await job.waitUntilFinished(
       getRuntimeEnsureQueueEvents(),
@@ -117,10 +122,12 @@ browserAccessRoutes.post('/:id/open-mailpit', async (c) => {
   await requireOwnedTask(taskId, userId);
 
   try {
-    const job = await getRuntimeEnsureQueue().add(
-      RUNTIME_ENSURE_JOB_NAMES.NAVIGATE_MAILPIT,
-      { taskId, userId } satisfies RuntimeEnsurePayload,
-      { jobId: `mailpit-${taskId}-${Date.now()}`, removeOnComplete: true, removeOnFail: true },
+    const job = await boundedAdd(() =>
+      getRuntimeEnsureQueue().add(
+        RUNTIME_ENSURE_JOB_NAMES.NAVIGATE_MAILPIT,
+        { taskId, userId } satisfies RuntimeEnsurePayload,
+        { jobId: `mailpit-${taskId}-${Date.now()}`, removeOnComplete: true, removeOnFail: true },
+      ),
     );
     const result = (await job.waitUntilFinished(
       getRuntimeEnsureQueueEvents(),

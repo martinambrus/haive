@@ -1,3 +1,4 @@
+import { boundedAdd, QueueAddTimeoutError } from '../lib/queue-bounded.js';
 import { randomUUID } from 'node:crypto';
 import {
   beginModuleDrain,
@@ -418,20 +419,27 @@ export function moduleRoutes(loaded: readonly LoadedApiModule[]): Hono<AppEnv> {
     const db = getDb();
     const auditId = randomUUID();
     await db.transaction((tx) => insertAuditEvent(tx, event, { id: auditId }));
-    // Redis can wait indefinitely: keep the required row committed without holding a connection.
+    // Commit the launch audit before the bounded Redis wait, without holding a connection.
     let job: Awaited<ReturnType<ReturnType<typeof getModuleControlQueue>['add']>>;
     try {
-      job = await getModuleControlQueue().add(
-        MODULE_CONTROL_JOB_NAMES.TEARDOWN,
-        { moduleId: id } satisfies ModuleTeardownPayload,
-        {
-          deduplication: { id: `module-teardown-${id}` },
-          removeOnComplete: 100,
-          removeOnFail: 100,
-        },
+      job = await boundedAdd(() =>
+        getModuleControlQueue().add(
+          MODULE_CONTROL_JOB_NAMES.TEARDOWN,
+          { moduleId: id } satisfies ModuleTeardownPayload,
+          {
+            deduplication: { id: `module-teardown-${id}` },
+            removeOnComplete: 100,
+            removeOnFail: 100,
+          },
+        ),
       );
       if (!job.id) throw new HttpError(500, 'Module teardown was not queued');
     } catch (err) {
+      if (err instanceof QueueAddTimeoutError) {
+        // The launch may still land. Its committed audit must remain available.
+        logAuditEvent(event);
+        throw err;
+      }
       try {
         await db.delete(schema.auditEvents).where(eq(schema.auditEvents.id, auditId));
       } catch (cleanupError) {

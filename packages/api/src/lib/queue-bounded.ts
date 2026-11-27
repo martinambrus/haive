@@ -6,6 +6,14 @@ import { HttpError } from '../context.js';
  *  request awaiting it would hang. */
 export const QUEUE_ADD_WAIT_MS = 2_000;
 
+/** The outcome is unknown: the add can still land after this deadline. */
+export class QueueAddTimeoutError extends Error {
+  constructor() {
+    super('redis did not answer in time');
+    this.name = 'QueueAddTimeoutError';
+  }
+}
+
 /** Awaits `add()` for at most `waitMs`; rejects on the add's own rejection or on the timeout.
  *  The add is not cancelled: after a timeout it can still land, so only queue work that is
  *  idempotent or guarded by the worker. A late rejection is swallowed. */
@@ -18,7 +26,7 @@ export async function boundedAdd<T>(
     const pending = add();
     pending.catch(() => undefined);
     const timeout = new Promise<never>((_, reject) => {
-      timer = setTimeout(() => reject(new Error('redis did not answer in time')), waitMs);
+      timer = setTimeout(() => reject(new QueueAddTimeoutError()), waitMs);
     });
     return await Promise.race([pending, timeout]);
   } finally {
