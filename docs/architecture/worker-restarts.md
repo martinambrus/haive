@@ -755,13 +755,15 @@ holding a row lock. The summary's deferred auth cleanup repeats the terminal che
 this fence after sync-back, before invalidating preparations. The superseded pass also
 refuses to initiate a settlement at a newer task epoch.
 
-Boot's auth-volume reaper uses that same ordering for an existing terminal task: one
+Boot's auth-volume reaper starts in the background after the task and CLI queues start.
+It uses that same ordering for an existing terminal task: one source-identity-checked,
 ledger-based credential sync outside the task-row lock, then a bounded settlement
 transaction holding the task row through cache invalidation, stopped-helper cleanup and
 each volume removal. It checks the section signal between destructive calls and forwards
 it to stopped-helper cleanup. Retry during sync or before the row lock preserves the task's
-copies. A failed sync lookup leaves those copies for another boot, while unrelated orphans
-continue. A deleted task has no row or invocation ledger left, so its original orphan-removal
+copies. Boot tries each auth lock once; a busy lock or a failed sync/helper lookup leaves
+those copies for another boot, while unrelated orphans continue. A refused source identity
+(including a legacy copy with no source label) writes nothing and permits removal. A deleted task has no row or invocation ledger left, so its original orphan-removal
 path remains. In-flight preparation locks survive cache invalidation and remove themselves
 on settlement; sync-back temporary files and MCP failure diagnostics are owned by their run
 (see [Sandbox](sandbox.md)). No schema change is required; revert the code to roll back.

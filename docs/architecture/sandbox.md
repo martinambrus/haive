@@ -2,32 +2,47 @@
 
 `packages/worker/src/sandbox/clawker-client.ts` wraps the clawker binary. The worker container mounts `/var/run/docker.sock` and uses Docker-in-Docker to spawn per-task containers. The cloned repository and the run-owned files described below are mounted into the per-task container. The worker filesystem and the user home directory are never exposed. CLI authentication files are copied into a named volume per task at startup and the volume is destroyed at task end. At worker boot `reapOrphanedAuthVolumes` removes a task's copy whose task ended, and an isolated provider's or a user's auth volumes once that row is gone, so a deleted provider or user leaves no CLI credential on the host. A login session still holding such a volume is removed with it, since its row went with the owner's and nothing else would. The owner is read back from the volume's name (`cliAuthVolumeOwner`, beside the builders).
 
-Before reaping an existing completed, failed or cancelled task's copies, the boot reaper
-calls `syncRefreshedAuthToUserVolumes` once for that task, using its invocation ledger to
-resolve the actual provider rows, auth mode and isolation. This preserves a single-use
-credential rotated inside the task through the same credential-only, parse/mtime/auth-lock
-guards as ordinary task-end sync. It waits for no auth lock while holding the task row.
-Removal and preparation invalidation then recheck settlement under the bounded task-row
-fence used by terminal-summary cleanup (see [Worker restarts](worker-restarts.md)). A Retry
-that won during sync keeps the copies. A ledger lookup failure keeps them until another
-boot; the sync's existing best-effort failures and 30-second auth-lock wait remain unchanged.
-A task whose row is gone has no ledger to sync; its copies are removed as before. Ambiguous
-task-id slugs are retained rather than choosing one task's credentials.
+Boot auth-volume reaping starts in the background after the task and CLI queues start,
+so a login's auth lock or Docker helpers cannot delay queue consumption. Before reaping an
+existing completed, failed or cancelled task's copies, the reaper calls
+`syncRefreshedAuthToUserVolumes` once for that task. It resolves provider rows from the invocation
+ledger and uses the same credential-only parse/mtime/auth-lock guards as task-end and summary
+sync. Boot tries each auth lock once; a busy lock or a helper/lookup failure keeps the task's
+copies for the next boot. Ordinary task-end and summary sync still wait up to 30 seconds and
+keep their best-effort teardown contract. No auth lock is awaited while holding a task row.
+Removal and preparation invalidation recheck settlement under the bounded task-row fence used
+by terminal-summary cleanup (see [Worker restarts](worker-restarts.md)). A Retry that won during
+sync keeps the copies. A task whose row is gone has no ledger to sync; its copies are removed.
+Ambiguous task-id slugs are retained rather than choosing one task's credentials.
 
-`clearTaskAuthPreparationState` forgets applied identities and legacy failure diagnostics,
-for the selected provider or the whole task. It never drops a live preparation lock;
-`withScopeLock` removes its own tail when it settles. A terminal summary or a sibling provider
-may still be preparing after another settlement clears the cache. CLI MCP merge diagnostics
-travel in the coalesced result to each caller's `CliMcpMergeDiagnostics`, and the resolver
-reads that call's failed names. A later surface or task-cache clear cannot replace them;
-the two-argument `failedMcpAddNames` retains its legacy last-merge diagnostic view.
+Every newly prepared task auth volume has a Docker-owned `haive.auth-source` label recording
+its source user-volume name, auth mode and isolation; a copy with no source records `none`.
+The sandbox cannot alter that label. Every sync-back path, including mid-task harvest, re-reads
+the ledger's current provider rows after acquiring the auth lock. A moved row, multiple rows
+of the same CLI resolving to different identities, or a label that does not exactly match
+refuses sync before any credential write, with a structural reason in the log. A copy from
+before the label is never synced, including at task end or summary: there is no live-task
+exception or guessed backfill. A refused source sync is safe to discard during boot reaping;
+only retryable failures retain the copy. Newer user logins still win by mtime, and a missing
+user volume still wins as a sign-out. No schema or data migration is needed.
+
+`clearTaskAuthPreparationState` forgets applied identities for the selected provider or the
+whole task. It never drops a live preparation lock; `withScopeLock` removes its own tail when
+it settles. All preparation writers, including CLI MCP merges, use the same generic
+`applyAuthPreparationOnce` helper for coalescing, serialization and applied-state tracking.
+CLI MCP failures travel only in the coalesced result to each caller's
+`CliMcpMergeDiagnostics`; the resolver reads that call's failed names. A later surface or
+cache clear cannot replace them. There is no legacy last-merge failure map or reader.
 
 Each sync-back helper writes a UUID-suffixed sibling temporary credential and installs an
 exit trap to remove only that file, on success or shell failure. The atomic rename, sandbox
 ownership, 0600 mode and in-helper mtime check remain unchanged. A SIGKILL can bypass the
-shell trap and leave its private temp; there is no new stale-temp sweep. Rollback: revert
-the code commit; no schema or data migration is needed. Credentials already synced remain
-in their user volumes and removed task copies cannot be restored by reverting code.
+trap. On the next eligible locked sync pass, even if no credential needs copying, a helper
+removes regular files matching that credential's `<basename>.haive-tmp-*` prefix in its
+parent directory only when older than ten minutes. Recent temps, other prefixes and links
+are left alone; leftovers are never read as credentials. Rollback: revert the code commit;
+labels are ignored by the older worker. Credentials already synced remain in user volumes,
+and removed task copies cannot be restored by reverting code.
 
 **Committed mining views are immutable mounts.** `repo/committed-snapshot.ts` owns the bounded
 resolver. `resolveInvocationRepoMount` chooses a snapshot before repository-less scratch,

@@ -12,6 +12,7 @@ import { spawnSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { resolveCliAuthUserVolumeName } from '@haive/shared';
 import type { SQL } from 'drizzle-orm';
 
 const h = vi.hoisted(() => ({
@@ -32,6 +33,19 @@ const provider = {
   authMode: 'subscription' as const,
   isolateAuth: false,
 };
+function syncDb() {
+  return {
+    selectDistinct: () => ({ from: () => ({ where: async () => [{ providerId: provider.id }] }) }),
+    query: { cliProviders: { findFirst: async () => provider } },
+  } as unknown as Database;
+}
+function sourceLabel(userVolume: string, authMode = 'subscription', isolateAuth = false) {
+  return JSON.stringify({ userVolume, authMode, isolateAuth });
+}
+const defaultUserVolume = resolveCliAuthUserVolumeName(
+  { ...provider, providerId: provider.id, providerName: provider.name },
+  0,
+);
 beforeEach(() => {
   h.acquire.mockReset().mockResolvedValue(h.release);
   h.release.mockClear();
@@ -71,14 +85,13 @@ describe('task auth sync shares the sign-out critical section', () => {
     expect(h.release).toHaveBeenCalledOnce();
   });
   it('does not recreate a volume that sign-out removed', async () => {
-    const runner = { volumeExists: vi.fn(async () => false), run: vi.fn() };
+    const runner = {
+      volumeExists: vi.fn(async (name: string) => name.includes('_task_')),
+      volumeLabel: async () => sourceLabel(defaultUserVolume),
+      run: vi.fn(),
+    };
     expect(
-      await syncProviderAuthBack(
-        'task',
-        provider,
-        {} as Database,
-        runner as unknown as DockerRunner,
-      ),
+      await syncProviderAuthBack('task', provider, syncDb(), runner as unknown as DockerRunner),
     ).toBe(false);
     expect(runner.run).not.toHaveBeenCalled();
     expect(h.release).toHaveBeenCalledOnce();
@@ -89,6 +102,7 @@ describe('task auth sync shares the sign-out critical section', () => {
     const prior = randomBytes(32).toString('hex');
     const runner = {
       volumeExists: vi.fn(async () => true),
+      volumeLabel: async () => sourceLabel(defaultUserVolume),
       run: vi.fn(async (opts: DockerRunOpts) => {
         const task = opts.mounts?.[0]?.source.includes('_task_') === true;
         const script = opts.cmd[2] as string;
@@ -107,7 +121,7 @@ describe('task auth sync shares the sign-out critical section', () => {
       await syncProviderAuthBack(
         'task',
         provider,
-        { update } as unknown as Database,
+        { ...syncDb(), update } as unknown as Database,
         runner as unknown as DockerRunner,
       ),
     ).toBe(true);
@@ -124,6 +138,7 @@ describe('sync-back temporary files', () => {
     const userToken = randomBytes(32).toString('hex');
     const runner = {
       volumeExists: async () => true,
+      volumeLabel: async () => sourceLabel(defaultUserVolume),
       run: async (opts: DockerRunOpts) => {
         const script = opts.cmd[2]!;
         if (opts.mounts?.length === 2) copies.push(script);
@@ -140,7 +155,7 @@ describe('sync-back temporary files', () => {
       },
     } as unknown as DockerRunner;
     await Promise.all(
-      ['one', 'two'].map((task) => syncProviderAuthBack(task, provider, {} as Database, runner)),
+      ['one', 'two'].map((task) => syncProviderAuthBack(task, provider, syncDb(), runner)),
     );
     return copies;
   }
@@ -221,6 +236,7 @@ it.each([
     const copies: DockerRunOpts[] = [];
     const runner = {
       volumeExists: async () => true,
+      volumeLabel: async () => sourceLabel(expectedUserVolume, authMode, isolateAuth),
       run: async (opts: DockerRunOpts) => {
         if (opts.mounts?.length === 2) copies.push(opts);
         const task = opts.mounts?.[0]?.source.includes('_task_');

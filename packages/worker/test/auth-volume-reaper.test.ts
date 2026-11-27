@@ -19,11 +19,13 @@ import {
 } from '../src/sandbox/task-auth-volume.js';
 
 vi.mock('../src/sandbox/task-auth-volume.js', () => ({
-  syncRefreshedAuthToUserVolumes: vi.fn(async () => undefined),
+  syncRefreshedAuthToUserVolumes: vi.fn(async () => ({ retainTaskCopy: false })),
   clearTaskAuthPreparationState: vi.fn(),
 }));
 afterEach(() => {
-  vi.mocked(syncRefreshedAuthToUserVolumes).mockReset().mockResolvedValue(undefined);
+  vi.mocked(syncRefreshedAuthToUserVolumes)
+    .mockReset()
+    .mockResolvedValue({ retainTaskCopy: false });
   vi.mocked(clearTaskAuthPreparationState).mockReset();
 });
 
@@ -105,6 +107,7 @@ describe('reapOrphanedAuthVolumes', () => {
         expect(task).toBe(DONE_TASK);
         expect(fake.rowLocked(schema.tasks, DONE_TASK)).toBe(false);
         events.push('sync');
+        return { retainTaskCopy: false };
       });
       const count = await reapOrphanedAuthVolumes(database, {
         listAuthVolumes: async () => names,
@@ -129,6 +132,7 @@ describe('reapOrphanedAuthVolumes', () => {
     const fake = fixture('failed');
     vi.mocked(syncRefreshedAuthToUserVolumes).mockImplementationOnce(async () => {
       fake.patch(schema.tasks, DONE_TASK, { status: 'running', orchestrationEpoch: 2 });
+      return { retainTaskCopy: false };
     });
     const stopped = vi.fn();
     const remove = vi.fn();

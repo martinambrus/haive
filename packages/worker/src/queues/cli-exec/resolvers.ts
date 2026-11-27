@@ -75,7 +75,6 @@ import { cliAdapterRegistry } from '../../cli-adapters/registry.js';
 import type { CliProviderRecord } from '../../cli-adapters/types.js';
 import {
   ensureTaskAuthVolumes,
-  failedMcpAddNames,
   mergeCliMcpIntoTaskVolume,
   mergeGeminiMcpIntoSettings,
   resolveTaskAuthMounts,
@@ -625,7 +624,7 @@ export async function resolveMcpExtraFiles(
         undefined,
         diagnostics,
       );
-      const failed = merged ? [] : failedMcpAddNames(taskId, providerName, diagnostics);
+      const failed = merged ? [] : diagnostics.failedNames;
       requireWritten(
         merged,
         failed.length > 0

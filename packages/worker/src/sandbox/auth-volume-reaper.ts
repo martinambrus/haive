@@ -10,7 +10,7 @@ import {
   taskWriteTarget,
   withTaskSettlementTransaction,
 } from '@haive/shared';
-import { defaultDockerRunner } from './docker-runner.js';
+import { defaultDockerRunner, type DockerRunner } from './docker-runner.js';
 import {
   clearTaskAuthPreparationState,
   syncRefreshedAuthToUserVolumes,
@@ -45,6 +45,7 @@ export function selectOrphanAuthVolumes(names: string[], live: LiveAuthOwners): 
 }
 
 export interface AuthVolumeReaperDeps {
+  runner?: DockerRunner;
   listAuthVolumes: () => Promise<string[]>;
   /** Every container mounting the volume, running or not: only called once its owner row is gone. */
   removeContainersUsingVolume?: (name: string) => Promise<void>;
@@ -183,7 +184,19 @@ export async function reapOrphanedAuthVolumes(
         if (!task) continue;
         // As in terminal-summary cleanup: auth lock waits must stay OUTSIDE task-row
         // locks. A lookup failure retains the task copies for the next boot.
-        await syncRefreshedAuthToUserVolumes(db, taskId);
+        const sync = await syncRefreshedAuthToUserVolumes(
+          db,
+          taskId,
+          deps.runner ?? defaultDockerRunner,
+          0,
+        );
+        if (sync?.retainTaskCopy) {
+          log.info(
+            { taskId, reason: 'sync_retry_required' },
+            'keeping task auth copies for a later reap',
+          );
+          continue;
+        }
         const volumes = orphans.filter((volume) => {
           const candidate = cliAuthVolumeOwner(volume);
           return candidate?.kind === 'task' && candidate.slug === owner!.slug;

@@ -98,6 +98,15 @@ const READY_MARKER = '.haive-ready';
  *  volume at populate time and re-checked on every reuse. Absent on a volume populated before
  *  this existed, which is read as "fresh" — no backfill, same stance as every other marker. */
 const SOURCE_MARKER = '.haive-source';
+/** Docker-owned identity: sandbox writers cannot alter a volume label. */
+const AUTH_SOURCE_LABEL = 'haive.auth-source';
+function authSourceIdentity(ctx: ProviderAuthCtx, idx: number): string {
+  return JSON.stringify({
+    userVolume: userVolumeForCtx(ctx, idx),
+    authMode: ctx.authMode,
+    isolateAuth: ctx.isolateAuth,
+  });
+}
 /** Recorded in {@link SOURCE_MARKER} when the volume was populated with NO source at all —
  *  an api-key provider row, or a CLI the user had not logged into yet.
  *
@@ -255,20 +264,22 @@ const appliedAuthPreparations = new Map<string, string>();
  *  actually applied: a best-effort helper that logged and returned changed nothing, so the
  *  slot is forgotten rather than recorded and the next caller tries again.
  *  Resolves to whether the slot holds this identity, for every caller coalesced onto one run. */
-async function applyAuthPreparationOnce(
-  runs: Map<string, Promise<boolean>>,
+async function applyAuthPreparationOnce<T = boolean>(
+  runs: Map<string, Promise<T>>,
   scope: string,
   key: string,
-  work: () => Promise<boolean>,
-): Promise<boolean> {
-  if (appliedAuthPreparations.get(scope) === key) return true;
+  work: () => Promise<T>,
+  success: T = true as T,
+  isApplied: (result: T) => boolean = (result) => result === true,
+): Promise<T> {
+  if (appliedAuthPreparations.get(scope) === key) return success;
   return coalesceAuthPreparation(runs, `${scope}|${key}`, () =>
     withScopeLock(scope, async () => {
       // Re-checked INSIDE the lock: an identical preparation may have been applied while
       // this one waited, which is the whole point of queueing behind it.
-      if (appliedAuthPreparations.get(scope) === key) return true;
+      if (appliedAuthPreparations.get(scope) === key) return success;
       const applied = await work();
-      if (applied) appliedAuthPreparations.set(scope, key);
+      if (isApplied(applied)) appliedAuthPreparations.set(scope, key);
       else appliedAuthPreparations.delete(scope);
       return applied;
     }),
@@ -296,9 +307,6 @@ export function clearTaskAuthPreparationState(taskId: string, providerName?: str
   const prefix = providerName ? `${taskId}|${providerName}|` : `${taskId}|`;
   for (const scope of appliedAuthPreparations.keys()) {
     if (scope.startsWith(prefix)) appliedAuthPreparations.delete(scope);
-  }
-  for (const scope of failedMcpAdds.keys()) {
-    if (scope.startsWith(prefix)) failedMcpAdds.delete(scope);
   }
 }
 
@@ -440,7 +448,9 @@ async function ensureTaskAuthVolumesUnlocked(
       }
     }
 
-    const created = await runner.volumeCreate(taskVol);
+    const created = await runner.volumeCreate(taskVol, {
+      [AUTH_SOURCE_LABEL]: userHasData ? authSourceIdentity(ctx, idx) : NO_SOURCE_SENTINEL,
+    });
     if (!created.ok) {
       throw new Error(
         `Failed to create task auth volume ${taskVol}: ${created.stderr || 'unknown error'}`,
@@ -951,8 +961,6 @@ const MCP_MANAGED_MARKER = '.haive-mcp-managed';
 const MCP_ADD_FAILED_PREFIX = 'haive-mcp: add ';
 const MCP_ADD_FAILED_SUFFIX = ' failed';
 
-// Servers whose `mcp add` failed in the last run of a scope (diagnostic; the exit code is the signal).
-const failedMcpAdds = new Map<string, string[]>();
 const cliMcpScope = (taskId: string, providerName: string): string =>
   `${taskId}|${providerName}|cli-mcp`;
 
@@ -962,16 +970,6 @@ export interface CliMcpMergeDiagnostics {
 }
 interface CliMcpMergeResult extends CliMcpMergeDiagnostics {
   applied: boolean;
-}
-
-/** With diagnostics, reads that call's failures even after another surface ran or cleanup
- *  cleared the task cache. Without it, retains the legacy last-merge diagnostic contract. */
-export function failedMcpAddNames(
-  taskId: string,
-  providerName: CliProviderName,
-  diagnostics?: CliMcpMergeDiagnostics,
-): readonly string[] {
-  return diagnostics?.failedNames ?? failedMcpAdds.get(cliMcpScope(taskId, providerName)) ?? [];
 }
 
 /**
@@ -1016,26 +1014,14 @@ export async function mergeCliMcpIntoTaskVolume(
   const surfaceKey = contentKey(JSON.stringify({ image, servers }));
   const scope = cliMcpScope(taskId, providerName);
   const success: CliMcpMergeResult = { applied: true, failedNames: [] };
-  // Carry diagnostics in the coalesced promise, never by reading the scope's mutable
-  // last-failure cache after await: a different surface may already have cleared it.
-  const result =
-    appliedAuthPreparations.get(scope) === surfaceKey
-      ? success
-      : await coalesceAuthPreparation(cliMcpMergeRuns, `${scope}|${surfaceKey}`, () =>
-          withScopeLock(scope, async () => {
-            if (appliedAuthPreparations.get(scope) === surfaceKey) return success;
-            const result = await mergeCliMcpIntoTaskVolumeUnlocked(
-              taskId,
-              providerName,
-              image,
-              servers,
-              runner,
-            );
-            if (result.applied) appliedAuthPreparations.set(scope, surfaceKey);
-            else appliedAuthPreparations.delete(scope);
-            return result;
-          }),
-        );
+  const result = await applyAuthPreparationOnce(
+    cliMcpMergeRuns,
+    scope,
+    surfaceKey,
+    () => mergeCliMcpIntoTaskVolumeUnlocked(taskId, providerName, image, servers, runner),
+    success,
+    (result) => result.applied,
+  );
   if (diagnostics) diagnostics.failedNames = result.failedNames;
   return result.applied;
 }
@@ -1047,7 +1033,6 @@ async function mergeCliMcpIntoTaskVolumeUnlocked(
   servers: McpServerSpec[],
   runner: DockerRunner,
 ): Promise<CliMcpMergeResult> {
-  failedMcpAdds.delete(cliMcpScope(taskId, providerName));
   const meta = getCliProviderMetadata(providerName);
   // Index 0 is the CLI's own home dir for both cli-merge providers (`~/.grok`, `~/.codex`).
   const authPath = meta.authConfigPaths[0];
@@ -1128,7 +1113,6 @@ async function mergeCliMcpIntoTaskVolumeUnlocked(
         (line) => line.startsWith(MCP_ADD_FAILED_PREFIX) && line.endsWith(MCP_ADD_FAILED_SUFFIX),
       )
       .map((line) => line.slice(MCP_ADD_FAILED_PREFIX.length, -MCP_ADD_FAILED_SUFFIX.length));
-    failedMcpAdds.set(cliMcpScope(taskId, providerName), failedNames);
     log.warn(
       { taskId, providerName, exitCode: result.exitCode, stderr: result.stderr.slice(-500) },
       'mcp merge helper exited non-zero',
@@ -1267,27 +1251,33 @@ export async function syncRefreshedAuthToUserVolumes(
   db: Database,
   taskId: string,
   runner: DockerRunner = defaultDockerRunner,
-): Promise<void> {
-  // The provider ROWS this task actually used. The task volume name carries only
-  // (taskId, providerName, idx), which cannot disambiguate two isolated rows of the same
-  // CLI — the invocation ledger can, and it also skips providers the task never touched.
+  lockWaitMs = 30_000,
+): Promise<{ retainTaskCopy: boolean }> {
+  let retainTaskCopy = false;
+  for (const provider of await taskAuthProviders(db, taskId)) {
+    const outcome = { retry: false };
+    await syncProviderAuthBack(taskId, provider, db, runner, lockWaitMs, outcome);
+    retainTaskCopy ||= outcome.retry;
+  }
+  return { retainTaskCopy };
+}
+
+/** Read actual rows from the ledger; a CLI name alone cannot identify an auth scope. */
+async function taskAuthProviders(db: Database, taskId: string): Promise<AuthSyncProvider[]> {
   const used = await db
     .selectDistinct({ providerId: schema.cliInvocations.cliProviderId })
     .from(schema.cliInvocations)
     .where(eq(schema.cliInvocations.taskId, taskId));
-
+  const providers: AuthSyncProvider[] = [];
   for (const { providerId } of used) {
     if (!providerId) continue;
     const provider = await db.query.cliProviders.findFirst({
       where: eq(schema.cliProviders.id, providerId),
-      // authMode is part of the auth-volume identity (resolveCliAuthUserVolumeName), so
-      // omitting it here would resolve every row to the subscription volume.
       columns: { id: true, userId: true, name: true, isolateAuth: true, authMode: true },
     });
-    if (!provider) continue;
-
-    await syncProviderAuthBack(taskId, provider, db, runner);
+    if (provider) providers.push(provider);
   }
+  return providers;
 }
 
 /** Provider identity the auth sync needs: enough to resolve the user volume
@@ -1317,6 +1307,7 @@ export async function syncProviderAuthBack(
   db: Database,
   runner: DockerRunner = defaultDockerRunner,
   lockWaitMs = 30_000,
+  outcome?: { retry: boolean },
 ): Promise<boolean> {
   const source = CLI_CREDENTIAL_FILES[provider.name];
   if (!source) return false;
@@ -1335,16 +1326,63 @@ export async function syncProviderAuthBack(
   try {
     release = await waitForCliAuthLock(db, cliAuthScope(provider), lockWaitMs);
     if (!release) {
+      if (outcome) outcome.retry = true;
       if (lockWaitMs > 0) {
         log.warn(
           { taskId, providerId: provider.id, provider: provider.name, taskVol, lockWaitMs },
-          'auth sync-back skipped: authentication stayed busy; teardown will remove the task credential copy',
+          'auth sync-back skipped: authentication stayed busy',
         );
       }
       return false;
     }
+    if (!(await runner.volumeExists(taskVol))) return false;
+    // Re-read after waiting: a settings save holds both old and new scope locks.
+    const rows = (await taskAuthProviders(db, taskId)).filter((row) => row.name === provider.name);
+    const current = rows.find((row) => row.id === provider.id);
+    const identity = (row: AuthSyncProvider) =>
+      authSourceIdentity(
+        {
+          userId: row.userId,
+          providerId: row.id,
+          providerName: row.name,
+          authMode: row.authMode,
+          isolateAuth: row.isolateAuth,
+        },
+        source.authPathIdx,
+      );
+    const reason =
+      !current || identity(current) !== authSourceIdentity(ctx, source.authPathIdx)
+        ? 'provider_scope_changed'
+        : new Set(rows.map(identity)).size > 1
+          ? 'ambiguous_provider_rows'
+          : (await runner.volumeLabel?.(taskVol, AUTH_SOURCE_LABEL)) !== identity(current)
+            ? 'source_identity_mismatch'
+            : null;
+    if (reason) {
+      log.warn(
+        { taskId, providerId: provider.id, provider: provider.name, reason },
+        'auth sync-back refused',
+      );
+      return false;
+    }
     // A sign-out that won the lock must not be undone by a helper mount recreating it.
     if (!(await runner.volumeExists(userVol))) return false;
+    await release.assertHeld();
+    // A killed helper cannot run its EXIT trap. Never read these leftovers as credentials;
+    // only delete this credential's known prefix, older than ten minutes, under its lock.
+    const sweep = await runner.run({
+      image: HELPER_IMAGE,
+      entrypoint: '',
+      user: 'root',
+      cmd: [
+        'sh',
+        '-c',
+        `find ${shellQuote(`/vol/${source.relPath.substring(0, source.relPath.lastIndexOf('/') + 1)}`)} -maxdepth 1 -type f -name ${shellQuote(`${source.relPath.split('/').at(-1)}.haive-tmp-*`)} -mmin +10 -delete`,
+      ],
+      mounts: [{ source: userVol, target: '/vol', readOnly: false }],
+      timeoutMs: HELPER_TIMEOUT_MS,
+    });
+    if (sweep.exitCode !== 0) throw new Error('auth sync-back temp sweep failed');
     const taskRaw = await readVolumeFile(taskVol, source.relPath, runner);
     if (!taskRaw) return false;
     const taskToken = extractToken(source.extract, taskRaw);
@@ -1364,8 +1402,10 @@ export async function syncProviderAuthBack(
         'synced CLI-refreshed credential back to the user auth volume',
       );
     }
+    if (!copied && outcome) outcome.retry = true;
     return copied;
   } catch (err) {
+    if (outcome) outcome.retry = true;
     log.warn(
       { err, taskId, provider: provider.name, relPath: source.relPath },
       'auth sync-back failed; user volume left as-is',

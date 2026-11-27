@@ -18,7 +18,7 @@ vi.mock('../src/sandbox/task-auth-volume.js', async (original) => ({
   findTaskAuthVolumes: vi.fn(async () => []),
   cleanupTaskAuthVolumes: vi.fn(async () => ({ removed: [], failed: [] })),
   clearTaskAuthPreparationState: vi.fn(),
-  syncRefreshedAuthToUserVolumes: vi.fn(async () => undefined),
+  syncRefreshedAuthToUserVolumes: vi.fn(async () => ({ retainTaskCopy: false })),
 }));
 afterEach(() => {
   vi.restoreAllMocks();
@@ -37,7 +37,10 @@ function taskDb() {
 
 it('summary cleanup preserves preparations and auth volumes when Retry wins during sync', async () => {
   const { db, revive } = taskDb();
-  vi.mocked(syncRefreshedAuthToUserVolumes).mockImplementationOnce(async () => revive());
+  vi.mocked(syncRefreshedAuthToUserVolumes).mockImplementationOnce(async () => {
+    revive();
+    return { retainTaskCopy: false };
+  });
   await cleanupAuthAfterTerminalSummary(db, TASK);
   expect(cleanupTaskAuthVolumes).not.toHaveBeenCalled();
   expect(clearTaskAuthPreparationState).not.toHaveBeenCalled();

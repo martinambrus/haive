@@ -48,8 +48,8 @@ function userVolumeOf(provider: AuthSyncProvider, authPathIdx: number): string {
  *    cliAuthTaskVolumeName keys on (taskId, cliName, idx) and carries no provider id, so one
  *    task volume backs every row of that CLI in that task; when an isolate_auth row or an
  *    api_key row sits beside a subscription row, nothing in the name says whose credential is
- *    in there, and guessing would write one account's token over another's. The teardown sync
- *    has the same blind spot — this refuses to widen it, it does not fix it.
+ *    in there, and guessing would write one account's token over another's. The shared sync-back
+ *    path also refuses ambiguity and checks the task volume's recorded source under its lock.
  *
  *  Pure so both rules are testable without docker or a db. */
 export function selectHarvestTargets(

@@ -180,7 +180,12 @@ export interface DockerRunner {
   run(opts: DockerRunOpts): Promise<DockerRunResult>;
   inspect(tag: string): Promise<DockerInspectResult>;
   remove(ref: string, opts?: { force?: boolean }): Promise<DockerRemoveResult>;
-  volumeCreate(name: string): Promise<DockerVolumeOpResult>;
+  volumeCreate(
+    name: string,
+    labels?: Readonly<Record<string, string>>,
+  ): Promise<DockerVolumeOpResult>;
+  /** Missing label returns null; an inspect failure throws. */
+  volumeLabel?(name: string, key: string): Promise<string | null>;
   volumeExists(name: string): Promise<boolean>;
   volumeRemove(name: string): Promise<DockerVolumeOpResult>;
   /** Remove only non-running containers that still mount this volume. A worker killed
@@ -580,11 +585,27 @@ export const defaultDockerRunner: DockerRunner = {
     return result;
   },
 
-  async volumeCreate(name) {
-    const result = await spawnAndCollect('docker', ['volume', 'create', name], {
+  async volumeCreate(name, labels = {}) {
+    const args = Object.entries(labels).flatMap(([key, value]) => ['--label', `${key}=${value}`]);
+    const result = await spawnAndCollect('docker', ['volume', 'create', ...args, name], {
       timeoutMs: 15_000,
     });
     return { ok: result.exitCode === 0, stderr: result.stderr, error: result.error };
+  },
+
+  async volumeLabel(name, key) {
+    const result = await spawnAndCollect(
+      'docker',
+      ['volume', 'inspect', '--format', '{{json .Labels}}', name],
+      {
+        timeoutMs: 15_000,
+      },
+    );
+    if (result.exitCode !== 0) throw new Error('auth volume label inspect failed');
+    const labels: unknown = JSON.parse(result.stdout);
+    if (!labels || typeof labels !== 'object') return null;
+    const value = (labels as Record<string, unknown>)[key];
+    return typeof value === 'string' ? value : null;
   },
 
   async volumeExists(name) {
