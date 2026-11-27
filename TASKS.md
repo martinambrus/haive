@@ -678,7 +678,7 @@ status: open · kind: docs · found: guarded span prerequisites docs (#1268) · 
 
 ### T722 · FNF[claude-usage-connection] · Claude usage connection leftovers (+14)
 
-status: open · kind: fix · found: login-set design (T720) 2026-11-19 · priority: P4
+status: open (items 2, 3, 4, 8, 12, 13, 14 done 2026-11-27 #1372 (f6bca7bcc): one shared auth-aware usage-window predicate decides polling, outage recovery and the web meters; refresh stops on any failure and persists the rotated token first; allowance windows come from ok snapshots only; API-key clones and manual grants refused; item 9 inapplicable since API-key rows are ineligible; open: 5, 7, 10, 11; item 6 needs owner approval) · kind: fix · found: login-set design (T720) 2026-11-19 · priority: P4
 
 All PRE-EXISTING. Paths are under `packages/`. Check each against the shared usage connection (T720) when that lands: one refresher per set may close items 3 and 5.
 
