@@ -12,7 +12,7 @@ import { createFakeDb } from '@haive/database/testing';
  * the scan and the write loses its row).
  */
 
-const getJobs = vi.fn<() => Promise<Array<{ data: unknown }>>>();
+const getJobs = vi.fn<() => Promise<Array<{ data: unknown; timestamp?: number }>>>();
 const closed = vi.fn<() => Promise<void>>();
 const constructed = vi.fn<() => void>();
 
@@ -84,13 +84,18 @@ describe('reconcileStrandedCloningRepos', () => {
         id: '00000000-0000-4000-8000-0000000000b1',
         status: 'cloning',
         errorCode,
+        checkoutSessionReason: 'draining',
         updatedAt: new Date(Date.now() - 10 * 60_000),
         rootClaimedAt: null,
       });
 
       await reconcileStrandedCloningRepos(fake.db as unknown as Database);
 
-      expect(fake.rows(schema.repositories)[0]).toMatchObject({ status: 'error', errorCode });
+      expect(fake.rows(schema.repositories)[0]).toMatchObject({
+        status: 'error',
+        errorCode,
+        checkoutSessionReason: null,
+      });
     },
   );
   it('releases a stranded ready refresh marker without discarding its repair code', async () => {
@@ -236,5 +241,34 @@ describe('T594 L3: stale healthy refresh marker', () => {
     } finally {
       info.mockRestore();
     }
+  });
+});
+
+it.each([
+  ['foreign_container', 1, 'error'],
+  ['container_remains', 1, 'error'],
+  ['docker_unknown', 31 * 60_000, 'error'],
+  ['docker_unknown', 60_000, 'cloning'],
+  ['draining', 31 * 60_000, 'cloning'],
+])('reconcile counts %s age=%i as %s despite a delayed job', async (reason, age, status) => {
+  const id = '00000000-0000-4000-8000-0000000000b1';
+  getJobs
+    .mockReset()
+    .mockResolvedValue([{ data: { repositoryId: id }, timestamp: Date.now() - age }]);
+  const fake = createFakeDb({ repositories: schema.repositories });
+  fake.insert(schema.repositories, {
+    id,
+    status: 'cloning',
+    refreshPending: true,
+    refreshJobId: 'deferred',
+    checkoutSessionReason: reason,
+    updatedAt: new Date(Date.now() - 10 * 60_000),
+    rootClaimedAt: null,
+  });
+  await reconcileStrandedCloningRepos(fake.db as unknown as Database);
+  expect(fake.rows(schema.repositories)[0]).toMatchObject({
+    status,
+    checkoutSessionReason: status === 'error' ? null : reason,
+    refreshPending: status === 'cloning',
   });
 });

@@ -1,3 +1,4 @@
+import { suspendCheckoutSessions } from './interactive-checkout.js';
 import { assertRepoJobOwner, ObsoleteRepoJobError, repoJobPredicate } from './job-owner.js';
 import { withProjectionMove } from '../project-state/projection-move.js';
 import { checkoutWorktreeRefusal } from '@haive/shared/repo-rebuild';
@@ -496,6 +497,7 @@ async function rebuild(
   repoStorageRoot: string,
   rel: string,
   dest: string,
+  suspendSessions: typeof suspendCheckoutSessions,
 ): Promise<void> {
   const worktreeRefusal = await checkoutWorktreeRefusal(db, payload.repositoryId, dest);
   if (worktreeRefusal) throw new Error(worktreeRefusal);
@@ -601,138 +603,159 @@ async function rebuild(
   // archive, Terminal and Editor readers while the public checkout is being moved.
   const escalated = await db
     .update(schema.repositories)
-    .set({ status: 'cloning', updatedAt: new Date() })
+    .set({
+      status: 'cloning',
+      checkoutSessionReason: 'draining',
+      statusMessage: null,
+      updatedAt: new Date(),
+    })
     .where(repoJobPredicate(payload.repositoryId))
     .returning({ id: schema.repositories.id });
   if (escalated.length === 0) throw new ObsoleteRepoJobError();
-  const aside = await db.transaction(async (tx) => {
-    // Starts and revivals take this key before writing task state. Recount after the slow
-    // preparation, then hold the key only through the rename, never through the clone or copy.
+  await db.transaction(async (tx) => {
     await lockRepositoryTasksKey(tx, payload.repositoryId);
     const worktreeRefusal = await checkoutWorktreeRefusal(tx, payload.repositoryId, dest);
     if (worktreeRefusal) throw new Error(worktreeRefusal);
     const holding = await checkoutHoldingTasks(tx, payload.repositoryId);
     if (holding > 0) throw new Error(holdingRefusal(holding));
-    if (payload.recoverCheckout) {
-      await lockProjectState(tx, payload.repositoryId);
-      const [pending] = await tx
-        .select({ intent: schema.projectStateOutbox.writeIntent })
-        .from(schema.projectStateOutbox)
-        .where(eq(schema.projectStateOutbox.repositoryId, payload.repositoryId))
-        .limit(1);
-      if (pending?.intent != null)
-        throw new Error(
-          'Not refreshed: a pending project data write appeared before the rebuild. Nothing was moved; retry after recovery finishes.',
-        );
-    }
-    return moveAside(repoStorageRoot, rel);
   });
-  // Publish a folder copy only after it finishes. A failed or interrupted copy must never
-  // leave a partial checkout that the next refresh could mistake for ready.
-  const stagingRel =
-    fromFolder || payload.recoverCheckout ? `${rel}.rebuild-${randomUUID()}` : null;
-  let restoring = false;
-  let published = false;
+  const resumeSessions = await suspendSessions(db, payload.repositoryId);
   try {
-    if (fromFolder) {
-      await ensureDirNoFollow(repoStorageRoot, stagingRel!);
-      await copyTree(fromFolder, path.join(repoStorageRoot, stagingRel!));
-    } else {
-      await ensureDirNoFollow(repoStorageRoot, payload.userId);
-      await gitClone(
-        fromRemote!,
-        stagingRel ? path.join(repoStorageRoot, stagingRel) : dest,
-        payload.branch,
-        auth,
-        { db, userId: payload.userId },
-      );
-    }
-    if (stagingRel) {
+    await db
+      .update(schema.repositories)
+      .set({ checkoutSessionReason: null })
+      .where(repoJobPredicate(payload.repositoryId));
+    const aside = await db.transaction(async (tx) => {
+      // Starts and revivals take this key before writing task state. Recount after the slow
+      // preparation, then hold the key only through the rename, never through the clone or copy.
+      await lockRepositoryTasksKey(tx, payload.repositoryId);
+      const worktreeRefusal = await checkoutWorktreeRefusal(tx, payload.repositoryId, dest);
+      if (worktreeRefusal) throw new Error(worktreeRefusal);
+      const holding = await checkoutHoldingTasks(tx, payload.repositoryId);
+      if (holding > 0) throw new Error(holdingRefusal(holding));
       if (payload.recoverCheckout) {
-        // This is still a private replacement, never the preserved aside. No reader may see the
-        // source's stale projections before the ordinary writers recreate this install's data.
-        const replacement = path.join(repoStorageRoot, stagingRel);
-        for (const projection of [
-          HAIVE_DATA_FILES.environment,
-          HAIVE_DATA_FILES.exclusions,
-          HAIVE_DATA_FILES.tooling,
-        ]) {
-          await removeNoFollow(replacement, projection, { recursive: true });
-        }
-        const built = await usableCheckout(replacement);
-        if (built !== 'usable')
-          throw new Error('the private recovery replacement is not a usable checkout');
-        // All writes stay off the public checkout. The writers commit their normal journals and
-        // bases before publication; keep this sibling on failure, including any undo capability.
-        restoring = true;
-        await restoreProjectData(db, payload.repositoryId, replacement);
-        await db.transaction(async (tx) => {
-          // Reuse the rebuild fence at publication too: a task admitted during the copy must
-          // not see a replacement or race its restore. No pool writer runs under this lock.
-          await lockRepositoryTasksKey(tx, payload.repositoryId);
-          const refusal = await checkoutWorktreeRefusal(tx, payload.repositoryId, dest);
-          if (refusal) throw new Error(refusal);
-          const holding = await checkoutHoldingTasks(tx, payload.repositoryId);
-          if (holding > 0) throw new Error(holdingRefusal(holding));
-          await renameNoFollow(repoStorageRoot, stagingRel, rel, { noReplace: true });
-          published = true;
-        });
-      } else {
-        await renameNoFollow(repoStorageRoot, stagingRel, rel, { noReplace: true });
+        await lockProjectState(tx, payload.repositoryId);
+        const [pending] = await tx
+          .select({ intent: schema.projectStateOutbox.writeIntent })
+          .from(schema.projectStateOutbox)
+          .where(eq(schema.projectStateOutbox.repositoryId, payload.repositoryId))
+          .limit(1);
+        if (pending?.intent != null)
+          throw new Error(
+            'Not refreshed: a pending project data write appeared before the rebuild. Nothing was moved; retry after recovery finishes.',
+          );
       }
-    }
-  } catch (err) {
-    if (restoring && stagingRel) {
-      throw failedAfterMove(
-        published
-          ? `the restored replacement was published, but the publication transaction failed (${err instanceof Error ? err.message : String(err)})`
-          : `the replacement's project data could not be restored or published (${err instanceof Error ? err.message : String(err)}); the private replacement was kept next to the checkout as ${path.basename(stagingRel)}`,
-        aside,
-        err,
-      );
-    }
-    if (stagingRel) {
-      try {
-        await removeNoFollow(repoStorageRoot, stagingRel, { recursive: true });
-      } catch (cleanupErr) {
-        logger.warn(
-          { err: cleanupErr, stagingRel },
-          'unfinished refresh copy could not be removed',
+      return moveAside(repoStorageRoot, rel);
+    });
+    // Publish a folder copy only after it finishes. A failed or interrupted copy must never
+    // leave a partial checkout that the next refresh could mistake for ready.
+    const stagingRel =
+      fromFolder || payload.recoverCheckout ? `${rel}.rebuild-${randomUUID()}` : null;
+    let restoring = false;
+    let published = false;
+    try {
+      if (fromFolder) {
+        await ensureDirNoFollow(repoStorageRoot, stagingRel!);
+        await copyTree(fromFolder, path.join(repoStorageRoot, stagingRel!));
+      } else {
+        await ensureDirNoFollow(repoStorageRoot, payload.userId);
+        await gitClone(
+          fromRemote!,
+          stagingRel ? path.join(repoStorageRoot, stagingRel) : dest,
+          payload.branch,
+          auth,
+          { db, userId: payload.userId },
         );
+      }
+      if (stagingRel) {
+        if (payload.recoverCheckout) {
+          // This is still a private replacement, never the preserved aside. No reader may see the
+          // source's stale projections before the ordinary writers recreate this install's data.
+          const replacement = path.join(repoStorageRoot, stagingRel);
+          for (const projection of [
+            HAIVE_DATA_FILES.environment,
+            HAIVE_DATA_FILES.exclusions,
+            HAIVE_DATA_FILES.tooling,
+          ]) {
+            await removeNoFollow(replacement, projection, { recursive: true });
+          }
+          const built = await usableCheckout(replacement);
+          if (built !== 'usable')
+            throw new Error('the private recovery replacement is not a usable checkout');
+          // All writes stay off the public checkout. The writers commit their normal journals and
+          // bases before publication; keep this sibling on failure, including any undo capability.
+          restoring = true;
+          await restoreProjectData(db, payload.repositoryId, replacement);
+          await db.transaction(async (tx) => {
+            // Reuse the rebuild fence at publication too: a task admitted during the copy must
+            // not see a replacement or race its restore. No pool writer runs under this lock.
+            await lockRepositoryTasksKey(tx, payload.repositoryId);
+            const refusal = await checkoutWorktreeRefusal(tx, payload.repositoryId, dest);
+            if (refusal) throw new Error(refusal);
+            const holding = await checkoutHoldingTasks(tx, payload.repositoryId);
+            if (holding > 0) throw new Error(holdingRefusal(holding));
+            await renameNoFollow(repoStorageRoot, stagingRel, rel, { noReplace: true });
+            published = true;
+          });
+        } else {
+          await renameNoFollow(repoStorageRoot, stagingRel, rel, { noReplace: true });
+        }
+      }
+    } catch (err) {
+      if (restoring && stagingRel) {
         throw failedAfterMove(
-          `the new checkout could not be built (${(err instanceof Error ? err.message : String(err)).trim()}); the unfinished copy was kept next to the checkout as ${path.basename(stagingRel)} because cleanup failed (${cleanupErr instanceof Error ? cleanupErr.message : String(cleanupErr)})`,
+          published
+            ? `the restored replacement was published, but the publication transaction failed (${err instanceof Error ? err.message : String(err)})`
+            : `the replacement's project data could not be restored or published (${err instanceof Error ? err.message : String(err)}); the private replacement was kept next to the checkout as ${path.basename(stagingRel)}`,
           aside,
           err,
         );
       }
+      if (stagingRel) {
+        try {
+          await removeNoFollow(repoStorageRoot, stagingRel, { recursive: true });
+        } catch (cleanupErr) {
+          logger.warn(
+            { err: cleanupErr, stagingRel },
+            'unfinished refresh copy could not be removed',
+          );
+          throw failedAfterMove(
+            `the new checkout could not be built (${(err instanceof Error ? err.message : String(err)).trim()}); the unfinished copy was kept next to the checkout as ${path.basename(stagingRel)} because cleanup failed (${cleanupErr instanceof Error ? cleanupErr.message : String(cleanupErr)})`,
+            aside,
+            err,
+          );
+        }
+      }
+      throw failedAfterMove(
+        `the new checkout could not be built (${(err instanceof Error ? err.message : String(err)).trim()})`,
+        aside,
+        err,
+      );
     }
-    throw failedAfterMove(
-      `the new checkout could not be built (${(err instanceof Error ? err.message : String(err)).trim()})`,
-      aside,
-      err,
+    const built = await usableCheckout(dest);
+    if (built !== 'usable') {
+      const failure = failedAfterMove(
+        built === 'unusable'
+          ? 'the rebuilt checkout is not usable'
+          : `the rebuilt checkout could not be examined (${built.unknown})`,
+        aside,
+      );
+      throw typeof built === 'object' && built.repairNeeded
+        ? new CheckoutRepairNeededError(failure.message)
+        : failure;
+    }
+    await persistDetection(
+      db,
+      payload.repositoryId,
+      dest,
+      aside
+        ? `The previous folder was kept next to the checkout as ${path.basename(aside)}. Its files and unpushed commits are retained there.`
+        : null,
+      ...(payload.recoverCheckout ? [{ preserveProjectData: true } as const] : []),
     );
+  } finally {
+    resumeSessions();
   }
-  const built = await usableCheckout(dest);
-  if (built !== 'usable') {
-    const failure = failedAfterMove(
-      built === 'unusable'
-        ? 'the rebuilt checkout is not usable'
-        : `the rebuilt checkout could not be examined (${built.unknown})`,
-      aside,
-    );
-    throw typeof built === 'object' && built.repairNeeded
-      ? new CheckoutRepairNeededError(failure.message)
-      : failure;
-  }
-  await persistDetection(
-    db,
-    payload.repositoryId,
-    dest,
-    aside
-      ? `The previous folder was kept next to the checkout as ${path.basename(aside)}. Its files and unpushed commits are retained there.`
-      : null,
-    ...(payload.recoverCheckout ? [{ preserveProjectData: true } as const] : []),
-  );
 }
 
 /** Bring a repository's checkout up to its source without deleting anything. */
@@ -740,6 +763,7 @@ export async function handleRefresh(
   payload: RepoJobPayload,
   db: Database,
   repoStorageRoot: string,
+  suspendSessions: typeof suspendCheckoutSessions = suspendCheckoutSessions,
 ): Promise<void> {
   const rel = `${payload.userId}/${payload.repositoryId}`;
   const dest = path.join(repoStorageRoot, rel);
@@ -783,7 +807,7 @@ export async function handleRefresh(
           ),
         );
       if (!usable) {
-        await rebuild(db, payload, repoStorageRoot, rel, dest);
+        await rebuild(db, payload, repoStorageRoot, rel, dest, suspendSessions);
         return;
       }
       await persistDetection(db, payload.repositoryId, dest, await fastForward(db, payload, dest));

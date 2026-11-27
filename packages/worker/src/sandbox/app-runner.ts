@@ -1,3 +1,9 @@
+import {
+  CHECKOUT_IDENTITY_LABEL,
+  checkoutIdentity,
+  runnerCheckoutMatches,
+} from './checkout-identity.js';
+import { withSubpathInteractiveCheckout } from '../repo/interactive-checkout.js';
 import { requireRunnerPresence } from './runner-probe.js';
 import { execFile } from 'node:child_process';
 import path from 'node:path';
@@ -142,6 +148,7 @@ export async function startAppRunner(params: {
    *  starts a debugger on 0.0.0.0:9229, reachable from the Editor tab (Lane C2). */
   debugMode?: boolean;
 }): Promise<AppRunnerHandle> {
+  const identity = await checkoutIdentity(params.repoSubpath);
   const name = appRunnerName(params.taskId);
   await exec('docker', ['rm', '-f', '-v', name], { timeout: 30_000 }).catch(() => {});
 
@@ -193,6 +200,8 @@ export async function startAppRunner(params: {
       `${APP_RUNNER_LABEL}=1`,
       '--label',
       `${RUNNER_SUBPATH_LABEL}=${params.repoSubpath}`,
+      '--label',
+      `${CHECKOUT_IDENTITY_LABEL}=${identity}`,
       ...limitArgs,
       ...weightArgs,
       // ONE subpath, at the path it already had. Mounting the whole volume gave every task's
@@ -281,12 +290,8 @@ export async function ensureAppRunnerStarted(
       throw err;
     }
   }
-  const boot: Promise<AppRunnerHandle> = ensureAppRunnerStartedInner(
-    taskId,
-    repoSubpath,
-    imageTag,
-    appPort,
-    signal,
+  const boot: Promise<AppRunnerHandle> = withSubpathInteractiveCheckout(repoSubpath, () =>
+    ensureAppRunnerStartedInner(taskId, repoSubpath, imageTag, appPort, signal),
   ).finally(() => {
     if (inFlightAppRunnerBoots.get(taskId)?.boot === boot) inFlightAppRunnerBoots.delete(taskId);
   });
@@ -319,7 +324,9 @@ async function ensureAppRunnerStartedInner(
   if (await isRunning(name)) {
     // A runner mounts one subpath, so reuse is only safe while that is the subpath asked for. A
     // label docker could not be asked for is not another one: recreating would stop a running app.
-    const verdict = await runnerSubpathVerdict(name, repoSubpath);
+    const verdict = (await runnerCheckoutMatches(name, repoSubpath))
+      ? await runnerSubpathVerdict(name, repoSubpath)
+      : 'other';
     if (verdict === 'absent') {
       log.warn(
         { taskId, container: name, repoSubpath },
@@ -333,7 +340,9 @@ async function ensureAppRunnerStartedInner(
     );
   }
   if (await containerExists(name)) {
-    await exec('docker', ['rm', '-f', '-v', name], { timeout: 30_000 }).catch(() => {});
+    await exec('docker', ['stop', '--time', '10', name], { timeout: 30_000 });
+    await exec('docker', ['rm', '-v', name], { timeout: 30_000 });
+    if (await containerExists(name)) throw new Error('Old app runner remains');
   }
   // Read the task's debug flag here (single point) so the container is created with
   // the Node inspector when debug mode is on, without threading the flag through

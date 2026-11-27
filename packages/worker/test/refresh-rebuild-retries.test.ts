@@ -1,3 +1,7 @@
+vi.mock('../src/repo/interactive-checkout.js', async (original) => ({
+  ...(await original<typeof import('../src/repo/interactive-checkout.js')>()),
+  suspendCheckoutSessions: async () => () => {},
+}));
 import { execFile } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { cp, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';

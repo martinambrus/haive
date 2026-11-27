@@ -1,3 +1,9 @@
+import { interactiveCheckouts } from '../src/repo/interactive-checkout.js';
+vi.mock('../src/sandbox/checkout-identity.js', async (original) => ({
+  ...(await original<typeof import('../src/sandbox/checkout-identity.js')>()),
+  CHECKOUT_IDENTITY_LABEL: 'haive.checkout.identity',
+  checkoutIdentity: async () => '1:2',
+}));
 import { beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { schema, type Database } from '@haive/database';
 import { createFakeDb } from '@haive/database/testing';
@@ -37,6 +43,7 @@ const h = vi.hoisted(() => {
     imagePresent: true,
     pullFails: false,
     prepFails: false,
+    beforeRun: undefined as undefined | (() => Promise<void>),
     unreadableLabel: null as string | null,
     probeFailure: null as Error | null,
     failExistenceOnly: false,
@@ -74,10 +81,17 @@ const h = vi.hoisted(() => {
       if (!container) throw new Error('missing');
       if (rest[0] !== '-f') return out('[{}]');
       const format = rest[1]!;
+      if (format === '{{.Created}}') return out('2026-11-27T10:00:00Z');
       const label = /^\{\{index \.Config\.Labels "(.+)"\}\}$/.exec(format)?.[1];
       if (label === undefined) throw new Error(`fake docker: unhandled inspect format ${format}`);
       if (label === state.unreadableLabel) throw new Error('docker inspect timed out');
       return out(`${container.labels[label] ?? ''}\n`);
+    }
+    if (verb === 'stop') {
+      state.calls.push(`stop ${rest[rest.length - 1]}`);
+      const container = state.containers.get(rest[rest.length - 1]!);
+      if (container) container.running = false;
+      return out('');
     }
     if (verb === 'rm') {
       for (const name of rest.filter((arg) => !arg.startsWith('-'))) {
@@ -86,6 +100,7 @@ const h = vi.hoisted(() => {
       return out('');
     }
     if (verb === 'run' && rest[0] === '-d') {
+      await state.beforeRun?.();
       if (!state.imagePresent) {
         if (state.pullFails) throw new Error('docker run failed: the image cannot be pulled');
         state.imagePresent = true;
@@ -229,6 +244,7 @@ beforeEach(() => {
   h.state.imagePresent = true;
   h.state.pullFails = false;
   h.state.prepFails = false;
+  h.state.beforeRun = undefined;
   h.state.unreadableLabel = null;
   h.state.probeFailure = null;
   h.state.failExistenceOnly = false;
@@ -240,7 +256,7 @@ beforeEach(() => {
 const seed = (editor: Editor, labels: Record<string, string>) =>
   h.state.containers.set(ideRunnerName(editor.session), {
     running: true,
-    labels: { [RUNNER_SUBPATH_LABEL]: SUBPATH, ...labels },
+    labels: { 'haive.checkout.identity': '1:2', [RUNNER_SUBPATH_LABEL]: SUBPATH, ...labels },
   });
 
 /** Everything that changed state: container removals and launches, registry deletions. */
@@ -311,6 +327,7 @@ describe.each(staleLaunches)('a running editor with %s', (_launch, labels) => {
 
     expect(mutations()).toEqual([]);
     expect(h.state.containers.get(name)?.labels).toEqual({
+      'haive.checkout.identity': '1:2',
       [RUNNER_SUBPATH_LABEL]: SUBPATH,
       ...launched,
     });
@@ -410,7 +427,7 @@ describe('an editor that is not a stale idle one', () => {
     // The launch fails for want of the image, but the editor on the wrong workspace is gone.
     await expect(ensure()).rejects.toThrow();
 
-    expect(mutations()).toEqual([`rm ${name}`, `hset ${key}`]);
+    expect(mutations()).toEqual([`stop ${name}`, `rm ${name}`, `hset ${key}`]);
     expect(h.state.containers.has(name)).toBe(false);
   });
 
@@ -473,6 +490,7 @@ describe('a running editor whose workspace label cannot be read', () => {
 
         expect(mutations()).toEqual([]);
         expect(h.state.containers.get(name)?.labels).toEqual({
+          'haive.checkout.identity': '1:2',
           [RUNNER_SUBPATH_LABEL]: SUBPATH,
           ...launched,
         });
@@ -490,7 +508,7 @@ describe('a running editor whose workspace label is empty', () => {
 
     expect(await ensure()).toEqual({ container: name });
 
-    expect(mutations()).toEqual([`rm ${name}`, `hset ${key}`, `run ${name}`]);
+    expect(mutations()).toEqual([`stop ${name}`, `rm ${name}`, `hset ${key}`, `run ${name}`]);
   });
 });
 
@@ -583,7 +601,7 @@ describe('an editor holding another workspace', () => {
 
     expect(await ensure()).toEqual({ container: name });
 
-    expect(mutations()).toEqual([`rm ${name}`, `hset ${key}`, `run ${name}`]);
+    expect(mutations()).toEqual([`stop ${name}`, `rm ${name}`, `hset ${key}`, `run ${name}`]);
     expect(h.state.registry.get(key)?.refcount).toBe('1');
   });
 });
@@ -687,7 +705,100 @@ it('keeps repository editor data when ownership inspection fails, then removes i
   await killRepoIdeRunner(REPO);
   expect(h.state.containers.has(name)).toBe(false);
   expect(mutations()).toEqual([
+    `stop ${name}`,
     `rm ${name}`,
     `volume rm ${ideUserDataVolumeName(repositoryEditor.session)}`,
   ]);
+});
+
+it.each([undefined, '999:2'])(
+  'keeps a legacy or same-inode Editor without replacement evidence (%s)',
+  async (identity) => {
+    seed(repositoryEditor, { [SPEC_LABEL]: SPEC, 'haive.checkout.identity': identity ?? '' });
+    h.state.registry.set(ideSessionKey(repositoryEditor.session), {
+      refcount: '1',
+      lastSeenAt: String(Date.now()),
+    });
+    await repositoryEditor.ensure();
+    expect(h.state.runs).toHaveLength(0);
+    expect(h.state.calls.some((call) => call.startsWith('stop '))).toBe(false);
+    expect(h.state.calls.some((call) => call.startsWith('volume rm '))).toBe(false);
+  },
+);
+
+it('drains an Editor boot started before cloning and delayed past the close pass', async () => {
+  let entered!: () => void;
+  const arrived = new Promise<void>((resolve) => {
+    entered = resolve;
+  });
+  let resume!: () => void;
+  const gate = new Promise<void>((resolve) => {
+    resume = resolve;
+  });
+  h.state.beforeRun = async () => {
+    entered();
+    await gate;
+  };
+  const opening = repositoryEditor.ensure();
+  const refused = expect(opening).rejects.toMatchObject({ code: 'checkout_unavailable' });
+  await arrived;
+  let stopped = false;
+  const suspension = interactiveCheckouts.suspend(REPO, async () => {
+    stopped = true;
+    expect(h.state.containers.has(ideRunnerName(repositoryEditor.session))).toBe(true);
+    h.state.containers.delete(ideRunnerName(repositoryEditor.session));
+  });
+  expect(stopped).toBe(false);
+  resume();
+  await refused;
+  (await suspension)();
+  expect(stopped).toBe(true);
+  expect(h.state.containers.has(ideRunnerName(repositoryEditor.session))).toBe(false);
+});
+
+it('keeps an idle legacy unstamped Editor when no checkout was replaced', async () => {
+  seed(repositoryEditor, { [SPEC_LABEL]: SPEC, 'haive.checkout.identity': '' });
+  h.state.registry.set(ideSessionKey(repositoryEditor.session), {
+    refcount: '0',
+    lastSeenAt: pastGrace(),
+  });
+  await repositoryEditor.ensure();
+  expect(h.state.runs).toHaveLength(0);
+  expect(h.state.calls.some((call) => call.startsWith('stop '))).toBe(false);
+});
+
+it('replaces an idle Editor with a different inode after process-local state is lost', async () => {
+  seed(repositoryEditor, { [SPEC_LABEL]: SPEC, 'haive.checkout.identity': '1:999' });
+  h.state.registry.set(ideSessionKey(repositoryEditor.session), {
+    refcount: '0',
+    lastSeenAt: pastGrace(),
+  });
+  await repositoryEditor.ensure();
+  expect(h.state.runs).toHaveLength(1);
+  expect(h.state.calls.some((call) => call.startsWith('stop '))).toBe(true);
+  expect(h.state.calls.some((call) => call.startsWith('volume rm '))).toBe(false);
+});
+
+it('replaces a different stamped inode even when its Editor registry is held', async () => {
+  seed(repositoryEditor, { [SPEC_LABEL]: SPEC, 'haive.checkout.identity': '1:999' });
+  h.state.registry.set(ideSessionKey(repositoryEditor.session), {
+    refcount: '1',
+    lastSeenAt: String(Date.now()),
+  });
+  await repositoryEditor.ensure();
+  expect(h.state.runs).toHaveLength(1);
+  expect(h.state.calls.some((call) => call.startsWith('stop '))).toBe(true);
+  expect(h.state.calls.some((call) => call.startsWith('volume rm '))).toBe(false);
+});
+
+it('keeps a held Editor when its checkout identity label is unreadable', async () => {
+  seed(repositoryEditor, { [SPEC_LABEL]: SPEC });
+  h.state.registry.set(ideSessionKey(repositoryEditor.session), {
+    refcount: '1',
+    lastSeenAt: String(Date.now()),
+  });
+  h.state.unreadableLabel = 'haive.checkout.identity';
+  await repositoryEditor.ensure();
+  expect(h.state.runs).toHaveLength(0);
+  expect(mutations()).toEqual([]);
 });

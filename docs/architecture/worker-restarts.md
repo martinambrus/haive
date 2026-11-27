@@ -1588,3 +1588,17 @@ A pass that detaches anything owes another full discovery, at most four passes. 
 for the current bounded batch and closes the iterator. Reads perform no recovery; the sweep calls
 an explicit fs-safe mutation. Generic parks retain their age policy. Details and residuals are in
 [Secret and git-data masking](sandbox-masking.md).
+
+## Interactive checkout replacement recovery
+
+A rebuild stops and verifies interactive containers before its first rename. On worker death,
+committed checkout availability and Docker root device/inode labels are the recovery evidence;
+in-memory boot/session maps and matching path strings grant no reuse permission. Legacy unstamped
+containers are always kept; stamped labels compare inode only across device remounts.
+Identity repair uses ordinary runner recovery without a running-task or held-Editor override.
+An unverifiable Docker stop delays the owned job for at most 30 minutes; permanent reason codes
+and expired deferrals return the row to visible error/Retry with no directory moved. The stranded
+sweep does not count these deferrals as live forever. The single-worker barrier bounds its open/boot
+drain without holding a pool connection. See
+[Repository refresh](repository-refresh.md#interactive-mounts-at-replacement) for deployment,
+rollback, Redis stale-cookie limitations and anonymous versus named volume lifetimes.

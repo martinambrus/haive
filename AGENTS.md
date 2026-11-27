@@ -357,7 +357,8 @@ listed here, and keep this file under 32 KiB: Codex CLI reads no more of it than
 - [MCP server consent](docs/architecture/mcp-consent.md): MCP server lists committed by another
   install. `importHaiveDataMirror`.
 - [Repository refresh](docs/architecture/repository-refresh.md): fast-forward, never delete.
-  `repo/refresh.ts`, `checkout-access.ts`, `requireCheckoutAccess`, `withCheckoutMutation`,
+  `repo/refresh.ts`, `interactive-checkout.ts`, `checkout-identity.ts`,
+  `CheckoutSessionsBusyError`, `checkout-access.ts`, `requireCheckoutAccess`, `withCheckoutMutation`,
   `assertCheckoutMutationOwner`, `RootClaimBusyError`.
 - [Onboarding template versioning](docs/architecture/onboarding-upgrades.md): the manifest, what
   to bump, upgrade apply and rollback, RTK off. `template-manifest.ts`, `_agent-templates.ts`,

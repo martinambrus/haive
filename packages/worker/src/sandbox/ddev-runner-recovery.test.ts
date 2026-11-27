@@ -1,6 +1,21 @@
+vi.mock('./checkout-identity.js', async (original) => {
+  const actual = await original<typeof import('./checkout-identity.js')>();
+  return {
+    ...actual,
+    checkoutIdentity: async () => '1:2',
+    runnerCheckoutMatches: (container: string, subpath: string, options = {}) =>
+      actual.runnerCheckoutMatches(container, subpath, { ...options, identity: '1:2' }),
+  };
+});
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-const h = vi.hoisted(() => ({ exec: vi.fn(), acquire: vi.fn(), release: vi.fn() }));
+const h = vi.hoisted(() => ({
+  exec: vi.fn(),
+  acquire: vi.fn(),
+  release: vi.fn(),
+  stale: false,
+  held: false,
+}));
 vi.mock('node:child_process', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:child_process')>();
   const { promisify } = await import('node:util');
@@ -16,7 +31,8 @@ vi.mock('../repo/worktree-permissions.js', () => ({
 vi.mock('../db.js', () => ({
   getDb: () => ({
     query: {
-      tasks: { findFirst: async () => null },
+      tasks: { findFirst: async () => (h.held ? { status: 'running', deadAt: null } : null) },
+      taskSteps: { findFirst: async () => (h.held ? { id: 'running-step' } : undefined) },
       taskDatabaseStates: { findFirst: async () => null },
     },
   }),
@@ -43,7 +59,7 @@ const project = (status = 'running') =>
   JSON.stringify({ raw: { status, primary_url: 'https://fixture.ddev.site' } });
 const mutations = () => h.exec.mock.calls.filter(([, args]) => ['rm', 'run'].includes(args[0]));
 
-type Probe = 'presence' | 'workspace' | 'dockerd' | 'describe' | 'warm start';
+type Probe = 'identity' | 'presence' | 'workspace' | 'dockerd' | 'describe' | 'warm start';
 let failAt: Probe | undefined;
 let failure: unknown;
 let presence: string;
@@ -53,6 +69,8 @@ let status: string;
 
 beforeEach(() => {
   vi.restoreAllMocks();
+  h.stale = false;
+  h.held = false;
   h.exec.mockReset();
   h.acquire.mockReset().mockResolvedValue(h.release);
   h.release.mockReset();
@@ -73,6 +91,9 @@ beforeEach(() => {
       if (args.at(-2)?.includes(RUNNER_SUBPATH_LABEL)) {
         probe = 'workspace';
         stdout = label;
+      } else if (args.at(-2)?.includes('haive.checkout.identity')) {
+        probe = 'identity';
+        stdout = h.stale ? '1:3' : '';
       } else stdout = '<no value>,<no value>';
     } else if (args[0] === 'exec') {
       const command = args.at(-1) ?? '';
@@ -103,7 +124,7 @@ describe('DDEV recovery keeps runners when a probe gave no answer', () => {
     ['daemon/exec non-zero', { code: 1 }],
   ] as const;
 
-  describe.each<Probe>(['presence', 'workspace', 'dockerd'])('%s', (probe) => {
+  describe.each<Probe>(['identity', 'presence', 'workspace', 'dockerd'])('%s', (probe) => {
     it.each(failures)('holds on %s and permits a later ensure', async (_kind, fields) => {
       failAt = probe;
       failure = Object.assign(new Error('arbitrary failure wording'), fields);
@@ -197,7 +218,8 @@ describe('DDEV recovery keeps runners when a probe gave no answer', () => {
   it('keeps the runner when both describe and the dockerd exec fail', async () => {
     h.exec.mockImplementation(async (_bin: string, args: string[]) => {
       if (args[0] === 'ps') return reply('running');
-      if (args[0] === 'inspect') return reply(subpath);
+      if (args[0] === 'inspect')
+        return reply(args.at(-2)?.includes('haive.checkout.identity') ? '' : subpath);
       if (args[0] === 'exec') throw Object.assign(new Error('exec failed'), { code: 1 });
       if (args[0] === 'run') throw coldReached;
       return reply();
@@ -245,4 +267,20 @@ describe('DDEV recovery keeps runners when a probe gave no answer', () => {
     expect(h.exec.mock.calls.some(([, args]) => args.at(-1)?.endsWith('ddev start'))).toBe(true);
     expect(mutations()).toEqual([]);
   });
+});
+
+it('drops anonymous volumes when repairing an idle DDEV runner mount', async () => {
+  h.stale = true;
+  await expect(ensureDdevStarted(task, subpath)).rejects.toThrow(coldReached);
+  expect(h.exec.mock.calls.map(([, args]) => args)).toContainEqual(['rm', '-v', handle.container]);
+});
+
+it.each(['workspace', 'dockerd'])('recovers %s during a running task step', async (failure) => {
+  h.held = true;
+  if (failure === 'workspace') label = 'user/previous-workspace';
+  else {
+    status = 'stopped';
+    dockerd = 'down';
+  }
+  await expect(ensureDdevStarted(task, subpath)).rejects.toThrow(coldReached);
 });

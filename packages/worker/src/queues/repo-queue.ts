@@ -1,3 +1,8 @@
+import {
+  CheckoutSessionsBusyError,
+  checkoutSessionCanRetry,
+  CHECKOUT_SESSION_RETRY_MS,
+} from '../repo/interactive-checkout.js';
 import { RootClaimBusyError } from '../repo/root-claim-busy.js';
 import path from 'node:path';
 import {
@@ -91,6 +96,24 @@ export function startRepoWorker(repoStorageRoot: string): Worker {
             );
             return;
           }
+          const sessionFailure = err instanceof CheckoutSessionsBusyError;
+          if (sessionFailure) {
+            logger.warn({ repositoryId: payload.repositoryId, reason: err.reason }, err.message);
+            if (checkoutSessionCanRetry(err.reason, job.timestamp ?? 0)) {
+              await db
+                .update(schema.repositories)
+                .set({
+                  status: 'cloning',
+                  checkoutSessionReason: err.reason,
+                  statusMessage: err.message,
+                })
+                .where(repoJobPredicate(payload.repositoryId));
+              await job.moveToDelayed(Date.now() + CHECKOUT_SESSION_RETRY_MS, token);
+              throw new DelayedError();
+            }
+            // Permanent blocks and exhausted transient waits are terminal for this owner.
+            // A manual Retry admits a fresh job; no rename has occurred.
+          }
           if (err instanceof RootClaimBusyError) {
             logger.info(
               { repositoryId: payload.repositoryId, jobId: job.id, kind: err.kind },
@@ -108,6 +131,7 @@ export function startRepoWorker(repoStorageRoot: string): Worker {
             .update(schema.repositories)
             .set({
               status: 'error',
+              checkoutSessionReason: sessionFailure ? err.reason : null,
               // A check-only job runs for a repair code and keeps it whatever failed, so its
               // Retry stays a check and a rebuild still needs the explicit recovery.
               ...(payload.checkCheckoutOnly
@@ -127,10 +151,11 @@ export function startRepoWorker(repoStorageRoot: string): Worker {
           // A delayed retry still owes work; only its final failure releases its own marker.
           if (
             (job.attemptsMade ?? 0) + 1 >= (job.opts?.attempts ?? 1) ||
-            err instanceof UnrecoverableError
+            err instanceof UnrecoverableError ||
+            sessionFailure
           )
             await clearRefreshPending();
-          throw err;
+          throw sessionFailure ? new UnrecoverableError(message) : err;
         }
         // Completion cleanup is separate from handler failure. Keep the ready result
         // if this write fails so an owned retry resumes imports instead of rebuilding

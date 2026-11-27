@@ -1,3 +1,7 @@
+vi.mock('../src/repo/interactive-checkout.js', async (original) => ({
+  ...(await original<Record<string, unknown>>()),
+  suspendCheckoutSessions: async () => () => {},
+}));
 import { execFileSync, spawn } from 'node:child_process';
 import fsPromises from 'node:fs/promises';
 import { syncBuiltinESMExports } from 'node:module';

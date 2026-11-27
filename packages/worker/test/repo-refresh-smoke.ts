@@ -49,7 +49,11 @@ import { initDatabase, getDb } from '../src/db.js';
 import { StepSupersededError } from '../src/step-engine/step-ownership.js';
 import { handleClone, handleCopyLocal } from './support/repo-preparation.js';
 import { checkoutHoldingTasks } from '../src/repo/refresh.js';
-import { handleRefresh } from './support/repo-preparation.js';
+import { handleRefresh as admittedRefresh } from './support/repo-preparation.js';
+// This smoke covers Git/SQL recovery. Session draining/Docker/Redis have their own controls.
+// Keep the real refresh handler and mock only the suspension seam, as the Vitest fixtures do.
+const handleRefresh: typeof admittedRefresh = (payload, db, storage) =>
+  admittedRefresh(payload, db, storage, async () => () => {});
 import {
   MOVE_ATTEMPTS,
   putBackProjections,

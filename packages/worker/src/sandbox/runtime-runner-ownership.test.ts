@@ -1,3 +1,8 @@
+vi.mock('./checkout-identity.js', () => ({
+  CHECKOUT_IDENTITY_LABEL: 'haive.checkout.identity',
+  checkoutIdentity: async () => '1:2',
+  runnerCheckoutMatches: async () => true,
+}));
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Database } from '@haive/database';
 import {

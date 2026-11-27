@@ -1,3 +1,4 @@
+import { checkoutSessionCanRetry } from './repo/interactive-checkout.js';
 import { bundleArchiveRel } from './repo/bundle-ingest.js';
 import {
   clearReplacementRecord,
@@ -542,6 +543,7 @@ export async function reconcileStrandedCloningRepos(db: Database): Promise<void>
       id: schema.repositories.id,
       status: schema.repositories.status,
       errorCode: schema.repositories.errorCode,
+      checkoutSessionReason: schema.repositories.checkoutSessionReason,
     })
     .from(schema.repositories)
     .where(
@@ -575,7 +577,16 @@ export async function reconcileStrandedCloningRepos(db: Database): Promise<void>
   const stillQueued = new Set<string>();
   for (const job of jobs) {
     const repositoryId = (job?.data as { repositoryId?: unknown } | undefined)?.repositoryId;
-    if (typeof repositoryId === 'string') stillQueued.add(repositoryId);
+    if (typeof repositoryId === 'string') {
+      const row = cloning.find((candidate) => candidate.id === repositoryId);
+      if (
+        row?.checkoutSessionReason &&
+        row.checkoutSessionReason !== 'draining' &&
+        !checkoutSessionCanRetry(row.checkoutSessionReason, job.timestamp ?? 0)
+      )
+        continue;
+      stillQueued.add(repositoryId);
+    }
   }
 
   const strandedRows = cloning.filter((row) => !stillQueued.has(row.id));
@@ -614,6 +625,7 @@ export async function reconcileStrandedCloningRepos(db: Database): Promise<void>
     .update(schema.repositories)
     .set({
       status: 'error',
+      checkoutSessionReason: null,
       refreshPending: false,
       refreshJobId: null,
       // Keep a repair signal (check-only or recovery preparation), just as the processor's catch does.

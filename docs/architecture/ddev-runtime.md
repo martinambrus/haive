@@ -237,3 +237,17 @@ and browser pins, including both raw browser picker fields, before any template 
 unsafe interpolated scalars stop DDEV rendering with the field and a bounded JSON-quoted preview;
 Unicode controls and invisible/bidi characters are escaped as `\uXXXX`. Correct the declared
 dependencies and retry. Undo is a code revert, with no schema or data rollback.
+
+## Repository checkout replacement
+
+The repository lifecycle barrier drains complete DDEV ensures, including coalesced callers'
+`onReady` wiring, and app-runner boots before stopping mounts. A drain has a 30-second deadline;
+Docker/transport deferrals have a 30-minute total bound and structural repair codes.
+The runtime-ensure queue requires ready and repeats admission after startup. Stamped inode
+changes detect old checkouts; legacy unstamped runners and device-only remounts are kept.
+Ordinary recovery for another workspace or a dead nested dockerd still recreates the runner
+during a running step, as before. No running-task identity hold overrides recovery.
+Both checkout-stop and stale runner removal use `-v`: the anonymous nested `/var/lib/docker`
+is recreated fresh, while named repository/CA/registry-cache volumes survive. A new DDEV runner
+restores the ordinary saved snapshot and loses newer unsnapshotted database changes. See
+[Repository refresh](repository-refresh.md) for bounded suspension and deployment.
