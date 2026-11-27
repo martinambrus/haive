@@ -45,6 +45,7 @@ export {
   ROOT_CLAIM_STALE_MS,
   acquireRootClaim,
   rootClaimHandleOwns,
+  rootClaimHandleConfirmedAt,
   claimRepositoryRoot,
   renewRootClaim,
   isRootClaimLive,

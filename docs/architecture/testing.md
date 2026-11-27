@@ -150,3 +150,14 @@ root claim tries to rebuild. `checkout-read-rename.test.ts` uses real temporary 
 seams to rename before anchor open, during descriptor verification and after handle acquisition;
 input variants and capability rejection stay in fake-database tests. No development checkout,
 queues or data stores participate in these controls.
+
+Relink probes must target the fresh client used by the Git transaction, after the separate intent
+transaction; intercepting `getDb().transaction` no longer injects a relink failure. Held-row
+fixtures also take the mutation lease a real relink holds. A competing relink is now refused
+with `checkout_unavailable`; its retry can succeed only after restoration and release. The
+process-death probe mounts both route handlers and blocks the final repository UPDATE with a
+Postgres trigger and a parent-held advisory lock, after Git but before the client can send COMMIT.
+A deferred COMMIT trigger is unsuitable: after client death the server can finish an already
+submitted COMMIT. The probe kills the child first, releases the barrier, verifies no early repair,
+then models lease expiry on the scratch row before the sweep repairs it. Git fixtures in
+`checkout-access-db.test.ts` are built once and copied for each test.

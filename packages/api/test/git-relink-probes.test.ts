@@ -10,16 +10,30 @@ import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest
 import { eq, and } from 'drizzle-orm';
 import { Hono } from 'hono';
 import { hardenGitArgs } from '@haive/shared/git-args';
-import { createDatabase, schema, type Database } from '@haive/database';
+import {
+  acquireRootClaim,
+  ROOT_CLAIM_STALE_MS,
+  createDatabase,
+  schema,
+  type Database,
+} from '@haive/database';
 import { cleanActor, makeActor } from './security-audit-db.js';
 
-const h = vi.hoisted(() => ({ db: undefined as unknown, actor: '' }));
+const h = vi.hoisted(() => ({
+  db: undefined as unknown,
+  actor: '',
+  freshCalls: 0,
+  relinkUrl: undefined as string | undefined,
+  relinkDatabase: undefined as ((db: Database) => Database) | undefined,
+}));
 vi.mock('../src/db.js', () => ({
   getDb: () => h.db,
   withFreshDatabase: async (run: (fresh: Database) => Promise<unknown>) => {
-    const fresh = createDatabase(url!);
+    // Intent is the first fresh transaction; the Git transaction is the second.
+    const relink = ++h.freshCalls === 2;
+    const fresh = createDatabase(relink ? (h.relinkUrl ?? url!) : url!);
     try {
-      return await run(fresh);
+      return await run(relink && h.relinkDatabase ? h.relinkDatabase(fresh) : fresh);
     } finally {
       await fresh.$client.end({ timeout: 5 });
     }
@@ -117,6 +131,8 @@ probe('remote relink at real PostgreSQL commit and process-death boundaries', ()
       await exited;
     }
     child = undefined;
+    await db.$client`DROP TRIGGER IF EXISTS hold_relink_commit ON repositories`;
+    await db.$client`DROP FUNCTION IF EXISTS hold_relink_commit()`;
     if (actor) await cleanActor(db, actor);
     if (root) await rm(root, { recursive: true, force: true });
   });
@@ -126,6 +142,10 @@ probe('remote relink at real PostgreSQL commit and process-death boundaries', ()
   });
 
   async function fixture() {
+    h.freshCalls = 0;
+    h.relinkUrl = undefined;
+    h.relinkDatabase = undefined;
+    h.db = db;
     actor = (await makeActor(db)).id;
     h.actor = actor;
     root = await mkdtemp(join(tmpdir(), 'git-relink-'));
@@ -207,6 +227,7 @@ probe('remote relink at real PostgreSQL commit and process-death boundaries', ()
   it('passes over a repository a relink holds instead of acting on its intent afterwards', async () => {
     await fixture();
     h.db = db;
+    const owner = (await acquireRootClaim(db, repository, 'mutation', actor))!;
     // A folder import mid-relink: its intent is committed and its row is locked.
     await db
       .update(schema.repositories)
@@ -246,6 +267,7 @@ probe('remote relink at real PostgreSQL commit and process-death boundaries', ()
       await relink;
     }
     await sweep;
+    await owner.release();
     expect(await git(root, ['remote', '-v'])).toBe(before);
     expect((await stored())?.remoteRelinkIntent).toBe('00000000-0000-4000-8000-0000000000aa');
   });
@@ -296,22 +318,22 @@ probe('remote relink at real PostgreSQL commit and process-death boundaries', ()
     if (!address || typeof address === 'string') throw new Error('No proxy port');
     const proxyUrl = new URL(url!);
     proxyUrl.port = String(address.port);
-    const proxied = createDatabase(proxyUrl.href);
+    h.relinkUrl = proxyUrl.href;
     let driverError: unknown;
-    const transaction = proxied.transaction.bind(proxied);
-    h.db = new Proxy(proxied, {
-      get(target, key, receiver) {
-        if (key !== 'transaction') return Reflect.get(target, key, receiver);
-        return async (...args: Parameters<Database['transaction']>) => {
-          try {
-            return await transaction(...args);
-          } catch (error) {
-            driverError = error;
-            throw error;
-          }
-        };
-      },
-    });
+    h.relinkDatabase = (proxied) =>
+      new Proxy(proxied, {
+        get(target, key, receiver) {
+          if (key !== 'transaction') return Reflect.get(target, key, receiver);
+          return async (...args: Parameters<Database['transaction']>) => {
+            try {
+              return await target.transaction(...args);
+            } catch (error) {
+              driverError = error;
+              throw error;
+            }
+          };
+        },
+      });
     try {
       const response = await app.request(`/${repository}/remote`, {
         method: 'POST',
@@ -325,7 +347,6 @@ probe('remote relink at real PostgreSQL commit and process-death boundaries', ()
       expect(await audits()).toHaveLength(1);
       expect(await git(root, ['remote', 'get-url', 'origin'])).toBe(newUrl);
     } finally {
-      await proxied.$client.end({ timeout: 1 });
       for (const socket of sockets) socket.destroy();
       await new Promise<void>((resolve) => server.close(() => resolve()));
     }
@@ -342,32 +363,50 @@ probe('remote relink at real PostgreSQL commit and process-death boundaries', ()
           .set({ remoteUrl: null })
           .where(eq(schema.repositories.id, repository));
       }
-      child = fork(
-        fileURLToPath(new URL('./fixtures/git-relink-probe-child.ts', import.meta.url)),
-        [url!, actor, repository, newUrl],
-        {
-          execArgv: ['--import', 'tsx'],
-          stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
-        },
-      );
-      let output = '';
-      child.stderr?.on('data', (chunk: Buffer) => {
-        output += chunk.toString();
-      });
-      await new Promise<void>((resolve, reject) => {
-        child!.once('message', (message) => {
-          if (message === 'before_commit') resolve();
-          else reject(new Error(`Unexpected child phase: ${String(message)}`));
-        });
-        child!.once('error', reject);
-        child!.once('exit', () =>
-          reject(new Error(`Child exited before the commit boundary: ${output}`)),
+      // Hold the fresh client's persistence statement after Git, before it can send COMMIT.
+      // A server already processing COMMIT can commit even after its client dies, so this
+      // barrier must be an ordinary trigger, with COMMIT still owned by the killed API.
+      const held = await db.$client.reserve();
+      await held`SELECT pg_advisory_lock(780, 2)`;
+      try {
+        await db.$client`CREATE FUNCTION hold_relink_commit() RETURNS trigger LANGUAGE plpgsql AS
+          $$ BEGIN PERFORM pg_advisory_xact_lock(780, 2); RETURN NEW; END $$`;
+        await db.$client`CREATE TRIGGER hold_relink_commit AFTER UPDATE ON repositories
+          FOR EACH ROW
+          WHEN (NEW.remote_url IS DISTINCT FROM OLD.remote_url)
+          EXECUTE FUNCTION hold_relink_commit()`;
+        child = fork(
+          fileURLToPath(new URL('./fixtures/git-relink-probe-child.ts', import.meta.url)),
+          [url!, actor, repository, newUrl],
+          { execArgv: ['--import', 'tsx'], stdio: ['ignore', 'pipe', 'pipe', 'ipc'] },
         );
-      });
-      expect(await git(root, ['remote', 'get-url', 'origin'])).toBe(newUrl);
-      const exited = once(child, 'exit');
-      child.kill('SIGKILL');
-      await exited;
+        let output = '';
+        child.stderr?.on('data', (chunk: Buffer) => {
+          output += chunk.toString();
+        });
+        await expect
+          .poll(
+            async () => {
+              if (child!.exitCode !== null || child!.signalCode !== null)
+                throw new Error(`Child exited before the commit boundary: ${output}`);
+              const [waiting] = await db.$client`
+            SELECT count(*)::int AS n FROM pg_locks
+            WHERE locktype = 'advisory' AND classid = 780 AND objid = 2 AND NOT granted`;
+              return waiting!.n;
+            },
+            { timeout: 15_000 },
+          )
+          .toBe(1);
+        expect(await git(root, ['remote', 'get-url', 'origin'])).toBe(newUrl);
+      } finally {
+        if (child && child.exitCode === null && child.signalCode === null) {
+          const exited = once(child, 'exit');
+          child.kill('SIGKILL');
+          await exited;
+        }
+        await held`SELECT pg_advisory_unlock(780, 2)`;
+        held.release();
+      }
       expect((await stored())?.remoteUrl).toBe(managed ? oldUrl : null);
       expect(await audits()).toHaveLength(0);
       expect((await stored())?.remoteRelinkIntent).toBeTruthy();
@@ -375,11 +414,20 @@ probe('remote relink at real PostgreSQL commit and process-death boundaries', ()
       h.db = db;
       expect((await app.request(`/${repository}`)).status).toBe(200);
       expect(await git(root, ['remote', 'get-url', 'origin'])).toBe(newUrl);
+      // Process death leaves the durable lease live. No repair may write before expiry.
+      await sweepOnce();
+      expect(await git(root, ['remote', 'get-url', 'origin'])).toBe(newUrl);
+      expect((await stored())?.remoteRelinkIntent).toBeTruthy();
+      await db
+        .update(schema.repositories)
+        .set({ rootClaimedAt: new Date(Date.now() - ROOT_CLAIM_STALE_MS - 1) })
+        .where(eq(schema.repositories.id, repository));
       await sweepOnce();
       expect(await git(root, ['remote', '-v'])).toBe(
         managed ? `origin\t${oldUrl} (fetch)\norigin\t${oldUrl} (push)` : '',
       );
       expect((await stored())?.remoteRelinkIntent).toBeNull();
     },
+    30_000,
   );
 });

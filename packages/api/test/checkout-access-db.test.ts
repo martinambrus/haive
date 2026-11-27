@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readFile, rename, rm, writeFile } from 'node:fs/promises';
+import { cp, mkdir, mkdtemp, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { execFile } from 'node:child_process';
@@ -96,6 +96,7 @@ describe.skipIf(!url)('checkout mutation lifetime on real filesystem, Git and Po
   let db: Database;
   let temp: string;
   let root: string;
+  let template: string;
   const upload = (body: ReadableStream<Uint8Array> | string) =>
     app.request(`/tasks/${TASK}/attachments?filename=held.md`, {
       method: 'POST',
@@ -106,6 +107,10 @@ describe.skipIf(!url)('checkout mutation lifetime on real filesystem, Git and Po
     db = createDatabase(url!);
     h.db = db;
     temp = await mkdtemp(join(tmpdir(), 'checkout-access-'));
+    template = join(temp, 'template');
+    await mkdir(template);
+    await exec('git', ['init', '-q', template]);
+    await exec('git', ['-C', template, 'remote', 'add', 'origin', 'https://old.test/repo']);
     vi.spyOn(configService, 'getNumber').mockResolvedValue(1024);
   });
   beforeEach(async () => {
@@ -114,9 +119,7 @@ describe.skipIf(!url)('checkout mutation lifetime on real filesystem, Git and Po
     await db.delete(schema.users).where(eq(schema.users.id, USER));
     root = join(temp, 'repo');
     await rm(root, { force: true, recursive: true });
-    await mkdir(root);
-    await exec('git', ['init', '-q', root]);
-    await exec('git', ['-C', root, 'remote', 'add', 'origin', 'https://old.test/repo']);
+    await cp(template, root, { recursive: true });
     await db
       .insert(schema.users)
       .values({ id: USER, emailEncrypted: 'x', emailBlindIndex: 't780-pr2', passwordHash: 'x' });

@@ -3,6 +3,8 @@ import {
   acquireRootClaim,
   isRootClaimLive,
   rootClaimHandleOwns,
+  rootClaimHandleConfirmedAt,
+  ROOT_CLAIM_STALE_MS,
   readLiveRootClaim,
   rootClaimRefusal,
   schema,
@@ -104,10 +106,22 @@ export async function withCheckoutMutation<T>(
   }
 }
 
-/** Check immediately before every physical mutation. Identity-only take-back is still allowed
- * after loss, while the upload descriptor pins the file it created. */
-export function assertCheckoutMutationOwner(owner: RootClaimHandle): void {
-  if (owner.lost()) throw new CheckoutUnavailableError();
+export const CHECKOUT_MUTATION_SAFETY_MS = 30_000;
+
+/** Check immediately before every physical mutation. Failed renewals/read-backs cannot extend
+ * write authority. Leave time before takeover for an in-flight syscall to settle; the lease
+ * keeps renewing even while writes are refused. Identity-only upload take-back remains allowed. */
+export function assertCheckoutMutationOwner(
+  owner: RootClaimHandle,
+  now: () => number = Date.now,
+): void {
+  const confirmedAt = rootClaimHandleConfirmedAt(owner);
+  if (
+    owner.lost() ||
+    confirmedAt === null ||
+    now() - confirmedAt.getTime() >= ROOT_CLAIM_STALE_MS - CHECKOUT_MUTATION_SAFETY_MS
+  )
+    throw new CheckoutUnavailableError();
 }
 
 /** Classify a failed acquisition against fresh availability. A rename that interrupted the

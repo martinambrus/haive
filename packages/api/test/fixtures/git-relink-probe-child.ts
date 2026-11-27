@@ -14,27 +14,19 @@ if (
   Number(target.port) < 1024
 )
   throw new Error('Use the disposable relink_test database');
-const db = initDatabase(url!);
-const transaction = db.transaction.bind(db);
-db.transaction = (callback, config) =>
-  transaction(async (tx) => {
-    const result = await callback(tx);
-    process.send?.('before_commit');
-    await new Promise<never>(() => undefined);
-    return result;
-  }, config);
+initDatabase(url!);
 
-// Invoke the production route with the same authenticated-context seam as the parent.
-const handler = repoRoutes.routes.find(
+// Mount both production handlers: the mutation-claim middleware and the relink itself.
+const handlers = repoRoutes.routes.filter(
   (route) => route.method === 'POST' && route.path === '/:id/remote',
-)?.handler;
-if (!handler) throw new Error('Relink handler not found');
+);
+if (handlers.length !== 2) throw new Error('Relink handlers not found');
 const app = new Hono<AppEnv>();
 app.use('*', async (c, next) => {
   c.set('userId', actor!);
   await next();
 });
-app.post('/:id/remote', handler);
+for (const route of handlers) app.post('/:id/remote', route.handler);
 app.onError(errorHandler);
 await app.request(`/${repository}/remote`, {
   method: 'POST',

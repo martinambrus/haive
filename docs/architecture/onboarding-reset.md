@@ -355,8 +355,14 @@ New independent mutations refuse while `refresh_pending` is set or the checkout 
 An already admitted owner may finish after preparation is queued. At pickup a foreign held claim
 raises `RootClaimBusyError`: the worker delays the job by five seconds with BullMQ's `DelayedError`,
 retaining its pending owner and availability without spending a failure attempt, even with
-`attempts: 1`. API mutations check `owner.lost()` before each physical step, including each streamed
-write, abort on loss and log it at release. Upload take-back removes only its own pinned inode;
+`attempts: 1`. API mutations check the registered handle before each physical step, including each
+streamed write. `assertCheckoutMutationOwner` refuses a lost or released handle and stops writes
+30 seconds before its last confirmed lease stamp reaches `ROOT_CLAIM_STALE_MS` (its clock is
+injectable). A renewal attempt or unreadable read-back never advances that stamp; a read-back
+that proves only the old stamp grants no new time either. A delayed reply uses the written stamp,
+not its arrival time. Renewal keeps running after this write refusal, preserving preparation's
+uncapped renewal and observable-loss policy; a later confirmed renewal can admit writes again.
+Loss is logged at release. Upload take-back removes only its own pinned inode;
 a retained aside is left alone when the public name no longer identifies that file. No connection
 spans a body or subprocess. Maintenance counting of these API holds remains a documented gap
 ([release drain](release.md#the-drain-an-upgrade-runs-first)); a killed API's claim can remain live

@@ -223,8 +223,12 @@ concurrent independent mutations in the same repository must retry, with copy na
 kind. A preparation queued after an admitted mutation waits: `withRootClaim` raises
 `RootClaimBusyError`, and the queue delays pickup five seconds without changing status, clearing
 its owner or consuming a failure attempt. The admitted mutation can finish while that preparation
-is owed; a new mutation cannot enter that queue gap. Independent writes consult `owner.lost()`
-before every physical step and log claim loss on release. A refused post-stream recheck takes back
+is owed; a new mutation cannot enter that queue gap. Before every physical step, independent
+writes check the registered handle's last confirmed lease stamp as well as `owner.lost()`,
+refusing at `ROOT_CLAIM_STALE_MS - CHECKOUT_MUTATION_SAFETY_MS` (30 seconds before takeover)
+even when renewal cannot prove a takeover. Neither failed attempts nor delayed reply arrival
+refresh that stamp. This write fence has an injectable clock and does not stop lease renewal.
+Claim loss is logged on release. A refused post-stream recheck takes back
 the upload by its pinned inode, leaving no orphan in the public tree and preserving an aside.
 A read uses admission only:
 a failed acquisition rechecks availability to classify a rename as `checkout_unavailable`, while
@@ -313,7 +317,9 @@ timer when the server closes. It selects only repositories with non-null
 database intent, at most 25 IDs per 30-second tick, rotating the cursor and
 scheduling only after the preceding pass finishes; its timers are unref'd. The
 request pool is used only to collect the page, never held across sweep Git.
-Each selected repository is rechecked under the fresh-client lock, taken with
+Each selected repository first takes the mutation lease; a live API writer's lease holds repair
+as `checkout`, including after its database connection drops. After API death the intent remains
+untouched until that lease expires. It is then rechecked under the fresh-client lock, taken with
 `SKIP LOCKED`: a repository a relink holds is passed over, not waited for, so the
 sweep never acts on a live request's intent the moment that request rolls back;
 the next tick sees it again. A dropped database connection releases that lock

@@ -1,17 +1,27 @@
-import { beforeEach, expect, it } from 'vitest';
+import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import {
   acquireRootClaim,
+  ROOT_CLAIM_RENEW_MS,
+  ROOT_CLAIM_STALE_MS,
   rootClaimRefusal,
   schema,
   type Database,
   type RootClaimHandle,
 } from '@haive/database';
 import { createFakeDb } from '@haive/database/testing';
-import { requireCheckoutAccess, withCheckoutMutation } from '../src/checkout-access.js';
+import {
+  assertCheckoutMutationOwner,
+  requireCheckoutAccess,
+  withCheckoutMutation,
+} from '../src/checkout-access.js';
 const id = '00000000-0000-4000-8000-000000007810';
 const userId = '00000000-0000-4000-8000-000000007811';
 let fake: ReturnType<typeof createFakeDb>;
 let db: Database;
+afterEach(() => {
+  vi.restoreAllMocks();
+  vi.useRealTimers();
+});
 beforeEach(() => {
   fake = createFakeDb({ repositories: schema.repositories });
   fake.insert(schema.repositories, { id, userId, status: 'ready' });
@@ -143,4 +153,57 @@ it('lets an admitted owner finish after a preparation becomes owed', async () =>
       { id },
     );
   });
+});
+
+it.each([false, true])(
+  'stops independent writes before lease expiry while renewal keeps trying (read-back fails=%s)',
+  async (readFails) => {
+    vi.useFakeTimers();
+    const started = Date.now();
+    const owner = (await acquireRootClaim(db, id, 'mutation'))!;
+    const update = vi.spyOn(db, 'update').mockImplementation(() => {
+      throw new Error('renewal cannot reach the database');
+    });
+    if (readFails)
+      vi.spyOn(db, 'select').mockImplementation(() => {
+        throw new Error('read-back cannot reach the database');
+      });
+    try {
+      await vi.advanceTimersByTimeAsync(ROOT_CLAIM_RENEW_MS);
+      expect(owner.lost()).toBe(false);
+      expect(() => assertCheckoutMutationOwner(owner)).not.toThrow();
+      // Inject the physical write's clock, between timer ticks, with 30 seconds still left
+      // before PostgreSQL can admit a takeover. Failed attempts are never confirmations.
+      expect(() =>
+        assertCheckoutMutationOwner(owner, () => started + ROOT_CLAIM_STALE_MS - 30_001),
+      ).not.toThrow();
+      expect(() =>
+        assertCheckoutMutationOwner(owner, () => started + ROOT_CLAIM_STALE_MS - 30_000),
+      ).toThrow(expect.objectContaining({ code: 'checkout_unavailable' }));
+      const attempts = update.mock.calls.length;
+      await vi.advanceTimersByTimeAsync(ROOT_CLAIM_STALE_MS);
+      expect(update.mock.calls.length).toBeGreaterThan(attempts);
+      expect(owner.lost()).toBe(false);
+      vi.restoreAllMocks();
+      await vi.advanceTimersByTimeAsync(ROOT_CLAIM_RENEW_MS);
+      expect(() => assertCheckoutMutationOwner(owner)).not.toThrow();
+    } finally {
+      vi.restoreAllMocks();
+      await owner.release();
+    }
+  },
+);
+
+it('allows writes beyond the initial stale window after confirmed renewals, and rejects release', async () => {
+  vi.useFakeTimers();
+  const owner = (await acquireRootClaim(db, id, 'mutation'))!;
+  try {
+    await vi.advanceTimersByTimeAsync(ROOT_CLAIM_STALE_MS * 2);
+    expect(() => assertCheckoutMutationOwner(owner)).not.toThrow();
+  } finally {
+    await owner.release();
+  }
+  expect(() => assertCheckoutMutationOwner(owner)).toThrow(
+    expect.objectContaining({ code: 'checkout_unavailable' }),
+  );
 });
