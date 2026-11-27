@@ -3,26 +3,27 @@ import {
   acquireRootClaim,
   isRootClaimLive,
   rootClaimHandleOwns,
+  readLiveRootClaim,
+  rootClaimRefusal,
   schema,
   type Database,
   type RootClaimHandle,
 } from '@haive/database';
+import { logger } from './logger/index.js';
 import { HttpError } from './module-host/index.js';
 
 type Db = Database | Parameters<Parameters<Database['transaction']>[0]>[0];
 export type CheckoutAvailability = 'ready' | 'repair';
 export type CheckoutAccess =
-  | { mode: 'read' }
+  | { mode: 'read'; availability?: CheckoutAvailability }
   | { mode: 'mutation'; owner?: RootClaimHandle; availability?: CheckoutAvailability }
   | { mode: 'preparation'; owner: RootClaimHandle };
 
 export class CheckoutUnavailableError extends HttpError {
-  constructor() {
-    super(
-      409,
-      'This repository checkout is preparing or unavailable. Try again in a moment.',
-      'checkout_unavailable',
-    );
+  constructor(
+    message = 'This repository checkout is preparing or unavailable. Try again in a moment.',
+  ) {
+    super(409, message, 'checkout_unavailable');
   }
 }
 
@@ -32,24 +33,37 @@ export class CheckoutUnavailableError extends HttpError {
 export async function requireCheckoutAccess(db: Db, repositoryId: string, access: CheckoutAccess) {
   const repo = await db.query.repositories.findFirst({
     where: eq(schema.repositories.id, repositoryId),
-    columns: { id: true, status: true, rootClaimedAt: true, rootClaimOwner: true },
+    columns: {
+      id: true,
+      status: true,
+      rootClaimedAt: true,
+      rootClaimOwner: true,
+      rootClaimKind: true,
+      refreshPending: true,
+    },
   });
   if (!repo) throw new CheckoutUnavailableError();
   const own =
     access.mode !== 'read' &&
     access.owner !== undefined &&
-    rootClaimHandleOwns(access.owner, repositoryId, repo.rootClaimOwner);
+    rootClaimHandleOwns(
+      access.owner,
+      repositoryId,
+      repo.rootClaimOwner,
+      access.mode === 'preparation' ? ['rebuild', 'refresh'] : undefined,
+    );
   if (access.mode === 'preparation') {
-    if (!own || !isRootClaimLive(repo.rootClaimedAt)) throw new CheckoutUnavailableError();
+    if (
+      !own ||
+      !['rebuild', 'refresh'].includes(repo.rootClaimKind ?? '') ||
+      !isRootClaimLive(repo.rootClaimedAt)
+    )
+      throw new CheckoutUnavailableError();
     return repo;
   }
   if (
-    (repo.status !== 'ready' &&
-      !(
-        access.mode === 'mutation' &&
-        access.availability === 'repair' &&
-        repo.status === 'error'
-      )) ||
+    (repo.status !== 'ready' && !(access.availability === 'repair' && repo.status === 'error')) ||
+    (access.mode === 'mutation' && repo.refreshPending && !own) ||
     (access.mode === 'mutation' && isRootClaimLive(repo.rootClaimedAt) && !own)
   )
     throw new CheckoutUnavailableError();
@@ -71,14 +85,29 @@ export async function withCheckoutMutation<T>(
   run: (owner: RootClaimHandle) => Promise<T>,
   availability: CheckoutAvailability = 'ready',
 ): Promise<T> {
-  const owner = await acquireRootClaim(db, repositoryId, 'edit', userId);
-  if (!owner) throw new CheckoutUnavailableError();
+  const owner = await acquireRootClaim(db, repositoryId, 'mutation', userId);
+  if (!owner) {
+    const held = await readLiveRootClaim(db, repositoryId);
+    throw new CheckoutUnavailableError(held ? rootClaimRefusal(held.kind) : undefined);
+  }
   try {
-    await requireCheckoutAccess(db, repositoryId, { mode: 'mutation', owner, availability });
+    const admitted = await requireCheckoutAccess(db, repositoryId, {
+      mode: 'mutation',
+      owner,
+      availability,
+    });
+    if (admitted.refreshPending) throw new CheckoutUnavailableError();
     return await run(owner);
   } finally {
     await owner.release();
+    if (owner.lost()) logger.error({ repositoryId }, 'checkout mutation lost its root claim');
   }
+}
+
+/** Check immediately before every physical mutation. Identity-only take-back is still allowed
+ * after loss, while the upload descriptor pins the file it created. */
+export function assertCheckoutMutationOwner(owner: RootClaimHandle): void {
+  if (owner.lost()) throw new CheckoutUnavailableError();
 }
 
 /** Classify a failed acquisition against fresh availability. A rename that interrupted the
@@ -88,12 +117,13 @@ export async function withCheckoutRead<T>(
   db: Db,
   repositoryId: string,
   open: () => Promise<T>,
+  availability: CheckoutAvailability = 'ready',
 ): Promise<T> {
-  await requireCheckoutAccess(db, repositoryId, { mode: 'read' });
+  await requireCheckoutAccess(db, repositoryId, { mode: 'read', availability });
   try {
     return await open();
   } catch (err) {
-    await requireCheckoutAccess(db, repositoryId, { mode: 'read' });
+    await requireCheckoutAccess(db, repositoryId, { mode: 'read', availability });
     throw err;
   }
 }

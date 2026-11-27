@@ -1,4 +1,8 @@
-import { CheckoutUnavailableError, withCheckoutMutation } from '@haive/shared/checkout-access';
+import {
+  assertCheckoutMutationOwner,
+  CheckoutUnavailableError,
+  withCheckoutMutation,
+} from '@haive/shared/checkout-access';
 import type { RootClaimHandle, DbTx } from '@haive/database';
 import { DerivedRunPlanError, pinnedTaskStepIds } from '@haive/shared/modularity';
 import { MERGE_LANDED_EVENT, readLandedMerge } from '@haive/shared/merge-left-open';
@@ -2815,7 +2819,10 @@ repoRoutes.post('/:id/remote', remoteCheckoutAccess, async (c) => {
     body.credentialsId === undefined ? repo.credentialsSecretId : body.credentialsId,
   );
 
-  const git = (args: string[]) => relinkGit(root, args);
+  const git = (args: string[]) => {
+    assertCheckoutMutationOwner(checkoutOwner);
+    return relinkGit(root, args);
+  };
   await verifyRelinkCheckout(root);
 
   let intent: Awaited<ReturnType<typeof markRemoteIntent>>;

@@ -1,4 +1,9 @@
-import { requireCheckoutAccess, withCheckoutMutation } from '@haive/shared/checkout-access';
+import {
+  CheckoutUnavailableError,
+  assertCheckoutMutationOwner,
+  requireCheckoutAccess,
+  withCheckoutMutation,
+} from '@haive/shared/checkout-access';
 import type { RootClaimHandle } from '@haive/database';
 import { randomUUID } from 'node:crypto';
 import { and, asc, eq, gt, isNotNull } from 'drizzle-orm';
@@ -114,7 +119,7 @@ export async function reconcileRemote(
   id: string,
   userId: string,
   { skipLocked = false, owner }: { skipLocked?: boolean; owner?: RootClaimHandle } = {},
-): Promise<'locked' | 'fenced' | undefined> {
+): Promise<'locked' | 'fenced' | 'checkout' | undefined> {
   const run = async (checkoutOwner: RootClaimHandle) =>
     withFreshDatabase(async (db) => {
       return withSettledTransaction(db, async (tx) => {
@@ -161,7 +166,10 @@ export async function reconcileRemote(
           if (!parsed.success) throw new Error('Saved remote needs repair before reconciliation');
           remote = parsed.data.remoteUrl;
         }
-        const git = (args: string[]) => relinkGit(root, args);
+        const git = (args: string[]) => {
+          assertCheckoutMutationOwner(checkoutOwner);
+          return relinkGit(root, args);
+        };
         if (remote === null) {
           const removed = await git(['remote', 'remove', 'origin']);
           if (!removed.ok && removed.code !== 2)
@@ -201,7 +209,12 @@ export async function reconcileRemote(
     columns: { id: true },
   });
   if (!repo) return;
-  return withCheckoutMutation(getDb(), id, userId, run, 'repair');
+  try {
+    return await withCheckoutMutation(getDb(), id, userId, run, 'repair');
+  } catch (err) {
+    if (skipLocked && err instanceof CheckoutUnavailableError) return 'checkout';
+    throw err;
+  }
 }
 
 /** One bounded page per tick, rotating through IDs. No request-pool connection spans Git. */
@@ -215,6 +228,8 @@ export function startRemoteReconcileSweep({
   let stopped = false;
   let timer: NodeJS.Timeout;
   const skipLoggedAt = new Map<string, number>();
+  const checkoutHolds = new Set<string>();
+  const seen = new Set<string>();
   const tick = async () => {
     // Retain only this log interval's skips, bounded by the sweep's page size/rate.
     const expired = Date.now() - skipLogIntervalMs;
@@ -234,8 +249,18 @@ export function startRemoteReconcileSweep({
       cursor = repos.length === batchSize ? repos.at(-1)!.id : undefined;
       for (const repo of repos) {
         if (stopped) break;
+        seen.add(repo.id);
         try {
           const reason = await reconcileRemote(repo.id, repo.userId, { skipLocked: true });
+          if (reason !== 'checkout') checkoutHolds.delete(repo.id);
+          if (reason === 'checkout') {
+            if (!checkoutHolds.has(repo.id)) {
+              checkoutHolds.add(repo.id);
+              logger.info({ repositoryId: repo.id, reason }, 'remote reconciliation skipped');
+            }
+            continue;
+          }
+          if (!reason) skipLoggedAt.delete(repo.id);
           if (reason && !skipLoggedAt.has(repo.id)) {
             skipLoggedAt.set(repo.id, Date.now());
             logger.info({ repositoryId: repo.id, reason }, 'remote reconciliation skipped');
@@ -243,6 +268,10 @@ export function startRemoteReconcileSweep({
         } catch (err) {
           logger.warn({ err, repositoryId: repo.id }, 'remote state reconciliation deferred');
         }
+      }
+      if (cursor === undefined) {
+        for (const id of checkoutHolds) if (!seen.has(id)) checkoutHolds.delete(id);
+        seen.clear();
       }
     } catch (err) {
       logger.warn({ err }, 'remote reconciliation sweep deferred');

@@ -14,7 +14,7 @@ vi.mock('../src/lib/relink-git.js', () => ({
   gitFailureText: () => 'git operation failed',
 }));
 import { logger } from '@haive/shared';
-import { schema } from '@haive/database';
+import { acquireRootClaim, type Database, schema } from '@haive/database';
 import { createFakeDb } from '@haive/database/testing';
 import {
   isRemoteConnectionError,
@@ -343,4 +343,25 @@ it('retains the root lease until Git settles after its transaction rejects', asy
   }
   expect(await result).toBe(error);
   expect(fake.rows(schema.repositories)[0]!.rootClaimedAt).toBeNull();
+});
+
+it('sweep logs a held mutation once, retains intent and reconciles after release', async () => {
+  vi.useFakeTimers();
+  const owner = (await acquireRootClaim(fake.db as unknown as Database, id, 'edit', userId))!;
+  vi.spyOn(fake.db.query.repositories!, 'findMany').mockResolvedValue([repo] as never);
+  const stop = startRemoteReconcileSweep({ intervalMs: 10 });
+  try {
+    await vi.advanceTimersByTimeAsync(20);
+    expect(h.git).not.toHaveBeenCalled();
+    expect(pending()).toBeTruthy();
+    expect(logger.warn).not.toHaveBeenCalled();
+    expect(info).toHaveBeenCalledTimes(1);
+    await owner.release();
+    await vi.advanceTimersByTimeAsync(10);
+    expect(h.git).toHaveBeenCalled();
+    expect(pending()).toBeNull();
+  } finally {
+    stop();
+    await owner.release();
+  }
 });

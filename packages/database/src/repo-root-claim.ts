@@ -7,9 +7,9 @@ import type { Database } from './index.js';
 // transaction can use these too. Mirrors dag-reset.ts, the other helper api and worker both call.
 type DbHandle = Parameters<Parameters<Database['transaction']>[0]>[0];
 
-/** Who is rewriting the root. Carried only so a refusal can say what it is waiting for — nothing
- *  branches on it, because the exclusion is mutual either way. */
-export type RootClaimKind = 'reset' | 'rebuild' | 'refresh' | 'edit' | 'verify';
+/** Who holds the root, for truthful refusal copy and preparation capability checks.
+ * Exclusion is mutual for every kind. */
+export type RootClaimKind = 'reset' | 'rebuild' | 'refresh' | 'edit' | 'mutation' | 'verify';
 
 /**
  * How long a root claim is honoured WITHOUT a heartbeat before readers treat it as abandoned.
@@ -514,8 +514,9 @@ export interface RootClaimHandle {
    * enough for someone else's takeover CAS — a partition that reaches us and not them, or an
    * event loop blocked for fifteen minutes. It means two writers touched one tree.
    *
-   * Observable rather than fatal, deliberately. The destructive work cannot be preempted: there
-   * is no cancelling a `copyTree` or an `rm -rf` mid-call, and THROWING afterwards would hand the
+   * Independent mutations check this before each physical write and abort further work.
+   * For preparation's already-destructive work, observable rather than fatal, deliberately.
+   * The destructive work cannot be preempted: there is no cancelling a `copyTree` or an `rm -rf` mid-call, and THROWING afterwards would hand the
    * job back to BullMQ's `attempts: 3`, which re-runs the clone and puts a third writer on the
    * same tree. What is left is to say so, loudly, at the point where a caller would otherwise
    * report a clean result.
@@ -526,16 +527,23 @@ export interface RootClaimHandle {
 // Runtime identity, not structural typing: a fabricated handle cannot authorize checkout access.
 const heldClaims = new WeakMap<
   RootClaimHandle,
-  { repositoryId: string; owner: string; active: () => boolean }
+  { repositoryId: string; owner: string; kind: RootClaimKind; active: () => boolean }
 >();
 
 export function rootClaimHandleOwns(
   handle: RootClaimHandle,
   repositoryId: string,
   owner: string | null,
+  kinds?: readonly RootClaimKind[],
 ): boolean {
   const held = heldClaims.get(handle);
-  return !!held && held.repositoryId === repositoryId && held.owner === owner && held.active();
+  return (
+    !!held &&
+    held.repositoryId === repositoryId &&
+    held.owner === owner &&
+    (!kinds || kinds.includes(held.kind)) &&
+    held.active()
+  );
 }
 
 /**
@@ -732,7 +740,7 @@ export async function acquireRootClaim(
       current = null;
     },
   };
-  heldClaims.set(handle, { repositoryId, owner, active: () => current !== null && !lost });
+  heldClaims.set(handle, { repositoryId, owner, kind, active: () => current !== null && !lost });
   return handle;
 }
 
@@ -766,6 +774,9 @@ export function rootClaimRefusal(kind: RootClaimKind | null): string {
   }
   if (kind === 'edit') {
     return 'A knowledge file in this repository is being saved. Try again in a moment.';
+  }
+  if (kind === 'mutation') {
+    return 'This repository is being changed by another file or configuration operation. Try again in a moment.';
   }
   if (kind === 'verify') {
     return 'This repository is being checked. Try again in a moment.';

@@ -284,8 +284,9 @@ survey that established this is worth not repeating:
 
 **`repositories.root_claimed_at` is a CLAIM, not a lock, and it is RECIPROCAL.** Both the reset
 and the three repo-queue handlers that `rm -rf` the root take the same claim
-(`claimRepositoryRoot`, `'reset' | 'rebuild'`), so whichever arrives second is refused in either
-direction; `refresh-tree` and the knowledge-file editor refuse while it is held. The handlers HOLD
+(`acquireRootClaim`, kinds `reset` and `rebuild`), so a second independent writer is refused; a
+queued preparation delays pickup instead of failing a ready checkout. `refresh-tree` and the
+knowledge-file editor refuse while it is held. The handlers HOLD
 it across their destructive work rather than checking once before it — a one-directional check
 leaves the window where a handler has already passed it and the reset claims the row before
 `rm(dest)` runs, and both then walk the same tree. `root_claim_kind` names what a refusal is waiting for. Deferred Starts and revivals of every
@@ -344,6 +345,22 @@ Where it IS taken the claim is per-REPOSITORY, so two root-level knowledge saves
 at the same instant refuse one another with "try again in a moment". Accepted deliberately: the
 hold is one file write long, and a per-file lock would not exclude the reset, which is repo-wide
 by nature. A task with no repository takes nothing, since there is no root to protect.
+
+Uploads, attachment removals, remote relinks/reconciliation and whole-plan removal hold a separate
+`mutation` claim (`withCheckoutMutation`), often for minutes across a streamed body or Git.
+Their refusal says the repository is being changed by another file or configuration operation,
+never that a knowledge file is being saved; the HTTP code remains `checkout_unavailable`.
+New independent mutations refuse while `refresh_pending` is set or the checkout is not ready
+(explicit repair permits `error` for raw downloads, attachment removal and remote repair).
+An already admitted owner may finish after preparation is queued. At pickup a foreign held claim
+raises `RootClaimBusyError`: the worker delays the job by five seconds with BullMQ's `DelayedError`,
+retaining its pending owner and availability without spending a failure attempt, even with
+`attempts: 1`. API mutations check `owner.lost()` before each physical step, including each streamed
+write, abort on loss and log it at release. Upload take-back removes only its own pinned inode;
+a retained aside is left alone when the public name no longer identifies that file. No connection
+spans a body or subprocess. Maintenance counting of these API holds remains a documented gap
+([release drain](release.md#the-drain-an-upgrade-runs-first)); a killed API's claim can remain live
+for fifteen minutes after its last renewal.
 
 A lock must be HELD across the work it protects, and both places to hold one cost more than the
 race: the repo worker and the task worker run in ONE process on ONE `max: 10` pool, so a repo job

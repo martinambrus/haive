@@ -22,9 +22,16 @@ const h = vi.hoisted(() => ({ db: undefined as unknown }));
 vi.mock('../src/db.js', () => ({ getDb: () => h.db }));
 
 import { Hono } from 'hono';
-import { schema, acquireRootClaim, withTaskAttachmentsLock, type Database } from '@haive/database';
+import {
+  schema,
+  acquireRootClaim,
+  ROOT_CLAIM_RENEW_MS,
+  withTaskAttachmentsLock,
+  type Database,
+} from '@haive/database';
 import { createFakeDb, type FakeRow } from '@haive/database/testing';
 import { CONFIG_KEYS, configService } from '@haive/shared';
+import * as fsSafe from '@haive/shared/fs-safe';
 import { attachmentRoutes } from '../src/routes/tasks/attachments.js';
 import { errorHandler } from '../src/middleware/error-handler.js';
 import type { AppEnv } from '../src/context.js';
@@ -368,6 +375,87 @@ describe('task attachment routes', () => {
     );
     await expect(lstat(repo)).rejects.toMatchObject({ code: 'ENOENT' });
   });
+
+  it('aborts streaming and takes back its file when renewal reports claim loss', async () => {
+    const open = fsSafe.openFileNoFollow;
+    const writes: ReturnType<typeof vi.spyOn>[] = [];
+    vi.spyOn(fsSafe, 'openFileNoFollow').mockImplementation(async (...args) => {
+      const fh = await open(...args);
+      if (fh && args[2] === 'create-exclusive') writes.push(vi.spyOn(fh, 'write'));
+      return fh;
+    });
+    vi.useFakeTimers();
+    try {
+      const body = new ReadableStream<Uint8Array>(
+        {
+          async pull(controller) {
+            fake.patch(schema.repositories, REPO, { rootClaimOwner: 'successor' });
+            await vi.advanceTimersByTimeAsync(ROOT_CLAIM_RENEW_MS);
+            controller.enqueue(new TextEncoder().encode('must not write'));
+            controller.close();
+          },
+        },
+        { highWaterMark: 0 },
+      );
+      expect(await upload('lost.md', body)).toMatchObject({
+        status: 409,
+        body: { code: 'checkout_unavailable' },
+      });
+      expect(filenames()).toEqual([]);
+      expect(await exists(up('lost.md'))).toBe(false);
+      expect(writes).toHaveLength(1);
+      expect(writes[0]).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('takes back a finished upload when recheck refuses without a rename', async () => {
+    const body = new ReadableStream<Uint8Array>(
+      {
+        pull(controller) {
+          fake.patch(schema.repositories, REPO, { status: 'error' });
+          controller.enqueue(new TextEncoder().encode('orphan'));
+          controller.close();
+        },
+      },
+      { highWaterMark: 0 },
+    );
+    expect(await upload('held.md', body)).toMatchObject({
+      status: 409,
+      body: { code: 'checkout_unavailable' },
+    });
+    expect(filenames()).toEqual([]);
+    expect(await exists(up('held.md'))).toBe(false);
+  });
+
+  it('keeps raw download and deletion available for repair on an error checkout', async () => {
+    const row = await seedFile('repair.md', 'repair bytes');
+    fake.patch(schema.repositories, REPO, { status: 'error' });
+    const raw = await download(row.id as string);
+    expect(raw.status).toBe(200);
+    expect(raw.bytes.toString()).toBe('repair bytes');
+    expect((await send('DELETE', `/${TASK}/attachments/${row.id}`)).status).toBe(200);
+    expect(filenames()).toEqual([]);
+    expect(await exists(up('repair.md'))).toBe(false);
+    expect(await upload('new.md')).toMatchObject({
+      status: 409,
+      body: { code: 'checkout_unavailable' },
+    });
+  });
+
+  it.each(['single', 'folder'])(
+    'deletes attachment rows DB-only after repository deletion: %s',
+    async (kind) => {
+      const row = await seedFile('docs/gone.md', 'retained');
+      fake.patch(schema.tasks, TASK, { repositoryId: null });
+      const route =
+        kind === 'single' ? `/${TASK}/attachments/${row.id}` : `/${TASK}/attachments?prefix=docs`;
+      expect((await send('DELETE', route)).status).toBe(200);
+      expect(filenames()).toEqual([]);
+      expect(await readFile(up('docs/gone.md'), 'utf8')).toBe('retained');
+    },
+  );
 
   it('does not recreate a missing checkout anchor on upload', async () => {
     await rm(repo, { recursive: true });

@@ -1,3 +1,4 @@
+import { RootClaimBusyError } from '../repo/root-claim-busy.js';
 import path from 'node:path';
 import {
   assertRepoJobOwner,
@@ -8,7 +9,7 @@ import {
 import { CheckoutRepairNeededError } from '../repo/repair-needed.js';
 import { scrubErrorPaths } from '@haive/shared/logger';
 import { safeProcessor } from './safe-processor.js';
-import { Worker, UnrecoverableError, type Job } from 'bullmq';
+import { Worker, DelayedError, UnrecoverableError, type Job } from 'bullmq';
 import { and, eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import {
@@ -33,7 +34,7 @@ import { handleRefresh } from '../repo/refresh.js';
 export function startRepoWorker(repoStorageRoot: string): Worker {
   const worker = new Worker<RepoJobPayload>(
     QUEUE_NAMES.REPO,
-    safeProcessor(async (job: Job<RepoJobPayload>) =>
+    safeProcessor(async (job: Job<RepoJobPayload>, token) =>
       withRepoJobOwner(job.data.repositoryId, job.id ?? '', async () => {
         const db = getDb();
         const payload = job.data;
@@ -89,6 +90,14 @@ export function startRepoWorker(repoStorageRoot: string): Worker {
               'Obsolete or ownerless repository job refused',
             );
             return;
+          }
+          if (err instanceof RootClaimBusyError) {
+            logger.info(
+              { repositoryId: payload.repositoryId, jobId: job.id, kind: err.kind },
+              'Repository preparation waiting for root claim',
+            );
+            await job.moveToDelayed(Date.now() + 5_000, token);
+            throw new DelayedError();
           }
           const message = scrubErrorPaths(err);
           logger.error(

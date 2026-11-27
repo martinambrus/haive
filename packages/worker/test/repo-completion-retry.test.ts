@@ -104,3 +104,47 @@ it.each([REPO_JOB_NAMES.CLONE, REPO_JOB_NAMES.COPY, REPO_JOB_NAMES.INIT, REPO_JO
     });
   },
 );
+
+it.each([1, 3])(
+  'claim contention delays even the last of %i allowed attempts without changing ready',
+  async (attempts) => {
+    const { RootClaimBusyError } = await import('../src/repo/root-claim-busy.js');
+    const { DelayedError } = await import('bullmq');
+    const fake = createFakeDb({ repositories: schema.repositories });
+    const repositoryId = randomUUID();
+    const jobId = randomUUID();
+    fake.insert(schema.repositories, {
+      id: repositoryId,
+      status: 'ready',
+      refreshPending: true,
+      refreshJobId: jobId,
+    });
+    h.db = fake.db;
+    h.prepare
+      .mockRejectedValueOnce(new RootClaimBusyError('mutation'))
+      .mockResolvedValueOnce(undefined);
+    startRepoWorker('/fixture');
+    const moveToDelayed = vi.fn().mockResolvedValue(undefined);
+    const job = {
+      id: jobId,
+      name: REPO_JOB_NAMES.SCAN,
+      data: { repositoryId, userId: 'fixture-user' },
+      opts: { attempts },
+      attemptsMade: attempts - 1,
+      moveToDelayed,
+    };
+    await expect(h.processor!(job)).rejects.toBeInstanceOf(DelayedError);
+    expect(moveToDelayed).toHaveBeenCalledOnce();
+    expect(fake.rows(schema.repositories)[0]).toMatchObject({
+      status: 'ready',
+      refreshPending: true,
+      refreshJobId: jobId,
+    });
+    await h.processor!(job);
+    expect(fake.rows(schema.repositories)[0]).toMatchObject({
+      status: 'ready',
+      refreshPending: false,
+      refreshJobId: null,
+    });
+  },
+);

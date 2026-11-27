@@ -4,11 +4,11 @@ import { cp, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/pr
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
-import { Queue, type Job, type Worker } from 'bullmq';
+import { Queue, QueueEvents, type Job, type Worker } from 'bullmq';
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createBullRedisConnection, QUEUE_NAMES, REPO_JOB_NAMES } from '@haive/shared';
 import type { RepoJobPayload } from '@haive/shared';
-import { schema, type Database } from '@haive/database';
+import { acquireRootClaim, schema, type Database } from '@haive/database';
 import { createFakeDb } from '@haive/database/testing';
 
 // The refresh route adds its job with `attempts: 3`, and BullMQ runs a processor that throws again.
@@ -25,6 +25,7 @@ const h = vi.hoisted(() => ({
   restore: vi.fn(),
   seed: vi.fn(),
   holding: false,
+  realClaims: false,
   /** Stand in for the copy and the clone that follow the move. Null runs the real copy; the clone
    *  is never real, and with no stand-in it finishes and leaves nothing. */
   copyFault: null as null | ((src: string, dest: string) => Promise<void>),
@@ -34,7 +35,8 @@ vi.mock('../src/repo/clone.js', async (original) => {
   const real = await original<typeof import('../src/repo/clone.js')>();
   return {
     ...real,
-    withRootClaim: async (_db: unknown, _id: string, fn: () => Promise<void>) => fn(),
+    withRootClaim: (...args: Parameters<typeof real.withRootClaim>) =>
+      h.realClaims ? real.withRootClaim(...args) : args[2](),
     persistDetection: h.persist,
     restoreProjectData: h.restore,
     copyTree: (src: string, dest: string) =>
@@ -74,6 +76,9 @@ const row: {
   errorCode?: string | null;
   refreshPending: boolean;
   refreshJobId: string | null;
+  rootClaimedAt?: Date | null;
+  rootClaimOwner?: string | null;
+  rootClaimKind?: string | null;
 } = {
   id: REPO,
   status: 'cloning',
@@ -120,6 +125,10 @@ beforeEach(async () => {
   row.refreshPending = false;
   row.refreshJobId = null;
   h.holding = false;
+  h.realClaims = false;
+  row.rootClaimedAt = null;
+  row.rootClaimOwner = null;
+  row.rootClaimKind = null;
   h.copyFault = null;
   h.cloneFault = null;
   h.seed.mockResolvedValue(undefined);
@@ -347,5 +356,46 @@ describe.skipIf(!redisUrl)('a rebuilt checkout that needs repair', () => {
     expect(row).toMatchObject({ status: 'error', errorCode: 'checkout_repair_needed' });
     expect(await asides(dest)).toHaveLength(1);
     expect(h.persist).not.toHaveBeenCalled();
+  });
+});
+
+describe.skipIf(!redisUrl)('preparation waits behind an admitted upload lease', () => {
+  it('keeps ready and re-drives attempts: 1 after the lease releases without a failure attempt', async () => {
+    const { dest, payload } = await fixture();
+    await writeFile(path.join(dest, '.git/HEAD'), 'ref: refs/heads/main\n');
+    row.status = 'ready';
+    h.holding = true; // A live task makes this usable refresh finish without moving Git.
+    h.realClaims = true;
+    const upload = (await acquireRootClaim(db, REPO, 'mutation'))!;
+    expect(upload).not.toBeNull();
+    const events = new QueueEvents(QUEUE_NAMES.REPO, { connection: connection! });
+    await events.waitUntilReady();
+    const delayed = new Promise<string>((resolve) => {
+      events.once('delayed', () => resolve('delayed'));
+      events.once('failed', () => resolve('failed'));
+    });
+    const completed = new Promise<void>((resolve) => events.once('completed', () => resolve()));
+    const jobId = randomUUID();
+    row.refreshPending = true;
+    row.refreshJobId = jobId;
+    worker = startRepoWorker(root);
+    await worker.waitUntilReady();
+    try {
+      const job = await queue!.add(REPO_JOB_NAMES.REFRESH, payload, { jobId, attempts: 1 });
+      expect(await delayed).toBe('delayed');
+      expect(row).toMatchObject({ status: 'ready', refreshPending: true, refreshJobId: jobId });
+      expect((await queue!.getJob(jobId))!.attemptsMade).toBe(0);
+      await upload.release();
+      await job.promote(); // Drive delayed pickup explicitly; no wall-clock backoff wait.
+      await completed;
+      const ended = (await queue!.getJob(jobId))!;
+      expect(await ended.getState()).toBe('completed');
+      expect(ended.attemptsMade).toBe(1);
+      expect(row).toMatchObject({ status: 'ready', refreshPending: false, refreshJobId: null });
+      expect(await readFile(path.join(dest, 'notes.md'), 'utf8')).toBe('keep me\n');
+    } finally {
+      await upload.release();
+      await events.close();
+    }
   });
 });

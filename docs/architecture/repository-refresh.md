@@ -208,26 +208,35 @@ already shipped in `2c16ca95e` remain unchanged. T594 C2 also resolves T602 item
 ## Checkout access during replacement (T780 PR2, reduced scope)
 
 `@haive/shared/checkout-access` is the server-side admission policy. `read` requires ready;
-`mutation` requires ready and no foreign live root claim; explicit `repair` availability also
-permits an error checkout, so remote configuration can still be repaired. Neither admits cloning.
+`mutation` admission requires ready, no owed preparation (`refresh_pending`) and no foreign live
+root claim. Explicit `repair` availability also permits an error checkout for raw attachment
+reads, attachment removal and remote configuration repair. Neither admits cloning.
 `preparation` requires the actual renewing `RootClaimHandle`, verified against its private runtime
-registration, repository ID and the live row's owner. A boolean, copied object, another repository's
-handle, expired/replaced claim or released handle grants no permission. This mode is available for
+registration, repository ID, preparation kind (`rebuild` or `refresh`) and the live row's owner.
+A boolean, copied object, another repository's handle, expired/replaced claim or released handle grants no permission. This mode is available for
 preparation's private restore; wiring existing preparation/projection callers remains follow-up work.
 
-`withCheckoutMutation` acquires the renewing root claim **before** attachment/domain/row locks,
+`withCheckoutMutation` acquires a distinct `mutation` root claim **before** attachment/domain/row locks,
 checks availability again after acquisition and releases in `finally`. It retains no connection
 across an upload body or subprocess. A claim collision answers 409 `checkout_unavailable`;
-concurrent independent mutations in the same repository must retry. A read uses admission only:
+concurrent independent mutations in the same repository must retry, with copy naming the held
+kind. A preparation queued after an admitted mutation waits: `withRootClaim` raises
+`RootClaimBusyError`, and the queue delays pickup five seconds without changing status, clearing
+its owner or consuming a failure attempt. The admitted mutation can finish while that preparation
+is owed; a new mutation cannot enter that queue gap. Independent writes consult `owner.lost()`
+before every physical step and log claim loss on release. A refused post-stream recheck takes back
+the upload by its pinned inode, leaving no orphan in the public tree and preserving an aside.
+A read uses admission only:
 a failed acquisition rechecks availability to classify a rename as `checkout_unavailable`, while
 an already verified descriptor can finish on the preserved inode. These are not snapshot exports.
 The policy never creates an anchor or changes repository status or preparation ownership.
 
 This PR applies that policy to attachment upload/raw/single-delete/folder-delete, remote relink
-and its reconciliation sweep, and whole-plan deletion (the lease spans its database deletion and
-both physical mirror removals). Attachment lists and database-only plan list/detail/node edits
-remain available. The raw route's error recheck preserves ordinary missing-file and containment
-errors when the checkout is still ready. Ordinary ready fast-forwards do not hide read-only access.
+and its reconciliation sweep (one info line per checkout hold, redriven after release), and
+whole-plan deletion (the lease spans its database deletion and both physical mirror removals). Attachment lists and database-only plan list/detail/node edits
+remain available. A task whose repository was deleted can remove its attachment rows DB-only,
+without guessing a filesystem root. The raw route's error recheck preserves ordinary missing-file
+and containment errors when the checkout is still ready. Ordinary ready fast-forwards do not hide read-only access.
 
 The remaining independent entries in the T780 analysis are **not yet covered**: plan writer/importer
 and Save/Pull, project-state sync/writer/journal/rules/metadata recovery, initial detection/legacy

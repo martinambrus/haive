@@ -307,6 +307,20 @@ background job a route queued: a repository `cloning` or with `refresh_pending` 
 sandbox image is `building` or whose model is `provisioning`. `GET /admin/maintenance/blocking` and
 the admin maintenance page list both, so what the page shows is what the updater waits for; a job
 row stuck in its in-progress status holds the drain until the deadline, and `--force` passes it.
+
+**Known drain gap (T780 PR2 L6, found-not-fixed):** API-held root claims for streamed attachments,
+attachment removal, remote relink/reconciliation and plan removal (`root_claim_kind = 'mutation'`)
+are neither counted by `liveWorkCount` nor listed by `/admin/maintenance/blocking`. Their admissions
+also do not take the new-work fence, so a zero count does not prove those requests finished.
+Before starting an upgrade, let those requests finish and prevent new attachment/relink/plan-delete
+requests throughout the drain and service replacement. Read the repository claim rows as an
+additional check: `root_claimed_at > now() - interval '15 minutes'` must return no live holds.
+A lease renews while the API is alive, with no duration cap. Stopping it mid-request leaves its
+last stamp live for up to `ROOT_CLAIM_STALE_MS` (15 minutes after the last renewal); new preparations
+wait for that expiry, preserving ready and their pending marker. This bound describes abandoned
+claims only, not a safe deadline for interrupting a live upload. Full repair needs both counted
+claims and mutation admission under the maintenance fence; this PR does not claim that fix.
+
 Which tasks count depends on the state in force (`drainTaskStatuses`, in `@haive/shared`). Over
 `normal` or `draining` they are `queued`, `running`, `paused`, `waiting_user` and `waiting_pr`: the
 owners can still come back to a parked task. Under a `maintenance` the updater kept, only `queued`

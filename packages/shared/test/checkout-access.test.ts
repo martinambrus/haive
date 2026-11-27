@@ -1,5 +1,11 @@
 import { beforeEach, expect, it } from 'vitest';
-import { acquireRootClaim, schema, type Database, type RootClaimHandle } from '@haive/database';
+import {
+  acquireRootClaim,
+  rootClaimRefusal,
+  schema,
+  type Database,
+  type RootClaimHandle,
+} from '@haive/database';
 import { createFakeDb } from '@haive/database/testing';
 import { requireCheckoutAccess, withCheckoutMutation } from '../src/checkout-access.js';
 const id = '00000000-0000-4000-8000-000000007810';
@@ -87,4 +93,54 @@ it('cannot acquire a claim for another user', async () => {
     code: 'checkout_unavailable',
   });
   expect(fake.rows(schema.repositories)[0]!.rootClaimOwner).toBeNull();
+});
+
+it('refuses independent mutations while preparation is owed, including post-ready imports', async () => {
+  fake.patch(schema.repositories, id, { refreshPending: true });
+  await expect(withCheckoutMutation(db, id, userId, async () => 'unsafe')).rejects.toMatchObject({
+    code: 'checkout_unavailable',
+  });
+  expect(fake.rows(schema.repositories)[0]!.rootClaimOwner).toBeNull();
+});
+it.each(['edit', 'mutation'] as const)('rejects a %s capability for preparation', async (kind) => {
+  const owner = (await acquireRootClaim(db, id, kind))!;
+  fake.patch(schema.repositories, id, { status: 'cloning' });
+  try {
+    await expect(
+      requireCheckoutAccess(db, id, { mode: 'preparation', owner }),
+    ).rejects.toMatchObject({ code: 'checkout_unavailable' });
+  } finally {
+    await owner.release();
+  }
+});
+it('uses distinct truthful copy for long mutations and short knowledge edits', () => {
+  expect(rootClaimRefusal('edit')).toContain('knowledge file');
+  expect(rootClaimRefusal('mutation')).toContain('being changed');
+});
+it('holds long independent work as a mutation claim', async () => {
+  await withCheckoutMutation(db, id, userId, async () => {
+    expect(fake.rows(schema.repositories)[0]!.rootClaimKind).toBe('mutation');
+  });
+});
+
+it.each(['reset', 'rebuild', 'refresh', 'edit', 'mutation', 'verify'] as const)(
+  'keeps the stable refusal code with %s copy',
+  async (kind) => {
+    const owner = (await acquireRootClaim(db, id, kind))!;
+    try {
+      await expect(
+        withCheckoutMutation(db, id, userId, async () => 'unsafe'),
+      ).rejects.toMatchObject({ code: 'checkout_unavailable', message: rootClaimRefusal(kind) });
+    } finally {
+      await owner.release();
+    }
+  },
+);
+it('lets an admitted owner finish after a preparation becomes owed', async () => {
+  await withCheckoutMutation(db, id, userId, async (owner) => {
+    fake.patch(schema.repositories, id, { refreshPending: true });
+    await expect(requireCheckoutAccess(db, id, { mode: 'mutation', owner })).resolves.toMatchObject(
+      { id },
+    );
+  });
 });

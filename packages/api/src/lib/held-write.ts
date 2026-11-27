@@ -12,12 +12,14 @@ export async function writeBodyToHeld(
   maxBytes: number,
   tooLarge: () => Error,
   start = 0,
+  beforeWrite: () => void = () => {},
 ): Promise<number> {
   let total = 0;
   for await (const chunk of Readable.fromWeb(body as never) as AsyncIterable<Uint8Array>) {
     if (total + chunk.byteLength > maxBytes) throw tooLarge();
     let written = 0;
     while (written < chunk.byteLength) {
+      beforeWrite();
       const { bytesWritten } = await fh.write(
         chunk,
         written,

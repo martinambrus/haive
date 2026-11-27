@@ -8,6 +8,7 @@ import { createFakeDb } from '@haive/database/testing';
 import { ATTACHMENT_ARCHIVE_MAX_FILES } from '../src/attachments/archive.js';
 import {
   readExpansionIntent,
+  removeFiles,
   rewriteAttachmentsManifest,
   settleExpansionAttempt,
 } from '../src/attachments-fs.js';
@@ -149,4 +150,29 @@ describe('readExpansionIntent', () => {
     await intent(ATTACHMENT_ARCHIVE_MAX_FILES + 1);
     expect(await readExpansionIntent(f.anchor, stagingRel)).toBeNull();
   });
+});
+
+it('checks the lease before each removal, aborting the remaining files after loss', async () => {
+  const f = await fixture();
+  for (const name of ['a.md', 'b.md'])
+    await writeFile(path.join(f.anchor, f.uploadsRel, name), name);
+  let calls = 0;
+  const beforeWrite = () => {
+    if (++calls === 2) throw new Error('lease lost');
+  };
+  await expect(removeFiles(f.anchor, f.uploadsRel, ['a.md', 'b.md'], beforeWrite)).rejects.toThrow(
+    'lease lost',
+  );
+  expect(await exists(path.join(f.anchor, f.uploadsRel, 'a.md'))).toBe(false);
+  expect(await readFile(path.join(f.anchor, f.uploadsRel, 'b.md'), 'utf8')).toBe('b.md');
+});
+it('does not swallow a lost lease as a best-effort manifest failure', async () => {
+  const f = await fixture();
+  f.attach('a.md');
+  await expect(
+    rewriteAttachmentsManifest(f.db, TASK, f.anchor, f.uploadsRel, () => {
+      throw new Error('lease lost');
+    }),
+  ).rejects.toThrow('lease lost');
+  expect(await f.listed()).toBeNull();
 });

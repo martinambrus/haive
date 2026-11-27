@@ -30,11 +30,12 @@ const SANDBOX_GID = 1000;
 /**
  * Rewrite `<uploads>/_ATTACHMENTS.md` from the task's rows, or remove it once none remain.
  *
- * It NEVER throws, because every caller has already done the work the manifest describes — an
+ * I/O failures never throw, because every caller has already done the work the manifest describes — an
  * upload's row exists, a delete's files are gone — and an error here used to turn that into a 500
  * the client retries, which for an upload is a second copy of the file. A link planted at the name
  * is replaced as a link (`replaceLeafLink`), so one planted link no longer blocks every later
  * upload and delete; anything else standing there is logged and left for the next write.
+ * A supplied beforeWrite ownership fence still aborts on lease loss.
  *
  * The rows are read and the file written under the task's attachments lock, so the last writer to
  * hold it describes the latest rows: two writers reading, then writing in the other order, used to
@@ -47,6 +48,7 @@ export async function rewriteAttachmentsManifest(
   taskId: string,
   anchor: string,
   uploadsRel: string,
+  beforeWrite: () => void = () => {},
 ): Promise<void> {
   const manifestRel = `${uploadsRel}/${ATTACHMENTS_MANIFEST_NAME}`;
   try {
@@ -58,22 +60,26 @@ export async function rewriteAttachmentsManifest(
       });
       const body = renderAttachmentsManifest(rows);
       if (body === null) {
+        beforeWrite();
         await removeNoFollow(anchor, manifestRel).catch(() => {});
         return;
       }
       // Replace-atomic: every agent is told to read this index, so a reader sees the old one or
       // the new one and never a partial write.
+      beforeWrite();
       await writeFileNoFollow(anchor, manifestRel, body, {
         fileMode: 0o644,
         replaceLeafLink: true,
       });
       // Best-effort: a writer that is not root cannot hand the file over, and 0644 is
       // world-readable.
+      beforeWrite();
       await chownNoFollow(anchor, manifestRel, { uid: SANDBOX_UID, gid: SANDBOX_GID }).catch(
         () => {},
       );
     });
   } catch (err) {
+    beforeWrite(); // Claim loss must abort rather than become a best-effort manifest warning.
     log.warn({ err, taskId }, 'could not rewrite the attachments manifest');
   }
 }
@@ -85,8 +91,10 @@ export async function removeFiles(
   anchor: string,
   uploadsRel: string,
   files: readonly string[],
+  beforeWrite: () => void = () => {},
 ): Promise<void> {
   for (const file of files) {
+    beforeWrite();
     await removeNoFollow(anchor, `${uploadsRel}/${file}`).catch(() => {});
   }
 }
@@ -97,9 +105,11 @@ export async function pruneEmptyDirs(
   anchor: string,
   uploadsRel: string,
   relDir: string,
+  beforeWrite: () => void = () => {},
 ): Promise<void> {
   let cursor = relDir;
   while (cursor !== '' && cursor !== '.') {
+    beforeWrite();
     try {
       // Non-recursive on purpose: ENOTEMPTY is the signal to stop, so a directory something else
       // still lives in is left exactly as it is.
@@ -117,10 +127,11 @@ export async function pruneAfter(
   anchor: string,
   uploadsRel: string,
   removed: readonly string[],
+  beforeWrite: () => void = () => {},
 ): Promise<void> {
   const dirs = [...new Set(removed.map((f) => splitAttachmentPath(f).dir))].filter((d) => d !== '');
   dirs.sort((a, b) => b.split('/').length - a.split('/').length);
-  for (const dir of dirs) await pruneEmptyDirs(anchor, uploadsRel, dir);
+  for (const dir of dirs) await pruneEmptyDirs(anchor, uploadsRel, dir, beforeWrite);
 }
 
 /**
@@ -207,6 +218,7 @@ export async function settleExpansionAttempt(
   anchor: string,
   uploadsRel: string,
   staging: string,
+  beforeWrite: () => void = () => {},
 ): Promise<boolean> {
   const stagingRel = `${uploadsRel}/${staging}`;
   const intent = await readExpansionIntent(anchor, stagingRel);
@@ -214,6 +226,7 @@ export async function settleExpansionAttempt(
     const claimed = `${uploadsRel}/${intent.dir}`;
     if ((await lstatNoFollow(anchor, `${stagingRel}/tree`)) !== null) {
       if ((await lstatNoFollow(anchor, claimed))?.kind === 'directory') {
+        beforeWrite();
         await removeNoFollow(anchor, claimed).catch(() => {});
       }
     } else {
@@ -230,9 +243,10 @@ export async function settleExpansionAttempt(
         for (const row of rows) owned.add(row.filename);
       }
       const orphans = names.filter((name) => !owned.has(name));
-      await removeFiles(anchor, uploadsRel, orphans);
-      await pruneAfter(anchor, uploadsRel, orphans);
+      await removeFiles(anchor, uploadsRel, orphans, beforeWrite);
+      await pruneAfter(anchor, uploadsRel, orphans, beforeWrite);
     }
+    beforeWrite();
     await removeNoFollow(anchor, `${stagingRel}/${EXPANSION_INTENT_FILE}`).catch(() => {});
   }
   return intent !== null;
@@ -248,11 +262,12 @@ export async function settleExpansionIntents(
   anchor: string,
   uploadsRel: string,
   settled: string[],
+  beforeWrite: () => void = () => {},
 ): Promise<void> {
   for (const entry of (await readdirNoFollow(anchor, uploadsRel)) ?? []) {
     if (
       expansionAttemptArchiveId(entry.name) !== null &&
-      (await settleExpansionAttempt(tx, taskId, anchor, uploadsRel, entry.name))
+      (await settleExpansionAttempt(tx, taskId, anchor, uploadsRel, entry.name, beforeWrite))
     ) {
       settled.push(entry.name);
     }
@@ -269,13 +284,14 @@ export async function settleExpansionAttempts(
   uploadsRel: string,
   archiveIds: ReadonlySet<string>,
   keep: string | null = null,
+  beforeWrite: () => void = () => {},
 ): Promise<string[]> {
   const settled: string[] = [];
   const entries = (await readdirNoFollow(anchor, uploadsRel)) ?? [];
   for (const entry of entries) {
     const archiveId = expansionAttemptArchiveId(entry.name);
     if (entry.name !== keep && archiveId !== null && archiveIds.has(archiveId)) {
-      await settleExpansionAttempt(tx, taskId, anchor, uploadsRel, entry.name);
+      await settleExpansionAttempt(tx, taskId, anchor, uploadsRel, entry.name, beforeWrite);
       settled.push(entry.name);
     }
   }
@@ -288,8 +304,10 @@ export async function removeExpansionStagings(
   anchor: string,
   uploadsRel: string,
   stagings: readonly string[],
+  beforeWrite: () => void = () => {},
 ): Promise<void> {
   for (const staging of stagings) {
+    beforeWrite();
     await removeNoFollow(anchor, `${uploadsRel}/${staging}`, {
       recursive: true,
       repairPermissions: true,

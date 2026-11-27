@@ -427,7 +427,7 @@ jobs:
       - name: Repo refresh retries on a real Redis
         if: ${{ !cancelled() && steps.migrate.conclusion == 'success' }}
         timeout-minutes: 5
-        run: pnpm --filter @haive/worker exec vitest run test/refresh-rebuild-retries.test.ts
+        run: pnpm --filter @haive/worker exec vitest run test/refresh-rebuild-retries.test.ts --maxWorkers=2
         env:
           REFRESH_RETRIES_TEST_REDIS_URL: redis://localhost:6379/5
 

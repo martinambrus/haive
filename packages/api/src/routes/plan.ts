@@ -1,4 +1,4 @@
-import { withCheckoutMutation } from '@haive/shared/checkout-access';
+import { assertCheckoutMutationOwner, withCheckoutMutation } from '@haive/shared/checkout-access';
 import { scrubErrorPaths } from '@haive/shared/logger';
 import { Hono } from 'hono';
 import { z } from 'zod';
@@ -1072,7 +1072,7 @@ planRoutes.delete('/:id/plan', async (c) => {
   const root = await findPlanRoot(db, repositoryId);
   if (!root) return c.json({ deletedNodes: 0, mirrorRemoved: true });
 
-  return withCheckoutMutation(db, repositoryId, userId, async () => {
+  return withCheckoutMutation(db, repositoryId, userId, async (owner) => {
     // Through applyPlanPatch like every other write; the subtree goes by the
     // parent_id cascade. No expectedVersion: the user is deleting the whole
     // plan, so a concurrent edit to one node does not change their intent, and a
@@ -1094,9 +1094,11 @@ planRoutes.delete('/:id/plan', async (c) => {
     try {
       const repoRoot = await resolveRepoRoot(db, userId, repositoryId);
       for (const rel of [HAIVE_DATA_FILES.plan, HAIVE_DATA_FILES.planMarkdown]) {
+        assertCheckoutMutationOwner(owner);
         await removeNoFollow(repoRoot, rel);
       }
     } catch (err) {
+      assertCheckoutMutationOwner(owner);
       mirrorRemoved = false;
       logger.warn({ err, repositoryId }, 'plan mirror removal failed after plan delete');
     }
