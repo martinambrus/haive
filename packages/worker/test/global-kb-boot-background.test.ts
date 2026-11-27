@@ -1,14 +1,19 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { logger } from '@haive/shared';
+import { configService, ConfigUnavailableError, logger } from '@haive/shared';
 import type { Database } from '@haive/database';
 import { createFakeDb } from '@haive/database/testing';
 import { globalKbEntries } from '@haive/shared/global-kb';
 
-const h = vi.hoisted(() => ({ kb: undefined as unknown, opts: undefined as unknown }));
+const h = vi.hoisted(() => ({
+  kb: undefined as unknown,
+  error: undefined as unknown,
+  opts: undefined as unknown,
+}));
 vi.mock('@haive/shared/global-kb', async (importOriginal) => ({
   ...(await importOriginal<object>()),
   withGlobalKb: async (_db: unknown, fn: (ctx: unknown) => Promise<unknown>, opts?: unknown) => {
     h.opts = opts;
+    if (h.error) throw h.error;
     return fn({ db: h.kb });
   },
 }));
@@ -17,7 +22,10 @@ import * as migrations from '../src/data-migrations.js';
 const db = {} as Database;
 const original = [...migrations.DATA_MIGRATIONS];
 let stop: (() => void) | undefined;
-beforeEach(() => vi.useFakeTimers());
+beforeEach(() => {
+  vi.useFakeTimers();
+  h.error = undefined;
+});
 afterEach(async () => {
   stop?.();
   stop = undefined;
@@ -157,6 +165,7 @@ describe('global KB boot repair', () => {
 describe('alias key repair while jobs are admitted', () => {
   const recompute = original.find((m) => m.id === 'recomputeAliasedTopicKeys')!.run;
   const setup = () => {
+    vi.spyOn(configService, 'getBoolean').mockResolvedValue(true);
     const fake = createFakeDb({ globalKbEntries });
     h.kb = fake.db;
     fake.insert(globalKbEntries, {
@@ -215,3 +224,45 @@ describe('alias key repair while jobs are admitted', () => {
     expect(fake.rows(globalKbEntries)[0]!.topicKey).toBe('best_practice:redis');
   });
 });
+
+describe('global-store repair admission', () => {
+  it('does not open the disabled store for alias recompute', async () => {
+    vi.spyOn(configService, 'getBoolean').mockResolvedValue(false);
+    h.opts = undefined;
+    await original.find((m) => m.id === 'recomputeAliasedTopicKeys')!.run(db);
+    expect(h.opts).toBeUndefined();
+  });
+
+  it('keeps heading cleanup behind upgrade commit and propagates a typed config outage', async () => {
+    const migration = original.find((m) => m.id === 'dropHeadingOnlyGlobalKbChunks')!;
+    expect(migration.kind).toBe('destructive');
+    expect(migration.background).toBeUndefined();
+    vi.spyOn(configService, 'getBoolean').mockResolvedValue(true);
+    h.error = new ConfigUnavailableError('get');
+    await expect(migration.run(db)).rejects.toBe(h.error);
+    const signal = new AbortController().signal;
+    await expect(migration.run(db, { deadlineMs: 12, signal })).rejects.toBe(h.error);
+    expect(h.opts).toMatchObject({ deadlineMs: 12, signal });
+  });
+});
+
+it.each([undefined, new AbortController().signal])(
+  'keeps ordinary heading cleanup errors best effort (signal=%s)',
+  async (signal) => {
+    vi.spyOn(configService, 'getBoolean').mockResolvedValue(true);
+    h.error = Object.assign(new Error('permission denied'), { code: '42501' });
+    await expect(
+      original.find((m) => m.id === 'dropHeadingOnlyGlobalKbChunks')!.run(db, { signal }),
+    ).resolves.toBeUndefined();
+  },
+);
+it.each([undefined, new AbortController().signal])(
+  'propagates coded heading cleanup deadlines (signal=%s)',
+  async (signal) => {
+    vi.spyOn(configService, 'getBoolean').mockResolvedValue(true);
+    h.error = Object.assign(new Error('private details'), { code: '57014' });
+    await expect(
+      original.find((m) => m.id === 'dropHeadingOnlyGlobalKbChunks')!.run(db, { signal }),
+    ).rejects.toMatchObject({ code: 'GLOBAL_KB_DEADLINE' });
+  },
+);

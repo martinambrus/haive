@@ -25,6 +25,8 @@ import {
   resolveTaskStackContext,
   stackProjectName,
   withGlobalKb,
+  globalKbCallOptions,
+  type GlobalKbCallOptions,
   type ProjectFacetSet,
 } from '@haive/shared/global-kb';
 import { getDb } from '../db.js';
@@ -362,7 +364,9 @@ ragRoutes.post('/search', sandboxBodyLimit, async (c) => {
 
   const availability: { note?: string } = {};
   const cliInvocationId = await ragInvocationId(getDb(), verified);
-  const hits = await executeRagSearch(taskId, query, topK, 'all', availability);
+  const hits = await executeRagSearch(taskId, query, topK, 'all', availability, {
+    signal: c.req.raw.signal,
+  });
   await logRagQuery(getDb(), taskId, query, topK ?? null, hits, cliInvocationId);
   return c.json({ hits, ...availability });
 });
@@ -374,6 +378,7 @@ export async function executeRagSearch(
   topK?: number,
   scope: 'local' | 'global' | 'all' = 'all',
   availability: { note?: string } = {},
+  opts: GlobalKbCallOptions = {},
 ): Promise<RagSearchHit[]> {
   const effectiveTopK = topK ?? DEFAULT_RAG_SEARCH_CONFIG.topK;
   const db = getDb();
@@ -511,12 +516,15 @@ export async function executeRagSearch(
             }
             return { scoped, bodies };
           }),
-        {
-          connectTimeoutSeconds: RAG_SEARCH_CONNECT_TIMEOUT_SECONDS,
-          deadlineMs: RAG_SEARCH_DEADLINE_MS,
-          // The store is searched with a vector from this snapshot's model, so it opens the same one.
-          settings: embedSettings,
-        },
+        globalKbCallOptions(
+          {
+            ...opts,
+            connectTimeoutSeconds: opts.connectTimeoutSeconds ?? RAG_SEARCH_CONNECT_TIMEOUT_SECONDS,
+            // The store is searched with a vector from this snapshot's model, so it opens the same one.
+            settings: embedSettings,
+          },
+          RAG_SEARCH_DEADLINE_MS,
+        ),
       );
       globalHits = result.scoped;
       globalBodies = result.bodies;

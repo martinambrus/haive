@@ -513,6 +513,7 @@ describe('rag_search, the global store', () => {
       {
         connectTimeoutSeconds: 3,
         deadlineMs: DEADLINE_MS,
+        signal: expect.any(AbortSignal),
         settings: expect.objectContaining({ ollamaUrl: GLOBAL_OLLAMA, embedModel: 'global-model' }),
       },
     ]);

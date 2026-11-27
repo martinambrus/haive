@@ -1,5 +1,9 @@
 import { describe, expect, it } from 'vitest';
-import { GlobalKbDeadlineError, classifyGlobalKbError } from '../src/global-kb/errors.js';
+import {
+  GlobalKbDeadlineError,
+  classifyGlobalKbError,
+  rethrowIfGlobalKbTimeout,
+} from '../src/global-kb/errors.js';
 
 const coded = (code: string, message = 'write ' + code + ' kb.internal.example:5432') =>
   Object.assign(new Error(message), { code });
@@ -63,8 +67,23 @@ describe('classifyGlobalKbError', () => {
 describe('GlobalKbDeadlineError', () => {
   it('names its limit and carries a code the classifier knows', () => {
     const err = new GlobalKbDeadlineError(6000);
-    expect(err.message).toBe('global KB call exceeded 6000 ms');
+    expect(err.message).toBe(
+      '[GLOBAL_KB_DEADLINE] global KB call exceeded 6000 ms; retry the operation.',
+    );
     expect(err.code).toBe('GLOBAL_KB_DEADLINE');
     expect(err).toBeInstanceOf(Error);
   });
+});
+
+it('normalizes timeouts through codes and causes, without using or exposing their messages', () => {
+  for (const code of ['57014', 'CONNECT_TIMEOUT', 'GLOBAL_KB_DEADLINE']) {
+    const err = Object.assign(new Error('wrapper'), { cause: coded(code) });
+    expect(() => rethrowIfGlobalKbTimeout(err)).toThrow(GlobalKbDeadlineError);
+    try {
+      rethrowIfGlobalKbTimeout(err);
+    } catch (timeout) {
+      expect((timeout as Error).message).not.toContain('kb.internal.example');
+    }
+  }
+  expect(() => rethrowIfGlobalKbTimeout(coded('42P01', 'timed out'))).not.toThrow();
 });

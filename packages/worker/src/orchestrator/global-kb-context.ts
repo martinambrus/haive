@@ -107,6 +107,7 @@ export async function resolveGlobalKbContext(
     const options: GlobalKbCallOptions = {
       connectTimeoutSeconds: bounds.connectTimeoutSeconds,
       deadlineMs: bounds.deadlineMs,
+      signal: bounds.signal ?? new AbortController().signal,
     };
 
     const read = await withGlobalKb(

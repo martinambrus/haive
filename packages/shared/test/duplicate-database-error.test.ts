@@ -1,7 +1,16 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Database } from '@haive/database';
 
-vi.mock('postgres', () => ({ default: () => ({ end: async () => {} }) }));
+const h = vi.hoisted(() => ({ error: null as Error | null }));
+vi.mock('postgres', () => ({
+  default: () => ({
+    end: async () => {},
+    unsafe: async (query: string) => {
+      if (query.includes('CREATE DATABASE')) throw h.error;
+      return [];
+    },
+  }),
+}));
 
 import { resolveGlobalKbConnection, type GlobalKbSettings } from '../src/global-kb/connection.js';
 import { resolveRagConnection, type RagToolingPrefs } from '../src/rag/connection.js';
@@ -11,13 +20,15 @@ const pgError = (code: string, message: string, constraint_name?: string): Error
 const wrapped = (cause: Error): Error =>
   Object.assign(new Error('Failed query: CREATE DATABASE "x"\nparams: '), { cause });
 
-const missingThenFails = (err: Error): Database =>
-  ({
+const missingThenFails = (err: Error): Database => {
+  h.error = err;
+  return {
     execute: async (query: { queryChunks?: unknown[] }) => {
       if (JSON.stringify(query).includes('CREATE DATABASE')) throw err;
       return [];
     },
-  }) as unknown as Database;
+  } as unknown as Database;
+};
 
 const kbSettings: GlobalKbSettings = {
   enabled: true,
@@ -43,10 +54,13 @@ const SITES: Array<[string, (db: Database) => Promise<unknown>]> = [
   ['per-project RAG', (db) => resolveRagConnection(ragPrefs, db, 'project')],
 ];
 
+let serverCase = 0;
+
 describe.each(SITES)('CREATE DATABASE lost to a concurrent creator (%s)', (_site, resolve) => {
   const before = process.env.DATABASE_URL;
   beforeEach(() => {
-    process.env.DATABASE_URL = 'postgres://u:p@main.example:5432/haive';
+    // Each case boots a different fake server; a prior success must not bypass its injected CREATE error.
+    process.env.DATABASE_URL = `postgres://u:p@main-${++serverCase}.example:5432/haive`;
   });
   afterEach(() => {
     if (before === undefined) delete process.env.DATABASE_URL;

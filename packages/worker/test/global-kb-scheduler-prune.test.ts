@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 const h = vi.hoisted(() => ({
   store: new Map<string, Set<string>>(),
   removed: [] as string[],
+  schedules: [] as Array<[string, unknown, unknown]>,
 }));
 
 vi.mock('../src/db.js', () => ({ getDb: () => ({}) }));
@@ -19,7 +20,8 @@ vi.mock('bullmq', () => ({
       if (!ids) h.store.set(this.name, (ids = new Set()));
       return ids;
     }
-    upsertJobScheduler = async (id: string) => {
+    upsertJobScheduler = async (id: string, schedule: unknown, job: unknown) => {
+      h.schedules.push([id, schedule, job]);
       this.ids().add(id);
     };
     getJobSchedulersCount = async () => this.ids().size;
@@ -68,9 +70,23 @@ const live = () => [...(h.store.get(QUEUE_NAMES.GLOBAL_KB_SYNC) ?? [])].sort();
 beforeEach(() => {
   h.store.clear();
   h.removed.length = 0;
+  h.schedules = [];
 });
 
 describe('global KB scheduler pruning', () => {
+  it('retains recurring retries after a failed tick, without per-job exponential retries', async () => {
+    await scheduleGlobalKbReconcile();
+    expect(h.schedules).toEqual([
+      [
+        RECONCILE,
+        { every: 5 * 60_000 },
+        expect.objectContaining({
+          opts: { removeOnComplete: true, removeOnFail: 5 },
+        }),
+      ],
+    ]);
+  });
+
   it('holds both owned ids in one exported constant', () => {
     expect([...GLOBAL_KB_SCHEDULER_IDS].sort()).toEqual(OWN);
   });

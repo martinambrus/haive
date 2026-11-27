@@ -1,3 +1,4 @@
+import { globalKbCallOptions, rethrowIfGlobalKbTimeout } from '@haive/shared/global-kb';
 import { and, eq, isNotNull, isNull } from 'drizzle-orm';
 import { globalKbEntries, resolveGlobalKbSettings, withGlobalKb } from '@haive/shared/global-kb';
 import type { FormSchema } from '@haive/shared';
@@ -86,51 +87,57 @@ function buildMergePrompt(p: MergePair): string {
 }
 
 /** This task's promoted drafts that are linked to an existing entry, paired with that
- *  entry's body. Best-effort: a disabled/unreachable global KB yields no pairs. */
+ *  entry's body. A disabled/refused store yields no pairs; a timeout fails for Retry. */
 async function loadPairs(ctx: StepContext): Promise<MergePair[]> {
   try {
     const settings = await resolveGlobalKbSettings();
     if (!settings.enabled) return [];
-    return await withGlobalKb(ctx.db, async ({ db: gdb }) => {
-      const drafts = await gdb
-        .select({
-          id: globalKbEntries.id,
-          title: globalKbEntries.title,
-          body: globalKbEntries.body,
-          description: globalKbEntries.description,
-          supersedesEntryId: globalKbEntries.supersedesEntryId,
-        })
-        .from(globalKbEntries)
-        .where(
-          and(
-            eq(globalKbEntries.sourceTaskId, ctx.taskId),
-            eq(globalKbEntries.status, 'draft'),
-            isNotNull(globalKbEntries.supersedesEntryId),
-          ),
-        );
-      const pairs: MergePair[] = [];
-      for (const d of drafts) {
-        if (!d.supersedesEntryId) continue;
-        const [existing] = await gdb
-          .select({ body: globalKbEntries.body, description: globalKbEntries.description })
+    return await withGlobalKb(
+      ctx.db,
+      async ({ db: gdb }) => {
+        const drafts = await gdb
+          .select({
+            id: globalKbEntries.id,
+            title: globalKbEntries.title,
+            body: globalKbEntries.body,
+            description: globalKbEntries.description,
+            supersedesEntryId: globalKbEntries.supersedesEntryId,
+          })
           .from(globalKbEntries)
-          .where(eq(globalKbEntries.id, d.supersedesEntryId))
-          .limit(1);
-        if (existing) {
-          pairs.push({
-            draftId: d.id,
-            draftTitle: d.title,
-            draftBody: d.body,
-            existingId: d.supersedesEntryId,
-            existingBody: existing.body,
-            draftDescription: d.description,
-            existingDescription: existing.description,
-          });
+          .where(
+            and(
+              eq(globalKbEntries.sourceTaskId, ctx.taskId),
+              eq(globalKbEntries.status, 'draft'),
+              isNotNull(globalKbEntries.supersedesEntryId),
+            ),
+          );
+        const pairs: MergePair[] = [];
+        for (const d of drafts) {
+          if (!d.supersedesEntryId) continue;
+          const [existing] = await gdb
+            .select({ body: globalKbEntries.body, description: globalKbEntries.description })
+            .from(globalKbEntries)
+            .where(eq(globalKbEntries.id, d.supersedesEntryId))
+            .limit(1);
+          if (existing) {
+            pairs.push({
+              draftId: d.id,
+              draftTitle: d.title,
+              draftBody: d.body,
+              existingId: d.supersedesEntryId,
+              existingBody: existing.body,
+              draftDescription: d.description,
+              existingDescription: existing.description,
+            });
+          }
         }
-      }
-      return pairs;
-    });
+        return pairs;
+      },
+      globalKbCallOptions({ signal: ctx.signal }),
+    );
   } catch (err) {
+    ctx.signal?.throwIfAborted();
+    rethrowIfGlobalKbTimeout(err);
     ctx.logger.warn({ err }, 'global KB merge: pair lookup failed (treating as none)');
     return [];
   }
@@ -199,55 +206,61 @@ export const globalKbMergeStep: StepDefinition<MergeDetect, MergeApply> = {
     try {
       const settings = await resolveGlobalKbSettings();
       if (settings.enabled) {
-        await withGlobalKb(ctx.db, async ({ db: gdb }) => {
-          for (const p of pairs) {
-            const r = results.find((x) => x.agentId === `merge:${p.draftId}`);
-            const body = usableBody(r);
-            const usable = body !== '';
-            // Agents run up to an hour; a draft activated meanwhile is no longer ours to write.
-            const stillDraft = and(
-              eq(globalKbEntries.id, p.draftId),
-              eq(globalKbEntries.status, 'draft'),
-            );
-            if (nothingToMerge(p)) {
-              merged += 1;
-            } else if (usable) {
-              const [hit] = await gdb
-                .update(globalKbEntries)
-                .set({ body, embedStatus: 'pending', updatedAt: new Date() })
-                .where(and(stillDraft, eq(globalKbEntries.body, p.draftBody)))
-                .returning({ id: globalKbEntries.id });
-              if (hit) {
-                mergedDrafts.add(p.draftId);
+        await withGlobalKb(
+          ctx.db,
+          async ({ db: gdb }) => {
+            for (const p of pairs) {
+              const r = results.find((x) => x.agentId === `merge:${p.draftId}`);
+              const body = usableBody(r);
+              const usable = body !== '';
+              // Agents run up to an hour; a draft activated meanwhile is no longer ours to write.
+              const stillDraft = and(
+                eq(globalKbEntries.id, p.draftId),
+                eq(globalKbEntries.status, 'draft'),
+              );
+              if (nothingToMerge(p)) {
                 merged += 1;
-              } else {
-                const [row] = await gdb
-                  .select({ status: globalKbEntries.status, body: globalKbEntries.body })
-                  .from(globalKbEntries)
-                  .where(eq(globalKbEntries.id, p.draftId))
-                  .limit(1);
-                if (row?.status === 'draft' && row.body === body) {
+              } else if (usable) {
+                const [hit] = await gdb
+                  .update(globalKbEntries)
+                  .set({ body, embedStatus: 'pending', updatedAt: new Date() })
+                  .where(and(stillDraft, eq(globalKbEntries.body, p.draftBody)))
+                  .returning({ id: globalKbEntries.id });
+                if (hit) {
                   mergedDrafts.add(p.draftId);
                   merged += 1;
                 } else {
-                  (row?.status === 'draft' ? editedDraft : leftDraft).add(p.draftId);
+                  const [row] = await gdb
+                    .select({ status: globalKbEntries.status, body: globalKbEntries.body })
+                    .from(globalKbEntries)
+                    .where(eq(globalKbEntries.id, p.draftId))
+                    .limit(1);
+                  if (row?.status === 'draft' && row.body === body) {
+                    mergedDrafts.add(p.draftId);
+                    merged += 1;
+                  } else {
+                    (row?.status === 'draft' ? editedDraft : leftDraft).add(p.draftId);
+                  }
                 }
               }
+              // Activation archives the superseded entry, so a description it carried would otherwise be
+              // lost; the draft's own, when it has one, stays.
+              const inherited = p.draftDescription ? null : (p.existingDescription ?? null);
+              if (inherited) {
+                await gdb
+                  .update(globalKbEntries)
+                  .set({ description: inherited, updatedAt: new Date() })
+                  .where(and(stillDraft, isNull(globalKbEntries.description)));
+              }
+              finishedDraft.add(p.draftId);
             }
-            // Activation archives the superseded entry, so a description it carried would otherwise be
-            // lost; the draft's own, when it has one, stays.
-            const inherited = p.draftDescription ? null : (p.existingDescription ?? null);
-            if (inherited) {
-              await gdb
-                .update(globalKbEntries)
-                .set({ description: inherited, updatedAt: new Date() })
-                .where(and(stillDraft, isNull(globalKbEntries.description)));
-            }
-            finishedDraft.add(p.draftId);
-          }
-        });
+          },
+          globalKbCallOptions({ signal: ctx.signal }),
+        );
       }
     } catch (err) {
+      ctx.signal?.throwIfAborted();
+      rethrowIfGlobalKbTimeout(err);
       writeFailed = true;
       ctx.logger.warn({ err }, 'global KB merge: applying merged bodies failed');
     }

@@ -1,11 +1,12 @@
+import { createHash } from 'node:crypto';
 import { databaseName } from '../naming/index.js';
 import postgres from 'postgres';
-import { sql } from 'drizzle-orm';
-import { isDuplicateDatabase, type Database } from '@haive/database';
+import { hasPgCode, isDuplicateDatabase, type Database } from '@haive/database';
 import { logger } from '../logger/index.js';
 import { IN_STACK_OLLAMA_URL } from '../constants/index.js';
 import { configService, CONFIG_KEYS, type ConfigService } from '../config/config.service.js';
 import { secretsService, SECRET_KEYS } from '../config/secrets.service.js';
+import { GlobalKbDeadlineError } from './errors.js';
 import { assertUserPostgresDsn } from '../egress/user-postgres-dsn.js';
 
 const log = logger.child({ module: 'global-kb-connection' });
@@ -64,6 +65,8 @@ export interface GlobalKbConnection {
   ollamaUrl: string | null;
   embedModel: string | null;
   close: () => Promise<void>;
+  /** Invalidate this connection's internal bootstrap memo on a coded missing database. */
+  onError?: (err: unknown) => void;
 }
 
 /** An absent key reads on, as the seed has it, for every reader. */
@@ -120,8 +123,14 @@ export async function resolveGlobalKbSettings(): Promise<GlobalKbSettings> {
   };
 }
 
-/** Per-call limits; see `GlobalKbCallOptions`. Left out of the options, postgres.js keeps its own. */
+/** Maximum lifetime of the disposable internal database bootstrap client. */
+export const GLOBAL_KB_ADMIN_DEADLINE_MS = 10_000;
+
+/** Per-call connection limits; see `GlobalKbCallOptions`. */
 export interface GlobalKbConnectOptions {
+  /** Bounds the dedicated admin client used for internal database creation. */
+  deadlineMs?: number;
+  signal?: AbortSignal;
   connectTimeoutSeconds?: number;
   /** False skips the query that teaches the driver the array types of the store. */
   fetchTypes?: boolean;
@@ -136,29 +145,87 @@ const poolOptions = (opts: GlobalKbConnectOptions) => ({
   ...(opts.fetchTypes === undefined ? {} : { fetch_types: opts.fetchTypes }),
 });
 
+// Success only: failed/aborted attempts must probe again. Concurrent first calls own their
+// private admin clients, so one caller cancellation never invalidates another call.
+const internalDatabaseReady = new Set<string>();
+
 async function resolveInternal(
   settings: GlobalKbSettings,
-  haiveDb: Database,
+  _haiveDb: Database,
   opts: GlobalKbConnectOptions,
 ): Promise<GlobalKbConnection> {
   const dbName = GLOBAL_KB_DB_NAME;
-
-  // Create the dedicated DB on the main host if absent (mirrors the per-project
-  // resolveInternal in shared/rag/connection.ts).
-  try {
-    const rows = (await haiveDb.execute(
-      sql.raw(`SELECT 1 FROM pg_database WHERE datname = '${dbName}'`),
-    )) as unknown[];
-    if (!Array.isArray(rows) || rows.length === 0) {
-      await haiveDb.execute(sql.raw(`CREATE DATABASE "${dbName}"`));
-      log.info({ dbName }, 'created internal global KB database');
-    }
-  } catch (err) {
-    if (!isDuplicateDatabase(err)) throw err;
-  }
-
   const haiveUrl = process.env.DATABASE_URL;
   if (!haiveUrl) throw new Error('DATABASE_URL not set');
+  opts.signal?.throwIfAborted();
+  const adminKey = createHash('sha256').update(haiveUrl).digest('hex');
+  if (!internalDatabaseReady.has(adminKey)) {
+    // Never issue this work on the shared worker/API pool: a Promise.race cannot remove a
+    // queued query there, and cancelling it must not destroy unrelated application queries.
+    // CREATE DATABASE cannot run in a transaction, so use a bounded, single-use admin session
+    // with a startup statement_timeout (internal Haive server only), rather than SET LOCAL.
+    const deadlineMs = Math.min(
+      opts.deadlineMs ?? GLOBAL_KB_ADMIN_DEADLINE_MS,
+      GLOBAL_KB_ADMIN_DEADLINE_MS,
+    );
+    const admin = postgres(haiveUrl, {
+      ...poolOptions(opts),
+      max: 1,
+      fetch_types: false,
+      connection: {
+        statement_timeout: Math.max(1, Math.trunc(deadlineMs)),
+        client_connection_check_interval: CONNECTION_CHECK_MS,
+      },
+    });
+    const controller = new AbortController();
+    const forwardAbort = () => controller.abort(opts.signal!.reason);
+    opts.signal?.addEventListener('abort', forwardAbort, { once: true });
+    if (opts.signal?.aborted) forwardAbort();
+    const timer = setTimeout(
+      () => controller.abort(new GlobalKbDeadlineError(deadlineMs)),
+      deadlineMs,
+    );
+    timer.unref();
+    const destroy = () => {
+      void admin.end({ timeout: 0 }).catch(() => {});
+    };
+    let onAbort!: () => void;
+    const aborted = new Promise<never>((_, reject) => {
+      onAbort = () => {
+        destroy();
+        reject(controller.signal.reason);
+      };
+      controller.signal.addEventListener('abort', onAbort, { once: true });
+      if (controller.signal.aborted) onAbort();
+    });
+    try {
+      await Promise.race([
+        (async () => {
+          controller.signal.throwIfAborted();
+          const rows = await admin.unsafe(`SELECT 1 FROM pg_database WHERE datname = '${dbName}'`);
+          controller.signal.throwIfAborted();
+          if (rows.length === 0) {
+            await admin.unsafe(`CREATE DATABASE "${dbName}"`);
+            controller.signal.throwIfAborted();
+            log.info({ dbName }, 'created internal global KB database');
+          }
+        })(),
+        aborted,
+      ]);
+    } catch (err) {
+      if (!isDuplicateDatabase(err)) throw err;
+    } finally {
+      clearTimeout(timer);
+      opts.signal?.removeEventListener('abort', forwardAbort);
+      controller.signal.removeEventListener('abort', onAbort);
+      // Do not let close() add five seconds to the caller's bound.
+      destroy();
+    }
+    controller.signal.throwIfAborted();
+
+    internalDatabaseReady.add(adminKey);
+  }
+
   const url = new URL(haiveUrl);
   url.pathname = `/${dbName}`;
 
@@ -167,7 +234,12 @@ async function resolveInternal(
     // Internal only: end abandoned statements on Haive's server when close() drops the socket.
     connection: { client_connection_check_interval: CONNECTION_CHECK_MS },
   });
-  return buildConnection('internal', pg, settings);
+  return {
+    ...buildConnection('internal', pg, settings),
+    onError: (err) => {
+      if (hasPgCode(err, '3D000')) internalDatabaseReady.delete(adminKey);
+    },
+  };
 }
 
 function resolveExternal(

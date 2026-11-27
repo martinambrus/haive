@@ -9,8 +9,11 @@ const h = vi.hoisted(() => ({
   events: [] as string[],
   lockFails: false,
   readFails: false,
+  readError: null as unknown,
   settingsReads: 0,
   gate: null as Promise<void> | null,
+  commitGate: null as Promise<void> | null,
+  commitStarted: null as (() => void) | null,
   set: vi.fn(async (key: string, _value: string) => {
     h.events.push(`set:${key}`);
   }),
@@ -45,6 +48,7 @@ const h = vi.hoisted(() => ({
             unsafe: async (text: string) => {
               if (text.startsWith('SET')) return [];
               h.events.push('read');
+              if (h.readError) throw h.readError;
               if (h.readFails) throw new Error('statement timeout');
               return rows(text);
             },
@@ -52,9 +56,15 @@ const h = vi.hoisted(() => ({
         );
         try {
           const result = await run(tx);
+          h.commitStarted?.();
+          if (h.commitGate) await h.commitGate;
           h.events.push('commit');
           return result;
         } catch (err) {
+          if (h.commitGate) {
+            h.commitStarted?.();
+            await h.commitGate;
+          }
           h.events.push('rollback');
           throw err;
         }
@@ -115,6 +125,19 @@ vi.mock('@haive/shared/global-kb', async (importOriginal) => ({
     if (opts !== undefined) h.checks.push(opts);
     return h.connect(settings, db);
   },
+  withGlobalKbConnection: async (
+    db: unknown,
+    run: (ctx: unknown) => Promise<unknown>,
+    opts: { settings: unknown },
+  ) => {
+    h.checks.push(opts);
+    const conn = await h.connect(opts.settings, db);
+    try {
+      return await run({ conn });
+    } finally {
+      await conn.close();
+    }
+  },
   withGlobalKb: async () => {
     throw new Error('the dims check must not ensure the schema');
   },
@@ -122,7 +145,7 @@ vi.mock('@haive/shared/global-kb', async (importOriginal) => ({
 
 import { Hono } from 'hono';
 import { schema } from '@haive/database';
-import { CONFIG_KEYS, SECRET_KEYS } from '@haive/shared';
+import { CONFIG_KEYS, SECRET_KEYS, logger } from '@haive/shared';
 import { adminRoutes } from '../src/routes/admin.js';
 import { globalKbRoutes } from '../src/routes/global-kb.js';
 import { errorHandler } from '../src/middleware/error-handler.js';
@@ -271,13 +294,17 @@ beforeEach(() => {
   h.events = [];
   h.lockFails = false;
   h.readFails = false;
+  h.readError = null;
   h.checks = [];
   h.role = 'admin';
   h.flags = new Map();
   h.settings = { ...SAVED };
+  h.commitGate = null;
+  h.commitStarted = null;
 });
 
 afterEach(() => {
+  vi.useRealTimers();
   // A failed audit row fails the save; none may be swallowed into this logger.
   expect(h.auditLog.error).not.toHaveBeenCalled();
 });
@@ -985,7 +1012,12 @@ describe('PUT /global-kb/config with a different embedding width', () => {
     await put(widen);
 
     expect(h.checks).toEqual([
-      expect.objectContaining({ connectTimeoutSeconds: expect.any(Number), fetchTypes: false }),
+      expect.objectContaining({
+        connectTimeoutSeconds: 3,
+        fetchTypes: false,
+        deadlineMs: 6000,
+        signal: expect.any(AbortSignal),
+      }),
     ]);
   });
 
@@ -1070,12 +1102,103 @@ describe('PUT /global-kb/config with a different embedding width', () => {
     expect(h.events).not.toContain('commit');
   });
 
+  it('hands a failed width check to the connection, so a dropped database is created again next time', async () => {
+    const dropped = Object.assign(new Error('database does not exist'), { code: '3D000' });
+    h.readError = dropped;
+    const onError = vi.fn();
+    const open = h.connect.getMockImplementation()!;
+    h.connect.mockImplementationOnce(async (...args) => ({ ...(await open(...args)), onError }));
+    const res = await put(widen);
+
+    expect(res.status).toBeGreaterThanOrEqual(500);
+    expect(onError).toHaveBeenCalledWith(dropped);
+    expect(h.set).not.toHaveBeenCalled();
+  });
+
+  it('answers a coded store timeout during the width check as retryable, without driver text', async () => {
+    h.connect.mockRejectedValueOnce(
+      Object.assign(new Error('private server details'), { code: '57014' }),
+    );
+    const res = await put(widen);
+    expect(res.status).toBe(503);
+    expect(await res.json()).toMatchObject({ code: 'GLOBAL_KB_DEADLINE', retryable: true });
+    expect(h.set).not.toHaveBeenCalled();
+  });
+
   it('fails the request, writing nothing, when the store cannot be reached', async () => {
     h.connect.mockRejectedValueOnce(new Error('connect ECONNREFUSED'));
     const res = await put(widen);
 
     expect(res.status).toBeGreaterThanOrEqual(500);
     expect(h.set).not.toHaveBeenCalled();
+  });
+
+  it.each(['COMMIT', 'ROLLBACK'])(
+    'bounds store %s after guarded config writes settle',
+    async (phase) => {
+      vi.useFakeTimers();
+      const original = new Error('config write refused');
+      const errorLog = vi.spyOn(logger, 'error').mockImplementation(() => {});
+      if (phase === 'ROLLBACK') h.set.mockRejectedValueOnce(original);
+      let release!: () => void;
+      let started!: () => void;
+      const entered = new Promise<void>((resolve) => {
+        started = resolve;
+      });
+      h.commitGate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      h.commitStarted = started;
+      let settled = false;
+      const saving = Promise.resolve(put(widen)).then((res) => {
+        settled = true;
+        return res;
+      });
+      try {
+        await entered;
+        await vi.advanceTimersByTimeAsync(6001);
+        expect(settled).toBe(true);
+        const response = await saving;
+        expect(response.status).toBe(phase === 'COMMIT' ? 503 : 500);
+        expect(response.headers.get('Retry-After')).toBeNull();
+        expect(await response.json()).toMatchObject(
+          phase === 'COMMIT'
+            ? { code: 'global_kb_config_outcome_unknown', retryable: false }
+            : { error: 'Internal server error' },
+        );
+        if (phase === 'COMMIT') expect(h.audits.length).toBeGreaterThan(0);
+        else expect(errorLog).toHaveBeenCalledWith({ err: original }, 'Unhandled API error');
+      } finally {
+        release();
+        await saving;
+        await vi.advanceTimersByTimeAsync(0);
+        errorLog.mockRestore();
+      }
+    },
+  );
+
+  it('retains the schema lock after config writes start, even when the store-wait deadline passes', async () => {
+    vi.useFakeTimers();
+    let release!: () => void;
+    let started!: () => void;
+    const entered = new Promise<void>((resolve) => {
+      started = resolve;
+    });
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    h.set.mockImplementationOnce(async () => {
+      started();
+      await held;
+    });
+    const saving = put(widen);
+    await entered;
+    await vi.advanceTimersByTimeAsync(6001);
+    expect(h.events).not.toContain('close');
+    expect(h.events).not.toContain('commit');
+    release();
+    expect((await saving).status).toBe(200);
+    expect(h.events.slice(-2)).toEqual(['commit', 'close']);
   });
 
   it('lets a second save read the settings only after the first one is done', async () => {
@@ -1367,4 +1490,12 @@ describe('/admin/config/house-rules', () => {
     expect((await send('PUT', '/admin/config/house-rules', { enabled: 'no' })).status).toBe(400);
     expect(h.set).not.toHaveBeenCalled();
   });
+});
+
+it('keeps the probe connection allowance at 30 s inside its 8 s overall deadline', async () => {
+  await send('POST', '/global-kb/test-db', {
+    mode: 'external',
+    connectionString: 'postgres://u:p@kb.example/kb',
+  });
+  expect(h.checks.at(-1)).toMatchObject({ connectTimeoutSeconds: 30, deadlineMs: 8000 });
 });
