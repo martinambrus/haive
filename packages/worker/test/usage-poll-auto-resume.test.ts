@@ -111,11 +111,12 @@ function setup() {
     providerId: PROVIDER,
     reason: 'rate_limit',
     since,
-    resetAt: new Date(0),
+    resetAt: new Date(0) as Date | null,
     currentStepId: 'fan-out',
     currentRound: 0,
     autoResumeCount: 0,
     providerName: 'claude-code',
+    providerAuthMode: 'subscription',
   };
   const next: (typeof armed)[] = [];
   const db = {
@@ -143,6 +144,45 @@ beforeEach(() => {
   h.failNextAdd = null;
   h.refusals = 1;
   h.tries = 0;
+});
+
+describe('auth-aware server-error recovery', () => {
+  afterEach(() => vi.restoreAllMocks());
+  it.each(['auto', 'notify'])(
+    'recovers unpolled API-key Claude through cool-off (%s)',
+    async (mode) => {
+      config(mode, 'normal');
+      const t = setup();
+      Object.assign(t.armed, {
+        reason: 'server_error',
+        providerAuthMode: 'api_key',
+        since: new Date(Date.now() - 5 * 60_000),
+      });
+      await checkProviderRecovery(t.db);
+      expect(t.task().status).toBe(mode === 'auto' ? 'running' : 'failed');
+      expect(t.fake.rows(schema.taskEvents)).toHaveLength(1);
+      expect(h.queued).toHaveLength(mode === 'auto' ? 1 : 0);
+      if (mode === 'notify') expect(t.task().allowanceReplenishedAt).toBeInstanceOf(Date);
+    },
+  );
+
+  it('still requires a post-failure snapshot for subscription Claude', async () => {
+    config('auto', 'normal');
+    const t = setup();
+    Object.assign(t.armed, { reason: 'server_error', since: new Date(Date.now() - 5 * 60_000) });
+    await checkProviderRecovery(t.db);
+    expect(t.writes).toEqual([]);
+    expect(h.queued).toEqual([]);
+  });
+
+  it('preserves a captured rate-limit reset even if auth has since changed', async () => {
+    config('auto', 'normal');
+    const t = setup();
+    t.armed.providerAuthMode = 'api_key';
+    await checkProviderRecovery(t.db);
+    expect(t.task().status).toBe('running');
+    expect(h.queued).toHaveLength(1);
+  });
 });
 
 describe('the allowance auto-resume of a task whose provider is back', () => {
@@ -822,3 +862,51 @@ describe('T594 M1: a recovered allowance survives revival refusals', () => {
     expect(h.queued).toHaveLength(1);
   });
 });
+
+describe('allowance reset backfill from stored windows', () => {
+  afterEach(() => vi.restoreAllMocks());
+  it.each(['error', 'needs_reconnect', 'ok'])('uses only ok snapshots (%s)', async (status) => {
+    config('notify', 'normal');
+    const t = setup();
+    t.armed.resetAt = null;
+    t.fake.patch(schema.tasks, TASK, { allowanceResetAt: null });
+    t.fake.insert(schema.usageWindowSnapshots, {
+      providerId: PROVIDER,
+      userId: USER,
+      providerName: 'claude-code',
+      status,
+      fetchedAt: new Date(),
+      fiveHourPct: 100,
+      fiveHourResetAt: new Date(0),
+    });
+    await checkProviderRecovery(t.db);
+    expect(t.task().allowanceReplenishedAt != null).toBe(status === 'ok');
+    if (status !== 'ok') {
+      expect(t.task().allowanceResetAt).toBeNull();
+      expect(t.fake.rows(schema.taskEvents)).toEqual([]);
+    }
+  });
+});
+
+it.each([10, 100])(
+  'stale ok snapshots cannot backfill resets or recover via percentage (%s)',
+  async (pct) => {
+    config('notify', 'normal');
+    const t = setup();
+    t.armed.resetAt = null;
+    t.fake.patch(schema.tasks, TASK, { allowanceResetAt: null });
+    t.fake.insert(schema.usageWindowSnapshots, {
+      providerId: PROVIDER,
+      userId: USER,
+      providerName: 'claude-code',
+      status: 'ok',
+      fetchedAt: new Date(Date.now() - 13 * 60_000 - 1),
+      fiveHourPct: pct,
+      fiveHourResetAt: new Date(0),
+    });
+    await checkProviderRecovery(t.db);
+    expect(t.task().allowanceReplenishedAt).toBeNull();
+    expect(t.task().allowanceResetAt).toBeNull();
+    expect(t.fake.rows(schema.taskEvents)).toEqual([]);
+  },
+);

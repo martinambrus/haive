@@ -144,7 +144,8 @@ const OAUTH_ERROR_CODES = new Set([
   'temporarily_unavailable',
 ]);
 
-function oauthErrorCode(body: string): string | null {
+function oauthErrorCode(status: number, body: string): string | null {
+  if (status !== 400 && status !== 401) return null;
   try {
     const parsed = JSON.parse(body) as { error?: unknown };
     return typeof parsed.error === 'string' && OAUTH_ERROR_CODES.has(parsed.error)
@@ -174,7 +175,11 @@ export async function postToken(
   });
   if (!res.ok) {
     const body = await res.text().catch(() => '');
-    throw new ClaudeOauthError(params.grant_type ?? '', res.status, oauthErrorCode(body));
+    throw new ClaudeOauthError(
+      params.grant_type ?? '',
+      res.status,
+      oauthErrorCode(res.status, body),
+    );
   }
   const prior = params.grant_type === 'refresh_token' ? params.refresh_token : undefined;
   let parsed: TokenResponse;

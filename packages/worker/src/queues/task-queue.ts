@@ -185,7 +185,7 @@ import {
 } from '../step-engine/registry.js';
 import { fixRoundTargetDef } from '../step-engine/fix-consumer.js';
 import { enqueueUsagePollTick } from './usage-poll-queue.js';
-import { USAGE_PROVIDERS } from '../usage-window/fetchers/index.js';
+import { hasUsageWindow } from '@haive/shared/usage-window';
 import { constrainingResetAt, SERVER_ERROR_COOLOFF_MS } from '../usage-window/allowance-watch.js';
 import {
   blockedByActiveStepMessage,
@@ -2083,12 +2083,14 @@ async function recordFailedStepHint(
     .find((r) => r.reason === 'rate_limit' || r.reason === 'server_error');
   if (outage?.reason) {
     let providerName: string | undefined;
+    let providerAuthMode: string | undefined;
     if (outage.cliProviderId) {
       const prov = await db.query.cliProviders.findFirst({
         where: eq(schema.cliProviders.id, outage.cliProviderId),
-        columns: { name: true },
+        columns: { name: true, authMode: true },
       });
       providerName = prov?.name ?? undefined;
+      providerAuthMode = prov?.authMode;
     }
     try {
       await writeStepHint(db, failedRow, failedTask, {
@@ -2121,14 +2123,15 @@ async function recordFailedStepHint(
       watchMode !== 'off' &&
       outage.reason === 'rate_limit' &&
       outage.cliProviderId &&
-      providerName &&
-      providerName in USAGE_PROVIDERS
+      hasUsageWindow(providerName, providerAuthMode)
     ) {
       // Rate limit: capture the window the task is blocked until (latest reset over the
       // exhausted windows) so the poller can fire on the authoritative vendor reset,
       // not just a %-drop.
       const [snap] = await db
         .select({
+          status: schema.usageWindowSnapshots.status,
+          fetchedAt: schema.usageWindowSnapshots.fetchedAt,
           fiveHourPct: schema.usageWindowSnapshots.fiveHourPct,
           fiveHourResetAt: schema.usageWindowSnapshots.fiveHourResetAt,
           sevenDayPct: schema.usageWindowSnapshots.sevenDayPct,
@@ -2161,7 +2164,7 @@ async function recordFailedStepHint(
     } else if (watchMode !== 'off' && outage.reason === 'server_error' && outage.cliProviderId) {
       // Server error: no quota meter to read, so recovery is judged by serverErrorVerdict
       // (cool-off, plus a post-failure OK usage snapshot where one is readable). That works
-      // for every CLI, so unlike the rate-limit arm this is NOT gated on USAGE_PROVIDERS.
+      // for every CLI, so unlike the rate-limit arm this is not gated on hasUsageWindow.
       const cooloffEnd = new Date(armedAt.getTime() + SERVER_ERROR_COOLOFF_MS);
       const armed = await armAllowanceWatch(db, taskId, epoch, {
         awaitingAllowanceProviderId: outage.cliProviderId,

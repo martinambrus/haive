@@ -70,7 +70,7 @@ function sentenceHosts(root: Host): Host[] {
   );
 }
 
-function answer(rows: unknown[], reconnectIds: string[] = []) {
+function answer(rows: unknown[], reconnectIds: string[] = [], connected = true) {
   h.get.mockImplementation(async (path: string) => {
     if (path === '/cli-providers') return { providers: rows };
     if (path === '/cli-providers/catalog') return { providers: [] };
@@ -78,7 +78,7 @@ function answer(rows: unknown[], reconnectIds: string[] = []) {
       return {
         snapshots: reconnectIds.map((providerId) => ({ providerId, status: 'needs_reconnect' })),
       };
-    if (path.endsWith('/usage-auth')) return { connected: true };
+    if (path.endsWith('/usage-auth')) return { connected };
     return {};
   });
 }
@@ -176,3 +176,33 @@ describe('login set copy on the providers list', () => {
     expect(h.get.mock.calls.length).toBe(getsBefore);
   });
 });
+
+it.each([false, true])(
+  'Disconnect describes the actual scope for an isolated row (reconnect=%s)',
+  async (reconnect) => {
+    answer([{ ...row('a', 'claude-code'), isolateAuth: true }], reconnect ? ['a'] : []);
+    const confirm = vi.fn((_message: string) => true);
+    vi.stubGlobal('confirm', confirm);
+    h.delete.mockResolvedValue({});
+    const view = await renderPage();
+    const button = buttons(view.tree(), /^disconnect usage$/i)[0]!;
+    expect(String(button.props.title)).toContain('this row');
+    expect(String(button.props.title)).not.toContain('every row');
+    fire.click(button);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(String(confirm.mock.calls[0]?.[0])).toContain('Row a?');
+    expect(String(confirm.mock.calls[0]?.[0])).not.toContain('every row');
+    expect(h.delete).toHaveBeenCalledWith('/cli-providers/a/usage-auth');
+  },
+);
+
+it.each([false, true])(
+  'API-key rows hide usage authorization but retain legacy Disconnect (dead=%s)',
+  async (dead) => {
+    answer([{ ...row('a', 'claude-code'), authMode: 'api_key' }], dead ? ['a'] : [], dead);
+    const view = await renderPage();
+    expect(buttons(view.tree(), /^reconnect$/i)).toHaveLength(0);
+    expect(buttons(view.tree(), /^connect usage$/i)).toHaveLength(0);
+    expect(buttons(view.tree(), /^disconnect usage$/i)).toHaveLength(dead ? 1 : 0);
+  },
+);

@@ -84,19 +84,20 @@ export async function pickGrantHolder(
 }
 
 /** Stores a rotated grant as ONE new encryption on every member that holds the holder's
- *  pre-refresh copy. Hold the advisory lock across the refresh and this write. */
+ *  pre-refresh copy. Hold the advisory lock across the refresh and this write. The CAS
+ *  refuses a replaced grant even if the advisory connection has failed; lock assertions
+ *  after the vendor spends the old token could only discard the rotation. */
 export async function rotateGrantCopies(
   db: Database,
   rep: CliAuthProvider,
   holder: GrantHolder,
   fresh: ClaudeOauthTokens,
-  assertHeld: () => Promise<void>,
+  masterKek: string,
 ): Promise<GrantHolder> {
   const value = JSON.stringify(fresh);
-  const env = envelopeEncrypt(value, await secretsService.getMasterKek());
+  const env = envelopeEncrypt(value, masterKek);
   const now = new Date();
   await db.transaction(async (tx) => {
-    await assertHeld();
     const ids = (await lockLoginSet(tx, rep)).map((m) => m.id);
     await tx
       .update(schema.cliProviderSecrets)
@@ -113,7 +114,6 @@ export async function rotateGrantCopies(
           eq(schema.cliProviderSecrets.encryptedValue, holder.encryptedValue),
         ),
       );
-    await assertHeld();
   });
   return { providerId: holder.providerId, ...env, grant: fresh };
 }

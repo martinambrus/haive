@@ -989,15 +989,52 @@ describe.skipIf(!url)(
         expect(await byAction(SET_ACTION)).toEqual([]);
       });
 
-      it('a clone of an API-key row copies every secret as before, the usage connection included', async () => {
+      it.each([false, true])(
+        'a clone of an API-key row never copies a usage grant (isolated=%s)',
+        async (isolateAuth) => {
+          await db
+            .update(schema.cliProviders)
+            .set({ isolateAuth })
+            .where(eq(schema.cliProviders.id, rows.D.id));
+          await seedGrants(['D']);
+          const res = await cloneOf('D');
+          expect(res.status).toBe(201);
+          const id = ((await res.json()) as { provider: { id: string } }).provider.id;
+          for (const name of NAMES)
+            expect((await plain(id, name)) === (await plain(rows.D.id, name)), name).toBe(true);
+          expect(await plain(id, USAGE)).toBeUndefined();
+          expect((await cloneMetadata()).secretNames).toEqual([...NAMES].sort());
+          expect(await byAction(SET_ACTION)).toEqual([]);
+        },
+      );
+
+      it('an API-key clone holds the source auth lock through its secret writes', async () => {
         await seedGrants(['D']);
-        const res = await cloneOf('D');
-        expect(res.status).toBe(201);
-        const id = ((await res.json()) as { provider: { id: string } }).provider.id;
-        for (const name of [...NAMES, USAGE])
-          expect((await plain(id, name)) === (await plain(rows.D.id, name)), name).toBe(true);
-        expect((await cloneMetadata()).secretNames).toEqual([...NAMES, USAGE].sort());
-        expect(await byAction(SET_ACTION)).toEqual([]);
+        // A second connection cannot acquire the lock from inside the clone transaction.
+        let checked = false;
+        const realTransaction = db.transaction.bind(db);
+        const wrapped = vi.spyOn(db, 'transaction').mockImplementation(
+          async (run: any, opts?: any) =>
+            realTransaction(async (tx: any) => {
+              const original = tx.query.cliProviderSecrets.findMany.bind(
+                tx.query.cliProviderSecrets,
+              );
+              tx.query.cliProviderSecrets.findMany = async (...args: any[]) => {
+                const release = await tryCliAuthLock(db, authState.cliAuthScope(rows.D));
+                checked = true;
+                if (release) await release();
+                expect(release).toBeNull();
+                return original(...args);
+              };
+              return run(tx);
+            }, opts) as any,
+        );
+        try {
+          expect((await cloneOf('D')).status).toBe(201);
+        } finally {
+          wrapped.mockRestore();
+        }
+        expect(checked).toBe(true);
       });
 
       it.each([

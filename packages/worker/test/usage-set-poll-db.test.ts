@@ -12,6 +12,23 @@ import {
   secretsService,
 } from '@haive/shared';
 
+const lockControl = vi.hoisted(() => ({ failChecks: false }));
+vi.mock('@haive/database', async (original) => {
+  const actual = await original<typeof import('@haive/database')>();
+  return {
+    ...actual,
+    tryCliAuthLock: async (...args: Parameters<typeof actual.tryCliAuthLock>) => {
+      const release = await actual.tryCliAuthLock(...args);
+      if (!release) return release;
+      return Object.assign(async () => release(), {
+        assertHeld: async () => {
+          if (lockControl.failChecks) throw new Error('synthetic lock check failure');
+          await release.assertHeld();
+        },
+      });
+    },
+  };
+});
 const logs = vi.hoisted(() => ({ calls: [] as unknown[][] }));
 vi.mock('@haive/shared', async (original) => {
   const actual = await original<typeof import('@haive/shared')>();
@@ -21,6 +38,7 @@ vi.mock('@haive/shared', async (original) => {
   stub.child = () => stub;
   return { ...actual, logger: Object.assign(Object.create(actual.logger), { child: () => stub }) };
 });
+import { pickGrantHolder } from '../src/usage-window/usage-grant-set.js';
 import { runUsagePollTick } from '../src/queues/usage-poll-queue.js';
 import { handleSignOutJob } from '../src/queues/cli-exec/handlers.js';
 import type { DockerRunner } from '../src/sandbox/docker-runner.js';
@@ -53,6 +71,8 @@ function makeVendor() {
     refreshable: new Set<string>(),
     status: new Map<string, number>(),
     issuedStatus: undefined as undefined | number,
+    tokenFailure: undefined as undefined | number | Error,
+    onToken: undefined as undefined | (() => void),
     onUsage: undefined as undefined | ((token: string) => Promise<void>),
     callsWith: (token: string) => v.usageCalls.filter((t) => t === token).length,
     reset() {
@@ -65,6 +85,9 @@ function makeVendor() {
       if (target === TOKEN_URL) {
         const spent = new URLSearchParams(String(init?.body)).get('refresh_token') ?? '';
         v.tokenCalls.push(spent);
+        if (v.tokenFailure instanceof Error) throw v.tokenFailure;
+        if (v.tokenFailure)
+          return Response.json({ error: 'temporarily_unavailable' }, { status: v.tokenFailure });
         if (!v.refreshable.delete(spent))
           return Response.json({ error: 'invalid_grant' }, { status: 400 });
         const issued = { access: rnd(), refresh: rnd() };
@@ -72,6 +95,7 @@ function makeVendor() {
         if (v.issuedStatus) v.status.set(issued.access, v.issuedStatus);
         v.refreshable.add(issued.refresh);
         allTokens.add(issued.access).add(issued.refresh);
+        v.onToken?.();
         return Response.json({
           access_token: issued.access,
           refresh_token: issued.refresh,
@@ -247,6 +271,7 @@ describe.skipIf(!url)('the usage poller treats one login set as one usage connec
     vi.useFakeTimers({ toFake: ['Date'] });
     clock += HOUR;
     vi.setSystemTime(clock);
+    lockControl.failChecks = false;
     vendor = makeVendor();
     vi.stubGlobal('fetch', vendor.fetch);
     vi.spyOn(configService, 'getBoolean').mockResolvedValue(true);
@@ -299,6 +324,216 @@ describe.skipIf(!url)('the usage poller treats one login set as one usage connec
     await db.delete(schema.auditEvents).where(eq(schema.auditEvents.actorUserId, U));
     await db.delete(schema.users).where(inArray(schema.users.id, [U, V]));
   });
+
+  it.each([false, true])(
+    'never polls an API-key Claude row holding an expired grant (isolated=%s)',
+    async (isolateAuth) => {
+      await db
+        .delete(schema.cliProviderSecrets)
+        .where(eq(schema.cliProviderSecrets.providerId, rows.E.id));
+      const g = mkGrant({ expired: true, live: false });
+      await store(g, ['E']);
+      await db
+        .update(schema.cliProviders)
+        .set({ enabled: true, isolateAuth })
+        .where(eq(schema.cliProviders.id, rows.E.id));
+      const before = await dump(['E']);
+      await tick();
+      expect(vendor.tokenCalls).not.toContain(g.refreshToken);
+      expect(vendor.usageCalls).toEqual([dGrant.accessToken]);
+      expect(await dump(['E'])).toEqual(before);
+    },
+  );
+
+  it.each(['api_key', 'subscription'] as const)(
+    'server-error recovery uses the cool-off only for unpolled Claude auth (%s)',
+    async (authMode) => {
+      vi.spyOn(configService, 'get').mockResolvedValue('notify');
+      await db
+        .update(schema.cliProviders)
+        .set({ enabled: true, authMode })
+        .where(eq(schema.cliProviders.id, rows.E.id));
+      const grant = await grantOf('E');
+      vendor.status.set(grant.accessToken, 503);
+      await seed('E', 'ok'); // A legacy reading from BEFORE the failure cannot prove recovery.
+      const [task] = await db
+        .insert(schema.tasks)
+        .values({
+          userId: U,
+          type: 'workflow',
+          title: 'outage control',
+          status: 'failed',
+          awaitingAllowanceProviderId: rows.E.id,
+          awaitingProviderReason: 'server_error',
+          awaitingProviderSince: new Date(clock),
+        })
+        .returning();
+      const readTask = () => db.query.tasks.findFirst({ where: eq(schema.tasks.id, task!.id) });
+      await tick();
+      expect((await readTask())!.allowanceReplenishedAt).toBeNull();
+      step(5 * MIN);
+      await tick();
+      expect((await readTask())!.allowanceReplenishedAt != null).toBe(authMode === 'api_key');
+      expect(vendor.callsWith(grant.accessToken)).toBe(authMode === 'api_key' ? 0 : 2);
+      if (authMode === 'subscription') {
+        vendor.status.delete(grant.accessToken);
+        step(5 * MIN);
+        await tick();
+        expect((await readTask())!.allowanceReplenishedAt).toBeInstanceOf(Date);
+      }
+      const events = await db
+        .select()
+        .from(schema.taskEvents)
+        .where(eq(schema.taskEvents.taskId, task!.id));
+      expect(events).toHaveLength(1);
+      expect(events[0]!.eventType).toBe('task.allowance_replenished');
+    },
+  );
+
+  it.each([503, 429, new TypeError('synthetic network failure')])(
+    'never uses the stale access token after refresh failure (%s), and retries only after the 190-second throttle',
+    async (failure) => {
+      const g = await expiredSet();
+      const before = await secretsOf(['A', 'B', 'C']);
+      vendor.tokenFailure = failure;
+      await tick();
+      expect(vendor.tokenCalls).toEqual([g.refreshToken]);
+      expect(vendor.usageCalls).not.toContain(g.accessToken);
+      expect(await secretsOf(['A', 'B', 'C'])).toEqual(before);
+      expect(await snapshotsOf(['A', 'B', 'C'])).toEqual([]);
+      step(189_999);
+      await tick();
+      expect(vendor.tokenCalls).toHaveLength(1);
+      vendor.tokenFailure = undefined;
+      step(1);
+      await tick();
+      expect(vendor.tokenCalls).toEqual([g.refreshToken, g.refreshToken]);
+      expect(vendor.usageCalls).toContain((await grantOf('A')).accessToken);
+      await expectSetConverged();
+    },
+  );
+
+  it('keeps a rotated token when lock checks fail after the vendor response', async () => {
+    const old = await expiredSet();
+    vendor.onToken = () => {
+      lockControl.failChecks = true;
+    };
+    await tick();
+    lockControl.failChecks = false;
+    const stored = await grantOf('A');
+    expect(stored.refreshToken === old.refreshToken).toBe(false);
+    expect(await grantOf('B')).toEqual(stored);
+    expect(await grantOf('C')).toEqual(stored);
+    step(5 * MIN);
+    await tick();
+    expect(vendor.tokenCalls).toEqual([old.refreshToken]);
+    await expectSetConverged();
+  });
+
+  it('warns once per refresh-failure streak and logs again after recovery', async () => {
+    await expiredSet();
+    vendor.tokenFailure = 400;
+    const warnings = () =>
+      logs.calls.filter((args) => args[1] === 'claude usage token refresh failed; skipping poll');
+    const before = warnings().length;
+    await tick();
+    step(190_000);
+    await tick();
+    expect(vendor.tokenCalls).toHaveLength(2);
+    expect(warnings()).toHaveLength(before + 1);
+    vendor.tokenFailure = undefined;
+    step(190_000);
+    await tick();
+    const stored = await grantOf('A');
+    await db
+      .update(schema.cliProviders)
+      .set({ enabled: false })
+      .where(eq(schema.cliProviders.id, rows.D.id));
+    step(9 * HOUR);
+    vendor.tokenFailure = 401;
+    await tick();
+    expect(vendor.tokenCalls.at(-1) === stored.refreshToken).toBe(true);
+    expect(warnings()).toHaveLength(before + 2);
+  });
+
+  it('commits the single-use rotation before usage, surviving a failed fetch and snapshot write', async () => {
+    const g = await expiredSet();
+    const drop = await trigger(
+      'usage_window_snapshots',
+      'BEFORE INSERT',
+      "RAISE EXCEPTION 'synthetic snapshot failure';",
+    );
+    let atUsage: { token: string; copies: Grant[]; oldRefreshLive: boolean } | undefined;
+    vendor.onUsage = async (token) => {
+      if (token === dGrant.accessToken) return;
+      atUsage = {
+        token,
+        copies: await Promise.all((['A', 'B', 'C'] as const).map(grantOf)),
+        oldRefreshLive: vendor.refreshable.has(g.refreshToken),
+      };
+      throw new Error('synthetic interruption before snapshot');
+    };
+    try {
+      await tick();
+    } finally {
+      await drop();
+    }
+    const stored = await grantOf('A');
+    expect(atUsage).toEqual({
+      token: stored.accessToken,
+      copies: [stored, stored, stored],
+      oldRefreshLive: false,
+    });
+    expect(stored.refreshToken === g.refreshToken).toBe(false);
+    expect(await snapshotsOf(['A', 'B', 'C'])).toEqual([]);
+    vendor.onUsage = undefined;
+    step(5 * MIN);
+    await tick();
+    // Reusing g's single-use refresh would fail. The committed rotated grant is read instead.
+    expect(vendor.tokenCalls).toEqual([g.refreshToken]);
+    expect(vendor.callsWith(stored.accessToken)).toBe(2);
+    await expectSetConverged();
+  });
+
+  it.each(['error', null, 'needs_reconnect'] as const)(
+    'holder ordering keeps the no-snapshot tier between error and needs_reconnect (%s)',
+    async (status) => {
+      const older = new Date(clock - 3 * HOUR);
+      await store(mkGrant(), ['A'], older);
+      await store(mkGrant(), ['B'], new Date(clock - HOUR));
+      if (status) await seed('A', status);
+      await seed('B', 'needs_reconnect');
+      const holder = await pickGrantHolder(db, rows.A);
+      // At needs_reconnect B wins by secret age; otherwise A's tier wins.
+      expect(holder?.providerId).toBe(status === 'needs_reconnect' ? rows.B.id : rows.A.id);
+    },
+  );
+
+  it('an error snapshot outranks a newer grant with no snapshot', async () => {
+    await store(mkGrant(), ['A'], new Date(clock - 3 * HOUR));
+    await store(mkGrant(), ['B'], new Date(clock - HOUR));
+    await seed('A', 'error');
+    expect((await pickGrantHolder(db, rows.A))?.providerId).toBe(rows.A.id);
+  });
+
+  it.each(['ok', 'error', null, 'needs_reconnect'] as const)(
+    'holder tie breaks in tier %s use newest secret then smallest id',
+    async (status) => {
+      const sorted = (['A', 'B', 'C'] as const).toSorted((a, b) =>
+        rows[a].id.localeCompare(rows[b].id),
+      );
+      const [small, middle, large] = sorted;
+      await store(mkGrant(), [small!, large!], new Date(clock - HOUR));
+      await store(mkGrant(), [middle!], new Date(clock - 2 * HOUR));
+      if (status) for (const key of sorted) await seed(key, status, new Date(clock - HOUR));
+      expect((await pickGrantHolder(db, rows.A))?.providerId).toBe(rows[small!].id);
+      await db
+        .update(schema.cliProviderSecrets)
+        .set({ updatedAt: new Date(clock) })
+        .where(eq(schema.cliProviderSecrets.providerId, rows[large!].id));
+      expect((await pickGrantHolder(db, rows.A))?.providerId).toBe(rows[large!].id);
+    },
+  );
 
   it('one refresh serves every identical copy of a grant', async () => {
     const g0 = await expiredSet();

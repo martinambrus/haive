@@ -194,9 +194,69 @@ text mentioning that code, other OAuth codes, server failures and aborts remain 
 raw body or description, which may echo credentials.
 
 `ClaudeOauthError` (`@haive/shared/claude-oauth`) follows the same rule: its message is
-`claude oauth <grant>: http <status>`, plus ` (<code>)` when the JSON `error` is a registered
-RFC 6749 code. Any other `error` value, the description and a plain-text body are dropped. The
+`claude oauth <grant>: http <status>`, plus ` (<code>)` only for HTTP 400/401 when the JSON
+`error` is a registered RFC 6749 code. A gateway 5xx carrying `invalid_grant` is transient. Any other `error` value, the description and a plain-text body are dropped. The
 message reaches the Connect HTTP 400 and the usage poller's warn log, so callers key on `code`
 (`isClaudeRefreshRejected` reads `invalid_grant`), never on wording. A 200 body that is not JSON
 throws a fixed `claude oauth: invalid token response`, because the parser's SyntaxError quotes
 the body.
+
+Claude usage authorization starts and completes only for a `claude-code` row on subscription
+auth; the poller also excludes API-key rows even if they retain a legacy usage grant. Disconnect
+and generic secret deletion can still remove that legacy grant. Manual usage-grant writes on
+API-key rows are refused, as are OAuth start/complete, with `usage_auth_subscription_required`.
+Completion rechecks auth mode as well as login scope after taking the advisory lock. List and
+edit-page authorization controls require subscription auth; legacy grants can still be disconnected.
+The edit form reports the persisted provider to its parent after every settings save, including
+the save before Rebuild image, so usage authorization and Disconnect scope follow the saved auth
+mode and isolation without reloading. A later secret-write or image-build failure does not undo
+that settings save.
+The usage API excludes frozen API-key Claude snapshots, and the task header also filters on
+the provider's auth mode when its row is known, so neither header surface keeps prompting an
+impossible reconnect for a known API-key row. If the provider list fails to load or omits a row,
+the header keeps the API-filtered snapshot and renders its own provider name, like the task-list
+strip; an unknown row is not evidence that usage is ineligible.
+The task header's empty-meter fallback is also suppressed on API-key Claude rows.
+An API-key Claude clone holds
+its source auth scope lock through the secret copy, but never copies the usage grant, whether
+shared or isolated. A subscription clone still seeds from its shared set; an isolated clone
+starts without a grant. Disconnect's confirmation and action title name only the isolated row
+when its authentication is isolated; the edit-page card uses the same scope-specific copy.
+
+Any Claude usage refresh failure stops that set's poll for the tick. The attempt is recorded
+before the vendor call, preserving the normal minimum 190-second cadence even on 429, 5xx,
+network failures and repeated non-`invalid_grant` refusals. These failures retain the stored
+grant without fetching usage with its stale access token. They warn once per failure streak
+for the exact refresh token; successful refresh or token replacement clears the streak.
+The warning retains sanitized OAuth status/code and omits arbitrary network error text.
+They remain retryable rather than declaring a transient vendor refusal a dead credential.
+
+The encryption key is loaded before the refresh request. After a successful response, the
+poller encrypts synchronously, locks the login-set rows, and commits a compare-and-swap update
+of every identical pre-refresh copy before starting the usage fetch. No advisory-lock checks
+intervene or roll back this CAS: a lost lock connection cannot discard an otherwise committable
+rotation, and the CAS cannot overwrite a newer grant. A failed usage fetch or snapshot write
+cannot roll that commit back. This preserves the existing single-use refresh assumption;
+no new vendor semantics were verified (item 6 remains outside scope).
+
+The remote rotation and local commit cannot be atomic. Process loss before that commit,
+a local transaction/commit failure after the vendor rotates, or a timeout/connection loss
+that hides a vendor-committed response can still lose the new token. Under the single-use
+assumption, the old refresh token is then spent and reconnect is required. Forced reconnect
+is the worst outcome of this gap; the CAS prevents overwriting a newer connection. Closing
+the gap would need vendor idempotency or a verified token grace period.
+
+Allowance-watch arming and reset backfill both require an `ok` snapshot no older than the
+existing 13-minute UI freshness bound (`USAGE_SNAPSHOT_STALE_AFTER_MS`). The recovery percentage
+probe uses that same age bound, so a refresh outage cannot feed it hours-old `ok` numbers.
+A reset captured earlier from a fresh `ok` snapshot remains authoritative even if a later
+snapshot errors or ages out. No existing snapshots or captured resets are rewritten.
+
+Usage-window eligibility is one browser-safe shared predicate, `hasUsageWindow`
+(`@haive/shared/usage-window`), used by poll target selection, outage probe expectations,
+rate-limit watch arming and snapshot display. API-key Claude rows use the existing five-minute
+server-error cool-off without waiting for a snapshot the poller cannot produce. Subscription
+Claude still requires a post-failure `ok` probe. Rate-limit recovery retains its existing
+captured-reset/percentage verdict, including a reset captured before an auth-mode change;
+there is no rate-limit cool-off fallback. Provider enablement and credential presence remain
+separate from this capability check.

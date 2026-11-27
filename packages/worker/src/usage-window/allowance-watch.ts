@@ -1,3 +1,5 @@
+import { USAGE_SNAPSHOT_STALE_AFTER_MS } from '@haive/shared';
+
 /** Pure snapshot-interpretation helpers for the allowance-back watch (notify-only).
  *  Shared by the arm path (task-queue's `failed` handler captures the reset the task is
  *  blocked until) and the detect path (usage-poll's tick decides when allowance is back).
@@ -31,7 +33,12 @@ export function maxConsumedPct(w: UsageWindows): number | null {
 /** The LATEST reset among the windows currently at/over EXHAUSTED_PCT — the true "blocked
  *  until" moment (if both the 5-hour and 7-day windows are maxed you're unblocked only when
  *  the later one resets). Null when no window is constrained or none exposes a reset. */
-export function constrainingResetAt(w: UsageWindows): Date | null {
+export function constrainingResetAt(
+  w: UsageWindows & { status: string; fetchedAt: Date },
+  now = Date.now(),
+): Date | null {
+  // An error preserves old windows; its updated timestamp is not fresh recovery evidence.
+  if (w.status !== 'ok' || now - w.fetchedAt.getTime() > USAGE_SNAPSHOT_STALE_AFTER_MS) return null;
   const resets = [
     [w.fiveHourPct, w.fiveHourResetAt],
     [w.sevenDayPct, w.sevenDayResetAt],
@@ -52,13 +59,16 @@ export type AllowanceVerdict = { back: false } | { back: true; via: 'reset' | 'u
  *  off old numbers — but a passed reset still fires (it doesn't depend on live %). */
 export function allowanceVerdict(args: {
   resetAt: Date | null;
-  windows: UsageWindows | null;
+  windows: (UsageWindows & { fetchedAt: Date }) | null;
   snapshotOk: boolean;
   now: number;
 }): AllowanceVerdict {
   const { resetAt, windows, snapshotOk, now } = args;
   if (resetAt != null && now >= resetAt.getTime()) return { back: true, via: 'reset' };
-  const maxPct = windows && snapshotOk ? maxConsumedPct(windows) : null;
+  const maxPct =
+    windows && snapshotOk && now - windows.fetchedAt.getTime() <= USAGE_SNAPSHOT_STALE_AFTER_MS
+      ? maxConsumedPct(windows)
+      : null;
   if (maxPct != null && maxPct < RECOVERED_PCT) return { back: true, via: 'usage_dropped' };
   return { back: false };
 }

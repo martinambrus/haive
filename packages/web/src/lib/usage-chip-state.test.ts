@@ -29,18 +29,18 @@ function snap(over: Partial<UsageWindowSnapshot> = {}): UsageWindowSnapshot {
 
 describe('isMeteredCli', () => {
   it('knows the CLIs a reading can exist for', () => {
-    expect(isMeteredCli('codex')).toBe(true);
-    expect(isMeteredCli('claude-code')).toBe(true);
-    expect(isMeteredCli('zai')).toBe(true);
-    expect(isMeteredCli('gemini')).toBe(true);
+    expect(isMeteredCli('codex', 'subscription')).toBe(true);
+    expect(isMeteredCli('claude-code', 'subscription')).toBe(true);
+    expect(isMeteredCli('zai', 'subscription')).toBe(true);
+    expect(isMeteredCli('gemini', 'subscription')).toBe(true);
   });
 
   it('rejects the CLIs that publish no usage endpoint', () => {
-    expect(isMeteredCli('ollama')).toBe(false);
-    expect(isMeteredCli('grok')).toBe(false);
-    expect(isMeteredCli('amp')).toBe(false);
-    expect(isMeteredCli('antigravity')).toBe(false);
-    expect(isMeteredCli(null)).toBe(false);
+    expect(isMeteredCli('ollama', 'subscription')).toBe(false);
+    expect(isMeteredCli('grok', 'subscription')).toBe(false);
+    expect(isMeteredCli('amp', 'subscription')).toBe(false);
+    expect(isMeteredCli('antigravity', 'subscription')).toBe(false);
+    expect(isMeteredCli(null, 'subscription')).toBe(false);
   });
 });
 
@@ -161,4 +161,18 @@ describe('fault copy', () => {
     expect(usageFaultHref('no_windows')).toBeNull();
     expect(usageFaultHref('no_meter')).toBeNull();
   });
+});
+
+it.each([
+  { snapshots: [] },
+  { snapshots: [snap({ providerName: 'claude-code', status: 'needs_reconnect' })] },
+])('API-key Claude has no actionable header fallback (%j)', ({ snapshots }) => {
+  expect(
+    resolveUsageChipState({
+      providerId: PROVIDER,
+      providerName: 'claude-code',
+      providerAuthMode: 'api_key',
+      snapshots,
+    }),
+  ).toEqual({ kind: 'hidden' });
 });

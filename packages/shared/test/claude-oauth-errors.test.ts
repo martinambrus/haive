@@ -16,7 +16,7 @@ function respond(status: number, body: string) {
 }
 
 async function refusal(): Promise<unknown> {
-  return refreshClaudeToken('rt').then(
+  return refreshClaudeToken(randomBytes(16).toString('hex')).then(
     () => null,
     (err: unknown) => err,
   );
@@ -48,6 +48,17 @@ describe('a refused Claude token refresh', () => {
     respond(503, 'upstream invalid_grant gateway');
     expect(isClaudeRefreshRejected(await refusal())).toBe(false);
   });
+
+  it.each([400, 401, 403, 429, 500, 503])(
+    'classifies JSON invalid_grant only on a 400/401 refusal (%s)',
+    async (status) => {
+      respond(status, JSON.stringify({ error: 'invalid_grant' }));
+      const err = (await refusal()) as { status: number; code: string | null };
+      expect(err.status).toBe(status);
+      expect(err.code).toBe(status === 400 || status === 401 ? 'invalid_grant' : null);
+      expect(isClaudeRefreshRejected(err)).toBe(status === 400 || status === 401);
+    },
+  );
 
   it('keeps the status in its message', async () => {
     respond(400, JSON.stringify({ error: 'invalid_grant' }));

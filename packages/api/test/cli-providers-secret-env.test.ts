@@ -54,7 +54,7 @@ import type { AppEnv } from '../src/context.js';
 
 const PROVIDER = '00000000-0000-4000-8000-0000000000b1';
 const KEK = 'ab'.repeat(32);
-const SECRET_VALUE = 'sk-test-value-123';
+const SECRET_VALUE = randomBytes(16).toString('hex');
 
 const app = new Hono<AppEnv>();
 app.route('/', cliProviderRoutes);
@@ -1065,7 +1065,7 @@ describe('T748.4 configured secrets list', () => {
     expect((await app.request(`/${PROVIDER}/secrets`)).status).toBe(200);
     expect(secretsService.getMasterKek).not.toHaveBeenCalled();
   });
-  it('lists and clones undecryptable rows, including the worker-only grant, without a KEK', async () => {
+  it('lists undecryptable rows and clones ordinary secrets without a KEK or usage grant', async () => {
     const fake = setup(true);
     fake.patch(schema.cliProviders, PROVIDER, { authMode: 'api_key' });
     for (const secretName of ['REAL_TOKEN', 'CLAUDE_USAGE_OAUTH']) {
@@ -1093,7 +1093,10 @@ describe('T748.4 configured secrets list', () => {
     const copies = fake
       .rows(schema.cliProviderSecrets)
       .filter((row) => row.providerId === clone.id);
-    expect(copies.length).toBe(before.length);
+    expect(copies.map((row) => row.secretName)).toEqual(['REAL_TOKEN']);
+    expect(
+      fake.rows(schema.cliProviderSecrets).filter((row) => row.providerId === PROVIDER),
+    ).toEqual(before);
     expect(
       copies.every((row) =>
         before.some(
