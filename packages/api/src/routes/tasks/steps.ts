@@ -1234,10 +1234,14 @@ stepRoutes.post('/:id/steps/:stepId/submit', async (c) => {
     return { accepted: true, answeredAt: now };
   };
   const answer = await db.transaction(async (tx) => {
-    const revive = await admitAnswer(tx, id);
-    if (revive) await refuseReviveBesideLive(tx, id);
-    const written = await writeAnswer(tx);
-    if (revive && written.accepted) await reopenFailedTask(tx, id, now);
+    let written: Awaited<ReturnType<typeof writeAnswer>>;
+    if (!(await admitAnswer(tx, id))) {
+      written = await writeAnswer(tx);
+    } else {
+      await refuseReviveBesideLive(tx, id);
+      written = await writeAnswer(tx);
+      if (written.accepted) await reopenFailedTask(tx, id, now);
+    }
     // Keep the accepted step row locked through this read, step before task as
     // Retry does. A takeover after commit makes an identical retry's wakeup stale.
     const [heldTask] = await tx

@@ -598,12 +598,13 @@ jobs:
           GATED_SHARDS: ${{ strategy.job-total }}
           PG_CONTAINER: ${{ job.services.postgres.id }}
           PGVECTOR_CONTAINER: ${{ job.services.pgvector.id }}
-          # This job owns its Redis service: gated databases 10-14, job default 0.
+          # This job owns its Redis service: gated databases 11-14, job default 0. Rows run one at a
+          # time, so advance-epochs shares database 11 under its own random queue name.
           INTEGRATIONS_BROKER_TEST_REDIS_URL: redis://localhost:6379/13
           MODULE_PURGE_API_TEST_REDIS_URL: redis://localhost:6379/12
           INTEGRATIONS_AUDIT_TEST_REDIS_URL: redis://localhost:6379/11
           T117_REDIS_URL: redis://127.0.0.1:6379/14
-          ADVANCE_EPOCHS_TEST_REDIS_URL: redis://localhost:6379/10
+          ADVANCE_EPOCHS_TEST_REDIS_URL: redis://localhost:6379/11
         run: |
           set -uo pipefail
           failed=0
