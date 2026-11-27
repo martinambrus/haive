@@ -236,13 +236,10 @@ async function resolveSetGrant(
           if (written) deadUsageRefreshToken.set(key, holder.grant.refreshToken);
           return null;
         }
-        // Transient (network / 5xx): try the stale token anyway; the fetch surfaces the
-        // state without marking the token permanently dead.
-        log.warn(
-          { providerId: rep.id, err },
-          'claude usage token refresh failed; using stale token',
-        );
-        return holder;
+        // Any refresh failure stops this poll. Keep the stored grant for the next tick,
+        // but never use an access token we already decided needs refreshing.
+        log.warn({ providerId: rep.id, err }, 'claude usage token refresh failed; skipping poll');
+        return null;
       }
     }
     return holder;
@@ -580,6 +577,7 @@ export async function runUsagePollTick(db: Database): Promise<void> {
       targets.push(p);
       continue;
     }
+    if (p.authMode !== 'subscription') continue;
     const scope = cliAuthScope(p);
     const rep = setReps.get(scope);
     if (!rep || p.id < rep.id) setReps.set(scope, p);

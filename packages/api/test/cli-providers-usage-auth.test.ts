@@ -45,10 +45,10 @@ import type { AppEnv } from '../src/context.js';
 
 const PROVIDER = '00000000-0000-4000-8000-0000000000b1';
 const KEK = 'ab'.repeat(32);
-const CODE = 'auth-code-from-claude';
+const CODE = randomUUID();
 const TOKENS = {
-  access_token: 'at-1',
-  refresh_token: 'rt-1',
+  access_token: randomUUID(),
+  refresh_token: randomUUID(),
   expires_in: 28800,
   scope: 'org:create_api_key user:profile user:inference',
 };
@@ -173,7 +173,10 @@ describe('POST /:providerId/usage-auth/complete', () => {
     expect(sent.get('state')).toBe(state);
     const verifier = sent.get('code_verifier')!;
     expect(createHash('sha256').update(verifier).digest('base64url')).toBe(challenge);
-    expect(storedTokens()).toMatchObject({ accessToken: 'at-1', refreshToken: 'rt-1' });
+    expect(storedTokens()).toMatchObject({
+      accessToken: TOKENS.access_token,
+      refreshToken: TOKENS.refresh_token,
+    });
     expect(h.pollAdd).toHaveBeenCalledTimes(1);
 
     const replay = await post('complete', { code: `${CODE}#${state}` });
@@ -328,3 +331,23 @@ it.each(['exchange', 'write'])(
     expect(h.pollAdd).not.toHaveBeenCalled();
   },
 );
+
+it.each(['api_key', 'subscription'])(
+  'starts usage authorization only for subscription auth (%s)',
+  async (authMode) => {
+    fake.patch(schema.cliProviders, PROVIDER, { authMode });
+    const set = vi.spyOn(h.redis as ReturnType<typeof memoryRedis>, 'set');
+    const res = await post('start');
+    expect(res.status).toBe(authMode === 'subscription' ? 200 : 400);
+    expect(set).toHaveBeenCalledTimes(authMode === 'subscription' ? 1 : 0);
+    expect(h.fetch).not.toHaveBeenCalled();
+  },
+);
+
+it('refuses completion if a subscription row changed to API-key auth after start', async () => {
+  const { state } = await startAuthorization();
+  fake.patch(schema.cliProviders, PROVIDER, { authMode: 'api_key' });
+  expect((await post('complete', { code: `${CODE}#${state}` })).status).toBe(400);
+  expect(h.fetch).not.toHaveBeenCalled();
+  expect(fake.rows(schema.cliProviderSecrets)).toEqual([]);
+});

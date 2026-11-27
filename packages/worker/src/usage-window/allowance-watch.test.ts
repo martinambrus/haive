@@ -10,7 +10,10 @@ import {
   type UsageWindows,
 } from './allowance-watch.js';
 
-const win = (o: Partial<UsageWindows> = {}): UsageWindows => ({
+const win = (
+  o: Partial<UsageWindows & { status: string }> = {},
+): UsageWindows & { status: string } => ({
+  status: 'ok',
   fiveHourPct: null,
   fiveHourResetAt: null,
   sevenDayPct: null,
@@ -33,6 +36,14 @@ describe('maxConsumedPct', () => {
 });
 
 describe('constrainingResetAt', () => {
+  it.each(['error', 'needs_reconnect'])(
+    'ignores preserved exhausted windows on %s snapshots',
+    (status) => {
+      expect(
+        constrainingResetAt(win({ status, fiveHourPct: 100, fiveHourResetAt: new Date(0) })),
+      ).toBeNull();
+    },
+  );
   const t5 = new Date('2026-07-03T05:00:00Z');
   const t7 = new Date('2026-07-10T00:00:00Z');
   it('picks the LATEST reset among windows at/over EXHAUSTED_PCT (blocked until the later one)', () => {

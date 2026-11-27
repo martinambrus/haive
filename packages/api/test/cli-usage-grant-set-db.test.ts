@@ -69,12 +69,18 @@ vi.mock('@haive/shared/claude-oauth', async (original) => ({
 }));
 import {
   configService,
+  lockLoginSet,
   envelopeDecrypt,
   secretsService,
   upsertProviderSecret,
 } from '@haive/shared';
 import { cliProviderRoutes } from '../src/routes/cli-providers.js';
-import { deleteUsageGrantFromSet, writeUsageGrantToSet } from '../src/lib/usage-grant-set.js';
+import {
+  deleteUsageGrantFromSet,
+  writeUsageGrantToSet,
+  seedUsageGrantJoiner,
+  dropLeaverUsageGrant,
+} from '../src/lib/usage-grant-set.js';
 import { errorHandler } from '../src/middleware/error-handler.js';
 import { HttpError, type AppEnv } from '../src/context.js';
 
@@ -426,18 +432,25 @@ describe.skipIf(!url)('every writer of the Claude usage connection covers the lo
       expect(seenAtTick).toBe(4);
     });
 
-    it.each([
-      ['an isolated row', 'D'],
-      ['an API-key row', 'E'],
-    ] as [string, Key][])('through %s writes and bumps that row only', async (_n, key) => {
-      const rest = ALL.filter((k) => k !== key);
-      const before = await outside(rest);
-      const { res, tokens } = await connect(rows[key].id);
-      expect(res.status).toBe(200);
-      await expectGrantEverywhere([key], tokens);
-      await expectUsageEvents(SET_ACTION, 'usage_oauth', key, [key], 1);
-      expect(await outside(rest)).toEqual(before);
-    });
+    it.each([['an isolated row', 'D']] as [string, Key][])(
+      'through %s writes and bumps that row only',
+      async (_n, key) => {
+        const rest = ALL.filter((k) => k !== key);
+        const before = await outside(rest);
+        const { res, tokens } = await connect(rows[key].id);
+        expect(res.status).toBe(200);
+        await expectGrantEverywhere([key], tokens);
+        await expectUsageEvents(SET_ACTION, 'usage_oauth', key, [key], 1);
+        expect(await outside(rest)).toEqual(before);
+      },
+    );
+  });
+
+  it('refuses usage authorization completion on an API-key row without changing grants', async () => {
+    const before = await world();
+    expect((await connect(rows.E.id)).res.status).toBe(400);
+    expect(h.exchange).not.toHaveBeenCalled();
+    expect(await world()).toEqual(before);
   });
 
   describe('Disconnect', () => {
@@ -585,6 +598,76 @@ describe.skipIf(!url)('every writer of the Claude usage connection covers the lo
     expect(await snapshotRows(pids)).toEqual(before);
     expect((await audits(db)).length).toBe(audited);
     expect(h.poll).not.toHaveBeenCalled();
+  });
+
+  it.each(['POST', 'DELETE'])(
+    'a non-Claude secret named like the usage grant keeps ordinary row-local semantics (%s)',
+    async (method) => {
+      const [sibling] = await db
+        .insert(schema.cliProviders)
+        .values({
+          userId: U,
+          name: 'codex',
+          authMode: 'subscription',
+          isolateAuth: false,
+          label: rnd(),
+        })
+        .returning();
+      await upsertProviderSecret(db, {
+        providerId: sibling!.id,
+        name: USAGE,
+        value: rnd(),
+        masterKek: KEK,
+        onExisting: 'overwrite',
+      });
+      const beforeSibling = await usageCopies([sibling!.id]);
+      const beforeSnapshots = await snapshotRows([rows.G.id]);
+      const value = rnd(); // Ordinary secret, deliberately not JSON.
+      const res = method === 'POST' ? await postUsage(rows.G.id, value) : await delUsage(rows.G.id);
+      expect(res.status).toBe(200);
+      expect(await usageCopies([sibling!.id])).toEqual(beforeSibling);
+      expect(await snapshotRows([rows.G.id])).toEqual(beforeSnapshots);
+      expect(await plain(rows.G.id, USAGE)).toBe(method === 'POST' ? value : undefined);
+    },
+  );
+
+  it('the seed helper rolls back when the lock is lost after its last secret write', async () => {
+    const before = await world();
+    const lost = new Error('synthetic lock loss');
+    let checks = 0;
+    await expect(
+      db.transaction(async (tx) => {
+        const members = await lockLoginSet(tx, rows.A);
+        await seedUsageGrantJoiner(tx, {
+          userId: U,
+          joinerId: rows.H.id,
+          members,
+          assertHeld: async () => {
+            if (++checks === 2) throw lost;
+          },
+        });
+      }),
+    ).rejects.toBe(lost);
+    expect(checks).toBe(2);
+    expect(await world()).toEqual(before);
+  });
+
+  it('the leaver helper rolls back when the lock is lost after its last write', async () => {
+    const before = await world();
+    const lost = new Error('synthetic lock loss');
+    await expect(
+      db.transaction(async (tx) => {
+        await lockLoginSet(tx, rows.A);
+        await dropLeaverUsageGrant(tx, {
+          userId: U,
+          leaverId: rows.A.id,
+          assertHeld: async () => {
+            throw lost;
+          },
+        });
+      }),
+    ).rejects.toBe(lost);
+    expect(await world()).toEqual(before);
   });
 
   it('refuses a manual grant whose expiry is not a finite number and writes nothing', async () => {
@@ -1009,12 +1092,12 @@ describe.skipIf(!url)('every writer of the Claude usage connection covers the lo
       expect((await plain(id, OTHER)) === (await plain(rows.D.id, OTHER))).toBe(true);
     });
 
-    it('a clone of an API-key row copies every secret as before', async () => {
+    it('a clone of an API-key row copies ordinary secrets without its legacy usage grant', async () => {
       const res = await call('POST', `/${rows.E.id}/clone`);
       expect(res.status).toBe(201);
       const id = ((await res.json()) as { provider: { id: string } }).provider.id;
-      for (const name of [USAGE, OTHER])
-        expect((await plain(id, name)) === (await plain(rows.E.id, name)), name).toBe(true);
+      expect(await plain(id, USAGE)).toBeUndefined();
+      expect((await plain(id, OTHER)) === (await plain(rows.E.id, OTHER))).toBe(true);
       expect(await usageEvents(SET_ACTION)).toEqual([]);
       expect(h.poll).not.toHaveBeenCalled();
     });

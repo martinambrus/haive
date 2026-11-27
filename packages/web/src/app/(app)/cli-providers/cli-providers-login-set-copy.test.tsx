@@ -176,3 +176,22 @@ describe('login set copy on the providers list', () => {
     expect(h.get.mock.calls.length).toBe(getsBefore);
   });
 });
+
+it.each([false, true])(
+  'Disconnect describes the actual scope for an isolated row (reconnect=%s)',
+  async (reconnect) => {
+    answer([{ ...row('a', 'claude-code'), isolateAuth: true }], reconnect ? ['a'] : []);
+    const confirm = vi.fn((_message: string) => true);
+    vi.stubGlobal('confirm', confirm);
+    h.delete.mockResolvedValue({});
+    const view = await renderPage();
+    const button = buttons(view.tree(), /^disconnect usage$/i)[0]!;
+    expect(String(button.props.title)).toContain('this row');
+    expect(String(button.props.title)).not.toContain('every row');
+    fire.click(button);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(String(confirm.mock.calls[0]?.[0])).toContain('Row a?');
+    expect(String(confirm.mock.calls[0]?.[0])).not.toContain('every row');
+    expect(h.delete).toHaveBeenCalledWith('/cli-providers/a/usage-auth');
+  },
+);

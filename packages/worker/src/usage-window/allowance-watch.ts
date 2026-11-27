@@ -31,7 +31,9 @@ export function maxConsumedPct(w: UsageWindows): number | null {
 /** The LATEST reset among the windows currently at/over EXHAUSTED_PCT — the true "blocked
  *  until" moment (if both the 5-hour and 7-day windows are maxed you're unblocked only when
  *  the later one resets). Null when no window is constrained or none exposes a reset. */
-export function constrainingResetAt(w: UsageWindows): Date | null {
+export function constrainingResetAt(w: UsageWindows & { status: string }): Date | null {
+  // An error preserves old windows; its updated timestamp is not fresh recovery evidence.
+  if (w.status !== 'ok') return null;
   const resets = [
     [w.fiveHourPct, w.fiveHourResetAt],
     [w.sevenDayPct, w.sevenDayResetAt],

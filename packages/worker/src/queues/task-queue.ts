@@ -2129,6 +2129,7 @@ async function recordFailedStepHint(
       // not just a %-drop.
       const [snap] = await db
         .select({
+          status: schema.usageWindowSnapshots.status,
           fiveHourPct: schema.usageWindowSnapshots.fiveHourPct,
           fiveHourResetAt: schema.usageWindowSnapshots.fiveHourResetAt,
           sevenDayPct: schema.usageWindowSnapshots.sevenDayPct,

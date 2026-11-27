@@ -111,7 +111,7 @@ function setup() {
     providerId: PROVIDER,
     reason: 'rate_limit',
     since,
-    resetAt: new Date(0),
+    resetAt: new Date(0) as Date | null,
     currentStepId: 'fan-out',
     currentRound: 0,
     autoResumeCount: 0,
@@ -820,5 +820,30 @@ describe('T594 M1: a recovered allowance survives revival refusals', () => {
     await checkProviderRecovery(t.db);
     expect(t.task()).toMatchObject({ status: 'running', allowanceAutoResumeCount: 1 });
     expect(h.queued).toHaveLength(1);
+  });
+});
+
+describe('allowance reset backfill from stored windows', () => {
+  afterEach(() => vi.restoreAllMocks());
+  it.each(['error', 'needs_reconnect', 'ok'])('uses only ok snapshots (%s)', async (status) => {
+    config('notify', 'normal');
+    const t = setup();
+    t.armed.resetAt = null;
+    t.fake.patch(schema.tasks, TASK, { allowanceResetAt: null });
+    t.fake.insert(schema.usageWindowSnapshots, {
+      providerId: PROVIDER,
+      userId: USER,
+      providerName: 'claude-code',
+      status,
+      fetchedAt: new Date(),
+      fiveHourPct: 100,
+      fiveHourResetAt: new Date(0),
+    });
+    await checkProviderRecovery(t.db);
+    expect(t.task().allowanceReplenishedAt != null).toBe(status === 'ok');
+    if (status !== 'ok') {
+      expect(t.task().allowanceResetAt).toBeNull();
+      expect(t.fake.rows(schema.taskEvents)).toEqual([]);
+    }
   });
 });

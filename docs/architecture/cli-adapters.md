@@ -194,9 +194,31 @@ text mentioning that code, other OAuth codes, server failures and aborts remain 
 raw body or description, which may echo credentials.
 
 `ClaudeOauthError` (`@haive/shared/claude-oauth`) follows the same rule: its message is
-`claude oauth <grant>: http <status>`, plus ` (<code>)` when the JSON `error` is a registered
-RFC 6749 code. Any other `error` value, the description and a plain-text body are dropped. The
+`claude oauth <grant>: http <status>`, plus ` (<code>)` only for HTTP 400/401 when the JSON
+`error` is a registered RFC 6749 code. A gateway 5xx carrying `invalid_grant` is transient. Any other `error` value, the description and a plain-text body are dropped. The
 message reaches the Connect HTTP 400 and the usage poller's warn log, so callers key on `code`
 (`isClaudeRefreshRejected` reads `invalid_grant`), never on wording. A 200 body that is not JSON
 throws a fixed `claude oauth: invalid token response`, because the parser's SyntaxError quotes
 the body.
+
+Claude usage authorization starts and completes only for a `claude-code` row on subscription
+auth; the poller also excludes API-key rows even if they retain a legacy usage grant. Disconnect
+and the generic secret routes can still remove that legacy grant. An API-key Claude clone holds
+its source auth scope lock through the secret copy, but never copies the usage grant, whether
+shared or isolated. A subscription clone still seeds from its shared set; an isolated clone
+starts without a grant. Disconnect's confirmation and action title name only the isolated row
+when its authentication is isolated.
+
+Any Claude usage refresh failure stops that set's poll for the tick. Transient failures retain
+the stored grant and retry on the next tick, without fetching usage with the stale access token.
+A successful rotation commits every identical copy before the usage fetch starts, in its own
+transaction, so an interrupted fetch or failed snapshot write cannot roll it back. This preserves
+the existing single-use refresh assumption; no new vendor semantics were verified. A process
+loss after the vendor rotates but before the local rotation commit is still an external-system
+atomicity gap; ordering the local write before usage cannot remove it.
+
+Allowance-watch arming and reset backfill both ignore preserved windows on snapshots whose
+status is not `ok`. The recovery percentage probe already requires `ok`, so old numbers cannot
+supply fresh evidence on either path. A reset captured earlier from an `ok` snapshot remains
+authoritative even when a later snapshot errors. No existing snapshots or captured resets are
+rewritten.
