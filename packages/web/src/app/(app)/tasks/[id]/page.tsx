@@ -2346,6 +2346,7 @@ export default function TaskDetailPage() {
                     onStop={() => void stopActiveCli()}
                     onCliLogin={() => openCliLoginForStep(step)}
                     providers={providers}
+                    providerRestrictions={task.cliProviderRestrictions}
                     taskCliProviderId={task.cliProviderId ?? null}
                     fallbackProviderId={taskEffectiveCliProviderId}
                     cliBusy={stepProviderBusy === step.stepId}
@@ -2466,6 +2467,7 @@ export default function TaskDetailPage() {
         <div className="flex flex-col gap-3">
           <SummaryCliCard
             providers={providers}
+            providerRestrictions={task.cliProviderRestrictions}
             summaryCliProviderId={task.summaryCliProviderId ?? null}
             summaryLlmEnabled={task.summaryLlmEnabled ?? true}
             busy={summaryCliBusy}
@@ -2475,6 +2477,7 @@ export default function TaskDetailPage() {
           <UpcomingCliPanel
             steps={upcomingCliSteps}
             providers={providers}
+            providerRestrictions={task.cliProviderRestrictions}
             taskCliProviderId={task.cliProviderId ?? null}
             fallbackProviderId={taskEffectiveCliProviderId}
             busyStepId={stepProviderBusy}
@@ -2573,6 +2576,7 @@ export default function TaskDetailPage() {
  *  cancelled or completed run. */
 function SummaryCliCard({
   providers,
+  providerRestrictions,
   summaryCliProviderId,
   summaryLlmEnabled,
   busy,
@@ -2580,6 +2584,7 @@ function SummaryCliCard({
   onChange,
 }: {
   providers: CliProvider[];
+  providerRestrictions?: Record<string, string>;
   summaryCliProviderId: string | null;
   summaryLlmEnabled: boolean;
   busy: boolean;
@@ -2632,8 +2637,14 @@ function SummaryCliCard({
             </option>
           )}
           {usable.map((p) => (
-            <option key={p.id} value={p.id}>
+            <option
+              key={p.id}
+              value={p.id}
+              disabled={!!providerRestrictions?.[p.id]}
+              title={providerRestrictions?.[p.id]}
+            >
               {p.label}
+              {providerRestrictions?.[p.id] ? ' — unavailable for this environment' : ''}
             </option>
           ))}
         </select>
@@ -2671,6 +2682,7 @@ function SummaryCliCard({
 function UpcomingCliPanel({
   steps,
   providers,
+  providerRestrictions,
   taskCliProviderId,
   fallbackProviderId,
   busyStepId,
@@ -2680,6 +2692,7 @@ function UpcomingCliPanel({
 }: {
   steps: UpcomingCliStep[];
   providers: CliProvider[];
+  providerRestrictions?: Record<string, string>;
   taskCliProviderId: string | null;
   fallbackProviderId: string | null;
   busyStepId: string | null;
@@ -2717,6 +2730,7 @@ function UpcomingCliPanel({
           </div>
           <CliPickerGrid
             providers={providers}
+            providerRestrictions={providerRestrictions}
             idPrefix={`upcoming-cli-${s.stepId}`}
             roles={s.cliRoles}
             seats={s.miningSeats}
@@ -2882,6 +2896,7 @@ interface StepCardProps {
   ) => Promise<void>;
   onCliLogin: () => void;
   providers: CliProvider[];
+  providerRestrictions?: Record<string, string>;
   /** Task-level fallback when this step has no per-step preference set. */
   taskCliProviderId: string | null;
   fallbackProviderId: string | null;
@@ -3680,6 +3695,7 @@ function StepCardImpl({
   canStop,
   onCliLogin,
   providers,
+  providerRestrictions,
   taskCliProviderId,
   fallbackProviderId,
   cliBusy,
@@ -3928,6 +3944,7 @@ function StepCardImpl({
           {showCliPicker && (
             <CliPickerGrid
               providers={providers}
+              providerRestrictions={providerRestrictions}
               idPrefix={cliPickerId}
               roles={step.cliRoles}
               seats={step.miningSeats}

@@ -61,6 +61,7 @@ interface Scenario {
   providers?: typeof PROVIDERS;
   runList?: string[];
   linked?: boolean;
+  repoLsp?: string[];
 }
 
 function makeCtx(s: Scenario = {}): StepContext {
@@ -90,7 +91,7 @@ function makeCtx(s: Scenario = {}): StepContext {
   // Valid onboarding mirrors keep detect off the joined task_steps fallback the fake cannot run.
   fake.insert(schema.repositories, {
     id: REPO,
-    lspServers: ['intelephense-extended'],
+    lspServers: s.repoLsp ?? ['intelephense-extended'],
     onboardingEnvironment: {
       schemaVersion: ONBOARDING_ENVIRONMENT_SCHEMA_VERSION,
       envDetectData: {},
@@ -124,6 +125,14 @@ const adoptable = (detected: unknown) =>
   (detected as { composedLspAdoptable?: boolean }).composedLspAdoptable;
 
 describe('detect composedLspAdoptable', () => {
+  it.each([{ keys: [] }, { keys: ['vtsls'] }, { keys: ['intelephense-extended', 'pyright'] }])(
+    'does not offer adoption for effective selection %j',
+    async ({ keys }) => {
+      const detected = await declareDepsStep.detect!(makeCtx({ repoLsp: keys }));
+      expect(adoptable(detected)).not.toBe(true);
+    },
+  );
+
   it('C1 is true for an eligible new environment', async () => {
     const detected = await declareDepsStep.detect!(makeCtx());
     expect(adoptable(detected)).toBe(true);

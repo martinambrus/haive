@@ -353,32 +353,18 @@ describe('skillVerificationStep.apply CLI write', () => {
   const CURRENT = '00000000-0000-4000-8000-0000000000d1';
   const GATE_PICK = '00000000-0000-4000-8000-0000000000d2';
   const CLIS_TAB_PICK = '00000000-0000-4000-8000-0000000000d3';
-  const makeFakeDb = (sink: Record<string, unknown>[]) =>
-    ({
-      insert: () => ({
-        values: (vals: Record<string, unknown>) => {
-          sink.push(vals);
-          return { onConflictDoUpdate: async () => {}, onConflictDoNothing: async () => {} };
-        },
-      }),
-    }) as unknown as StepContext['db'];
-
-  const brokenDetect = (cur: string) =>
-    detectStub(
-      [makeCheck({ skillId: 'bad', passed: false, issues: ['SKILL.md empty'] })],
-      [
-        { id: 'p1', label: 'Claude' },
-        { id: 'p2', label: 'Codex' },
-      ],
-      cur,
-    );
 
   it("runs the fix on the gate's pick in this task, over the task's earlier pick, and no later", async () => {
     const fake = createFakeDb({
+      tasks: schema.tasks,
+      cliProviders: schema.cliProviders,
+      envTemplates: schema.envTemplates,
       taskStepCliChoices: schema.taskStepCliChoices,
       userStepCliPreferences: schema.userStepCliPreferences,
       userStepCliRolePreferences: schema.userStepCliRolePreferences,
     });
+    fake.insert(schema.tasks, { id: TASK, userId: USER, cliProviderId: CURRENT });
+    fake.insert(schema.cliProviders, { id: GATE_PICK, userId: USER, name: 'codex', enabled: true });
     fake.insert(schema.taskStepCliChoices, {
       taskId: TASK,
       stepId: '09_5b-skill-repair',
@@ -413,21 +399,88 @@ describe('skillVerificationStep.apply CLI write', () => {
   });
 
   it('records the pick even when it equals the current model, so the fix runs on what was shown', async () => {
-    const inserts: Record<string, unknown>[] = [];
+    const fake = createFakeDb({
+      tasks: schema.tasks,
+      cliProviders: schema.cliProviders,
+      envTemplates: schema.envTemplates,
+      taskStepCliChoices: schema.taskStepCliChoices,
+    });
+    fake.insert(schema.tasks, { id: TASK, userId: USER, cliProviderId: CURRENT });
+    fake.insert(schema.cliProviders, {
+      id: CURRENT,
+      userId: USER,
+      name: 'claude-code',
+      enabled: true,
+    });
     const ctx = {
-      userId: 'u1',
-      taskId: 't1',
-      db: makeFakeDb(inserts),
+      userId: USER,
+      taskId: TASK,
+      db: fake.db,
       logger: { info: () => {} },
     } as unknown as StepContext;
     await skillVerificationStep.apply(ctx, {
-      detected: brokenDetect('p1'),
-      formValues: { decision: 'repair', repairCli: 'p1' },
+      detected: detectStub(
+        [makeCheck({ skillId: 'bad', passed: false, issues: ['empty'] })],
+        [{ id: CURRENT, label: 'Claude' }],
+        CURRENT,
+      ),
+      formValues: { decision: 'repair', repairCli: CURRENT },
       iteration: 0,
       previousIterations: [],
     });
-    expect(inserts).toEqual([
-      expect.objectContaining({ stepId: '09_5b-skill-repair', cliProviderId: 'p1' }),
+    expect(fake.rows(schema.taskStepCliChoices)).toEqual([
+      expect.objectContaining({ stepId: '09_5b-skill-repair', cliProviderId: CURRENT }),
     ]);
   });
+});
+
+it('skill-verification refuses a stale option after the task becomes composed', async () => {
+  const fake = createFakeDb(
+    {
+      tasks: schema.tasks,
+      cliProviders: schema.cliProviders,
+      envTemplates: schema.envTemplates,
+      taskStepCliChoices: schema.taskStepCliChoices,
+    },
+    { rowLocks: true },
+  );
+  const id = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, '0')}`;
+  fake.insert(schema.tasks, {
+    id: id(1),
+    userId: id(2),
+    cliProviderId: id(3),
+    envTemplateId: id(4),
+  });
+  fake.insert(schema.envTemplates, { id: id(4), declaredDeps: { lspInstallContractVersion: 2 } });
+  fake.insert(schema.cliProviders, {
+    id: id(3),
+    userId: id(2),
+    name: 'claude-code',
+    enabled: true,
+  });
+  fake.insert(schema.cliProviders, { id: id(5), userId: id(2), name: 'codex', enabled: true });
+  const reads: boolean[] = [];
+  fake.hooks.beforeRead = (table) => {
+    if (table === schema.envTemplates) reads.push(fake.rowLocked(schema.tasks, id(1)));
+  };
+  const ctx = {
+    userId: id(2),
+    taskId: id(1),
+    db: fake.db,
+    logger: { info: () => {} },
+  } as unknown as StepContext;
+  await expect(
+    skillVerificationStep.apply(ctx, {
+      detected: detectStub(
+        [makeCheck({ skillId: 'bad', passed: false, issues: ['empty'] })],
+        [{ id: id(5), label: 'Codex' }],
+        id(3),
+      ),
+      formValues: { decision: 'repair', repairCli: id(5) },
+      iteration: 0,
+      previousIterations: [],
+    }),
+  ).rejects.toMatchObject({ code: 'composed_lsp_provider_locked' });
+  expect(reads).toEqual([true]);
+  expect(fake.rows(schema.taskStepCliChoices)).toEqual([]);
 });

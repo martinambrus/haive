@@ -223,6 +223,8 @@ a running task that is neither paused nor dead. Reset paths that close the park 
 cannot keep the badge alive. The task list explicitly selects this column; detail reads the
 whole step row.
 
+A disable preview's composed-LSP failure list includes a task only when its effective run list still has a fresh CLI-dispatching step at or after the current pointer. A live task with only deterministic work left is not described as failing at a next CLI step. The existing provider-sensitive hold counts remain separate.
+
 Before saving a provider disable, Save and Rebuild read the authenticated, owner-scoped
 `GET /cli-providers/:id/disable-impact`. It counts remaining fresh default-slot bindings to that
 provider on non-dead, nonterminal tasks (including tasks waiting to start or resume), using the same

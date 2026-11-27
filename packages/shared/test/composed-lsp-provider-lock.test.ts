@@ -7,6 +7,7 @@ import {
   checkTaskComposedLspProvider,
   decideComposedLspProviderLock,
   lockTaskForComposedLsp,
+  withComposedLspTransaction,
   type ComposedLspLockProvider,
 } from '../src/composed-lsp-provider-lock.js';
 
@@ -221,5 +222,35 @@ describe('lockTaskForComposedLsp', () => {
 
   it("returns null when the task is not the user's", async () => {
     expect(await run([]).result).toBeNull();
+  });
+});
+
+describe('composed choice transaction deadlock recovery', () => {
+  it('retries one whole transaction on a wrapped SQLSTATE 40P01', async () => {
+    const db = {
+      transaction: vi
+        .fn()
+        .mockRejectedValueOnce(new Error('opaque', { cause: { code: '40P01' } }))
+        .mockResolvedValueOnce('saved'),
+    };
+    expect(await withComposedLspTransaction(db as unknown as Database, async () => 'saved')).toBe(
+      'saved',
+    );
+    expect(db.transaction).toHaveBeenCalledTimes(2);
+  });
+  it('returns a stable retryable refusal after a second deadlock', async () => {
+    const db = { transaction: vi.fn().mockRejectedValue({ code: '40P01' }) };
+    await expect(
+      withComposedLspTransaction(db as unknown as Database, async () => null),
+    ).rejects.toMatchObject({ code: 'composed_lsp_write_busy', retryable: true });
+    expect(db.transaction).toHaveBeenCalledTimes(2);
+  });
+  it('does not retry another SQLSTATE or wording that mentions deadlock', async () => {
+    const error = Object.assign(new Error('deadlock 40P01'), { code: '23503' });
+    const db = { transaction: vi.fn().mockRejectedValue(error) };
+    await expect(
+      withComposedLspTransaction(db as unknown as Database, async () => null),
+    ).rejects.toBe(error);
+    expect(db.transaction).toHaveBeenCalledTimes(1);
   });
 });

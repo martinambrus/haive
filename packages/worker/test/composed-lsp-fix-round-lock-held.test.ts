@@ -74,3 +74,24 @@ describe('next fix round CLI choice write', () => {
     expect(held, 'the task row lock was held at every choice insert').not.toContain(false);
   });
 });
+
+describe('composed contract read is made after the task lock', () => {
+  it('refuses a contract that became composed while waiting for the lock', async () => {
+    const fake = setup();
+    const reads: boolean[] = [];
+    fake.hooks.beforeLock = () => {
+      fake.patch(schema.envTemplates, TEMPLATE, { declaredDeps: { lspInstallContractVersion: 2 } });
+    };
+    fake.hooks.beforeRead = (table) => {
+      if (table === schema.envTemplates) reads.push(fake.rowLocked(schema.tasks, TASK));
+    };
+    await expect(
+      fake.db.transaction((tx) =>
+        recordFixRoundCliChoice(tx as unknown as DbTx, USER, TASK, phase2ImplementStep, 2, CODEX),
+      ),
+    ).rejects.toMatchObject({ name: 'Error' });
+    expect(fake.rows(schema.taskStepCliChoices)).toEqual([]);
+    expect(reads.length).toBeGreaterThan(0);
+    expect(reads).not.toContain(false);
+  });
+});

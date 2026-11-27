@@ -3,7 +3,9 @@ import { schema, type Database, type DbTx } from '@haive/database';
 import { CLI_PROVIDER_CATALOG, type CliProviderName } from '@haive/shared';
 import {
   checkTaskComposedLspProvider,
-  lockTaskForComposedLsp,
+  ComposedLspProviderLockedError,
+  withComposedLspTransaction,
+  writeLockedStepCliChoice,
   COMPOSED_LSP_PROVIDER_LOCKED,
 } from '@haive/shared/composed-lsp-provider-lock';
 import { HttpError } from '../context.js';
@@ -78,23 +80,15 @@ export async function writeStepCliChoice(
     const provider = await loadUsableProvider(db, userId, cliProviderId);
     effortLevel = clampEffort(provider.name, params.requestedEffort);
   }
-  await (db as Database).transaction(async (tx) => {
-    if (cliProviderId) {
-      // Lock the task row, then decide: see lockTaskForComposedLsp for the lock order.
-      await lockTaskForComposedLsp(tx, { userId, taskId });
-      await assertComposedLspProviderAllowed(tx, userId, taskId, cliProviderId);
-    }
-    await tx
-      .insert(schema.taskStepCliChoices)
-      .values({ taskId, stepId, role, cliProviderId, effortLevel })
-      .onConflictDoUpdate({
-        target: [
-          schema.taskStepCliChoices.taskId,
-          schema.taskStepCliChoices.stepId,
-          schema.taskStepCliChoices.role,
-        ],
-        set: { cliProviderId, effortLevel, updatedAt: new Date() },
-      });
+  await withComposedLspTransaction(db, async (tx) => {
+    await writeLockedStepCliChoice(tx, {
+      userId,
+      taskId,
+      stepId,
+      role,
+      cliProviderId,
+      effortLevel,
+    });
     if (!remember) return;
     if (!cliProviderId) {
       if (role === 'default') {
@@ -140,5 +134,9 @@ export async function writeStepCliChoice(
         ],
         set: { cliProviderId, effortLevel, explicit: true, updatedAt: new Date() },
       });
+  }).catch((error: unknown) => {
+    if (error instanceof ComposedLspProviderLockedError)
+      throw new HttpError(409, error.message, error.code);
+    throw error;
   });
 }

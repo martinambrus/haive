@@ -217,6 +217,8 @@ export function createFakeDb<const T extends Record<string, PgTable>>(
   const hooks: {
     /** Awaited before a transaction asks for the attachments lock, with the lock's key. */
     beforeLock: ((key: string) => void | Promise<void>) | null;
+    /** Awaited immediately before a builder or relational query reads its rows. */
+    beforeRead: ((table: PgTable) => void | Promise<void>) | null;
     /** Awaited before an insert, an update or a delete writes; a throw fails that statement. */
     beforeInsert: ((table: PgTable) => void | Promise<void>) | null;
     beforeUpdate: ((table: PgTable) => void | Promise<void>) | null;
@@ -229,6 +231,7 @@ export function createFakeDb<const T extends Record<string, PgTable>>(
     onWait: ((key: string) => void) | null;
   } = {
     beforeLock: null,
+    beforeRead: null,
     beforeInsert: null,
     beforeUpdate: null,
     beforeDelete: null,
@@ -635,6 +638,7 @@ export function createFakeDb<const T extends Record<string, PgTable>>(
                 .sort();
               for (const id of ids) await acquire(ctx, `row:${getTableName(table)}:${id}`);
             }
+            await hooks.beforeRead?.(table);
             return run();
           })
           .then(ok, bad),
@@ -801,8 +805,14 @@ export function createFakeDb<const T extends Record<string, PgTable>>(
   }
 
   const api = (table: PgTable): FakeTableApi => ({
-    findFirst: async (opts) => select(table, opts)[0],
-    findMany: async (opts) => select(table, opts),
+    findFirst: async (opts) => {
+      await hooks.beforeRead?.(table);
+      return select(table, opts)[0];
+    },
+    findMany: async (opts) => {
+      await hooks.beforeRead?.(table);
+      return select(table, opts);
+    },
   });
 
   function handle(ctx: TxContext | null): FakeDbHandle<Extract<keyof T, string>> {

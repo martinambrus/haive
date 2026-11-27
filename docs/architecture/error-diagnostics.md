@@ -74,6 +74,13 @@ records their sanitized message with the task id. The tick also inspects every s
 rejection and logs it when the error-recording path itself fails; remaining tasks and later
 batches continue.
 
+The API answers a transaction deadlock by SQLSTATE `40P01`, including a wrapped driver
+error, with 503 `transaction_retry_required`, `retryable: true` and `Retry-After: 1`.
+The response contains fixed retry guidance and no query or bound values. Provider-choice
+and summary writers first retry their transaction once; a second deadlock or a provider
+lost before the write raises `ComposedLspWriteBusyError` (`composed_lsp_write_busy`), also
+answered 503 with retry guidance. No message text triggers these outcomes.
+
 ## Configuration store outage
 
 ConfigService runs on its own Redis connection with a per-command deadline: `commandTimeout` 2000 ms,

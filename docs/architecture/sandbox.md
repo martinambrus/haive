@@ -1363,7 +1363,7 @@ one reads nothing further:
   run list. The set is a superset of what resolution can pick, so a doubtful case stays legacy.
 
 The form shows `keepLegacyLspInstall` ("Install language servers in the environment image") only
-when detect finds the task adoptable. Reused prior-task form values drop the field
+when detect finds the task adoptable for the effective dependency selection, including a repository override (an empty selection included). Reused prior-task form values drop the field
 (`reconcileStaleDeps`), so each task derives its own default and an opt-out is never inherited;
 Auto-continue therefore adopts. An environment that is not adopted writes no contract key, so its
 template hash and image tag are those of the legacy path. Once the cheap checks pass, step 01 logs
@@ -1373,7 +1373,7 @@ lock), from the task row's CLI read under it. A task with no own CLI uses the ol
 among the provider rows that decision reads (`composedLspAdoptable`), never the CLI resolved when
 the step started: provider rows are written without the task lock, so that value can be stale. A
 choice, default CLI or provider change that landed in between demotes the new row to the legacy
-variant, stored without the key, and the log says so. Apply also refreshes LSP capability
+variant, stored without the key. `appendStepWarning` also records the demotion on the step, so the task page shows why the environment uses legacy installation. Apply also refreshes LSP capability
 (`cliSupportsLsp`) from the task row and provider rows it reads at apply time (a null own CLI
 resolves to the oldest enabled provider, as at detect), rather than trusting the flag detect
 computed, so a default or provider change after detect is honoured. Replacement re-evaluates
@@ -1387,15 +1387,15 @@ absent/1 and the adoption conditions above hold for the default selection
 mandatory because a contract-2 link restricts dispatch at once). A plain Retry of 01 stops at the
 form; no route or page offers the action. Only a person ticks it: 01 lists the field in
 `humanOnlyFormFields`, and the runner drops listed keys from the task's pre-answers for the step and
-from reused prior-task values before they are overlaid or auto-submitted, so a task-type preset,
+from reused prior-task values before they are overlaid or auto-submitted, and from saved answers on a running/CLI-wait redelivery. An owner answer saved on a parked form remains valid. Thus a task-type preset,
 prior-task reuse and auto-continue never replace a template. Apply re-decides from the submitted
 form and never trusts detect. A refusal throws `ComposedLspReplacementRefusedError` (code
 `composed_lsp_replacement_refused`, closed `reason`: `rollout_off`, `cli_unsupported`, `selection`,
 `run_list`, `providers`) before any write, and again inside the transaction below, where it rolls
-the inserted row back.
+the inserted row back. The `selection` reason instead raises `ReopenStepFormError` with a notice: changing the dependency selection and ticking replacement together re-parks the form for review rather than failing the step.
 
-On acceptance one transaction inserts a NEW template row, takes the task row lock (see Provider
-lock) and decides again from the task's current CLI (the oldest enabled provider when it has none)
+On acceptance one transaction inserts a NEW template row, locks the owned step (status and rerun generation), then takes the task row lock (see Provider
+lock), checks owner, epoch, live/nondead status, current step and round, and decides again from the task's current CLI (the oldest enabled provider when it has none)
 and choices, links only the acting task to the
 row and writes a `task_events` row `env_template.replaced` with `sourceTemplateId` and
 `candidateTemplateId`. The row holds the form's deps plus contract 2 and no Dockerfile, so 02
@@ -1414,6 +1414,8 @@ re-declared by step 01) while its own build form, shown before the fork, offers 
 tag. A contract-2 row built before
 this rule keeps its stored tag until step 03 rebuilds it, which moves the tag and removes the
 superseded image by id.
+Retrying dependency declaration sets the existing template to `pending` and clears its hash and tag even when the dependency values and saved Dockerfile are unchanged. Step 02 restores the same hash and step 03 builds because the row is no longer ready; the old image id stays available for cleanup. Both contracts take this path. A control drives 01 → 02 → 03 with a fake Docker runner and pins that the contract-2 default tag is identical before and after, while 03 calls the build and records its new image id. This rebuild is not caused by the id-suffix tag rule, so that rule and the existing invalidation behavior remain unchanged. The reported legacy reuse was not reproduced on the same-row path; step 02 can separately relink onto an already-ready hash match, which has its own reuse controls. No real image build is needed for this control.
+
 The task picks the replacement up on that Retry: it resets 01 and every later step, so 02, 03, 04,
 01b and 01b1 build and verify the new row. Other tasks keep what they link, and a task that is
 not retried stays on the old row. The old row can end up unlinked, so repository delete also
@@ -1423,7 +1425,7 @@ Provider lock. A task whose template is contract 2 can launch only a provider th
 retained effective composed image. A switch is refused with 409 `composed_lsp_provider_locked` on
 the step-CLI choice route and the summary CLI route, and a fix-round choice is refused with
 `FixRoundCliLocked`, whose message the escalation gate shows; the gate offers only providers the
-lock accepts. `@haive/shared/composed-lsp-provider-lock` allows exactly one enabled
+lock accepts. `fixRoundOptionProviders` remains an advisory read: it holds no lock across a human decision. The transactional writer re-reads under the task lock and refuses a choice that became incompatible. The task detail exposes `cliProviderRestrictions`, per-provider explicit-write refusal messages from the same shared decision. The task page disables and annotates those options in summary, default, role and seat pickers; the server remains authoritative. `@haive/shared/composed-lsp-provider-lock` allows exactly one enabled
 `claude-code` provider. The dispatcher refuses the rest of the way: `composedLspProviderIds` holds
 the providers with an effective reference, a preferred provider outside it returns a skip plan
 with a named reason (the user's saved pick is the one exception, below), and with no preference the
@@ -1480,7 +1482,7 @@ taken `FOR NO KEY UPDATE` by `lockTaskForComposedLsp` (`@haive/shared/composed-l
 Every writer of a provider choice takes it, reads the task's CLI and its template's contract again
 inside it, and only then checks and writes: the step-CLI choice write (the step card and the CLIs
 tab), the summary CLI route, the model-health default rewrite that the step-CLI route makes with its
-choice, and the fix-round choice. So do both writers that give a task a contract-2 link, step 01's
+choice, the fix-round choice, and onboarding skill verification's repair/regeneration pick. The API, skill gate and fix-round gate use `writeLockedStepCliChoice`; the fix-round gate retains its capability checks and typed refusal. So do both writers that give a task a contract-2 link, step 01's
 replacement and its new-environment adoption. Whoever takes the lock second sees the first one's
 committed write: a switch is refused 409 `composed_lsp_provider_locked`, a replacement is refused
 `providers` and its inserted row rolls back, an adoption stores its row without the key. Step 02's
@@ -1499,7 +1501,7 @@ credential refresh status write, `markProvidersReady`) never take a task or step
 order before the insert, so it matches those writers. One inversion remains: deleting a provider
 holds its row and then needs the task rows its SET NULL rewrites, while a holder of the task row
 needs that provider's share lock (the choice inserts through their foreign key, the summary
-route's update); Postgres aborts one of them (`40P01`) and the state stays consistent. Saved
+route's update); Postgres aborts one of them (`40P01`) and the state stays consistent. The choice/summary transaction retries that SQLSTATE once, re-reading its inputs on the new transaction. A second deadlock, or a selected provider lost before the retried write, returns `composed_lsp_write_busy` with retry guidance. The API maps this to 503 `composed_lsp_write_busy`; a raw deletion-side `40P01` answers 503 `transaction_retry_required`. Both carry `Retry-After: 1` and `retryable: true`. Other SQLSTATEs and prose never trigger a retry. Real-Postgres controls cover contention and both deadlock victims, including rollback of the aborted side. Saved
 preferences are user-wide, so a remembered pick made on another task is not ordered against this
 task's decision.
 

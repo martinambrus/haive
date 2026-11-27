@@ -369,6 +369,7 @@ interface Recorder {
 function writeDb(providers: CliProviderRecord[] = PROVIDERS) {
   const rec: Recorder = { inserts: [], deletes: [] };
   const db = {
+    transaction: async (work: (tx: Database) => Promise<unknown>) => work(db),
     query: {
       cliProviders: {
         findFirst: async ({ where }: { where: SQL }) => {

@@ -166,3 +166,25 @@ describe('the effort dropdown of a switched-off provider', () => {
     expect(select?.props.disabled).toBeFalsy();
   });
 });
+
+it('disables API-refused providers in the default, role and seat pickers', () => {
+  const view = createRenderer(() => (
+    <CliPickerGrid
+      providers={providers}
+      providerRestrictions={{ p1: 'The environment refuses this provider.' }}
+      idPrefix="restricted"
+      defaultProviderId="p1"
+      taskCliProviderId={null}
+      roles={slots}
+      seats={slots}
+      onChange={() => {}}
+    />
+  ));
+  const options = findAll(view.tree(), (h) => h.tag === 'option' && h.props.value === 'p1');
+  expect(options).toHaveLength(2);
+  for (const option of options) {
+    expect(option.props.disabled).toBe(true);
+    expect(textOf(option)).toContain('unavailable for this environment');
+    expect(option.props.title).toBe('The environment refuses this provider.');
+  }
+});

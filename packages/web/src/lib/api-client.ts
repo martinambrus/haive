@@ -818,6 +818,8 @@ export interface Task {
   parentTaskId?: string | null;
   cliProviderId: string | null;
   effectiveCliProviderId?: string | null;
+  /** API verdicts for explicit picks this environment refuses. */
+  cliProviderRestrictions?: Record<string, string>;
   /** Which CLI writes the per-step recap. NULL means INHERIT the step's own chain, which is
    *  a real choice and not "unset" — see `summaryCliChoiceRecorded` server-side. Optional so
    *  an older api renders as inherit. */

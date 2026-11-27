@@ -260,3 +260,17 @@ it('uses the pre-lock task view for a malformed composed pin', async () => {
   fake.patch(schema.tasks, TASK, { metadata: { composedLspImageRefs: { schemaVersion: 999 } } });
   expect(await effective()).toBe(OLDEST);
 });
+
+it('returns the explicit-choice lock verdicts for the task pickers', async () => {
+  composed(OWN, [
+    { ...provider(OWN, 1), name: 'claude-code' },
+    { ...provider(OLDEST, 2), name: 'claude-code' },
+  ]);
+  const res = await app.request(`/${TASK}`);
+  expect(res.status).toBe(200);
+  const { task } = (await res.json()) as {
+    task: { cliProviderRestrictions: Record<string, string> };
+  };
+  expect(task.cliProviderRestrictions[OWN]).toBeUndefined();
+  expect(task.cliProviderRestrictions[OLDEST]).toContain('second row');
+});

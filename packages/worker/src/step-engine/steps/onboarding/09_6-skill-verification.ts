@@ -1,4 +1,8 @@
 import {
+  withComposedLspTransaction,
+  writeLockedStepCliChoice,
+} from '@haive/shared/composed-lsp-provider-lock';
+import {
   RESOURCE_LIMITS,
   lstatNoFollow,
   readdirNoFollow,
@@ -504,23 +508,16 @@ export const skillVerificationStep: StepDefinition<
       enabledIds: detected.cliOptions.map((o) => o.id),
     });
     if (cliChoice) {
-      await ctx.db
-        .insert(schema.taskStepCliChoices)
-        .values({
+      await withComposedLspTransaction(ctx.db, (tx) =>
+        writeLockedStepCliChoice(tx, {
+          userId: ctx.userId,
           taskId: ctx.taskId,
           stepId: cliChoice.targetStepId,
           role: 'default',
           cliProviderId: cliChoice.cliProviderId,
           effortLevel: null,
-        })
-        .onConflictDoUpdate({
-          target: [
-            schema.taskStepCliChoices.taskId,
-            schema.taskStepCliChoices.stepId,
-            schema.taskStepCliChoices.role,
-          ],
-          set: { cliProviderId: cliChoice.cliProviderId, effortLevel: null, updatedAt: new Date() },
-        });
+        }),
+      );
     }
 
     ctx.logger.info(

@@ -4286,7 +4286,9 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
       const submitted =
         redetected || current.pauseFormOnRetry || insightApprovalRequired
           ? undefined
-          : params.formValues;
+          : row.status !== 'waiting_form' && current.formValues != null
+            ? withoutHumanOnlyFields(params.formValues, stepDef.humanOnlyFormFields)
+            : params.formValues;
 
       // Manual mode: EVERY step pauses before apply. Formless steps get a
       // synthesized confirm-only schema so the existing waiting_form plumbing
@@ -4305,7 +4307,14 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
               ),
             )
           : validated;
-      let formValues = current.formValues as FormValues | null;
+      let formValues = (
+        row.status === 'waiting_form'
+          ? current.formValues
+          : (withoutHumanOnlyFields(current.formValues ?? undefined, stepDef.humanOnlyFormFields) ??
+            null)
+      ) as FormValues | null;
+      if (formValues !== current.formValues)
+        current = await updateRow(db, current.id, { formValues });
       if (formValues) {
         const normalized = normalizeStepFormValues(meta.id, formValues);
         if (!normalized.success) throw new Error(normalized.issues.join('; '));

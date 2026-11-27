@@ -299,7 +299,11 @@ describe('refused replacement', () => {
       const r = await makeLegacy({ ...scenario, stored, replace: true });
       const before = structuredClone([templates(r), r.fake.rows(schema.tasks)]);
       if (off) adoption.on = false;
-      await expect(r.apply()).rejects.toMatchObject({ code: REFUSED, reason });
+      await expect(r.apply()).rejects.toMatchObject(
+        reason === 'selection'
+          ? { name: 'ReopenStepFormError', notice: true }
+          : { code: REFUSED, reason },
+      );
       expect(events(r)).toHaveLength(0);
       expect(templates(r)).toHaveLength(1);
       expect([templates(r), r.fake.rows(schema.tasks)]).toEqual(before);
@@ -706,4 +710,119 @@ it('locked replacement re-reads provider capability after a provider rename', as
   };
   await expect(r.apply()).rejects.toMatchObject({ reason: 'cli_unsupported' });
   expect(candidates(r)).toHaveLength(0);
+});
+
+describe('step 01 Retry and the contract-2 image tag', () => {
+  it.each([1, 2])(
+    're-declaration invalidates contract %s without changing its default tag',
+    async (contract) => {
+      const deps = { ...(await applyNew({})), [KEY]: contract };
+      const r = makeRun({}, deps);
+      const dockerfile = KEPT_DOCKERFILE.trim();
+      const { envTemplateHash } =
+        await import('../src/step-engine/steps/env-replicate/02-generate-dockerfile.js');
+      const hash = envTemplateHash(dockerfile, deps);
+      Object.assign(r.ctx, { taskStepId: uuid(99), throwIfCancelled: vi.fn() });
+      r.fake.insert(schema.taskSteps, {
+        id: uuid(99),
+        taskId: TASK,
+        stepId: '03-build-image',
+        status: 'running',
+      });
+      const runner = {
+        inspect: vi.fn(async () => ({ exists: true, imageId: 'sha256:kept' })),
+        build: vi.fn(async () => ({
+          exitCode: 0,
+          imageId: 'sha256:new',
+          durationMs: 0,
+          stderr: '',
+          stdout: '',
+        })),
+        remove: vi.fn(async () => ({ ok: true })),
+      };
+      const build = createBuildImageStep(runner as unknown as DockerRunner);
+      r.fake.patch(schema.envTemplates, TEMPLATE, {
+        generatedDockerfile: dockerfile,
+        dockerfileHash: hash,
+        builtImageId: 'sha256:kept',
+        status: 'ready',
+      });
+      const before = await build.detect!(r.ctx);
+      const tagField = build.form!(r.ctx, before)!.fields.find((f) => f.id === 'imageTag');
+      if (tagField?.type !== 'text') throw new Error('expected image tag field');
+      const imageTag = tagField.default!;
+      r.fake.patch(schema.envTemplates, TEMPLATE, { imageTag });
+      await r.apply();
+      expect(source(r)).toMatchObject({
+        status: 'pending',
+        imageTag: null,
+        dockerfileHash: null,
+        builtImageId: 'sha256:kept',
+        generatedDockerfile: dockerfile,
+      });
+      const detected = await generateDockerfileStep.detect!(r.ctx);
+      await generateDockerfileStep.apply(r.ctx, {
+        detected,
+        formValues: { dockerfile },
+        iteration: 0,
+        previousIterations: [],
+      });
+      const after = await build.detect!(r.ctx);
+      expect(after).toMatchObject({ status: 'pending', currentImageId: 'sha256:kept', dockerfile });
+      const form = build.form!(r.ctx, after)!;
+      expect(form.fields.find((f) => f.id === 'imageTag')).toMatchObject({
+        type: 'text',
+        default: imageTag,
+      });
+      expect(form.fields.some((f) => f.id === 'forceRebuild')).toBe(false);
+      expect(source(r).dockerfileHash).toBe(hash);
+      const result = await build.apply(r.ctx, {
+        detected: after,
+        formValues: { imageTag },
+        iteration: 0,
+        previousIterations: [],
+      });
+      expect(result).toMatchObject({ skipped: false, imageTag, imageId: 'sha256:new' });
+      expect(runner.build).toHaveBeenCalledOnce();
+      expect(runner.remove).toHaveBeenCalledWith('sha256:kept');
+    },
+  );
+});
+
+describe('replacement belongs to the current step pass', () => {
+  it.each(['step reset', 'generation', 'epoch', 'Stop', 'dead', 'pointer'])(
+    'rolls back the candidate after %s overtakes it',
+    async (change) => {
+      const r = await makeLegacy({ replace: true });
+      Object.assign(r.ctx, { taskStepId: uuid(99), epoch: 1, round: 0, rerunGeneration: 0 });
+      r.fake.insert(schema.taskSteps, {
+        id: uuid(99),
+        taskId: TASK,
+        stepId: '01-declare-deps',
+        status: 'running',
+        rerunGeneration: 0,
+      });
+      r.fake.patch(schema.tasks, TASK, {
+        orchestrationEpoch: 1,
+        currentStepId: '01-declare-deps',
+        currentRound: 0,
+      });
+      r.fake.hooks.beforeInsert = (table) => {
+        if (table !== schema.envTemplates) return;
+        if (change === 'step reset')
+          r.fake.patch(schema.taskSteps, uuid(99), { status: 'pending' });
+        if (change === 'generation')
+          r.fake.patch(schema.taskSteps, uuid(99), { rerunGeneration: 1 });
+        if (change === 'epoch') r.fake.patch(schema.tasks, TASK, { orchestrationEpoch: 2 });
+        if (change === 'Stop') r.fake.patch(schema.tasks, TASK, { status: 'failed' });
+        if (change === 'dead') r.fake.patch(schema.tasks, TASK, { deadAt: new Date() });
+        if (change === 'pointer')
+          r.fake.patch(schema.tasks, TASK, { currentStepId: '02-generate-dockerfile' });
+      };
+      await expect(r.apply()).rejects.toMatchObject({ name: 'StepSupersededError' });
+      expect(candidates(r)).toEqual([]);
+      expect(linkOf(r, TASK)).toBe(TEMPLATE);
+      expect(events(r)).toEqual([]);
+    },
+  );
 });

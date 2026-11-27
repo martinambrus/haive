@@ -204,3 +204,20 @@ describe('the task row lock is held at every CLI-choice write', () => {
     check(schema.taskStepCliChoices, 'choice insert on the re-run path');
   });
 });
+
+describe('composed contract read is made after the task lock', () => {
+  it('refuses a contract that became composed while waiting for the lock', async () => {
+    const fake = setup();
+    const reads: boolean[] = [];
+    fake.hooks.beforeLock = () => {
+      fake.patch(schema.envTemplates, TEMPLATE, { declaredDeps: { lspInstallContractVersion: 2 } });
+    };
+    fake.hooks.beforeRead = (table) => {
+      if (table === schema.envTemplates) reads.push(fake.rowLocked(schema.tasks, TASK));
+    };
+    expect((await patch('summary-cli', { summaryCliProviderId: CODEX })).status).toBe(409);
+    expect(fake.rows(schema.tasks)[0]?.summaryCliProviderId ?? null).toBeNull();
+    expect(reads.length).toBeGreaterThan(0);
+    expect(reads).not.toContain(false);
+  });
+});

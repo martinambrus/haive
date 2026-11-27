@@ -556,6 +556,12 @@ describe('disabling the last enabled composed LSP member', () => {
     },
   );
 
+  it('does not predict a next CLI failure when no CLI step remains', async () => {
+    fake.patch(schema.cliProviders, providerId, { name: 'claude-code' });
+    composedTask([providerId], { runListSnapshot: ['plain'], currentStepId: 'plain' });
+    expect(await (await read()).json()).not.toHaveProperty('composedLspFailureTasks');
+  });
+
   it('does not report a set with another enabled member', async () => {
     const other = randomUUID();
     fake.insert(schema.cliProviders, {

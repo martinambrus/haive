@@ -104,7 +104,12 @@ import {
   assertNewWorkAllowed,
   requireNewWorkAllowed,
 } from '../../middleware/maintenance.js';
-import { lockTaskForComposedLsp } from '@haive/shared/composed-lsp-provider-lock';
+import {
+  assertComposedLspWriteProviderAvailable,
+  decideComposedLspProviderLock,
+  lockTaskForComposedLsp,
+  withComposedLspTransaction,
+} from '@haive/shared/composed-lsp-provider-lock';
 import { assertComposedLspProviderAllowed, loadUsableProvider } from '../../lib/step-cli-choice.js';
 import { HttpError, type AppEnv } from '../../context.js';
 import {
@@ -1324,9 +1329,25 @@ taskRoutes.get('/:id', async (c) => {
             preferred.providerId,
             allowed ? providerRows.filter((p) => allowed.has(p.id)) : providerRows,
           );
+  const cliProviderRestrictions =
+    composedIds === undefined
+      ? undefined
+      : Object.fromEntries(
+          providerRows.flatMap((provider) => {
+            const decision = decideComposedLspProviderLock({
+              providers: providerRows,
+              effectiveProviderIds: [
+                resolveTaskCliProviderId(task.cliProviderId, providerRows),
+                provider.id,
+              ],
+            });
+            return decision.ok ? [] : [[provider.id, decision.message]];
+          }),
+        );
   const taskWithActive = {
     ...taskFields,
     effectiveCliProviderId,
+    ...(cliProviderRestrictions === undefined ? {} : { cliProviderRestrictions }),
     typeLabel: typeLabels.get(task.type) ?? null,
     pausedByAdmin: adminPausedIds.has(id),
     pauseLocked: adminPauseLocks(adminPausedIds.has(id), c.get('userRole')),
@@ -2018,10 +2039,11 @@ taskRoutes.patch('/:id/summary-cli', async (c) => {
   // instead of what was just picked here.
   patch.summaryCliChoiceAt = new Date();
 
-  await db.transaction(async (tx) => {
+  await withComposedLspTransaction(db, async (tx) => {
     if (body.summaryCliProviderId) {
       // Lock the task row, then decide: see lockTaskForComposedLsp for the lock order.
       await lockTaskForComposedLsp(tx, { userId, taskId: id });
+      await assertComposedLspWriteProviderAvailable(tx, userId, body.summaryCliProviderId);
       await assertComposedLspProviderAllowed(tx, userId, id, body.summaryCliProviderId);
     }
     await tx.update(schema.tasks).set(patch).where(eq(schema.tasks.id, id));

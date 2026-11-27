@@ -1,7 +1,8 @@
+import { appendStepWarning, StepSupersededError, taskWriteTarget } from '../../step-ownership.js';
 import { assertDependencyTokens } from './_dependency-tokens.js';
 import { lstatNoFollow, readTextNoFollow } from '@haive/shared/fs-safe';
-import { and, desc, eq } from 'drizzle-orm';
-import { schema, type Database } from '@haive/database';
+import { and, desc, eq, isNull, notInArray } from 'drizzle-orm';
+import { schema, type Database, type DbTx } from '@haive/database';
 import {
   assertVersionToken,
   resolveTaskCliProviderId,
@@ -14,7 +15,11 @@ import {
   type OnboardingEnvironmentMirror,
   type OnboardingToolingMirror,
 } from '@haive/shared';
-import type { StepDefinition } from '../../step-definition.js';
+import {
+  ReopenStepFormError,
+  type StepContext,
+  type StepDefinition,
+} from '../../step-definition.js';
 import {
   DEFAULT_GO_VERSION,
   DEFAULT_RUST_VERSION,
@@ -53,6 +58,55 @@ async function taskCliSupportsLsp(
   const providerId = resolveTaskCliProviderId(own, providers);
   const name = providers.find((p) => p.id === providerId)?.name;
   return name ? getCliProviderMetadata(name).supportsLsp : false;
+}
+
+/** Step first, then task: Retry/Stop must win before a template can be linked.
+ * The epoch is absent only for callers outside a fenced engine pass. */
+async function fenceTemplateLink(ctx: StepContext, tx: DbTx): Promise<void> {
+  if (ctx.epoch == null) return;
+  const [step] = await tx
+    .select({ id: schema.taskSteps.id })
+    .from(schema.taskSteps)
+    .where(
+      and(
+        eq(schema.taskSteps.id, ctx.taskStepId),
+        eq(schema.taskSteps.taskId, ctx.taskId),
+        notInArray(schema.taskSteps.status, ['pending', 'skipped', 'failed']),
+        ctx.rerunGeneration === undefined
+          ? undefined
+          : eq(schema.taskSteps.rerunGeneration, ctx.rerunGeneration),
+      ),
+    )
+    .for('no key update');
+  if (!step) throw new StepSupersededError(ctx.taskStepId);
+}
+
+async function assertTemplateTaskFence(ctx: StepContext, tx: DbTx): Promise<void> {
+  if (ctx.epoch == null) return;
+  const [task] = await tx
+    .select({ id: schema.tasks.id })
+    .from(schema.tasks)
+    .where(
+      and(
+        taskWriteTarget(ctx.taskId, { epoch: ctx.epoch }),
+        eq(schema.tasks.userId, ctx.userId),
+        isNull(schema.tasks.deadAt),
+        eq(schema.tasks.currentStepId, '01-declare-deps'),
+        eq(schema.tasks.currentRound, ctx.round),
+      ),
+    );
+  if (!task) throw new StepSupersededError(ctx.taskStepId);
+}
+
+function refuseReplacement(
+  reason: import('../../../lsp/composed-adoption.js').ComposedLspReplacementReason,
+): never {
+  if (reason === 'selection')
+    throw new ReopenStepFormError(
+      'The selected language servers cannot use the composed installation. Review the dependencies and leave replacement unchecked, or choose only supported PHP language servers.',
+      { notice: true },
+    );
+  throw new ComposedLspReplacementRefusedError(reason);
 }
 
 // Both PHP language keys map to the single surviving env key (intelephense-extended):
@@ -559,10 +613,19 @@ export const declareDepsStep: StepDefinition<DeclareDepsDetect, DeclareDepsApply
       findVersion(result.runtimes, 'ruby'),
       rubyRow?.versions ?? [],
     );
+    const repoLspRow = repositoryId
+      ? await ctx.db
+          .select({ lspServers: schema.repositories.lspServers })
+          .from(schema.repositories)
+          .where(eq(schema.repositories.id, repositoryId))
+          .limit(1)
+      : [];
+    const effectiveLsp = repoLspRow[0]?.lspServers ?? result.suggestedLsp;
     if (
       COMPOSED_LSP_NEW_ENVIRONMENT_ADOPTION &&
       cliSupportsLsp &&
       existingTpl === null &&
+      isComposedLspSelection(effectiveLsp) &&
       (
         await composedLspAdoptable(ctx.db, {
           taskId: ctx.taskId,
@@ -579,21 +642,13 @@ export const declareDepsStep: StepDefinition<DeclareDepsDetect, DeclareDepsApply
       existingTpl !== null &&
       isLegacyLspContract(existingTpl.declaredDeps)
     ) {
-      // Repo-level servers win over the suggestion, as in apply.
-      const repoLspRow = repositoryId
-        ? await ctx.db
-            .select({ lspServers: schema.repositories.lspServers })
-            .from(schema.repositories)
-            .where(eq(schema.repositories.id, repositoryId))
-            .limit(1)
-        : [];
       const decision = await decideLegacyLspReplacement(ctx.db, {
         taskId: ctx.taskId,
         userId: ctx.userId,
         defaultProviderId: ctx.cliProviderId,
         rolloutOn: COMPOSED_LSP_NEW_ENVIRONMENT_ADOPTION,
         cliSupportsLsp,
-        lspServers: repoLspRow[0]?.lspServers ?? result.suggestedLsp,
+        lspServers: effectiveLsp,
       });
       if (decision.ok) result.legacyLspReplaceable = true;
     }
@@ -931,7 +986,7 @@ export const declareDepsStep: StepDefinition<DeclareDepsDetect, DeclareDepsApply
         cliSupportsLsp,
         lspServers,
       });
-      if (!decision.ok) throw new ComposedLspReplacementRefusedError(decision.reason);
+      if (!decision.ok) refuseReplacement(decision.reason);
       lspContract = 2;
       replacing = true;
     } else if (existing) {
@@ -1043,11 +1098,13 @@ export const declareDepsStep: StepDefinition<DeclareDepsDetect, DeclareDepsApply
         if (!created) throw new Error('failed to insert env_template row');
         // The insert precedes the lock (it takes KEY SHARE on the repository row); see
         // lockTaskForComposedLsp for the lock order. The refusal rolls the insert back.
+        await fenceTemplateLink(ctx, tx);
         const locked = await lockTaskForComposedLsp(tx, {
           userId: ctx.userId,
           taskId: ctx.taskId,
         });
         if (!locked) throw new Error('task not found');
+        await assertTemplateTaskFence(ctx, tx);
         const decision = await decideLegacyLspReplacement(tx, {
           taskId: ctx.taskId,
           userId: ctx.userId,
@@ -1056,7 +1113,7 @@ export const declareDepsStep: StepDefinition<DeclareDepsDetect, DeclareDepsApply
           cliSupportsLsp: await taskCliSupportsLsp(tx, ctx.userId, locked.cliProviderId),
           lspServers,
         });
-        if (!decision.ok) throw new ComposedLspReplacementRefusedError(decision.reason);
+        if (!decision.ok) refuseReplacement(decision.reason);
         await linkTaskToEnvTemplate(tx, ctx.taskId, created.id);
         await tx.insert(schema.taskEvents).values({
           taskId: ctx.taskId,
@@ -1149,11 +1206,13 @@ export const declareDepsStep: StepDefinition<DeclareDepsDetect, DeclareDepsApply
         if (!created) throw new Error('failed to insert env_template row');
         // The insert precedes the lock (it takes KEY SHARE on the repository row); see
         // lockTaskForComposedLsp for the lock order.
+        await fenceTemplateLink(ctx, tx);
         const locked = await lockTaskForComposedLsp(tx, {
           userId: ctx.userId,
           taskId: ctx.taskId,
         });
         if (!locked) throw new Error('task not found');
+        await assertTemplateTaskFence(ctx, tx);
         const decision = await composedLspAdoptable(tx, {
           taskId: ctx.taskId,
           userId: ctx.userId,
@@ -1166,6 +1225,11 @@ export const declareDepsStep: StepDefinition<DeclareDepsDetect, DeclareDepsApply
             .update(schema.envTemplates)
             .set({ declaredDeps: legacyDeps })
             .where(eq(schema.envTemplates.id, created.id));
+          await appendStepWarning(
+            tx,
+            ctx.taskStepId,
+            'The CLI choices changed while the environment was being saved. Language servers will be installed in the environment image using the legacy variant.',
+          );
           ctx.logger.info(
             { taskId: ctx.taskId, lspInstallContract: null, reason: decision.reason },
             'composed LSP adoption refused under the task lock; storing a legacy template',
