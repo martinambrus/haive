@@ -32,6 +32,8 @@ export async function restoreKbReroutes(
   let state: z.infer<typeof recoverySchema> = { version: 1, files: [] };
   let canPurgeDrafts = true;
   let canDeleteLocal = true;
+  // Only an absent journal or one read and validated whole may be rewritten.
+  let journalUsable = false;
   const warn = (err: unknown) => {
     // Neither parser excerpts nor containment errors' paths may carry journal data into logs.
     log.warn(
@@ -54,6 +56,7 @@ export async function restoreKbReroutes(
         throw new Error('Invalid KB re-route recovery path');
     }
     state = parsed;
+    journalUsable = true;
     for (const file of state.files) {
       const rel = `${KB_DIR}/${file.path}`;
       const parent = path.posix.dirname(rel);
@@ -99,14 +102,20 @@ export async function restoreKbReroutes(
     });
     await syncDirectoryNoFollow(repoPath, recoveryDir);
   };
-  // Rewrite fresh for this run even with no re-route selected. Retain validated entries
-  // after a restore failure: they may still be the only complete original bodies.
-  try {
-    await save();
-  } catch (err) {
-    canPurgeDrafts = false;
-    canDeleteLocal = false;
-    warn(err);
+  // Rewrite for this run even with no re-route selected. Retain validated entries after a
+  // restore failure: they may still be the only complete original bodies. A journal that
+  // could not be read or validated is never overwritten, since a transient failure would
+  // otherwise publish empty state and let the next Retry purge drafts it can no longer
+  // restore; this run then moves nothing.
+  if (!journalUsable) canDeleteLocal = false;
+  else {
+    try {
+      await save();
+    } catch (err) {
+      canPurgeDrafts = false;
+      canDeleteLocal = false;
+      warn(err);
+    }
   }
   return {
     canPurgeDrafts,

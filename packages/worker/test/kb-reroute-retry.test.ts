@@ -200,6 +200,9 @@ it.each([
       if (shape === 'KB directory') await mkdir(path.join(kb, 'blocked.md'));
     }
   }
+  const planted = ['malformed JSON', 'schema mismatch', 'invalid path'].includes(shape)
+    ? await readFile(journal, 'utf8')
+    : null;
   h.drafts.push({ title: 'prior', body: '# Saved original' });
   const context = ctx();
   const warn = vi.spyOn(context.logger, 'warn');
@@ -216,6 +219,9 @@ it.each([
   expect(await readFile(sentinel, 'utf8')).toBe('private sentinel');
   expect(warn).toHaveBeenCalled();
   expect(JSON.stringify(warn.mock.calls)).not.toContain('private sentinel');
+  // A journal that cannot be read or validated is never overwritten: it may be the only copy.
+  if (['malformed JSON', 'schema mismatch', 'invalid path'].includes(shape))
+    expect(await readFile(journal, 'utf8')).toBe(planted);
   // A directory slot that cannot hold a journal must also preserve a selected source.
   if (shape.startsWith('directory ') || shape === 'journal directory') {
     await knowledgeAcquisitionStep.apply(context, {
