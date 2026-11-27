@@ -50,6 +50,7 @@ vi.mock('bullmq', async (importOriginal) => ({
 // A task the hand-off fails releases what it holds; none of that may reach this host's Docker.
 vi.mock('../src/sandbox/task-auth-volume.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../src/sandbox/task-auth-volume.js')>()),
+  findTaskAuthVolumes: async () => [],
   cleanupTaskAuthVolumes: async () => ({ removed: [], failed: [] }),
   syncRefreshedAuthToUserVolumes: async () => undefined,
 }));

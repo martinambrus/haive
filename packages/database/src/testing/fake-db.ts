@@ -12,7 +12,7 @@ import { getTableConfig, PgJsonb, PgUUID, PgTable } from 'drizzle-orm/pg-core';
  * wrong folder. It supports exactly the conditions callers build — `and` and `or` of `eq` / `ne` /
  * `gt` / `gte` / `lt` / `lte` / `inArray` / `notInArray` / `isNull` / `isNotNull`, a NULL matching only `isNull`,
  * a jsonb column's key that holds a string (`jsonb_typeof(column -> 'key') = 'string'`),
- * a string-valued jsonb member equal to a string (`column ->> 'key' = value`),
+ * a scalar jsonb member extracted as text equal to a string (`column ->> 'key' = value`),
  * and `not(EXISTS (SELECT 1 FROM table WHERE inner_uuid = outer_uuid AND a IS NULL AND b IS NULL))`
  * or the same with `AND (a >= value OR b >= value)` in place of the two IS NULL tests —
  * and throws on anything else, so a drizzle upgrade or a new query shape fails loudly instead of
@@ -385,7 +385,9 @@ export function createFakeDb<const T extends Record<string, PgTable>>(
           return (
             typeof doc === 'object' &&
             doc !== null &&
-            (doc as Record<string, unknown>)[textMember[1]!] === val
+            (doc as Record<string, unknown>)[textMember[1]!] != null &&
+            typeof (doc as Record<string, unknown>)[textMember[1]!] !== 'object' &&
+            String((doc as Record<string, unknown>)[textMember[1]!]) === val
           );
         };
       }
@@ -900,7 +902,7 @@ export function createFakeDb<const T extends Record<string, PgTable>>(
         if (
           ctx !== null &&
           chunks.length === 1 &&
-          /^SET LOCAL (lock|statement)_timeout/.test(first)
+          /^SET LOCAL (lock|statement|transaction)_timeout/.test(first)
         )
           return;
         if (

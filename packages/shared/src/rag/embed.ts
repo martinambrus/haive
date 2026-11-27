@@ -155,13 +155,16 @@ export async function unloadOllamaModel(
   model: string,
   timeoutMs = 10_000,
   fetchFn: typeof fetch = ollamaFetch,
+  sectionSignal?: AbortSignal,
 ): Promise<boolean> {
   try {
     const resp = await fetchFn(`${url}/api/embed`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ model, input: 'unload', keep_alive: 0 }),
-      signal: AbortSignal.timeout(timeoutMs),
+      signal: sectionSignal
+        ? AbortSignal.any([sectionSignal, AbortSignal.timeout(timeoutMs)])
+        : AbortSignal.timeout(timeoutMs),
     });
     return resp.ok;
   } catch {

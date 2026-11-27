@@ -186,7 +186,10 @@ export interface DockerRunner {
   /** Remove only non-running containers that still mount this volume. A worker killed
    *  between `docker create` and `docker start` can otherwise leave a Created helper
    *  container pinning an auth volume forever. Running containers are never selected. */
-  removeStoppedContainersUsingVolume?(name: string): Promise<DockerContainerCleanupResult>;
+  removeStoppedContainersUsingVolume?(
+    name: string,
+    signal?: AbortSignal,
+  ): Promise<DockerContainerCleanupResult>;
 }
 
 const DEFAULT_BUILD_TIMEOUT_MS = 30 * 60 * 1000;
@@ -598,7 +601,7 @@ export const defaultDockerRunner: DockerRunner = {
     return { ok: result.exitCode === 0, stderr: result.stderr, error: result.error };
   },
 
-  async removeStoppedContainersUsingVolume(name) {
+  async removeStoppedContainersUsingVolume(name, signal) {
     // Multiple values for one Docker filter are ORed. Deliberately exclude `running`,
     // `paused` and `restarting`: task completion can race its best-effort step-summary
     // invocation, and cleanup must never kill work that is still in flight.
@@ -634,6 +637,7 @@ export const defaultDockerRunner: DockerRunner = {
     // container, so the daemon enforces that invariant instead of a stale snapshot. A `dead`
     // container may resist without force; it stays listed and the next sweep retries, which
     // is the cheaper failure — a leaked volume costs disk, a killed agent costs a task step.
+    signal?.throwIfAborted();
     const removed = await spawnAndCollect('docker', ['rm', ...ids], {
       timeoutMs: 30_000,
     });

@@ -64,6 +64,8 @@ import {
   TASK_DEAD_EVENT,
   TASK_JOB_NAMES,
   STOP_SETTLE_EVENTS,
+  setTaskSettlementTimeout,
+  withTaskSettlementTransaction,
   ideSessionKey,
   repoIdeSessionId,
   logger,
@@ -140,6 +142,7 @@ import { ContainerManager } from '../sandbox/container-manager.js';
 import { defaultDockerRunner } from '../sandbox/docker-runner.js';
 import {
   cleanupTaskAuthVolumes,
+  findTaskAuthVolumes,
   clearTaskAuthPreparationState,
   syncRefreshedAuthToUserVolumes,
 } from '../sandbox/task-auth-volume.js';
@@ -370,13 +373,15 @@ function endedAtOf(row: { endedAt: Date | null }): string | null {
   return row.endedAt?.toISOString() ?? null;
 }
 
-/** Appends the event once per pass (row, type, `endedAt`); a missing `endedAt` never matches. */
+/** Appends once per pass (row, type, `endedAt`); auth-volume observations also match
+ * epoch plus caller-supplied criteria. A missing `endedAt` never matches. */
 async function appendEventOnce(
   db: Database | DbHandle,
   taskId: string,
-  taskStepId: string,
+  taskStepId: string | null,
   eventType: string,
   payload: Record<string, unknown> & { endedAt: string | null },
+  extraMatches: readonly SQL[] = [],
 ): Promise<void> {
   await db.transaction(async (tx) => {
     const [seen] = await tx
@@ -385,9 +390,15 @@ async function appendEventOnce(
       .where(
         and(
           eq(schema.taskEvents.taskId, taskId),
-          eq(schema.taskEvents.taskStepId, taskStepId),
+          taskStepId === null
+            ? isNull(schema.taskEvents.taskStepId)
+            : eq(schema.taskEvents.taskStepId, taskStepId),
           eq(schema.taskEvents.eventType, eventType),
-          sql`${schema.taskEvents.payload}->>'endedAt' = ${payload.endedAt}`,
+          ...extraMatches,
+          sql`${schema.taskEvents.payload} ->> 'endedAt' = ${payload.endedAt}`,
+          taskStepId === null
+            ? sql`${schema.taskEvents.payload} ->> 'epoch' = ${String(payload.epoch)}`
+            : undefined,
         ),
       )
       .limit(1);
@@ -1129,6 +1140,7 @@ async function settleFailedTask(
   // A failed kb_author enrich leaves its global KB entry stuck in 'enriching'; mark
   // it 'failed' so the KB view can show a retry / go-to-task affordance.
   await reconcileKbAuthorEntryOnTaskEnd(db, taskId, 'failed', logger);
+  // Resource sections log their failures; the finish marker acknowledges this teardown pass.
   if (failure?.status === 'failed' && failure.completedAt) {
     const failedAt = failure.completedAt.toISOString();
     // An ordinary failed task has no request. Both its pass and the Stop job may settle it;
@@ -1161,10 +1173,10 @@ async function settleFailedTask(
  *  Ollama so the GPU is freed — but only when it is still resident AND no other
  *  live task uses the SAME (url, model). The resolve + residency + live-task gate
  *  lives in @haive/shared/rag (shared with the worker-boot reconciler and the API
- *  release endpoint, so all three stay in lockstep on "safe to evict"). Best-effort
+ *  global-KB release endpoint, which targets only the global-KB model). Best-effort
  *  and self-contained: never throws, so it cannot break the terminal transition.
- *  Repo-RAG only; the global-KB model has its own lifecycle and keep_alive
- *  backstop. */
+ *  Repo-RAG cleanup has boot reconciliation and the 30-minute keep_alive as backstops;
+ *  the global-KB model has its own lifecycle. */
 async function maybeUnloadTaskEmbedModel(db: Database, taskId: string): Promise<void> {
   try {
     const target = await resolveTaskEmbedTarget(db, taskId);
@@ -1172,7 +1184,7 @@ async function maybeUnloadTaskEmbedModel(db: Database, taskId: string): Promise<
     const status = await releaseEmbedModelIfUnused(db, {
       url: target.url,
       model: target.model,
-      excludeTaskId: taskId,
+      settlingTaskId: taskId,
     });
     logger.info({ taskId, model: target.model, status }, 'ollama embed model release');
   } catch (err) {
@@ -1412,21 +1424,54 @@ async function cleanupTaskContainers(
   }
 
   try {
-    const { removed, failed } = await cleanupTaskAuthVolumes(taskId);
-    if (removed.length > 0 || failed.length > 0) {
-      await appendEvent(db, taskId, null, 'auth_volumes.destroyed', {
-        reason,
-        removed: removed.length,
-        failed: failed.length,
-      });
-    }
+    const volumes = await findTaskAuthVolumes(taskId);
+    await withTaskSettlementTransaction(db, async (tx, signal) => {
+      await setTaskSettlementTimeout(tx);
+      const [task] = await tx
+        .select({
+          id: schema.tasks.id,
+          completedAt: schema.tasks.completedAt,
+          epoch: schema.tasks.orchestrationEpoch,
+        })
+        .from(schema.tasks)
+        .where(taskWriteTarget(taskId, { settled: true }))
+        .for('no key update');
+      if (!task) return;
+      // Retry writes this row last. Hold it through removal and cache invalidation;
+      // no step/run row or repository lock is acquired inside this section.
+      try {
+        const { removed, failed } = await cleanupTaskAuthVolumes(
+          taskId,
+          undefined,
+          volumes,
+          signal,
+        );
+        if (removed.length > 0 || failed.length > 0) {
+          await appendEventOnce(
+            tx,
+            taskId,
+            null,
+            'auth_volumes.destroyed',
+            {
+              endedAt: task.completedAt?.toISOString() ?? null,
+              epoch: String(task.epoch),
+              reason,
+              removed: removed.length,
+              failed: failed.length,
+            },
+            [
+              sql`${schema.taskEvents.payload} ->> 'removed' = ${String(removed.length)}`,
+              sql`${schema.taskEvents.payload} ->> 'failed' = ${String(failed.length)}`,
+            ],
+          );
+        }
+      } finally {
+        if (!signal.aborted) clearTaskAuthPreparationState(taskId);
+      }
+    });
   } catch (err) {
     logger.warn({ err, taskId, reason }, 'cleanup-task-auth-volumes failed');
   }
-  // Outside the try: the in-process record of what was applied to those volumes must be
-  // dropped even when their removal failed, or a task id that came round again would be
-  // told its preparations are already in place.
-  clearTaskAuthPreparationState(taskId);
 
   // The empty workspace a repo-less task ran in. Reaped here and not in the worktree branch
   // below because it is NOT a worktree — no step owns it, nothing else sweeps it, and it sits
@@ -1460,7 +1505,7 @@ async function cleanupTaskContainers(
   // for recovery) — it only drops the live tmux session, and the next attach
   // rebuilds a container via ensureShellContainer.
   try {
-    const reaped = await reapAllSessionsForTask(getRedis(), new Docker(), taskId);
+    const reaped = await reapAllSessionsForTask(getRedis(), new Docker(), taskId, db);
     if (reaped > 0) {
       await appendEvent(db, taskId, null, 'terminal_sessions.destroyed', {
         reason,
@@ -2384,10 +2429,11 @@ export async function handleResult(
       // took it by failing the task, which moves no epoch, and a pass it stopped mid-apply is the
       // only one left to release what the failed task holds.
       const task = await db.query.tasks.findFirst({
-        where: eq(schema.tasks.id, ctx.taskId),
-        columns: { status: true },
+        where: taskWriteTarget(ctx.taskId, { settled: true, epoch: ctx.orchestrationEpoch }),
+        columns: { status: true, orchestrationEpoch: true },
       });
-      if (task?.status === 'failed') await settleFailedTask(db, ctx.taskId);
+      if (task?.status === 'failed' && task.orchestrationEpoch === ctx.orchestrationEpoch)
+        await settleFailedTask(db, ctx.taskId);
       logger.info({ taskId: ctx.taskId, stepId }, 'step pass superseded; nothing to hand off');
       return;
     }

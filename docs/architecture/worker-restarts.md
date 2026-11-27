@@ -679,10 +679,55 @@ cancelled, completed or dead), `warn` for a row or task that no longer exists or
 explains it.
 The allowance watch a failure arms is fenced the same way, and only while the task still reads
 `failed`: the teardown before it can outlast a Retry clicked on that failure, which clears the
-watch as every other exit from `failed` does. The settle job reads its fence once, at its start,
-so a Retry that commits after that read can still meet the teardown in progress, as after a
-failure's own settlement. What it removes is rebuilt by the next ensure (task auth volume, terminal
-shell); only the shell's state is lost. The hint it leaves on the row (`writeStepHint`) lands
+watch as every other exit from `failed` does. The settle job still checks its failure stamp at pickup, and each destructive member
+rechecks settlement through `taskWriteTarget` (`shared/task-fence.ts`, re-exported at the
+existing worker step-ownership path). Auth-volume removal/cache invalidation, each terminal
+session removal and each CLI-model unload hold the task row FOR NO KEY UPDATE from that
+check through the destructive call. The task-triggered embed release takes the same fence;
+its live-model scan runs before taking the row, then the locked status check refuses a
+revived settling task. A Retry that committed first therefore keeps its volumes, shell and models;
+a Retry arriving during removal waits for the section to end before publishing its revival.
+These sections acquire no step/run rows or repository locks. Each sets LOCAL
+`transaction_timeout` to 60s (PostgreSQL 18, also used in CI) before taking the row:
+a wedged Docker or Redis await cannot pin it indefinitely. postgres.js races the callback
+against connection closure, so expiry rejects into the existing catch/log path.
+`withTaskSettlementTransaction` aborts the section's signal whenever that transaction ends or
+errors. Each destructive call checks it immediately before starting, including the auth helper's
+Docker removal after its listing, every volume removal, cache invalidation and the terminal's
+Redis deletion after Docker returns. Model unload requests combine that signal with their HTTP
+timeout, including the embed egress guard's asynchronous allowlist read. An abandoned callback may finish an external operation
+already issued before expiry; it cannot retract that operation, but starts no further destructive
+call after observing transaction termination. A removal completing after rollback can therefore
+leave no `auth_volumes.destroyed` audit row (the next probe finds the volume absent).
+
+Resource-section failures are logged and still allow the Stop or Cancel finish marker, as on main.
+Those markers acknowledge that the teardown pass ran, not that every resource disappeared.
+Auth-volume leftovers are retried by the last terminal summary and boot's `reapOrphanedAuthVolumes`;
+stopped helper containers are removed by that boot reaper before the volumes. Shell containers and
+registry keys stay for `TerminalSessionReaper` once disconnected and idle; the next shell ensure
+can recreate an absent shell. Repo-RAG embed models have `reconcileEmbedModelResidency` at boot
+and their 30-minute keep_alive expiry as backstops. The global-KB release endpoint targets only
+the global-KB model; CLI models have the Ollama daemon's default keep_alive expiry. The next model use loads
+an evicted model again. A wedged volume existence probe still looks like absence and can defer
+cleanup until boot. Cancel still withholds its finish marker when a CLI sandbox remains or its
+listing is unknown, or no-change directory discard fails, since merge-directory safety depends
+on those checks. The existing Cancel re-drive is capped at three, as described above; resource
+section failure alone no longer consumes that recovery path. Volume existence
+probes and the embed live-task scan run before the transaction; the task's settlement is
+rechecked after those reads, under the row lock. Auth sync-back remains outside
+the row lock: it may wait for the CLI auth session lock, which must never be awaited while
+holding a row lock. The summary's deferred auth cleanup repeats the terminal check under
+this fence after sync-back, before invalidating preparations. The superseded pass also
+refuses to initiate a settlement at a newer task epoch.
+
+Auth-volume audit appends use the existing append-once helper under that task row lock,
+keyed by completion stamp, epoch and removal/failure counts. Identical observations of
+one failure record one event; changed counts record a new event so a successful retry is
+visible after an earlier failed removal. Removal is retried even when the event already exists. A terminal row without a completion stamp cannot deduplicate.
+Rollback reverts the worker and shared code together, with no migration or data rollback;
+removed resources cannot be restored by reverting and the next ensure recreates them.
+
+The failure hint a hand-off leaves on the step row (`writeStepHint`) lands
 only while the row still reads `failed` and the task is still failed at that epoch, since a reset
 clears a hint written before it but not one written after; a finished fan-out's timeout hint lands
 only on a row still `done` under the pass's fence, and a login hint only while its run stands.

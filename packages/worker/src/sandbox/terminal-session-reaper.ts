@@ -1,3 +1,10 @@
+import { schema, type Database } from '@haive/database';
+import {
+  taskWriteTarget,
+  setTaskSettlementTimeout,
+  withTaskSettlementTransaction,
+  TASK_SETTLEMENT_TIMEOUT_MS,
+} from '@haive/shared';
 import Docker from 'dockerode';
 import {
   DEFAULT_GIT_CRED_TOKEN_TTL_SECONDS,
@@ -162,6 +169,8 @@ export async function reapAllSessionsForTask(
   redis: Redis,
   docker: Docker,
   taskId: string,
+  db: Database,
+  transactionTimeoutMs = TASK_SETTLEMENT_TIMEOUT_MS,
 ): Promise<number> {
   let cursor = '0';
   let killed = 0;
@@ -176,11 +185,22 @@ export async function reapAllSessionsForTask(
     cursor = next;
     for (const key of keys) {
       const entry = await redis.hgetall(key);
-      if (entry?.containerName) {
-        await removeShellContainer(docker, entry.containerName).catch(() => undefined);
-      }
-      await redis.del(key);
-      killed += 1;
+      await withTaskSettlementTransaction(db, async (tx, signal) => {
+        await setTaskSettlementTimeout(tx, transactionTimeoutMs);
+        const [task] = await tx
+          .select({ id: schema.tasks.id })
+          .from(schema.tasks)
+          .where(taskWriteTarget(taskId, { settled: true }))
+          .for('no key update');
+        if (!task) return;
+        if (entry?.containerName) {
+          signal.throwIfAborted();
+          await removeShellContainer(docker, entry.containerName).catch(() => undefined);
+        }
+        signal.throwIfAborted();
+        await redis.del(key);
+        killed += 1;
+      });
     }
   } while (cursor !== '0');
   if (killed > 0) {

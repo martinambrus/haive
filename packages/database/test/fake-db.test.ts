@@ -420,6 +420,21 @@ describe('the fake database', () => {
     expect(fake.rows(t)[0]!.sizeBytes).toBe(other);
   });
 
+  it('compares numeric JSON members through text extraction without matching null or missing keys', async () => {
+    const fake = createFakeDb({ taskEvents: schema.taskEvents });
+    for (const payload of [{ removed: 1 }, { removed: 0 }, { removed: null }, {}])
+      fake.insert(schema.taskEvents, {
+        taskId: TASK,
+        eventType: 'auth_volumes.destroyed',
+        payload,
+      });
+    const rows = await fake.db
+      .select()
+      .from(schema.taskEvents)
+      .where(sql`${schema.taskEvents.payload} ->> 'removed' = ${'1'}`);
+    expect(rows.map((row) => row.payload)).toEqual([{ removed: 1 }]);
+  });
+
   it('compares a json column by value, as Postgres compares jsonb, and never to NULL', () => {
     // A compare-and-set on a stored document hands back an object read earlier, which is equal to
     // the stored one without being it.

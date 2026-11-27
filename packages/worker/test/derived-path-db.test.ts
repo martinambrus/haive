@@ -42,6 +42,7 @@ vi.mock('../src/project-state/set-aside.js', async (original) => ({
 }));
 vi.mock('../src/sandbox/task-auth-volume.js', async (original) => ({
   ...(await original<object>()),
+  findTaskAuthVolumes: async () => [],
   cleanupTaskAuthVolumes: async () => ({ removed: [], failed: [] }),
   syncRefreshedAuthToUserVolumes: async () => undefined,
 }));

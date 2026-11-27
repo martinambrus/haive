@@ -113,3 +113,13 @@ describe('Ollama helpers dial through the egress guard by default', () => {
     );
   });
 });
+
+it('an ended settlement prevents an unload delayed by the egress allowlist read', async () => {
+  const controller = new AbortController();
+  vi.spyOn(configService, 'get').mockImplementation(async () => {
+    controller.abort(new Error('section ended'));
+    return '127.0.0.1';
+  });
+  expect(await unloadOllamaModel(loop(), 'm', 2000, undefined, controller.signal)).toBe(false);
+  expect(hits).toBe(0);
+});
