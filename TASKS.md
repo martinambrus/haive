@@ -559,7 +559,7 @@ From the T346 build (2026-11-08), PRE-EXISTING: 4. `failedMcpAddNames` (task-aut
 
 ### T545 · FNF[updater-found-state-fallback] · updater residual double failure and unbounded version wait
 
-status: open · kind: fix · priority: P3
+status: done 2026-11-27, merged #1361 (version gate bounded per request within the 180 s budget; double-failure hold proven durable via the `running` journal row, controls added) · kind: fix · priority: P3
 PRE-EXISTING, from the T355 build. 1. updater run.ts ~:394-395: a rollback whose found-state read and write both fail leaves no record of the hold. 2. run.ts ~:115-130 `awaitVersion` has no timeout.
 
 ### T547 · FNF[config-write-unknown-outcome] · a write that times out may still land
