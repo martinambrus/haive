@@ -3,6 +3,7 @@ import { configService, logger, rethrowIfConfigUnavailable } from '@haive/shared
 import {
   resolveGlobalKbEnabled,
   withGlobalKb,
+  globalKbCallOptions,
   type GlobalKbCallOptions,
 } from '@haive/shared/global-kb';
 import { cosineSimilarity, hashEmbed } from '@haive/shared/rag';
@@ -78,7 +79,7 @@ export async function classifyGlobalKbVectorProvenance(
           log.info({ hashed, model }, 'classified global KB vectors written before provenance');
         }
       },
-      opts,
+      globalKbCallOptions(opts),
     );
   } catch (err) {
     // Background boot owns retries and shutdown; the periodic sweep keeps its best-effort contract.

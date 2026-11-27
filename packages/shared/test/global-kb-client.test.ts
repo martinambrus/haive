@@ -269,7 +269,9 @@ describe('withGlobalKb with limits for one call', () => {
     await withGlobalKb(haiveDb, async () => undefined);
     // The sync job and the api embed and wait on locks inside this call: a bound that was the
     // default would turn their waits into failures.
-    expect(h.connectOpts).toEqual([{ connectTimeoutSeconds: undefined }]);
+    expect(h.connectOpts).toEqual([
+      { connectTimeoutSeconds: undefined, deadlineMs: undefined, signal: undefined },
+    ]);
     expect(h.ends).toEqual([]);
   });
 
@@ -282,8 +284,13 @@ describe('withGlobalKb with limits for one call', () => {
       deadlineMs: 5000,
     });
     expect(h.connectOpts).toEqual([
-      { connectTimeoutSeconds: 3 },
-      { connectTimeoutSeconds: 3, fetchTypes: false },
+      { connectTimeoutSeconds: 3, deadlineMs: undefined, signal: undefined },
+      {
+        connectTimeoutSeconds: 3,
+        fetchTypes: false,
+        deadlineMs: 5000,
+        signal: expect.any(AbortSignal),
+      },
     ]);
   });
 
@@ -513,4 +520,30 @@ it('a timed-out waiter never runs after a shared ensure completes', async () => 
   await vi.advanceTimersByTimeAsync(0);
   expect(ran).not.toHaveBeenCalled();
   expect(h.ensure).toHaveBeenCalledTimes(1);
+});
+
+describe('bounded call policy and bare probes', () => {
+  it('pins defaults and permits an injected budget and owner signal', async () => {
+    const { globalKbCallOptions, GLOBAL_KB_CALL_DEADLINE_MS, GLOBAL_KB_CONNECT_TIMEOUT_SECONDS } =
+      await import('../src/global-kb/client.js');
+    expect(GLOBAL_KB_CALL_DEADLINE_MS).toBe(60_000);
+    expect(GLOBAL_KB_CONNECT_TIMEOUT_SECONDS).toBe(3);
+    const signal = new AbortController().signal;
+    expect(globalKbCallOptions({ deadlineMs: 12, signal })).toEqual({
+      deadlineMs: 12,
+      signal,
+      connectTimeoutSeconds: 3,
+    });
+  });
+
+  it('bounds a bare probe without ensuring or publishing the schema', async () => {
+    const { withGlobalKbConnection } = await import('../src/global-kb/client.js');
+    const result = expect(
+      withGlobalKbConnection(haiveDb, async () => new Promise(() => {}), { deadlineMs: 12 }),
+    ).rejects.toMatchObject({ code: 'GLOBAL_KB_DEADLINE' });
+    await vi.advanceTimersByTimeAsync(12);
+    await result;
+    expect(h.ensure).not.toHaveBeenCalled();
+    expect(h.ends).toEqual([{ timeout: 0 }]);
+  });
 });

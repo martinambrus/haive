@@ -1,3 +1,4 @@
+import { globalKbCallOptions } from '@haive/shared/global-kb';
 import { addBestEffort } from '../lib/queue-bounded.js';
 import { safeErrorMessage } from '@haive/shared/logger';
 import { assertUserPostgresDsn, userPostgresErrorMessage } from '@haive/shared/egress';
@@ -39,12 +40,16 @@ import {
   normalizeGlobalKbDescription,
   orphanFacetMajors,
   refusedHouseRuleText,
-  resolveGlobalKbConnection,
   resolveGlobalKbSettings,
+  resolveGlobalKbConnection,
+  GlobalKbDeadlineError,
+  rethrowIfGlobalKbTimeout,
   readVectorColumnWidth,
   resolveHouseRulesEnabled,
   validateHouseRuleGlobs,
   withGlobalKb,
+  withGlobalKbConnection,
+  type GlobalKbCallOptions,
   withGlobalKbSchemaLock,
   type EnforceSpec,
   type GlobalKbCategory,
@@ -79,7 +84,7 @@ import { HttpError, type AppEnv } from '../context.js';
 // deletion require an admin for approved or ownerless entries, otherwise the owner or an admin.
 // Enforcement and connection and embedding store settings are admin-only. The corpus lives in a
 // SEPARATE database
-// reached via withGlobalKb; getDb() is the main DB, needed only to CREATE the dedicated DB
+// reached via withGlobalKb; getDb() supplies the compatible main-db helper argument
 // in internal mode.
 const CATEGORIES = [
   'general',
@@ -323,6 +328,7 @@ const configSchema = z
 const VECTOR_CHECK_CONNECT_TIMEOUT_SECONDS = 3;
 const VECTOR_CHECK_DEADLINE_MS = 6_000;
 const VECTOR_CHECK_STATEMENT_TIMEOUT_MS = 3_000;
+export const GLOBAL_KB_PROBE_DEADLINE_MS = 8_000;
 
 /** Runs `apply` while holding the store's schema lock, once the `vector` column is known to be `width` wide or absent.
  *  A schema ensure takes the same lock and reads the width afterwards, so it creates the column at what `apply` saved.
@@ -331,44 +337,90 @@ async function withVectorWidthLock(
   settings: Awaited<ReturnType<typeof resolveGlobalKbSettings>>,
   width: number,
   apply: () => Promise<void>,
+  opts: GlobalKbCallOptions = {},
 ) {
-  const conn = await resolveGlobalKbConnection(settings, getDb(), {
-    connectTimeoutSeconds: VECTOR_CHECK_CONNECT_TIMEOUT_SECONDS,
-    fetchTypes: false,
-  });
+  const bounds = globalKbCallOptions(opts, VECTOR_CHECK_DEADLINE_MS);
+  const controller = new AbortController();
+  let conn: Awaited<ReturnType<typeof resolveGlobalKbConnection>> | undefined;
   let applying = false;
-  let timer: ReturnType<typeof setTimeout> | undefined;
+  const destroy = () => {
+    void conn?.pg.end({ timeout: 0 }).catch(() => {});
+  };
+  const forwardAbort = () => controller.abort(bounds.signal!.reason);
+  bounds.signal!.addEventListener('abort', forwardAbort, { once: true });
+  if (bounds.signal!.aborted) forwardAbort();
+  const armDeadline = () =>
+    setTimeout(
+      () => controller.abort(new GlobalKbDeadlineError(bounds.deadlineMs)),
+      bounds.deadlineMs,
+    );
+  let timer = armDeadline();
+  let onAbort!: () => void;
   const deadline = new Promise<never>((_, reject) => {
-    timer = setTimeout(() => {
-      if (!applying)
-        reject(new Error('the global KB store did not answer the vector width check in time'));
-    }, VECTOR_CHECK_DEADLINE_MS);
-  });
-  const locked = withGlobalKbSchemaLock(
-    conn.pg,
-    async (tx) => {
-      const current = await readVectorColumnWidth(tx);
-      if (current !== null && current !== width) {
-        throw new HttpError(
-          409,
-          "the store's vector column has another width and cannot be resized here; the embedding dimensions must match it",
-          'embed_dimensions_locked',
-        );
+    onAbort = () => {
+      if (!applying) {
+        destroy();
+        reject(controller.signal.reason);
       }
-      applying = true;
-      await apply();
-    },
-    { timeoutMs: VECTOR_CHECK_STATEMENT_TIMEOUT_MS },
-  );
-  void locked.catch(() => {});
+    };
+    controller.signal.addEventListener('abort', onAbort, { once: true });
+    if (controller.signal.aborted) onAbort();
+  });
+  const locked = (async () => {
+    controller.signal.throwIfAborted();
+    conn = await resolveGlobalKbConnection(settings, getDb(), {
+      connectTimeoutSeconds: bounds.connectTimeoutSeconds ?? VECTOR_CHECK_CONNECT_TIMEOUT_SECONDS,
+      fetchTypes: false,
+      deadlineMs: bounds.deadlineMs,
+      signal: controller.signal,
+    });
+    if (controller.signal.aborted) {
+      destroy();
+      controller.signal.throwIfAborted();
+    }
+    return withGlobalKbSchemaLock(
+      conn.pg,
+      async (tx) => {
+        const current = await readVectorColumnWidth(tx);
+        if (current !== null && current !== width) {
+          throw new HttpError(
+            409,
+            "the store's vector column has another width and cannot be resized here; the embedding dimensions must match it",
+            'embed_dimensions_locked',
+          );
+        }
+        controller.signal.throwIfAborted();
+        // Config/audit writes have their own failure contract. Once started, keep the schema lock
+        // until they settle: dropping it on a timer would let an ensure create the old width while
+        // an already-issued Redis write later publishes the new one.
+        applying = true;
+        clearTimeout(timer);
+        bounds.signal!.removeEventListener('abort', forwardAbort);
+        try {
+          await apply();
+        } finally {
+          // Only config/audit work is exempt. Bound COMMIT and ROLLBACK too, and honor a
+          // disconnect deferred while publishing config, once dropping this lock is safe.
+          applying = false;
+          bounds.signal!.addEventListener('abort', forwardAbort, { once: true });
+          if (bounds.signal!.aborted) forwardAbort();
+          else timer = armDeadline();
+        }
+      },
+      { timeoutMs: VECTOR_CHECK_STATEMENT_TIMEOUT_MS },
+    );
+  })();
   try {
     await Promise.race([locked, deadline]);
   } catch (err) {
-    void conn.pg.end({ timeout: 0 }).catch(() => {});
+    destroy();
+    rethrowIfGlobalKbTimeout(err);
     throw err;
   } finally {
     clearTimeout(timer);
-    await conn.close().catch(() => {});
+    bounds.signal!.removeEventListener('abort', forwardAbort);
+    controller.signal.removeEventListener('abort', onAbort);
+    await conn?.close().catch(() => {});
   }
 }
 
@@ -605,7 +657,8 @@ async function putConfig(c: Context<AppEnv>) {
     logAuditEvent(outcome.event);
     if ('error' in outcome) throw outcome.error;
   };
-  if (dimsChange) await withVectorWidthLock(saved, d.embedDimensions!, write);
+  if (dimsChange)
+    await withVectorWidthLock(saved, d.embedDimensions!, write, { signal: c.req.raw.signal });
   else await write();
   if (isAdmin && clearing) {
     await auditedChange(
@@ -624,17 +677,6 @@ async function putConfig(c: Context<AppEnv>) {
 // --- Connection tests (the UI "Test" buttons). Both exercise the exact paths
 // the worker sync/query use, so a green result means the real embed/store path
 // works with the settings tested (entered by an admin, stored for anyone else). ---
-function withTimeout<T>(p: Promise<T>, ms: number, message: string): Promise<T> {
-  let timer: ReturnType<typeof setTimeout>;
-  // Handle a late rejection (after the timeout already won the race) so it never
-  // surfaces as an unhandledRejection.
-  void p.catch(() => {});
-  const timeout = new Promise<never>((_, reject) => {
-    timer = setTimeout(() => reject(new Error(message)), ms);
-  });
-  return Promise.race([p, timeout]).finally(() => clearTimeout(timer));
-}
-
 const testOllamaSchema = z
   .object({
     ollamaUrl: z.string().min(1),
@@ -709,18 +751,21 @@ globalKbRoutes.post('/test-db', requireAdmin, async (c) => {
   if (mode === 'external' && !connectionString) {
     return c.json({ ok: false, message: 'No external connection string to test' });
   }
-  let conn: Awaited<ReturnType<typeof resolveGlobalKbConnection>> | null = null;
   try {
     if (mode === 'external' && parsed.data.connectionString?.trim())
       assertUserPostgresDsn(connectionString!);
-    conn = await resolveGlobalKbConnection({ ...saved, mode, connectionString }, getDb());
-    const pg = conn.pg;
-    await withTimeout(
-      (async () => {
-        await pg`select 1`;
-      })(),
-      8000,
-      'connection timed out',
+    await withGlobalKbConnection(
+      getDb(),
+      async ({ conn }) => {
+        await conn.pg`select 1`;
+      },
+      globalKbCallOptions(
+        {
+          signal: c.req.raw.signal,
+          settings: { ...saved, mode, connectionString },
+        },
+        GLOBAL_KB_PROBE_DEADLINE_MS,
+      ),
     );
     return c.json({
       ok: true,
@@ -728,8 +773,6 @@ globalKbRoutes.post('/test-db', requireAdmin, async (c) => {
     });
   } catch (err) {
     return c.json({ ok: false, message: userPostgresErrorMessage(err) });
-  } finally {
-    if (conn) await conn.close().catch(() => {});
   }
 });
 
@@ -784,31 +827,35 @@ globalKbRoutes.post('/enrich', requireNewWorkAllowed, async (c) => {
   await definitionForCreate(db, 'kb_author', { locked: false, generic: false });
 
   const taskId = randomUUID();
-  const entry = await withGlobalKb(db, async ({ db: gdb, settings }) => {
-    const [row] = await gdb
-      .insert(globalKbEntries)
-      .values({
-        namespace: data.namespace || settings.namespace,
-        userId,
-        // User-set title is authoritative; the LLM overwrites category/facets/body.
-        title: data.title,
-        seedText: data.seedText,
-        body: data.seedText,
-        category: 'general',
-        // The author's stated scope, carried on the skeleton so the enrich step can read it
-        // back as authoritative. `{}` when they stated nothing, which leaves every dimension
-        // to the model exactly as before.
-        facets: normalizeFacets(data.facets as GlobalKbFacets | undefined),
-        description,
-        status: 'skeleton',
-        source: 'user',
-        embedStatus: 'pending',
-        // So the UI can offer a "watch task" link. The task is inserted below under this id.
-        sourceTaskId: taskId,
-      })
-      .returning();
-    return presentEntry(row!, await houseRuleContext(settings.namespace), c);
-  });
+  const entry = await withGlobalKb(
+    db,
+    async ({ db: gdb, settings }) => {
+      const [row] = await gdb
+        .insert(globalKbEntries)
+        .values({
+          namespace: data.namespace || settings.namespace,
+          userId,
+          // User-set title is authoritative; the LLM overwrites category/facets/body.
+          title: data.title,
+          seedText: data.seedText,
+          body: data.seedText,
+          category: 'general',
+          // The author's stated scope, carried on the skeleton so the enrich step can read it
+          // back as authoritative. `{}` when they stated nothing, which leaves every dimension
+          // to the model exactly as before.
+          facets: normalizeFacets(data.facets as GlobalKbFacets | undefined),
+          description,
+          status: 'skeleton',
+          source: 'user',
+          embedStatus: 'pending',
+          // So the UI can offer a "watch task" link. The task is inserted below under this id.
+          sourceTaskId: taskId,
+        })
+        .returning();
+      return presentEntry(row!, await houseRuleContext(settings.namespace), c);
+    },
+    globalKbCallOptions({ signal: c.req.raw.signal }),
+  );
 
   let queued: Awaited<ReturnType<typeof markQueuedForStart>>;
   let reachedCommit = false;
@@ -870,11 +917,15 @@ globalKbRoutes.post('/enrich', requireNewWorkAllowed, async (c) => {
     // The entry lives in the global KB database, so no transaction spans both writes. An error
     // inside the transaction rolled the task back; a failed commit wrote nothing only if refused.
     if (!reachedCommit || isRefusedStatement(err)) {
-      await withGlobalKb(db, ({ db: gdb }) =>
-        gdb.transaction(async (tx) => {
-          if ((await lockEntry(tx, entry.id))?.status !== 'skeleton') return;
-          await tx.delete(globalKbEntries).where(eq(globalKbEntries.id, entry.id));
-        }),
+      await withGlobalKb(
+        db,
+        ({ db: gdb }) =>
+          gdb.transaction(async (tx) => {
+            if ((await lockEntry(tx, entry.id))?.status !== 'skeleton') return;
+            await tx.delete(globalKbEntries).where(eq(globalKbEntries.id, entry.id));
+          }),
+        // Compensation is owed even after the request disconnects.
+        globalKbCallOptions(),
       ).catch((cleanupErr) =>
         logger.warn(
           { err: cleanupErr, entryId: entry.id },
@@ -931,45 +982,49 @@ globalKbRoutes.get('/entries', async (c) => {
     Math.max(1, Math.floor(Number(c.req.query('pageSize') ?? '12')) || 12),
   );
 
-  const result = await withGlobalKb(getDb(), async ({ db, settings }) => {
-    const conds: SQL[] = [];
-    if (status) conds.push(eq(globalKbEntries.status, status as GlobalKbStatus));
-    if (category) conds.push(eq(globalKbEntries.category, category as GlobalKbCategory));
-    // Scope to the drafts a given task promoted (the completed-task "review drafts" CTA).
-    if (sourceTaskId) conds.push(eq(globalKbEntries.sourceTaskId, sourceTaskId));
-    if (framework) {
-      conds.push(sql`jsonb_exists(${globalKbEntries.facets} -> 'framework', ${framework})`);
-    }
-    if (q) {
-      const like = `%${q}%`;
-      conds.push(
-        sql`(${globalKbEntries.title} ilike ${like} or ${globalKbEntries.body} ilike ${like})`,
-      );
-    }
-    const where = conds.length ? and(...conds) : undefined;
+  const result = await withGlobalKb(
+    getDb(),
+    async ({ db, settings }) => {
+      const conds: SQL[] = [];
+      if (status) conds.push(eq(globalKbEntries.status, status as GlobalKbStatus));
+      if (category) conds.push(eq(globalKbEntries.category, category as GlobalKbCategory));
+      // Scope to the drafts a given task promoted (the completed-task "review drafts" CTA).
+      if (sourceTaskId) conds.push(eq(globalKbEntries.sourceTaskId, sourceTaskId));
+      if (framework) {
+        conds.push(sql`jsonb_exists(${globalKbEntries.facets} -> 'framework', ${framework})`);
+      }
+      if (q) {
+        const like = `%${q}%`;
+        conds.push(
+          sql`(${globalKbEntries.title} ilike ${like} or ${globalKbEntries.body} ilike ${like})`,
+        );
+      }
+      const where = conds.length ? and(...conds) : undefined;
 
-    const totalRows = await db
-      .select({ n: sql<number>`count(*)::int` })
-      .from(globalKbEntries)
-      .where(where);
-    const total = totalRows[0]?.n ?? 0;
+      const totalRows = await db
+        .select({ n: sql<number>`count(*)::int` })
+        .from(globalKbEntries)
+        .where(where);
+      const total = totalRows[0]?.n ?? 0;
 
-    const entries = await db
-      .select()
-      .from(globalKbEntries)
-      .where(where)
-      .orderBy(desc(globalKbEntries.updatedAt), desc(globalKbEntries.id))
-      .limit(pageSize)
-      .offset((page - 1) * pageSize);
+      const entries = await db
+        .select()
+        .from(globalKbEntries)
+        .where(where)
+        .orderBy(desc(globalKbEntries.updatedAt), desc(globalKbEntries.id))
+        .limit(pageSize)
+        .offset((page - 1) * pageSize);
 
-    const facetRows = await db.select({ facets: globalKbEntries.facets }).from(globalKbEntries);
-    const frameworks = Array.from(
-      new Set(facetRows.flatMap((r) => r.facets?.framework ?? [])),
-    ).sort();
+      const facetRows = await db.select({ facets: globalKbEntries.facets }).from(globalKbEntries);
+      const frameworks = Array.from(
+        new Set(facetRows.flatMap((r) => r.facets?.framework ?? [])),
+      ).sort();
 
-    const ctx = await houseRuleContext(settings.namespace);
-    return { entries: entries.map((entry) => presentEntry(entry, ctx, c)), total, frameworks };
-  });
+      const ctx = await houseRuleContext(settings.namespace);
+      return { entries: entries.map((entry) => presentEntry(entry, ctx, c)), total, frameworks };
+    },
+    globalKbCallOptions({ signal: c.req.raw.signal }),
+  );
 
   return c.json({
     entries: await withSourceTaskStatus(getDb(), c.get('userId'), result.entries),
@@ -982,28 +1037,30 @@ globalKbRoutes.get('/entries', async (c) => {
 
 globalKbRoutes.get('/entries/:id', async (c) => {
   const id = entryIdParam(c.req.param('id'));
-  const found = await withGlobalKb(getDb(), async ({ db, settings }) => {
-    const entry = await db.query.globalKbEntries.findFirst({
-      where: eq(globalKbEntries.id, id),
-    });
-    if (!entry) return null;
-    // The LIVE entry that replaced this one, if any. Answered here because the only other way
-    // to know is to scan the entries list — and that list is filtered and paginated, so a
-    // reviewer looking at archived entries never has the active successor in hand. A warning
-    // derived from a VIEW is a warning that silently disappears when the view narrows.
-    //
-    // Walks the CHAIN, not the direct child. An article replaced more than once leaves
-    // A -> B -> C with only C active, and C points at B: a direct lookup from A finds B,
-    // discards it for being archived, and reports no successor — so the warning vanished on
-    // exactly the entries that have been superseded most often.
-    //
-    // Bounded twice, because this is recursion over user data: a depth cap, and a visited-set
-    // guard so a cycle in `supersedes_entry_id` terminates instead of spinning. Only for an
-    // archived row — an active entry cannot meaningfully be "replaced", and the query is not
-    // worth running on every detail open.
-    const successors =
-      entry.status === 'archived'
-        ? ((await db.execute(sql`
+  const found = await withGlobalKb(
+    getDb(),
+    async ({ db, settings }) => {
+      const entry = await db.query.globalKbEntries.findFirst({
+        where: eq(globalKbEntries.id, id),
+      });
+      if (!entry) return null;
+      // The LIVE entry that replaced this one, if any. Answered here because the only other way
+      // to know is to scan the entries list — and that list is filtered and paginated, so a
+      // reviewer looking at archived entries never has the active successor in hand. A warning
+      // derived from a VIEW is a warning that silently disappears when the view narrows.
+      //
+      // Walks the CHAIN, not the direct child. An article replaced more than once leaves
+      // A -> B -> C with only C active, and C points at B: a direct lookup from A finds B,
+      // discards it for being archived, and reports no successor — so the warning vanished on
+      // exactly the entries that have been superseded most often.
+      //
+      // Bounded twice, because this is recursion over user data: a depth cap, and a visited-set
+      // guard so a cycle in `supersedes_entry_id` terminates instead of spinning. Only for an
+      // archived row — an active entry cannot meaningfully be "replaced", and the query is not
+      // worth running on every detail open.
+      const successors =
+        entry.status === 'archived'
+          ? ((await db.execute(sql`
             WITH RECURSIVE chain AS (
               SELECT e.id, e.status, e.title, 1 AS depth, ARRAY[e.id] AS seen
                 FROM global_kb_entries e
@@ -1016,16 +1073,18 @@ globalKbRoutes.get('/entries/:id', async (c) => {
             )
             SELECT id, title FROM chain WHERE status = 'active' LIMIT 1
           `)) as unknown as Array<{ id: string; title: string }>)
-        : [];
-    const { usedBytes, entryBytes } = await alwaysBytes(db, settings.namespace, entry);
-    return {
-      entry: presentEntry(entry, await houseRuleContext(settings.namespace), c),
-      activeSuccessor: successors[0] ?? null,
-      usedBytes,
-      capBytes: HOUSE_RULES_ALWAYS_CAP_BYTES,
-      entryBytes,
-    };
-  });
+          : [];
+      const { usedBytes, entryBytes } = await alwaysBytes(db, settings.namespace, entry);
+      return {
+        entry: presentEntry(entry, await houseRuleContext(settings.namespace), c),
+        activeSuccessor: successors[0] ?? null,
+        usedBytes,
+        capBytes: HOUSE_RULES_ALWAYS_CAP_BYTES,
+        entryBytes,
+      };
+    },
+    globalKbCallOptions({ signal: c.req.raw.signal }),
+  );
   if (!found) throw new HttpError(404, 'global KB entry not found');
   return c.json(found);
 });
@@ -1038,25 +1097,29 @@ globalKbRoutes.post('/entries', async (c) => {
   const description = authoredDescription(data.description) ?? null;
   const userId = c.get('userId');
 
-  const entry = await withGlobalKb(getDb(), async ({ db, settings }) => {
-    const [row] = await db
-      .insert(globalKbEntries)
-      .values({
-        namespace: data.namespace || settings.namespace,
-        userId,
-        title: data.title,
-        seedText: data.seedText ?? null,
-        body: data.body,
-        category: data.category,
-        facets: normalizeFacets(data.facets as GlobalKbFacets | undefined),
-        description,
-        status: data.status ?? 'draft',
-        source: 'user',
-        embedStatus: 'pending',
-      })
-      .returning();
-    return presentEntry(row!, await houseRuleContext(settings.namespace), c);
-  });
+  const entry = await withGlobalKb(
+    getDb(),
+    async ({ db, settings }) => {
+      const [row] = await db
+        .insert(globalKbEntries)
+        .values({
+          namespace: data.namespace || settings.namespace,
+          userId,
+          title: data.title,
+          seedText: data.seedText ?? null,
+          body: data.body,
+          category: data.category,
+          facets: normalizeFacets(data.facets as GlobalKbFacets | undefined),
+          description,
+          status: data.status ?? 'draft',
+          source: 'user',
+          embedStatus: 'pending',
+        })
+        .returning();
+      return presentEntry(row!, await houseRuleContext(settings.namespace), c);
+    },
+    globalKbCallOptions({ signal: c.req.raw.signal }),
+  );
 
   await enqueueSync(entry.id, entry.namespace, 'upsert');
   return c.json({ entry }, 201);
@@ -1195,197 +1258,201 @@ globalKbRoutes.patch('/entries/:id', async (c) => {
   // decided to clear it but before the clear lands, and archives a predecessor the reviewer
   // had just detached. The UI's button guard cannot prevent that — it only serialises one tab,
   // while a second tab or an API client goes straight at the route.
-  const result = await withGlobalKb(getDb(), async ({ db: conn, settings }) =>
-    entryChange(c, (record) =>
-      conn.transaction(async (db) => {
-        // LOCKED, so a retry's detect — a plain UPDATE to `enriching` — waits for this transaction
-        // instead of flipping the status between the check and the write.
-        const current = await lockEntry(db, id);
-        if (!current) {
-          return {
-            row: undefined,
-            supersededId: null,
-            reembed: false,
-            namespace: settings.namespace,
-          };
-        }
-        if (!canManageEntry(current, c)) {
-          throw new HttpError(
-            403,
-            'Only an owner or admin may change an unapproved entry; approved and ownerless entries require an admin',
-            'admin_required',
-          );
-        }
-        const blocked = enrichmentBlocksEdit(current.status);
-        if (blocked) throw new HttpError(409, blocked, 'entry_enrichment_pending');
-        const set: Partial<typeof globalKbEntries.$inferInsert> = { updatedAt: new Date() };
-        if (data.title !== undefined) set.title = data.title;
-        if (data.body !== undefined) set.body = data.body;
-        if (data.category !== undefined) set.category = data.category;
-        if (data.facets !== undefined) set.facets = normalizeFacets(data.facets as GlobalKbFacets);
-        if (data.status !== undefined) set.status = data.status;
-        if (description !== undefined) set.description = description;
-        // Activating CLEARS the supersession stamp, or reactivating is a no-op that looks like a
-        // success. `supersededAt` means "archived because something replaced it", and the digest
-        // filters on `status = 'active' AND superseded_at IS NULL` — so a row flipped to active
-        // with the stamp still set stays invisible to every project. The scope editor's own warning
-        // tells a reviewer to reactivate the predecessor when they move a replacement's scope, and
-        // this is what makes that instruction true rather than merely printed.
-        //
-        // `supersedesEntryId` is deliberately KEPT here: it records what this entry replaced. Only a
-        // real re-scope clears it (below), because a rule whose scope moved no longer replaces that.
-        if (data.status === 'active') set.supersededAt = null;
-        // Only a changed title or body, or an entry becoming active, has anything to embed; pending
-        // is what lets the worker re-queue a sync whose enqueue below is lost.
-        const becomesActive = data.status === 'active' && current.status !== 'active';
-        const reembed =
-          becomesActive ||
-          (data.title !== undefined && data.title !== current.title) ||
-          (data.body !== undefined && data.body !== current.body);
-        if (reembed) set.embedStatus = 'pending';
-        const lapses: AuditEvent[] = [];
-        // Done here and not by the trigger: a reverted edit must not revive the approval, and the
-        // token is blind to the facet order a backfill rewrites.
-        if (
-          current.enforcedHash != null &&
-          houseRuleContentToken({ ...current, ...set }) !== houseRuleContentToken(current)
-        ) {
-          set.enforcedHash = null;
-          lapses.push(lapseAuditEvent(c.get('userId'), current, 'edit'));
-        } else if (
-          current.enforcedHash != null &&
-          current.status === 'active' &&
-          data.status !== undefined &&
-          data.status !== 'active'
-        ) {
-          lapses.push(lapseAuditEvent(c.get('userId'), current, 'status', data.status));
-        }
-        // A SCOPE edit invalidates a proposed supersession. The link was decided by comparing this
-        // draft's article against the entry it would replace; re-scoping it to another technology
-        // makes it a different rule, and activating it would then archive an entry it no longer has
-        // anything to do with. Cleared rather than revalidated — revalidating needs an embedding
-        // pass, and a stale duplicate the reviewer can archive by hand is a far cheaper mistake than
-        // silently retiring the wrong article. Keyed on the FILTER dimensions, so a tags-only edit
-        // (tags do not scope retrieval) leaves a valid link alone.
-        if (data.facets !== undefined) {
-          // Cleared on ANY real re-scope, whatever the status. The link is not only history: every
-          // activation reads it — reactivation included — and archives the entry it names. So an
-          // exemption for ACTIVE entries became wrong once an active entry could be archived and
-          // reactivated from the page: re-scope an active replacement (the scope editor then tells
-          // the reviewer to reactivate the old entry), archive it, reactivate it, and its activation
-          // archived that old entry again although the two rules no longer share a scope. This
-          // condition already had to widen once, from drafts to archived entries, for the same
-          // reason: the set of states an entry can be activated from kept growing.
-          //
-          // Clearing costs the record of what a re-scoped entry once replaced, which stopped being
-          // true when its scope moved. The predecessor's "an active entry still replaces this one"
-          // warning follows this link too, so it stops claiming a replacement that is gone.
-          if (current.supersedesEntryId && scopeChanged(current.facets, set.facets)) {
-            set.supersedesEntryId = null;
+  const result = await withGlobalKb(
+    getDb(),
+    async ({ db: conn, settings }) =>
+      entryChange(c, (record) =>
+        conn.transaction(async (db) => {
+          // LOCKED, so a retry's detect — a plain UPDATE to `enriching` — waits for this transaction
+          // instead of flipping the status between the check and the write.
+          const current = await lockEntry(db, id);
+          if (!current) {
+            return {
+              row: undefined,
+              supersededId: null,
+              reembed: false,
+              namespace: settings.namespace,
+            };
           }
-        }
-        // Authorize the link after a same-request re-scope has had a chance to clear it.
-        // The corpus advisory lock is already held; lock the predecessor in this transaction too.
-        const supersedesEntryId = { ...current, ...set }.supersedesEntryId;
-        if (becomesActive && supersedesEntryId) {
-          const [target] = await db
-            .select()
-            .from(globalKbEntries)
-            .where(eq(globalKbEntries.id, supersedesEntryId))
-            .for('update');
-          if (target && target.status !== 'archived' && !canManageEntry(target, c)) {
+          if (!canManageEntry(current, c)) {
             throw new HttpError(
               403,
-              'Activating this entry would archive an entry you may not change; an admin is required',
+              'Only an owner or admin may change an unapproved entry; approved and ownerless entries require an admin',
               'admin_required',
             );
           }
-          if (target?.status === 'active' && target.enforcedHash != null) {
-            lapses.push(lapseAuditEvent(c.get('userId'), target, 'status', 'archived'));
+          const blocked = enrichmentBlocksEdit(current.status);
+          if (blocked) throw new HttpError(409, blocked, 'entry_enrichment_pending');
+          const set: Partial<typeof globalKbEntries.$inferInsert> = { updatedAt: new Date() };
+          if (data.title !== undefined) set.title = data.title;
+          if (data.body !== undefined) set.body = data.body;
+          if (data.category !== undefined) set.category = data.category;
+          if (data.facets !== undefined)
+            set.facets = normalizeFacets(data.facets as GlobalKbFacets);
+          if (data.status !== undefined) set.status = data.status;
+          if (description !== undefined) set.description = description;
+          // Activating CLEARS the supersession stamp, or reactivating is a no-op that looks like a
+          // success. `supersededAt` means "archived because something replaced it", and the digest
+          // filters on `status = 'active' AND superseded_at IS NULL` — so a row flipped to active
+          // with the stamp still set stays invisible to every project. The scope editor's own warning
+          // tells a reviewer to reactivate the predecessor when they move a replacement's scope, and
+          // this is what makes that instruction true rather than merely printed.
+          //
+          // `supersedesEntryId` is deliberately KEPT here: it records what this entry replaced. Only a
+          // real re-scope clears it (below), because a rule whose scope moved no longer replaces that.
+          if (data.status === 'active') set.supersededAt = null;
+          // Only a changed title or body, or an entry becoming active, has anything to embed; pending
+          // is what lets the worker re-queue a sync whose enqueue below is lost.
+          const becomesActive = data.status === 'active' && current.status !== 'active';
+          const reembed =
+            becomesActive ||
+            (data.title !== undefined && data.title !== current.title) ||
+            (data.body !== undefined && data.body !== current.body);
+          if (reembed) set.embedStatus = 'pending';
+          const lapses: AuditEvent[] = [];
+          // Done here and not by the trigger: a reverted edit must not revive the approval, and the
+          // token is blind to the facet order a backfill rewrites.
+          if (
+            current.enforcedHash != null &&
+            houseRuleContentToken({ ...current, ...set }) !== houseRuleContentToken(current)
+          ) {
+            set.enforcedHash = null;
+            lapses.push(lapseAuditEvent(c.get('userId'), current, 'edit'));
+          } else if (
+            current.enforcedHash != null &&
+            current.status === 'active' &&
+            data.status !== undefined &&
+            data.status !== 'active'
+          ) {
+            lapses.push(lapseAuditEvent(c.get('userId'), current, 'status', data.status));
           }
-        }
-        // All decisions came from locked rows. A refused audit must precede every store write,
-        // including scope/link maintenance and activation of the replacement.
-        for (const lapse of lapses) await record(lapse);
-        if (data.facets !== undefined) {
-          // A link POINTING AT this entry was decided against the old scope
-          // too. Left in place, activating that replacement — a reactivation included — archives
-          // this entry although the two rules no longer share a scope, and the successor lookup
-          // keeps warning that it has been replaced. Their `updatedAt` is left alone, for the
-          // list-order reason the activation's predecessor archive gives.
-          if (scopeChanged(current.facets, set.facets)) {
-            await db
-              .update(globalKbEntries)
-              .set({ supersedesEntryId: null })
-              .where(eq(globalKbEntries.supersedesEntryId, id));
+          // A SCOPE edit invalidates a proposed supersession. The link was decided by comparing this
+          // draft's article against the entry it would replace; re-scoping it to another technology
+          // makes it a different rule, and activating it would then archive an entry it no longer has
+          // anything to do with. Cleared rather than revalidated — revalidating needs an embedding
+          // pass, and a stale duplicate the reviewer can archive by hand is a far cheaper mistake than
+          // silently retiring the wrong article. Keyed on the FILTER dimensions, so a tags-only edit
+          // (tags do not scope retrieval) leaves a valid link alone.
+          if (data.facets !== undefined) {
+            // Cleared on ANY real re-scope, whatever the status. The link is not only history: every
+            // activation reads it — reactivation included — and archives the entry it names. So an
+            // exemption for ACTIVE entries became wrong once an active entry could be archived and
+            // reactivated from the page: re-scope an active replacement (the scope editor then tells
+            // the reviewer to reactivate the old entry), archive it, reactivate it, and its activation
+            // archived that old entry again although the two rules no longer share a scope. This
+            // condition already had to widen once, from drafts to archived entries, for the same
+            // reason: the set of states an entry can be activated from kept growing.
+            //
+            // Clearing costs the record of what a re-scoped entry once replaced, which stopped being
+            // true when its scope moved. The predecessor's "an active entry still replaces this one"
+            // warning follows this link too, so it stops claiming a replacement that is gone.
+            if (current.supersedesEntryId && scopeChanged(current.facets, set.facets)) {
+              set.supersedesEntryId = null;
+            }
           }
-        }
-        const rekeyed = rescopedTopicKey(current, { category: set.category, facets: set.facets });
-        if (rekeyed !== undefined) set.topicKey = rekeyed;
-        const [row] = await db
-          .update(globalKbEntries)
-          .set(set)
-          .where(eq(globalKbEntries.id, id))
-          .returning();
-        // Carry the new scope onto this entry's CHUNKS, in the same transaction.
-        //
-        // A chunk holds its OWN copy of the facets and `buildFacetClause` filters on THAT, not on
-        // the entry's — so committing the entry alone leaves every chunk advertising the old
-        // scope, while the body expansion serves the entry's current text. Until the sync ran, a
-        // re-scoped rule was therefore still delivered to its FORMER projects and missing from its
-        // new ones, and indefinitely so if the enqueue or the embed failed.
-        //
-        // An UPDATE rather than a delete: a scope edit changes metadata, not prose, so the vectors
-        // stay valid and the entry keeps working for the whole operation instead of going dark
-        // until a re-embed lands. The enqueue below still runs — it is what re-embeds a BODY change
-        // — but retrieval is correct the moment this commits rather than whenever that job does.
-        if (set.facets !== undefined) {
-          await db.execute(
-            sql`UPDATE ai_rag_embeddings SET facets = ${JSON.stringify(set.facets)}::jsonb
-               WHERE namespace = ${row?.namespace ?? ''} AND entry_id = ${id}`,
-          );
-        }
-        // A non-active entry holds no vectors, enforced HERE, in the transaction that sets the status,
-        // rather than by the sync job enqueued after commit. Global retrieval has no status predicate:
-        // `rag.ts` ranks chunks on namespace and facets and joins the entry only to expand its body,
-        // so a chunk that outlives its entry's `active` status is served. An enqueue that failed after
-        // commit (Redis unavailable) used to leave an archived rule retrievable indefinitely, while
-        // the page reported the archive as failed. A no-op for an entry that holds none.
-        if (row && row.status !== 'active') {
-          await db.execute(
-            sql`DELETE FROM ai_rag_embeddings WHERE namespace = ${row.namespace} AND entry_id = ${id}`,
-          );
-        }
-        // Activation supersession: when a draft that proposes replacing another entry (a
-        // merge produced by onboarding) is activated, archive the entry it supersedes so
-        // the topic keeps a single live article. Its vectors go in this transaction too, for the
-        // reason above.
-        let supersededId: string | null = null;
-        if (row && becomesActive && row.supersedesEntryId) {
-          const [archived] = await db
+          // Authorize the link after a same-request re-scope has had a chance to clear it.
+          // The corpus advisory lock is already held; lock the predecessor in this transaction too.
+          const supersedesEntryId = { ...current, ...set }.supersedesEntryId;
+          if (becomesActive && supersedesEntryId) {
+            const [target] = await db
+              .select()
+              .from(globalKbEntries)
+              .where(eq(globalKbEntries.id, supersedesEntryId))
+              .for('update');
+            if (target && target.status !== 'archived' && !canManageEntry(target, c)) {
+              throw new HttpError(
+                403,
+                'Activating this entry would archive an entry you may not change; an admin is required',
+                'admin_required',
+              );
+            }
+            if (target?.status === 'active' && target.enforcedHash != null) {
+              lapses.push(lapseAuditEvent(c.get('userId'), target, 'status', 'archived'));
+            }
+          }
+          // All decisions came from locked rows. A refused audit must precede every store write,
+          // including scope/link maintenance and activation of the replacement.
+          for (const lapse of lapses) await record(lapse);
+          if (data.facets !== undefined) {
+            // A link POINTING AT this entry was decided against the old scope
+            // too. Left in place, activating that replacement — a reactivation included — archives
+            // this entry although the two rules no longer share a scope, and the successor lookup
+            // keeps warning that it has been replaced. Their `updatedAt` is left alone, for the
+            // list-order reason the activation's predecessor archive gives.
+            if (scopeChanged(current.facets, set.facets)) {
+              await db
+                .update(globalKbEntries)
+                .set({ supersedesEntryId: null })
+                .where(eq(globalKbEntries.supersedesEntryId, id));
+            }
+          }
+          const rekeyed = rescopedTopicKey(current, { category: set.category, facets: set.facets });
+          if (rekeyed !== undefined) set.topicKey = rekeyed;
+          const [row] = await db
             .update(globalKbEntries)
-            // Record the archive time via supersededAt, but DON'T bump updatedAt: the
-            // list sorts by updatedAt desc, so bumping it would float the just-archived
-            // old article above its replacement. Leaving updatedAt keeps it in place.
-            .set({ status: 'archived', supersededAt: new Date() })
-            .where(
-              and(
-                eq(globalKbEntries.id, row.supersedesEntryId),
-                ne(globalKbEntries.status, 'archived'),
-              ),
-            )
-            .returning({ id: globalKbEntries.id, namespace: globalKbEntries.namespace });
-          if (archived) {
+            .set(set)
+            .where(eq(globalKbEntries.id, id))
+            .returning();
+          // Carry the new scope onto this entry's CHUNKS, in the same transaction.
+          //
+          // A chunk holds its OWN copy of the facets and `buildFacetClause` filters on THAT, not on
+          // the entry's — so committing the entry alone leaves every chunk advertising the old
+          // scope, while the body expansion serves the entry's current text. Until the sync ran, a
+          // re-scoped rule was therefore still delivered to its FORMER projects and missing from its
+          // new ones, and indefinitely so if the enqueue or the embed failed.
+          //
+          // An UPDATE rather than a delete: a scope edit changes metadata, not prose, so the vectors
+          // stay valid and the entry keeps working for the whole operation instead of going dark
+          // until a re-embed lands. The enqueue below still runs — it is what re-embeds a BODY change
+          // — but retrieval is correct the moment this commits rather than whenever that job does.
+          if (set.facets !== undefined) {
             await db.execute(
-              sql`DELETE FROM ai_rag_embeddings
-                 WHERE namespace = ${archived.namespace} AND entry_id = ${archived.id}`,
+              sql`UPDATE ai_rag_embeddings SET facets = ${JSON.stringify(set.facets)}::jsonb
+               WHERE namespace = ${row?.namespace ?? ''} AND entry_id = ${id}`,
             );
           }
-          supersededId = archived?.id ?? null;
-        }
-        return { row, supersededId, reembed, namespace: settings.namespace };
-      }),
-    ),
+          // A non-active entry holds no vectors, enforced HERE, in the transaction that sets the status,
+          // rather than by the sync job enqueued after commit. Global retrieval has no status predicate:
+          // `rag.ts` ranks chunks on namespace and facets and joins the entry only to expand its body,
+          // so a chunk that outlives its entry's `active` status is served. An enqueue that failed after
+          // commit (Redis unavailable) used to leave an archived rule retrievable indefinitely, while
+          // the page reported the archive as failed. A no-op for an entry that holds none.
+          if (row && row.status !== 'active') {
+            await db.execute(
+              sql`DELETE FROM ai_rag_embeddings WHERE namespace = ${row.namespace} AND entry_id = ${id}`,
+            );
+          }
+          // Activation supersession: when a draft that proposes replacing another entry (a
+          // merge produced by onboarding) is activated, archive the entry it supersedes so
+          // the topic keeps a single live article. Its vectors go in this transaction too, for the
+          // reason above.
+          let supersededId: string | null = null;
+          if (row && becomesActive && row.supersedesEntryId) {
+            const [archived] = await db
+              .update(globalKbEntries)
+              // Record the archive time via supersededAt, but DON'T bump updatedAt: the
+              // list sorts by updatedAt desc, so bumping it would float the just-archived
+              // old article above its replacement. Leaving updatedAt keeps it in place.
+              .set({ status: 'archived', supersededAt: new Date() })
+              .where(
+                and(
+                  eq(globalKbEntries.id, row.supersedesEntryId),
+                  ne(globalKbEntries.status, 'archived'),
+                ),
+              )
+              .returning({ id: globalKbEntries.id, namespace: globalKbEntries.namespace });
+            if (archived) {
+              await db.execute(
+                sql`DELETE FROM ai_rag_embeddings
+                 WHERE namespace = ${archived.namespace} AND entry_id = ${archived.id}`,
+              );
+            }
+            supersededId = archived?.id ?? null;
+          }
+          return { row, supersededId, reembed, namespace: settings.namespace };
+        }),
+      ),
+    globalKbCallOptions({ signal: c.req.raw.signal }),
   ).catch(lockBusyError);
 
   const entry = result.row;
@@ -1402,43 +1469,46 @@ globalKbRoutes.patch('/entries/:id', async (c) => {
 // that enqueue failed. The sync is still enqueued, and finds nothing left to remove.
 globalKbRoutes.delete('/entries/:id', async (c) => {
   const id = entryIdParam(c.req.param('id'));
-  const entry = await withGlobalKb(getDb(), async ({ db: conn }) =>
-    entryChange(c, (record) =>
-      conn.transaction(async (db) => {
-        const current = await lockEntry(db, id);
-        if (!current) return undefined;
-        if (!canManageEntry(current, c)) {
-          throw new HttpError(
-            403,
-            'Only an owner or admin may delete an unapproved entry; approved and ownerless entries require an admin',
-            'admin_required',
-          );
-        }
-        if (current.enforcedHash != null) {
-          await record(lapseAuditEvent(c.get('userId'), current, 'delete'));
-        }
-        const [row] = await db
-          .delete(globalKbEntries)
-          .where(eq(globalKbEntries.id, id))
-          .returning();
-        if (row) {
-          await db.execute(
-            sql`DELETE FROM ai_rag_embeddings WHERE namespace = ${row.namespace} AND entry_id = ${id}`,
-          );
-          // Entries that replaced this one now replace what IT replaced. Left pointing at the gap, a
-          // chain A -> B -> C loses B, and archived A stops warning that C is live, so Reactivate is
-          // offered on a rule that already has an active successor. `updated_at` is left alone, for
-          // the list-order reason the activation's predecessor archive gives.
-          await db.execute(
-            sql`UPDATE global_kb_entries
+  const entry = await withGlobalKb(
+    getDb(),
+    async ({ db: conn }) =>
+      entryChange(c, (record) =>
+        conn.transaction(async (db) => {
+          const current = await lockEntry(db, id);
+          if (!current) return undefined;
+          if (!canManageEntry(current, c)) {
+            throw new HttpError(
+              403,
+              'Only an owner or admin may delete an unapproved entry; approved and ownerless entries require an admin',
+              'admin_required',
+            );
+          }
+          if (current.enforcedHash != null) {
+            await record(lapseAuditEvent(c.get('userId'), current, 'delete'));
+          }
+          const [row] = await db
+            .delete(globalKbEntries)
+            .where(eq(globalKbEntries.id, id))
+            .returning();
+          if (row) {
+            await db.execute(
+              sql`DELETE FROM ai_rag_embeddings WHERE namespace = ${row.namespace} AND entry_id = ${id}`,
+            );
+            // Entries that replaced this one now replace what IT replaced. Left pointing at the gap, a
+            // chain A -> B -> C loses B, and archived A stops warning that C is live, so Reactivate is
+            // offered on a rule that already has an active successor. `updated_at` is left alone, for
+            // the list-order reason the activation's predecessor archive gives.
+            await db.execute(
+              sql`UPDATE global_kb_entries
                  SET supersedes_entry_id = CASE WHEN id = ${row.supersedesEntryId}::uuid
                                                 THEN NULL ELSE ${row.supersedesEntryId}::uuid END
                WHERE supersedes_entry_id = ${id}::uuid`,
-          );
-        }
-        return row;
-      }),
-    ),
+            );
+          }
+          return row;
+        }),
+      ),
+    globalKbCallOptions({ signal: c.req.raw.signal }),
   ).catch(lockBusyError);
   if (!entry) throw new HttpError(404, 'global KB entry not found');
   await enqueueSync(entry.id, entry.namespace, 'delete');
@@ -1481,78 +1551,81 @@ globalKbRoutes.put('/entries/:id/enforcement', requireAdmin, async (c) => {
   }
   const userId = c.get('userId');
 
-  const result = await withGlobalKb(getDb(), async ({ db: conn, settings }) =>
-    auditedChange(
-      {
-        actorUserId: userId,
-        action: 'global_kb.house_rule.enforce',
-        targetType: 'global_kb_entry',
-        targetId: id,
-        metadata: enforcementAuditMetadata(settings.namespace, spec),
-      },
-      () =>
-        conn.transaction(async (db) => {
-          const row = await lockEntry(db, id);
-          if (!row) throw new HttpError(404, 'global KB entry not found');
-          if (row.status !== 'active') {
-            throw new HttpError(409, 'only an active entry can be enforced', 'not_active');
-          }
-          if (row.namespace !== settings.namespace) {
-            throw new HttpError(
-              409,
-              `this entry belongs to the namespace "${row.namespace}", not to the one this instance uses`,
-              'other_namespace',
-            );
-          }
-          if (houseRuleContentToken(row) !== expectedHash) {
-            throw new HttpError(
-              409,
-              'the entry changed after it was read; read it again before enforcing it',
-              'token_mismatch',
-            );
-          }
-          if (!collapseToLine(row.description ?? '')) {
-            throw new HttpError(
-              400,
-              'an enforced rule is listed by its description, so the entry needs one',
-              'description_required',
-            );
-          }
-          for (const field of ['title', 'description', 'body'] as const) {
-            const reason = refusedHouseRuleText(row[field] ?? '');
-            if (reason !== null) throw new HttpError(400, `${field} ${reason}`, 'refused_text');
-          }
-          if (spec.mode === 'always') {
-            const { usedBytes, entryBytes } = await alwaysBytes(db, settings.namespace, row);
-            if (usedBytes + entryBytes > HOUSE_RULES_ALWAYS_CAP_BYTES) {
-              // A refusal must throw through both transactions, including the audit row's.
-              throw new HTTPException(409, {
-                res: c.json(
-                  {
-                    error: 'the always-on rules would pass their size cap',
-                    code: 'always_cap',
-                    usedBytes,
-                    capBytes: HOUSE_RULES_ALWAYS_CAP_BYTES,
-                    entryBytes,
-                  },
-                  409,
-                ),
-              });
+  const result = await withGlobalKb(
+    getDb(),
+    async ({ db: conn, settings }) =>
+      auditedChange(
+        {
+          actorUserId: userId,
+          action: 'global_kb.house_rule.enforce',
+          targetType: 'global_kb_entry',
+          targetId: id,
+          metadata: enforcementAuditMetadata(settings.namespace, spec),
+        },
+        () =>
+          conn.transaction(async (db) => {
+            const row = await lockEntry(db, id);
+            if (!row) throw new HttpError(404, 'global KB entry not found');
+            if (row.status !== 'active') {
+              throw new HttpError(409, 'only an active entry can be enforced', 'not_active');
             }
-          }
-          const [updated] = await db
-            .update(globalKbEntries)
-            .set({
-              enforce: spec,
-              enforcedHash: houseRuleApprovalHash(row, spec),
-              enforcedAt: new Date(),
-              enforcedBy: userId,
-            })
-            .where(eq(globalKbEntries.id, id))
-            .returning();
-          return { row: updated!, namespace: settings.namespace };
-        }),
-    ),
+            if (row.namespace !== settings.namespace) {
+              throw new HttpError(
+                409,
+                `this entry belongs to the namespace "${row.namespace}", not to the one this instance uses`,
+                'other_namespace',
+              );
+            }
+            if (houseRuleContentToken(row) !== expectedHash) {
+              throw new HttpError(
+                409,
+                'the entry changed after it was read; read it again before enforcing it',
+                'token_mismatch',
+              );
+            }
+            if (!collapseToLine(row.description ?? '')) {
+              throw new HttpError(
+                400,
+                'an enforced rule is listed by its description, so the entry needs one',
+                'description_required',
+              );
+            }
+            for (const field of ['title', 'description', 'body'] as const) {
+              const reason = refusedHouseRuleText(row[field] ?? '');
+              if (reason !== null) throw new HttpError(400, `${field} ${reason}`, 'refused_text');
+            }
+            if (spec.mode === 'always') {
+              const { usedBytes, entryBytes } = await alwaysBytes(db, settings.namespace, row);
+              if (usedBytes + entryBytes > HOUSE_RULES_ALWAYS_CAP_BYTES) {
+                // A refusal must throw through both transactions, including the audit row's.
+                throw new HTTPException(409, {
+                  res: c.json(
+                    {
+                      error: 'the always-on rules would pass their size cap',
+                      code: 'always_cap',
+                      usedBytes,
+                      capBytes: HOUSE_RULES_ALWAYS_CAP_BYTES,
+                      entryBytes,
+                    },
+                    409,
+                  ),
+                });
+              }
+            }
+            const [updated] = await db
+              .update(globalKbEntries)
+              .set({
+                enforce: spec,
+                enforcedHash: houseRuleApprovalHash(row, spec),
+                enforcedAt: new Date(),
+                enforcedBy: userId,
+              })
+              .where(eq(globalKbEntries.id, id))
+              .returning();
+            return { row: updated!, namespace: settings.namespace };
+          }),
+      ),
+    globalKbCallOptions({ signal: c.req.raw.signal }),
   ).catch(lockBusyError);
 
   return c.json({ entry: presentEntry(result.row, await houseRuleContext(result.namespace), c) });
@@ -1561,47 +1634,51 @@ globalKbRoutes.put('/entries/:id/enforcement', requireAdmin, async (c) => {
 // Removes the approval and keeps the settings, as the last ones given.
 globalKbRoutes.delete('/entries/:id/enforcement', requireAdmin, async (c) => {
   const id = entryIdParam(c.req.param('id'));
-  const result = await withGlobalKb(getDb(), async ({ db: conn, settings }) => {
-    // Read the audit context before opening the store transaction, then verify it under its lock.
-    const [seen] = await conn.select().from(globalKbEntries).where(eq(globalKbEntries.id, id));
-    if (!seen) throw new HttpError(404, 'global KB entry not found');
-    if (seen.enforce === null) {
-      throw new HttpError(404, 'this entry was never enforced', 'not_enforced');
-    }
-    const metadata = enforcementAuditMetadata(seen.namespace, seen.enforce);
-    return auditedChange(
-      {
-        actorUserId: c.get('userId'),
-        action: 'global_kb.house_rule.unenforce',
-        targetType: 'global_kb_entry',
-        targetId: id,
-        metadata,
-      },
-      () =>
-        conn.transaction(async (db) => {
-          const row = await lockEntry(db, id);
-          if (!row) throw new HttpError(404, 'global KB entry not found');
-          if (row.enforce === null) {
-            throw new HttpError(404, 'this entry was never enforced', 'not_enforced');
-          }
-          if (
-            JSON.stringify(enforcementAuditMetadata(row.namespace, row.enforce)) !==
-            JSON.stringify(metadata)
-          ) {
-            throw new HttpError(
-              409,
-              'the enforcement changed; retry the removal',
-              'enforcement_changed',
-            );
-          }
-          const [updated] = await db
-            .update(globalKbEntries)
-            .set({ enforcedHash: null })
-            .where(eq(globalKbEntries.id, id))
-            .returning();
-          return { row: updated!, namespace: settings.namespace };
-        }),
-    );
-  }).catch(lockBusyError);
+  const result = await withGlobalKb(
+    getDb(),
+    async ({ db: conn, settings }) => {
+      // Read the audit context before opening the store transaction, then verify it under its lock.
+      const [seen] = await conn.select().from(globalKbEntries).where(eq(globalKbEntries.id, id));
+      if (!seen) throw new HttpError(404, 'global KB entry not found');
+      if (seen.enforce === null) {
+        throw new HttpError(404, 'this entry was never enforced', 'not_enforced');
+      }
+      const metadata = enforcementAuditMetadata(seen.namespace, seen.enforce);
+      return auditedChange(
+        {
+          actorUserId: c.get('userId'),
+          action: 'global_kb.house_rule.unenforce',
+          targetType: 'global_kb_entry',
+          targetId: id,
+          metadata,
+        },
+        () =>
+          conn.transaction(async (db) => {
+            const row = await lockEntry(db, id);
+            if (!row) throw new HttpError(404, 'global KB entry not found');
+            if (row.enforce === null) {
+              throw new HttpError(404, 'this entry was never enforced', 'not_enforced');
+            }
+            if (
+              JSON.stringify(enforcementAuditMetadata(row.namespace, row.enforce)) !==
+              JSON.stringify(metadata)
+            ) {
+              throw new HttpError(
+                409,
+                'the enforcement changed; retry the removal',
+                'enforcement_changed',
+              );
+            }
+            const [updated] = await db
+              .update(globalKbEntries)
+              .set({ enforcedHash: null })
+              .where(eq(globalKbEntries.id, id))
+              .returning();
+            return { row: updated!, namespace: settings.namespace };
+          }),
+      );
+    },
+    globalKbCallOptions({ signal: c.req.raw.signal }),
+  ).catch(lockBusyError);
   return c.json({ entry: presentEntry(result.row, await houseRuleContext(result.namespace), c) });
 });

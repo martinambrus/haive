@@ -1,3 +1,4 @@
+import { globalKbCallOptions } from '@haive/shared/global-kb';
 import { and, desc, eq, inArray, isNull, ne, sql } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
 import {
@@ -11,6 +12,8 @@ import {
   resolveGlobalKbSettings,
   resolveTaskFacets,
   withGlobalKb,
+  rethrowIfGlobalKbTimeout,
+  type GlobalKbCallOptions,
   type GlobalKbCategory,
   type GlobalKbFacets,
   type ProjectFacetSet,
@@ -49,6 +52,9 @@ interface PromoteLogger {
   warn: (obj: unknown, msg: string) => void;
   info: (obj: unknown, msg: string) => void;
 }
+
+// Includes the 240 s ingest embed budget, below the author step's 30 minute CLI budget.
+export const GLOBAL_KB_STEP_DEADLINE_MS = 300_000;
 
 /** Placeholder substituted for the source project's name in a promoted article,
  *  chosen to read as an obvious "rename me" token for a future reader/model. */
@@ -348,6 +354,7 @@ export async function loadActiveGlobalArticlesForTask(
   taskId: string,
   relevanceQuery = '',
   limit = 15,
+  opts: GlobalKbCallOptions = {},
 ): Promise<GlobalArticleSelection> {
   const empty: GlobalArticleSelection = {
     articles: [],
@@ -357,78 +364,84 @@ export async function loadActiveGlobalArticlesForTask(
   };
   try {
     const projectFacets = await resolveTaskFacets(db, taskId);
-    return await withGlobalKb(db, async ({ conn, db: gdb, settings }) => {
-      // Titles + facets only. Bodies are fetched for the chosen few at the end,
-      // so the scan can be wide enough to survive corpus growth without the
-      // prompt paying for it.
-      const rows = await gdb
-        .select({
-          id: globalKbEntries.id,
-          title: globalKbEntries.title,
-          facets: globalKbEntries.facets,
-          description: globalKbEntries.description,
-        })
-        .from(globalKbEntries)
-        .where(
-          and(
-            eq(globalKbEntries.namespace, settings.namespace),
-            eq(globalKbEntries.status, 'active'),
-            isNull(globalKbEntries.supersededAt),
-          ),
-        )
-        .orderBy(desc(globalKbEntries.updatedAt), desc(globalKbEntries.id))
-        .limit(ARTICLE_SCAN_LIMIT);
-      const compatible = rows.filter((r) => facetsMatchProject(r.facets, projectFacets));
-      if (compatible.length === 0) return empty;
-
-      const compatibleIds = new Set(compatible.map((r) => r.id));
-      const ranked = relevanceQuery.trim()
-        ? await rankArticleIdsByRelevance(
-            conn,
-            settings,
-            projectFacets,
-            relevanceQuery,
-            compatibleIds,
-            limit,
+    return await withGlobalKb(
+      db,
+      async ({ conn, db: gdb, settings }) => {
+        // Titles + facets only. Bodies are fetched for the chosen few at the end,
+        // so the scan can be wide enough to survive corpus growth without the
+        // prompt paying for it.
+        const rows = await gdb
+          .select({
+            id: globalKbEntries.id,
+            title: globalKbEntries.title,
+            facets: globalKbEntries.facets,
+            description: globalKbEntries.description,
+          })
+          .from(globalKbEntries)
+          .where(
+            and(
+              eq(globalKbEntries.namespace, settings.namespace),
+              eq(globalKbEntries.status, 'active'),
+              isNull(globalKbEntries.supersededAt),
+            ),
           )
-        : [];
+          .orderBy(desc(globalKbEntries.updatedAt), desc(globalKbEntries.id))
+          .limit(ARTICLE_SCAN_LIMIT);
+        const compatible = rows.filter((r) => facetsMatchProject(r.facets, projectFacets));
+        if (compatible.length === 0) return empty;
 
-      const ids = mergeRankedWithRecency(
-        ranked,
-        compatible.map((r) => r.id),
-        limit,
-      );
-      if (ids.length === 0) return empty;
+        const compatibleIds = new Set(compatible.map((r) => r.id));
+        const ranked = relevanceQuery.trim()
+          ? await rankArticleIdsByRelevance(
+              conn,
+              settings,
+              projectFacets,
+              relevanceQuery,
+              compatibleIds,
+              limit,
+            )
+          : [];
 
-      const bodies = await gdb
-        .select({
-          id: globalKbEntries.id,
-          title: globalKbEntries.title,
-          body: globalKbEntries.body,
-        })
-        .from(globalKbEntries)
-        .where(inArray(globalKbEntries.id, ids));
-      const byId = new Map(bodies.map((b) => [b.id, b]));
-      const articles = ids
-        .map((id) => byId.get(id))
-        .filter((b): b is { id: string; title: string; body: string } => !!b)
-        .map((b) => ({ title: b.title, body: b.body }));
+        const ids = mergeRankedWithRecency(
+          ranked,
+          compatible.map((r) => r.id),
+          limit,
+        );
+        if (ids.length === 0) return empty;
 
-      // Everything else that APPLIES, by title. Bodies are budgeted; awareness is
-      // not. 15 body slots against 56 compatible entries (measured) means the
-      // ordering only decides which bodies ride along — whichever article the
-      // agent actually needs must still be nameable, and `rag_search` returns any
-      // title in full.
-      const rest = compatible.filter((r) => !ids.includes(r.id));
-      const listed = rest.slice(0, OTHER_TITLE_LIMIT);
-      return {
-        articles,
-        otherTitles: listed.map((r) => r.title),
-        otherDescriptions: listed.map((r) => normalizeGlobalKbDescription(r.description)),
-        omittedTitleCount: Math.max(0, rest.length - OTHER_TITLE_LIMIT),
-      };
-    });
-  } catch {
+        const bodies = await gdb
+          .select({
+            id: globalKbEntries.id,
+            title: globalKbEntries.title,
+            body: globalKbEntries.body,
+          })
+          .from(globalKbEntries)
+          .where(inArray(globalKbEntries.id, ids));
+        const byId = new Map(bodies.map((b) => [b.id, b]));
+        const articles = ids
+          .map((id) => byId.get(id))
+          .filter((b): b is { id: string; title: string; body: string } => !!b)
+          .map((b) => ({ title: b.title, body: b.body }));
+
+        // Everything else that APPLIES, by title. Bodies are budgeted; awareness is
+        // not. 15 body slots against 56 compatible entries (measured) means the
+        // ordering only decides which bodies ride along — whichever article the
+        // agent actually needs must still be nameable, and `rag_search` returns any
+        // title in full.
+        const rest = compatible.filter((r) => !ids.includes(r.id));
+        const listed = rest.slice(0, OTHER_TITLE_LIMIT);
+        return {
+          articles,
+          otherTitles: listed.map((r) => r.title),
+          otherDescriptions: listed.map((r) => normalizeGlobalKbDescription(r.description)),
+          omittedTitleCount: Math.max(0, rest.length - OTHER_TITLE_LIMIT),
+        };
+      },
+      globalKbCallOptions(opts, GLOBAL_KB_STEP_DEADLINE_MS),
+    );
+  } catch (err) {
+    opts.signal?.throwIfAborted();
+    rethrowIfGlobalKbTimeout(err);
     return empty;
   }
 }
@@ -561,140 +574,146 @@ export function inheritDescription(
  *  (`source='promoted'`). Drafts hold no vectors and are not retrievable until an
  *  admin activates them in Settings → Global KB, so this NEVER touches the
  *  per-repo RAG — the routing gate keeps the local store clean by construction.
- *  Looks up the task's repository for provenance. Best-effort: any failure is
- *  logged and returns null so promotion can never fail the orchestration step. */
+ *  Looks up the task's repository for provenance. Best-effort for ordinary outages; a timeout or owner cancellation fails the step for Retry. */
 export async function promoteToGlobalKbDraft(
   db: Database,
   promotion: GlobalKbPromotion,
   log: PromoteLogger,
+  opts: GlobalKbCallOptions = {},
 ): Promise<{ id: string; deduped: boolean; supersedesEntryId?: string | null } | null> {
   try {
     const task = await db.query.tasks.findFirst({
       where: eq(schema.tasks.id, promotion.taskId),
       columns: { repositoryId: true },
     });
-    return await withGlobalKb(db, async ({ db: gdb, settings }) => {
-      const clean = sanitizeGlobalArticle({
-        title: promotion.title,
-        body: promotion.body,
-        description: promotion.description,
-        projectName: promotion.projectName,
-        facets: promotion.facets,
-      });
-      // Cross-repo reconcile: when another entry already covers this topic
-      // (category:tech[:major]), DON'T discard the new knowledge — unless it is
-      // byte-identical we keep it as a draft LINKED to that entry (supersedesEntryId)
-      // so the merge step can enrich it (keep unique info, dedup overlap) and, on
-      // activation, supersede the existing one. The existing entry — possibly a
-      // curated active — is never mutated here. The per-task draft cleanup runs
-      // first, so this matches OTHER tasks' or already-activated entries.
-      //
-      // The SELECT..INSERT runs in one transaction under a topic-scoped advisory lock
-      // so concurrent promotions of the SAME topic serialize: the second waits, then
-      // sees the first's committed draft and dedups/links instead of inserting a blind
-      // duplicate. Distinct topics never contend; the xact lock auto-releases on end.
-      return await gdb.transaction(async (tx) => {
-        let supersedesEntryId: string | null = null;
-        let supersededDescription: string | null | undefined;
-        if (promotion.topicKey) {
-          const lockKey = `${settings.namespace}:${promotion.topicKey}`;
-          await tx.execute(
-            sql`SELECT pg_advisory_xact_lock(hashtext('gkb_promote'), hashtext(${lockKey}))`,
-          );
-          const candidates = await tx
-            .select({
-              id: globalKbEntries.id,
-              status: globalKbEntries.status,
-              title: globalKbEntries.title,
-              body: globalKbEntries.body,
-              description: globalKbEntries.description,
+    return await withGlobalKb(
+      db,
+      async ({ db: gdb, settings }) => {
+        const clean = sanitizeGlobalArticle({
+          title: promotion.title,
+          body: promotion.body,
+          description: promotion.description,
+          projectName: promotion.projectName,
+          facets: promotion.facets,
+        });
+        // Cross-repo reconcile: when another entry already covers this topic
+        // (category:tech[:major]), DON'T discard the new knowledge — unless it is
+        // byte-identical we keep it as a draft LINKED to that entry (supersedesEntryId)
+        // so the merge step can enrich it (keep unique info, dedup overlap) and, on
+        // activation, supersede the existing one. The existing entry — possibly a
+        // curated active — is never mutated here. The per-task draft cleanup runs
+        // first, so this matches OTHER tasks' or already-activated entries.
+        //
+        // The SELECT..INSERT runs in one transaction under a topic-scoped advisory lock
+        // so concurrent promotions of the SAME topic serialize: the second waits, then
+        // sees the first's committed draft and dedups/links instead of inserting a blind
+        // duplicate. Distinct topics never contend; the xact lock auto-releases on end.
+        return await gdb.transaction(async (tx) => {
+          let supersedesEntryId: string | null = null;
+          let supersededDescription: string | null | undefined;
+          if (promotion.topicKey) {
+            const lockKey = `${settings.namespace}:${promotion.topicKey}`;
+            await tx.execute(
+              sql`SELECT pg_advisory_xact_lock(hashtext('gkb_promote'), hashtext(${lockKey}))`,
+            );
+            const candidates = await tx
+              .select({
+                id: globalKbEntries.id,
+                status: globalKbEntries.status,
+                title: globalKbEntries.title,
+                body: globalKbEntries.body,
+                description: globalKbEntries.description,
+              })
+              .from(globalKbEntries)
+              .where(
+                and(
+                  eq(globalKbEntries.namespace, settings.namespace),
+                  eq(globalKbEntries.topicKey, promotion.topicKey),
+                  // Don't reconcile against a superseded (archived) entry — it's on its
+                  // way out; match only live drafts/actives for this topic.
+                  ne(globalKbEntries.status, 'archived'),
+                ),
+              )
+              // Prefer the canonical active entry; else the newest.
+              .orderBy(
+                sql`case when ${globalKbEntries.status} = 'active' then 0 else 1 end`,
+                desc(globalKbEntries.createdAt),
+              )
+              .limit(SUPERSEDE_CANDIDATE_LIMIT);
+            // Exact duplicate of any same-key entry: nothing new to add, skip the insert.
+            const same = resolveIdenticalPromotion(
+              candidates,
+              clean.body,
+              normalizeGlobalKbDescription(clean.description),
+            );
+            if (same?.kind === 'duplicate') {
+              log.info(
+                { topicKey: promotion.topicKey, existingId: same.target.id },
+                'global KB promotion skipped (identical content already present)',
+              );
+              return { id: same.target.id, deduped: true, supersedesEntryId: null };
+            }
+            // Supersede an existing entry ONLY when its body is identical or embeddings confirm
+            // it is the SAME article — the coarse topicKey (category:tech) groups unrelated
+            // articles on one tech, so it can't decide identity. No confirmed match (or ollama
+            // unavailable) -> insert an INDEPENDENT new draft; never clobber a different
+            // article that merely shares the key.
+            if (same) {
+              supersedesEntryId = same.target.id;
+              log.info(
+                { topicKey: promotion.topicKey, supersedesEntryId },
+                'global KB promotion linked to existing topic (identical body)',
+              );
+            } else if (candidates.length > 0) {
+              supersedesEntryId = await confirmSupersedeByEmbedding(
+                { ollamaUrl: settings.ollamaUrl, embedModel: settings.embedModel },
+                `${clean.title}\n\n${clean.body}`,
+                candidates.map((c) => ({
+                  id: c.id,
+                  status: c.status,
+                  text: `${c.title}\n\n${c.body}`,
+                })),
+              );
+              log.info(
+                { topicKey: promotion.topicKey, candidates: candidates.length, supersedesEntryId },
+                supersedesEntryId
+                  ? 'global KB promotion linked to existing topic (similarity-confirmed)'
+                  : 'global KB promotion kept independent (no same-article match)',
+              );
+            }
+            supersededDescription = candidates.find((c) => c.id === supersedesEntryId)?.description;
+          }
+          const [row] = await tx
+            .insert(globalKbEntries)
+            .values({
+              namespace: settings.namespace,
+              userId: promotion.userId,
+              title: clean.title,
+              body: clean.body,
+              category: promotion.category,
+              // Normalised here rather than at each caller: this insert is the one place every
+              // promotion funnels through, and `techAnchorFacets` assigns a detected package
+              // VERBATIM while a project's own set is lowercased, so a capitalised package name
+              // would be stored unmatchable by the exact jsonb `?|` the search uses.
+              facets: normalizeFacets(promotion.facets),
+              description: inheritDescription(clean.description, supersededDescription),
+              status: 'draft',
+              source: 'promoted',
+              sourceTaskId: promotion.taskId,
+              sourceRepoId: task?.repositoryId ?? null,
+              topicKey: promotion.topicKey ?? null,
+              supersedesEntryId,
+              embedStatus: 'pending',
             })
-            .from(globalKbEntries)
-            .where(
-              and(
-                eq(globalKbEntries.namespace, settings.namespace),
-                eq(globalKbEntries.topicKey, promotion.topicKey),
-                // Don't reconcile against a superseded (archived) entry — it's on its
-                // way out; match only live drafts/actives for this topic.
-                ne(globalKbEntries.status, 'archived'),
-              ),
-            )
-            // Prefer the canonical active entry; else the newest.
-            .orderBy(
-              sql`case when ${globalKbEntries.status} = 'active' then 0 else 1 end`,
-              desc(globalKbEntries.createdAt),
-            )
-            .limit(SUPERSEDE_CANDIDATE_LIMIT);
-          // Exact duplicate of any same-key entry: nothing new to add, skip the insert.
-          const same = resolveIdenticalPromotion(
-            candidates,
-            clean.body,
-            normalizeGlobalKbDescription(clean.description),
-          );
-          if (same?.kind === 'duplicate') {
-            log.info(
-              { topicKey: promotion.topicKey, existingId: same.target.id },
-              'global KB promotion skipped (identical content already present)',
-            );
-            return { id: same.target.id, deduped: true, supersedesEntryId: null };
-          }
-          // Supersede an existing entry ONLY when its body is identical or embeddings confirm
-          // it is the SAME article — the coarse topicKey (category:tech) groups unrelated
-          // articles on one tech, so it can't decide identity. No confirmed match (or ollama
-          // unavailable) -> insert an INDEPENDENT new draft; never clobber a different
-          // article that merely shares the key.
-          if (same) {
-            supersedesEntryId = same.target.id;
-            log.info(
-              { topicKey: promotion.topicKey, supersedesEntryId },
-              'global KB promotion linked to existing topic (identical body)',
-            );
-          } else if (candidates.length > 0) {
-            supersedesEntryId = await confirmSupersedeByEmbedding(
-              { ollamaUrl: settings.ollamaUrl, embedModel: settings.embedModel },
-              `${clean.title}\n\n${clean.body}`,
-              candidates.map((c) => ({
-                id: c.id,
-                status: c.status,
-                text: `${c.title}\n\n${c.body}`,
-              })),
-            );
-            log.info(
-              { topicKey: promotion.topicKey, candidates: candidates.length, supersedesEntryId },
-              supersedesEntryId
-                ? 'global KB promotion linked to existing topic (similarity-confirmed)'
-                : 'global KB promotion kept independent (no same-article match)',
-            );
-          }
-          supersededDescription = candidates.find((c) => c.id === supersedesEntryId)?.description;
-        }
-        const [row] = await tx
-          .insert(globalKbEntries)
-          .values({
-            namespace: settings.namespace,
-            userId: promotion.userId,
-            title: clean.title,
-            body: clean.body,
-            category: promotion.category,
-            // Normalised here rather than at each caller: this insert is the one place every
-            // promotion funnels through, and `techAnchorFacets` assigns a detected package
-            // VERBATIM while a project's own set is lowercased, so a capitalised package name
-            // would be stored unmatchable by the exact jsonb `?|` the search uses.
-            facets: normalizeFacets(promotion.facets),
-            description: inheritDescription(clean.description, supersededDescription),
-            status: 'draft',
-            source: 'promoted',
-            sourceTaskId: promotion.taskId,
-            sourceRepoId: task?.repositoryId ?? null,
-            topicKey: promotion.topicKey ?? null,
-            supersedesEntryId,
-            embedStatus: 'pending',
-          })
-          .returning({ id: globalKbEntries.id });
-        return row ? { id: row.id, deduped: false, supersedesEntryId } : null;
-      });
-    });
+            .returning({ id: globalKbEntries.id });
+          return row ? { id: row.id, deduped: false, supersedesEntryId } : null;
+        });
+      },
+      globalKbCallOptions(opts, GLOBAL_KB_STEP_DEADLINE_MS),
+    );
   } catch (err) {
+    opts.signal?.throwIfAborted();
+    rethrowIfGlobalKbTimeout(err);
     log.warn({ err, title: promotion.title }, 'global KB promotion failed (skipped)');
     return null;
   }
@@ -711,30 +730,36 @@ export { globalKbTopicKey };
  *  task are removed — entries the user already activated (curated KB) are left
  *  untouched, and drafts hold no vectors so deleting the row is enough. No-ops
  *  when the global KB is disabled (so a normal run never opens the store).
- *  Best-effort: any failure is logged and returns 0 so it can never fail the
- *  orchestration step. Returns the number of drafts removed. */
+ *  Ordinary outages are logged and return 0; timeouts and owner cancellation propagate. Returns the number of drafts removed. */
 export async function clearTaskPromotedDrafts(
   db: Database,
   taskId: string,
   log: PromoteLogger,
+  opts: GlobalKbCallOptions = {},
 ): Promise<number> {
   try {
     const settings = await resolveGlobalKbSettings();
     if (!settings.enabled) return 0;
-    return await withGlobalKb(db, async ({ db: gdb }) => {
-      const removed = await gdb
-        .delete(globalKbEntries)
-        .where(
-          and(
-            eq(globalKbEntries.sourceTaskId, taskId),
-            eq(globalKbEntries.status, 'draft'),
-            eq(globalKbEntries.source, 'promoted'),
-          ),
-        )
-        .returning({ id: globalKbEntries.id });
-      return removed.length;
-    });
+    return await withGlobalKb(
+      db,
+      async ({ db: gdb }) => {
+        const removed = await gdb
+          .delete(globalKbEntries)
+          .where(
+            and(
+              eq(globalKbEntries.sourceTaskId, taskId),
+              eq(globalKbEntries.status, 'draft'),
+              eq(globalKbEntries.source, 'promoted'),
+            ),
+          )
+          .returning({ id: globalKbEntries.id });
+        return removed.length;
+      },
+      globalKbCallOptions(opts, GLOBAL_KB_STEP_DEADLINE_MS),
+    );
   } catch (err) {
+    opts.signal?.throwIfAborted();
+    rethrowIfGlobalKbTimeout(err);
     log.warn({ err, taskId }, 'global KB draft cleanup failed (skipped)');
     return 0;
   }

@@ -1,3 +1,4 @@
+import { globalKbCallOptions } from '@haive/shared/global-kb';
 /**
  * Citation-scrub calibration harness.
  *
@@ -64,10 +65,17 @@ async function main(): Promise<void> {
 
   const symbols = await collectRepoSymbols(repoPath, null).catch(() => new Set<string>());
   const repoBasenames = await collectRepoBasenames(repoPath).catch(() => new Set<string>());
-  const rows = await withGlobalKb(db, async ({ db: kb }) =>
-    kb
-      .select({ id: globalKbEntries.id, title: globalKbEntries.title, body: globalKbEntries.body })
-      .from(globalKbEntries),
+  const rows = await withGlobalKb(
+    db,
+    async ({ db: kb }) =>
+      kb
+        .select({
+          id: globalKbEntries.id,
+          title: globalKbEntries.title,
+          body: globalKbEntries.body,
+        })
+        .from(globalKbEntries),
+    globalKbCallOptions(),
   );
   const articles = limit > 0 ? rows.slice(0, limit) : rows;
 

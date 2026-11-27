@@ -1,3 +1,4 @@
+import { rethrowIfGlobalKbTimeout } from '@haive/shared/global-kb';
 import {
   ensureDirNoFollow,
   isPathContainmentError,
@@ -2094,7 +2095,7 @@ export const knowledgeAcquisitionStep: StepDefinition<KnowledgeDetect, Knowledge
     // Idempotent re-runs (Retry): drop this task's prior promoted drafts ONCE,
     // before any promotion below (placement re-routes AND entry promotes), so a
     // retry replaces rather than duplicates them. No-op when global KB is off.
-    await clearTaskPromotedDrafts(ctx.db, ctx.taskId, ctx.logger);
+    await clearTaskPromotedDrafts(ctx.db, ctx.taskId, ctx.logger, { signal: ctx.signal });
 
     // 1. Re-place / improve existing KB files into the canonical layout. Updates
     //    win over placements for the same file; first writer wins per destination.
@@ -2227,6 +2228,7 @@ export const knowledgeAcquisitionStep: StepDefinition<KnowledgeDetect, Knowledge
                 projectName: detected.projectName ?? undefined,
               },
               ctx.logger,
+              { signal: ctx.signal },
             );
             if (promo && !promo.deduped) {
               await removeNoFollow(ctx.repoPath, `${KB_DIR}/${src.relPath}`);
@@ -2246,6 +2248,8 @@ export const knowledgeAcquisitionStep: StepDefinition<KnowledgeDetect, Knowledge
               );
             }
           } catch (err) {
+            ctx.signal?.throwIfAborted();
+            rethrowIfGlobalKbTimeout(err);
             ctx.logger.warn({ err, path: p.path }, 'kb global re-route failed');
           }
           continue;
@@ -2361,6 +2365,7 @@ export const knowledgeAcquisitionStep: StepDefinition<KnowledgeDetect, Knowledge
             projectName: detected.projectName ?? undefined,
           },
           ctx.logger,
+          { signal: ctx.signal },
         );
         if (promo && !promo.deduped) {
           globalPromoted += 1;

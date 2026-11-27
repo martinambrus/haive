@@ -9,7 +9,7 @@ import {
 import { configService, CONFIG_KEYS } from '../config/config.service.js';
 import { secretsService, SECRET_KEYS } from '../config/secrets.service.js';
 import { backfillGlobalIdentifierTsv, ensureGlobalKbSchema } from './ensure-schema.js';
-import { GlobalKbDeadlineError } from './errors.js';
+import { GlobalKbDeadlineError, rethrowIfGlobalKbTimeout } from './errors.js';
 import { createGlobalKbDb, type GlobalKbDb } from './schema.js';
 
 // Schema DDL is memoized per process and store: the first call for a store ensures it, calls
@@ -31,14 +31,18 @@ function storeKey(settings: GlobalKbSettings): string {
     .digest('hex');
 }
 
-export interface GlobalKbContext {
+export interface GlobalKbConnectionContext {
   conn: GlobalKbConnection;
-  db: GlobalKbDb;
   settings: GlobalKbSettings;
+  /** Cancelled at the call deadline as well as by its owner. */
+  signal?: AbortSignal;
 }
 
-/** Bounds for one call, and the settings it opens. Absent, the connection keeps its own limits,
- *  which the sync job and the api rely on: their calls embed and wait on locks. */
+export interface GlobalKbContext extends GlobalKbConnectionContext {
+  db: GlobalKbDb;
+}
+
+/** Bounds for one call, and the settings it opens. Production callers choose a budget for their work. */
 export interface GlobalKbCallOptions {
   /** Seconds postgres.js allows for TCP, TLS, startup and auth. */
   connectTimeoutSeconds?: number;
@@ -52,9 +56,80 @@ export interface GlobalKbCallOptions {
   settings?: GlobalKbSettings;
 }
 
+// Ordinary store work leaves room around a 30 s namespace lock. Embedding callers choose a
+// longer budget explicitly; tests inject milliseconds through the same options.
+export const GLOBAL_KB_CALL_DEADLINE_MS = 60_000;
+export const GLOBAL_KB_CONNECT_TIMEOUT_SECONDS = 3;
+
+export function globalKbCallOptions(
+  opts: GlobalKbCallOptions = {},
+  deadlineMs = GLOBAL_KB_CALL_DEADLINE_MS,
+): GlobalKbCallOptions {
+  return {
+    ...opts,
+    deadlineMs: opts.deadlineMs ?? deadlineMs,
+    connectTimeoutSeconds: opts.connectTimeoutSeconds ?? GLOBAL_KB_CONNECT_TIMEOUT_SECONDS,
+    signal: opts.signal ?? new AbortController().signal,
+  };
+}
+
+async function ensureAndRun<T>(
+  { conn, settings, signal }: GlobalKbConnectionContext,
+  fn: (ctx: GlobalKbContext) => Promise<T>,
+  opts: GlobalKbCallOptions,
+): Promise<T> {
+  const key = storeKey(settings);
+  // Fresh, not cached: the api may have saved a new width a moment ago in another process. It
+  // applies only while the configured store is still the one this call opened.
+  const configuredStore = async () => {
+    const [mode, connectionString] = await Promise.all([
+      configService.getFresh(CONFIG_KEYS.GLOBAL_KB_MODE),
+      secretsService.getFresh(SECRET_KEYS.GLOBAL_KB_CONNECTION_STRING),
+    ]);
+    return storeKey({
+      ...settings,
+      mode: mode === 'external' ? 'external' : 'internal',
+      connectionString: connectionString || null,
+    });
+  };
+  const resolveDims = async () => {
+    // Store read before AND after the width, so a switch landing between them is seen.
+    if ((await configuredStore()) !== key) return settings.embeddingDimensions;
+    const raw = Number.parseInt(
+      (await configService.getFresh(CONFIG_KEYS.GLOBAL_KB_EMBED_DIMS)) ?? '',
+      10,
+    );
+    if ((await configuredStore()) !== key) return settings.embeddingDimensions;
+    return Number.isNaN(raw) ? settings.embeddingDimensions : raw;
+  };
+  // A call with a deadline never starts the shared ensure: its deadline kills the pool under it.
+  const shared = schemaReady.get(key);
+  if (shared) {
+    await shared;
+  } else if (opts.deadlineMs === undefined && !opts.signal) {
+    const ready = ensureGlobalKbSchema(conn, { resolveDims }).then(
+      (r) => noteIdentifierBackfill(key, r.identifierBackfillDone),
+      (err: unknown) => {
+        schemaReady.delete(key);
+        throw err;
+      },
+    );
+    schemaReady.set(key, ready);
+    await ready;
+  } else {
+    const r = await ensureGlobalKbSchema(conn, { timeoutMs: opts.deadlineMs, resolveDims });
+    opts.signal?.throwIfAborted();
+    noteIdentifierBackfill(key, r.identifierBackfillDone);
+    if (!schemaReady.has(key)) schemaReady.set(key, Promise.resolve());
+  }
+  opts.signal?.throwIfAborted();
+  const db = createGlobalKbDb(conn.pg);
+  return await fn({ conn, db, settings, signal });
+}
+
 async function openAndRun<T>(
   haiveDb: Database,
-  fn: (ctx: GlobalKbContext) => Promise<T>,
+  fn: (ctx: GlobalKbConnectionContext) => Promise<T>,
   opts: GlobalKbCallOptions,
   onOpen?: (conn: GlobalKbConnection) => void,
 ): Promise<T> {
@@ -62,59 +137,15 @@ async function openAndRun<T>(
   opts.signal?.throwIfAborted();
   const conn = await resolveGlobalKbConnection(settings, haiveDb, {
     connectTimeoutSeconds: opts.connectTimeoutSeconds,
-    // A pool destroyed at the deadline while that query is pending rejects it with nobody awaiting it.
+    deadlineMs: opts.deadlineMs,
+    signal: opts.signal,
+    // Bounded calls must not leave an implicit type-loading query without an awaiter.
     ...(opts.deadlineMs === undefined && !opts.signal ? {} : { fetchTypes: false }),
   });
   onOpen?.(conn);
   try {
     opts.signal?.throwIfAborted();
-    const key = storeKey(settings);
-    // Fresh, not cached: the api may have saved a new width a moment ago in another process. It
-    // applies only while the configured store is still the one this call opened.
-    const configuredStore = async () => {
-      const [mode, connectionString] = await Promise.all([
-        configService.getFresh(CONFIG_KEYS.GLOBAL_KB_MODE),
-        secretsService.getFresh(SECRET_KEYS.GLOBAL_KB_CONNECTION_STRING),
-      ]);
-      return storeKey({
-        ...settings,
-        mode: mode === 'external' ? 'external' : 'internal',
-        connectionString: connectionString || null,
-      });
-    };
-    const resolveDims = async () => {
-      // Store read before AND after the width, so a switch landing between them is seen.
-      if ((await configuredStore()) !== key) return settings.embeddingDimensions;
-      const raw = Number.parseInt(
-        (await configService.getFresh(CONFIG_KEYS.GLOBAL_KB_EMBED_DIMS)) ?? '',
-        10,
-      );
-      if ((await configuredStore()) !== key) return settings.embeddingDimensions;
-      return Number.isNaN(raw) ? settings.embeddingDimensions : raw;
-    };
-    // A call with a deadline never starts the shared ensure: its deadline kills the pool under it.
-    const shared = schemaReady.get(key);
-    if (shared) {
-      await shared;
-    } else if (opts.deadlineMs === undefined && !opts.signal) {
-      const ready = ensureGlobalKbSchema(conn, { resolveDims }).then(
-        (r) => noteIdentifierBackfill(key, r.identifierBackfillDone),
-        (err: unknown) => {
-          schemaReady.delete(key);
-          throw err;
-        },
-      );
-      schemaReady.set(key, ready);
-      await ready;
-    } else {
-      const r = await ensureGlobalKbSchema(conn, { timeoutMs: opts.deadlineMs, resolveDims });
-      opts.signal?.throwIfAborted();
-      noteIdentifierBackfill(key, r.identifierBackfillDone);
-      if (!schemaReady.has(key)) schemaReady.set(key, Promise.resolve());
-    }
-    opts.signal?.throwIfAborted();
-    const db = createGlobalKbDb(conn.pg);
-    return await fn({ conn, db, settings });
+    return await fn({ conn, settings, signal: opts.signal });
   } finally {
     await conn.close().catch(() => {});
   }
@@ -122,12 +153,12 @@ async function openAndRun<T>(
 
 /** Open the global KB store, ensure its schema once per process and store, run `fn`, then
  *  close the connection. Mirrors the rag route's open/close-per-call pattern;
- *  used by both the API CRUD route and the worker sync job. `haiveDb` is only
- *  needed to CREATE the dedicated DB in `internal` mode. */
-export async function withGlobalKb<T>(
+ *  used by both the API CRUD route and the worker sync job. The main-db argument stays for
+ *  compatibility; internal database creation uses a private client on DATABASE_URL. */
+async function runWithGlobalKb<T>(
   haiveDb: Database,
-  fn: (ctx: GlobalKbContext) => Promise<T>,
-  opts: GlobalKbCallOptions = {},
+  fn: (ctx: GlobalKbConnectionContext) => Promise<T>,
+  opts: GlobalKbCallOptions,
 ): Promise<T> {
   const { deadlineMs, signal } = opts;
   if (deadlineMs === undefined && !signal) return openAndRun(haiveDb, fn, opts);
@@ -163,6 +194,9 @@ export async function withGlobalKb<T>(
   });
   try {
     return await Promise.race([work, aborted]);
+  } catch (err) {
+    rethrowIfGlobalKbTimeout(err);
+    throw err;
   } finally {
     clearTimeout(timer);
     signal?.removeEventListener('abort', forwardAbort);
@@ -170,17 +204,44 @@ export async function withGlobalKb<T>(
   }
 }
 
+/** Open, ensure and run one store operation with the caller's bounds. */
+export function withGlobalKb<T>(
+  haiveDb: Database,
+  fn: (ctx: GlobalKbContext) => Promise<T>,
+  opts: GlobalKbCallOptions = {},
+): Promise<T> {
+  return runWithGlobalKb(
+    haiveDb,
+    (ctx) => ensureAndRun(ctx, fn, { ...opts, signal: ctx.signal }),
+    opts,
+  );
+}
+
+/** Bare sibling for probes and width checks: no schema mutation, same deadline and cancellation. */
+export function withGlobalKbConnection<T>(
+  haiveDb: Database,
+  fn: (ctx: GlobalKbConnectionContext) => Promise<T>,
+  opts: GlobalKbCallOptions,
+): Promise<T> {
+  return runWithGlobalKb(haiveDb, fn, opts);
+}
+
 /** Retries the identifier backfill of the CURRENT store when this process's ensure of it failed or
  *  stopped early; a converged store is not touched, since its count is a scan the index cannot serve. */
-export async function retryOwedGlobalIdentifierBackfill(haiveDb: Database): Promise<void> {
+export async function retryOwedGlobalIdentifierBackfill(
+  haiveDb: Database,
+  opts: GlobalKbCallOptions = {},
+): Promise<void> {
   const settings = await resolveGlobalKbSettings();
   const key = storeKey(settings);
   if (!identifierBackfillOwed.has(key)) return;
   await withGlobalKb(
     haiveDb,
-    async ({ conn }) => {
-      noteIdentifierBackfill(key, await backfillGlobalIdentifierTsv((run) => conn.pg.begin(run)));
+    async ({ conn, signal }) => {
+      const done = await backfillGlobalIdentifierTsv((run) => conn.pg.begin(run));
+      signal?.throwIfAborted();
+      noteIdentifierBackfill(key, done);
     },
-    { settings },
+    globalKbCallOptions({ ...opts, settings }),
   );
 }

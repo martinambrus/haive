@@ -293,10 +293,65 @@ text or a glob the grammar refuses moves the row to the stamp's
 every other caller awaiting it would inherit. It runs its own, with `SET LOCAL lock_timeout` and
 `statement_timeout` at the deadline ahead of the schema lock in every step: without them a waiter on
 that lock stayed on the server after the deadline had answered (MEASURED: 1 waiter 1.5 s later; 0
-with them). On a large store the first ensure's backfill can outlast a short deadline, so bounded
-calls fail their ensure until an unbounded caller completes it.
+with them). On a large store the first ensure's backfill can outlast a short deadline, so a longer-budget
+sync or repair must finish it before short reads can succeed.
 
-**Boot reads under a Redis outage are bounded, and a stalled store no longer holds boot.** At worker boot the two
+## Store call deadlines outside boot
+
+Every production `withGlobalKb` caller passes bounded options. `globalKbCallOptions` defaults to
+`GLOBAL_KB_CALL_DEADLINE_MS` (60 s) and a 3 s connect timeout; its options and default budget are
+injectable. The API CRUD budget leaves room for the 30 s namespace lock. Promotion, article loading
+and author enrichment use `GLOBAL_KB_STEP_DEADLINE_MS` (300 s), which includes the 240 s ingest
+embedding budget and leaves room in the author's 30-minute CLI budget (the merge CLI has an hour).
+The merge/review store operations use 60 s. These are per store call limits, not a new whole-step
+timeout; deterministic steps have no separate whole-step timeout. Enrichment and promotion can
+perform other repository work outside the store call.
+
+Steps forward `ctx.signal`, HTTP CRUD forwards the request signal, and the sync Worker aborts
+its calls before waiting for `close()`. Enrich compensation owns a fresh bounded signal, so a
+request disconnect cannot suppress removal of a skeleton whose task insert failed. Standalone helpers accept an optional owner signal; the
+helper supplies an idle signal when no owner exists. A timeout aborts the callback's context signal,
+destroys its private pool and rejects with `GlobalKbDeadlineError` (`GLOBAL_KB_DEADLINE`). Optional
+step lookups/promotions still skip ordinary outages, but rethrow timeouts as a coded step failure
+with Retry guidance. The API answers that deadline with 503, the code, `retryable: true` and
+`Retry-After: 1`. An interrupted write may already have committed; Retry must reconcile stored state.
+Cancellation cannot retract an external operation already issued by a callback.
+
+The sync entry budget is separately injectable (`GLOBAL_KB_SYNC_DEADLINE_MS`, 60 minutes) because
+one entry can require many CPU embedding batches. Store-only purge/reconcile calls, including
+unfinished-author scans, re-embed candidate/width reads and identifier-backfill retries, use 60 s.
+An interrupted identifier backfill remains owed. The five-minute reconcile scheduler and daily
+purge scheduler survive a failed tick; they have no per-job exponential retries. Pending/failed
+entries remain the durable recovery record for later reconcile ticks. The boot repair loop retains
+its 1 s to 60 s exponential backoff; alias recompute now checks Enabled like classification, and
+heading-only cleanup remains destructive and runs only after upgrade commit, propagating typed
+configuration outages to its caller.
+
+`withGlobalKbConnection` is the bare sibling for the API Test DB probe (8 s), including connection
+resolution and the query without ensuring or publishing schema readiness. The width check keeps
+its own 6 s store-wait deadline, now also covering connection resolution and request cancellation.
+Once it starts config/audit writes, it keeps the schema lock until they settle, as before: dropping
+that lock on expiry could let an ensure create the old width while an issued Redis write later
+publishes the new one. This exception bounds the store wait, not the subsequent main-database audit
+or config write; their existing failure and partial-write contract still applies. After those writes
+settle, the store COMMIT or ROLLBACK gets a fresh 6 s deadline and any deferred request cancellation is honored.
+
+Internal resolution never runs `SELECT pg_database` or `CREATE DATABASE` on the shared API/worker
+pool. It uses a disposable one-connection admin client, `fetch_types: false`, an injectable client
+deadline capped at `GLOBAL_KB_ADMIN_DEADLINE_MS` (10 s), the caller's signal and a matching startup
+`statement_timeout`. Startup settings are supported on Haive's own server and cover `CREATE DATABASE`,
+which PostgreSQL refuses inside the transaction required by `SET LOCAL`. Expiry destroys this
+client alone; abort checks prevent a late SELECT reply from creating a database. No abandoned
+query occupies the application's pool. A timed-out CREATE may have completed; the next attempt's
+existence check reconciles it. External connections keep transaction-local schema/lock limits and
+never receive these internal-only startup parameters.
+
+`global-kb-main-deadlines.test.ts` and `global-kb-call-deadlines.test.ts` use authenticated throwaway
+TCP peers that hold SQL replies, with injected deadlines and fake clocks. The controls cover both
+internal existence/create stalls, sweep expiry, step failure, shutdown and socket release. Baseline
+controls observed a still-pending sweep and open main-pool sockets after the caller's deadline.
+
+**Boot reads under a Redis outage are bounded, and a stalled store no longer holds boot.** At worker boot the
 config reads in `resolveGlobalKbSettings` reject typed after about 2 s; `runOne`
 (`data-migrations.ts`) rethrows the typed outage and the boot retry runs the migrations again once
 the store answers. The two global-store repairs do not block boot: `recomputeAliasedTopicKeys` and

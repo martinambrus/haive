@@ -6,11 +6,15 @@ const h = vi.hoisted(() => ({ calls: [] as Array<[string, Record<string, unknown
 vi.mock('postgres', () => ({
   default: (url: string, options: Record<string, unknown>) => {
     h.calls.push([url, options]);
-    return { end: async () => {} };
+    return { end: async () => {}, unsafe: async () => [{ exists: 1 }] };
   },
 }));
 
-import { resolveGlobalKbConnection, type GlobalKbSettings } from '../src/global-kb/connection.js';
+import {
+  GLOBAL_KB_ADMIN_DEADLINE_MS,
+  resolveGlobalKbConnection,
+  type GlobalKbSettings,
+} from '../src/global-kb/connection.js';
 
 const settings = (over: Partial<GlobalKbSettings>): GlobalKbSettings => ({
   enabled: true,
@@ -28,6 +32,7 @@ const settings = (over: Partial<GlobalKbSettings>): GlobalKbSettings => ({
 const existingDatabase = { execute: async () => [{ '?column?': 1 }] } as unknown as Database;
 
 describe('resolveGlobalKbConnection pool options', () => {
+  it('pins the internal admin deadline', () => expect(GLOBAL_KB_ADMIN_DEADLINE_MS).toBe(10_000));
   const before = process.env.DATABASE_URL;
   beforeEach(() => {
     h.calls = [];
@@ -43,13 +48,13 @@ describe('resolveGlobalKbConnection pool options', () => {
     ['internal', { mode: 'internal' as const, connectionString: null }],
   ])('keeps postgres.js its own limits for a call that asks for none (%s)', async (_mode, over) => {
     await resolveGlobalKbConnection(settings(over), existingDatabase);
-    expect(Object.keys(h.calls[0]![1]).sort()).toEqual(
+    expect(Object.keys(h.calls.at(-1)![1]).sort()).toEqual(
       _mode === 'internal' ? ['connection', 'max', 'onnotice'] : ['max', 'onnotice'],
     );
-    expect(h.calls[0]![1].connection).toEqual(
+    expect(h.calls.at(-1)![1].connection).toEqual(
       _mode === 'internal' ? { client_connection_check_interval: 500 } : undefined,
     );
-    expect(h.calls[0]![1].max).toBe(5);
+    expect(h.calls.at(-1)![1].max).toBe(5);
   });
 
   it.each([
@@ -60,7 +65,22 @@ describe('resolveGlobalKbConnection pool options', () => {
       connectTimeoutSeconds: 3,
       fetchTypes: false,
     });
-    expect(h.calls[0]![1]).toMatchObject({ max: 5, connect_timeout: 3, fetch_types: false });
+    expect(h.calls.at(-1)![1]).toMatchObject({ max: 5, connect_timeout: 3, fetch_types: false });
+  });
+
+  it('uses a disposable admin session with a server deadline, never the main executor', async () => {
+    const execute = vi.fn();
+    const signal = new AbortController().signal;
+    await resolveGlobalKbConnection(settings({ mode: 'internal' }), { execute } as never, {
+      deadlineMs: 17,
+      signal,
+    });
+    expect(execute).not.toHaveBeenCalled();
+    expect(h.calls[0]![1]).toMatchObject({
+      max: 1,
+      fetch_types: false,
+      connection: { statement_timeout: 17 },
+    });
   });
 
   it('opens the pool of one call without touching the next call', async () => {

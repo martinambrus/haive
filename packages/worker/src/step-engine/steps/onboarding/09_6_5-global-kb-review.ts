@@ -1,3 +1,5 @@
+import type { GlobalKbCallOptions } from '@haive/shared/global-kb';
+import { globalKbCallOptions, rethrowIfGlobalKbTimeout } from '@haive/shared/global-kb';
 import { and, desc, eq } from 'drizzle-orm';
 import { globalKbEntries, resolveGlobalKbSettings, withGlobalKb } from '@haive/shared/global-kb';
 import type { FormSchema } from '@haive/shared';
@@ -28,34 +30,43 @@ interface GlobalKbReviewDetect {
 
 /** Draft rows the current task promoted to the global KB. Best-effort: if the
  *  global KB is disabled or unreachable, treat it as "no drafts" (the step
- *  simply skips) rather than failing the run. */
-async function fetchTaskDrafts(ctx: StepContext): Promise<GlobalKbDraftRow[]> {
+ *  simply skips). A timeout fails for Retry rather than hiding existing drafts. */
+export async function fetchTaskDrafts(
+  ctx: StepContext,
+  opts: GlobalKbCallOptions = {},
+): Promise<GlobalKbDraftRow[]> {
   try {
     // Gate on the cheap config read first: when the global KB is off this never
     // opens (or, in internal mode, creates) the dedicated DB.
     const settings = await resolveGlobalKbSettings();
     if (!settings.enabled) return [];
-    return await withGlobalKb(ctx.db, async ({ db: gdb }) => {
-      const rows = await gdb
-        .select({
-          id: globalKbEntries.id,
-          title: globalKbEntries.title,
-          category: globalKbEntries.category,
-          description: globalKbEntries.description,
-        })
-        .from(globalKbEntries)
-        .where(
-          and(eq(globalKbEntries.sourceTaskId, ctx.taskId), eq(globalKbEntries.status, 'draft')),
-        )
-        .orderBy(desc(globalKbEntries.createdAt));
-      return rows.map((r) => ({
-        id: r.id,
-        title: r.title,
-        category: r.category,
-        description: r.description,
-      }));
-    });
+    return await withGlobalKb(
+      ctx.db,
+      async ({ db: gdb }) => {
+        const rows = await gdb
+          .select({
+            id: globalKbEntries.id,
+            title: globalKbEntries.title,
+            category: globalKbEntries.category,
+            description: globalKbEntries.description,
+          })
+          .from(globalKbEntries)
+          .where(
+            and(eq(globalKbEntries.sourceTaskId, ctx.taskId), eq(globalKbEntries.status, 'draft')),
+          )
+          .orderBy(desc(globalKbEntries.createdAt));
+        return rows.map((r) => ({
+          id: r.id,
+          title: r.title,
+          category: r.category,
+          description: r.description,
+        }));
+      },
+      globalKbCallOptions({ ...opts, signal: opts.signal ?? ctx.signal, settings }),
+    );
   } catch (err) {
+    ctx.signal?.throwIfAborted();
+    rethrowIfGlobalKbTimeout(err);
     ctx.logger.warn({ err }, 'global KB draft lookup failed (treating as no drafts)');
     return [];
   }

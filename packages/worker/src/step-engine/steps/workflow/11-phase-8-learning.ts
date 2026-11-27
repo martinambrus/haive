@@ -1364,6 +1364,8 @@ export const phase8LearningStep: StepDefinition<LearningDetect, LearningApply> =
       ctx.db,
       ctx.taskId,
       [meta.title, meta.description, implementOutput.summary].filter(Boolean).join('\n'),
+      undefined,
+      { signal: ctx.signal },
     );
     // Self-target revise channel: a reviewer's outstanding instruction (recorded by a
     // prior apply) steers this re-run; pair it with the prior run's drafts so the agent
@@ -1960,7 +1962,7 @@ export const phase8LearningStep: StepDefinition<LearningDetect, LearningApply> =
 
       // Idempotent re-runs (Retry): replace this task's prior promoted drafts so a
       // retry never duplicates them (no-op when the global KB is off).
-      await clearTaskPromotedDrafts(ctx.db, ctx.taskId, ctx.logger);
+      await clearTaskPromotedDrafts(ctx.db, ctx.taskId, ctx.logger, { signal: ctx.signal });
       let investigationWritten: string | null = null;
       const investigation = args.detected.isBugFix
         ? parseInvestigation(args.llmOutput ?? null)
@@ -2018,6 +2020,7 @@ export const phase8LearningStep: StepDefinition<LearningDetect, LearningApply> =
                 facets: {},
               },
               ctx.logger,
+              { signal: ctx.signal },
             ),
           );
           investigationWritten = promo ? `global-kb:${promo.id}` : null;
@@ -2065,6 +2068,7 @@ export const phase8LearningStep: StepDefinition<LearningDetect, LearningApply> =
                 projectName: projectName ?? undefined,
               },
               ctx.logger,
+              { signal: ctx.signal },
             ),
           );
           if (promo) promotedCandidates.push(`global-kb:${promo.id}`);

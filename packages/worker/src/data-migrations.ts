@@ -47,6 +47,7 @@ import {
   type GlobalKbCallOptions,
   resolveGlobalKbEnabled,
   withGlobalKb,
+  globalKbCallOptions,
 } from '@haive/shared/global-kb';
 import { loadPlanSkeletons } from '@haive/shared/plan';
 import { scrubErrorPaths } from '@haive/shared/logger';
@@ -192,7 +193,11 @@ export const DATA_MIGRATIONS: DataMigration[] = [
   // It issues a raw `DELETE FROM ai_rag_embeddings` against the global KB store —
   // a SEPARATE database, so outside any core-DB transaction and outside a core-DB snapshot.
   // Nothing can undo it.
-  { id: 'dropHeadingOnlyGlobalKbChunks', kind: 'destructive', run: dropHeadingOnlyGlobalKbChunks },
+  {
+    id: 'dropHeadingOnlyGlobalKbChunks',
+    kind: 'destructive',
+    run: dropHeadingOnlyGlobalKbChunks,
+  },
   // Removes the plain envVars copy of a secret the boot half copied: the previous release reads only
   // envVars, so this waits until the upgrade is kept.
   {
@@ -798,6 +803,7 @@ async function recomputeAliasedTopicKeys(
   db: Database,
   opts: GlobalKbCallOptions = {},
 ): Promise<void> {
+  if (!(await resolveGlobalKbEnabled(configService))) return;
   const norm = (v: string): string => v.toLowerCase().replace(/[^a-z0-9]+/g, '');
   await withGlobalKb(
     db,
@@ -846,7 +852,7 @@ async function recomputeAliasedTopicKeys(
         log.info({ updated }, 'recomputed topic keys whose tech segment predated the facet alias');
       }
     },
-    opts,
+    globalKbCallOptions(opts),
   );
 }
 
@@ -1284,21 +1290,30 @@ const HEADING_ONLY_PREFILTER_CHARS = 1024;
  *  Idempotent: a second run matches nothing. Best-effort and flag-gated — a
  *  global KB that is disabled or unreachable must never fail worker boot, and a
  *  disabled one must not be connected to (that would create its database). */
-async function dropHeadingOnlyGlobalKbChunks(db: Database): Promise<void> {
+async function dropHeadingOnlyGlobalKbChunks(
+  db: Database,
+  opts: GlobalKbCallOptions = {},
+): Promise<void> {
   try {
     if (!(await resolveGlobalKbEnabled(configService))) return;
-    await withGlobalKb(db, async ({ conn, settings }) => {
-      const rows = (await conn.pg.unsafe(
-        `SELECT id, content FROM ai_rag_embeddings WHERE namespace = $1 AND length(content) < $2`,
-        [settings.namespace, HEADING_ONLY_PREFILTER_CHARS],
-      )) as unknown as Array<{ id: number; content: string }>;
-      const stale = rows.filter((r) => isHeadingOnlyChunk(r.content)).map((r) => r.id);
-      if (stale.length === 0) return;
-      const placeholders = stale.map((_, i) => `$${i + 1}`).join(', ');
-      await conn.pg.unsafe(`DELETE FROM ai_rag_embeddings WHERE id IN (${placeholders})`, stale);
-      log.info({ deleted: stale.length }, 'removed heading-only global KB chunks');
-    });
+    await withGlobalKb(
+      db,
+      async ({ conn, settings }) => {
+        const rows = (await conn.pg.unsafe(
+          `SELECT id, content FROM ai_rag_embeddings WHERE namespace = $1 AND length(content) < $2`,
+          [settings.namespace, HEADING_ONLY_PREFILTER_CHARS],
+        )) as unknown as Array<{ id: number; content: string }>;
+        const stale = rows.filter((r) => isHeadingOnlyChunk(r.content)).map((r) => r.id);
+        if (stale.length === 0) return;
+        const placeholders = stale.map((_, i) => `$${i + 1}`).join(', ');
+        await conn.pg.unsafe(`DELETE FROM ai_rag_embeddings WHERE id IN (${placeholders})`, stale);
+        log.info({ deleted: stale.length }, 'removed heading-only global KB chunks');
+      },
+      globalKbCallOptions(opts),
+    );
   } catch (err) {
+    if (opts.signal) throw err;
+    rethrowIfConfigUnavailable(err);
     log.warn({ err }, 'heading-only global KB chunk cleanup skipped');
   }
 }

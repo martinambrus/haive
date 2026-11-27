@@ -44,8 +44,14 @@ vi.mock('@haive/shared', async (importOriginal) => ({
 }));
 vi.mock('@haive/shared/global-kb', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@haive/shared/global-kb')>()),
-  withGlobalKb: async (_db: unknown, fn: (ctx: unknown) => Promise<unknown>) =>
-    fn({ db: h.gdb, settings: { namespace: 'default' } }),
+  withGlobalKb: async (
+    _db: unknown,
+    fn: (ctx: unknown) => Promise<unknown>,
+    opts?: { signal?: AbortSignal },
+  ) => {
+    opts?.signal?.throwIfAborted();
+    return fn({ db: h.gdb, settings: { namespace: 'default' } });
+  },
 }));
 
 vi.mock('../src/lib/task-type-definition.js', async (importOriginal) => ({
@@ -316,6 +322,27 @@ describe('POST /enrich and the description', () => {
     expect((task().metadata as Record<string, unknown>).authorDescription).toBe(
       'Never inline SVG; reference a file.',
     );
+  });
+
+  it('compensates a failed task insert even when its request has disconnected', async () => {
+    const controller = new AbortController();
+    fake.hooks.beforeInsert = (table) => {
+      if (table === schema.tasks) {
+        controller.abort();
+        throw new Error('task insert refused');
+      }
+    };
+    const res = await app.request(
+      new Request('http://localhost/enrich', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(request),
+        signal: controller.signal,
+      }),
+    );
+    expect(res.status).toBe(500);
+    expect(fake.rows(schema.tasks)).toHaveLength(0);
+    expect(fake.rows(globalKbEntries).filter((r) => r.status === 'skeleton')).toHaveLength(0);
   });
 
   it('records no description when the author stated none', async () => {

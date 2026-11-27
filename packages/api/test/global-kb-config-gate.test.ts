@@ -11,6 +11,8 @@ const h = vi.hoisted(() => ({
   readFails: false,
   settingsReads: 0,
   gate: null as Promise<void> | null,
+  commitGate: null as Promise<void> | null,
+  commitStarted: null as (() => void) | null,
   set: vi.fn(async (key: string, _value: string) => {
     h.events.push(`set:${key}`);
   }),
@@ -52,9 +54,15 @@ const h = vi.hoisted(() => ({
         );
         try {
           const result = await run(tx);
+          h.commitStarted?.();
+          if (h.commitGate) await h.commitGate;
           h.events.push('commit');
           return result;
         } catch (err) {
+          if (h.commitGate) {
+            h.commitStarted?.();
+            await h.commitGate;
+          }
           h.events.push('rollback');
           throw err;
         }
@@ -114,6 +122,18 @@ vi.mock('@haive/shared/global-kb', async (importOriginal) => ({
   resolveGlobalKbConnection: (settings: unknown, db: unknown, opts?: unknown) => {
     if (opts !== undefined) h.checks.push(opts);
     return h.connect(settings, db);
+  },
+  withGlobalKbConnection: async (
+    db: unknown,
+    run: (ctx: unknown) => Promise<unknown>,
+    opts: { settings: unknown },
+  ) => {
+    const conn = await h.connect(opts.settings, db);
+    try {
+      return await run({ conn });
+    } finally {
+      await conn.close();
+    }
   },
   withGlobalKb: async () => {
     throw new Error('the dims check must not ensure the schema');
@@ -275,9 +295,12 @@ beforeEach(() => {
   h.role = 'admin';
   h.flags = new Map();
   h.settings = { ...SAVED };
+  h.commitGate = null;
+  h.commitStarted = null;
 });
 
 afterEach(() => {
+  vi.useRealTimers();
   // A failed audit row fails the save; none may be swallowed into this logger.
   expect(h.auditLog.error).not.toHaveBeenCalled();
 });
@@ -985,7 +1008,12 @@ describe('PUT /global-kb/config with a different embedding width', () => {
     await put(widen);
 
     expect(h.checks).toEqual([
-      expect.objectContaining({ connectTimeoutSeconds: expect.any(Number), fetchTypes: false }),
+      expect.objectContaining({
+        connectTimeoutSeconds: 3,
+        fetchTypes: false,
+        deadlineMs: 6000,
+        signal: expect.any(AbortSignal),
+      }),
     ]);
   });
 
@@ -1070,12 +1098,78 @@ describe('PUT /global-kb/config with a different embedding width', () => {
     expect(h.events).not.toContain('commit');
   });
 
+  it('answers a coded store timeout during the width check as retryable, without driver text', async () => {
+    h.connect.mockRejectedValueOnce(
+      Object.assign(new Error('private server details'), { code: '57014' }),
+    );
+    const res = await put(widen);
+    expect(res.status).toBe(503);
+    expect(await res.json()).toMatchObject({ code: 'GLOBAL_KB_DEADLINE', retryable: true });
+    expect(h.set).not.toHaveBeenCalled();
+  });
+
   it('fails the request, writing nothing, when the store cannot be reached', async () => {
     h.connect.mockRejectedValueOnce(new Error('connect ECONNREFUSED'));
     const res = await put(widen);
 
     expect(res.status).toBeGreaterThanOrEqual(500);
     expect(h.set).not.toHaveBeenCalled();
+  });
+
+  it.each(['COMMIT', 'ROLLBACK'])(
+    'bounds store %s after guarded config writes settle',
+    async (phase) => {
+      vi.useFakeTimers();
+      if (phase === 'ROLLBACK') h.set.mockRejectedValueOnce(new Error('config write refused'));
+      let release!: () => void;
+      let started!: () => void;
+      const entered = new Promise<void>((resolve) => {
+        started = resolve;
+      });
+      h.commitGate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      h.commitStarted = started;
+      let settled = false;
+      const saving = Promise.resolve(put(widen)).then((res) => {
+        settled = true;
+        return res;
+      });
+      try {
+        await entered;
+        await vi.advanceTimersByTimeAsync(6001);
+        expect(settled).toBe(true);
+        expect((await saving).status).toBe(503);
+      } finally {
+        release();
+        await saving;
+        await vi.advanceTimersByTimeAsync(0);
+      }
+    },
+  );
+
+  it('retains the schema lock after config writes start, even when the store-wait deadline passes', async () => {
+    vi.useFakeTimers();
+    let release!: () => void;
+    let started!: () => void;
+    const entered = new Promise<void>((resolve) => {
+      started = resolve;
+    });
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    h.set.mockImplementationOnce(async () => {
+      started();
+      await held;
+    });
+    const saving = put(widen);
+    await entered;
+    await vi.advanceTimersByTimeAsync(6001);
+    expect(h.events).not.toContain('close');
+    expect(h.events).not.toContain('commit');
+    release();
+    expect((await saving).status).toBe(200);
+    expect(h.events.slice(-2)).toEqual(['commit', 'close']);
   });
 
   it('lets a second save read the settings only after the first one is done', async () => {
