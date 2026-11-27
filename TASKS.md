@@ -985,7 +985,7 @@ status: dropped 2026-11-22 (unreachable): both type deletes lock the type row an
 
 ### T747 · FNF[claude-stream-error-codes] · only one of the Claude CLI's assistant error codes is read
 
-status: open for follow-ups 1-8; main item DONE in #1308 (d52dd3722, deployed 2026-11-21 17:47Z: codes mapped to auth / rate_limit / server_error, steered runs classify) · kind: fix · found: #1306 driver 2026-11-21 · priority: P4
+status: open for design items 5, 7, 8 (recommendations in #1367: 5 config/request class, 7 billing separate from rate limit, 8 `api_error_status` as fallback); follow-ups 1-4 DONE in #1367 (720a0ed6b, live 2026-11-27 via worker reload: failing-turn scope, account-action hint from the code map, `authFailure` removed); 6 does not reproduce (no structural amp/grok codes); main item DONE in #1308 (d52dd3722, deployed 2026-11-21 17:47Z: codes mapped to auth / rate_limit / server_error, steered runs classify) · kind: fix · found: #1306 driver 2026-11-21 · priority: P4
 
 `worker/src/queues/cli-exec/stream.ts` ~:87 and `exec-core.ts` ~:1221 read only `authentication_failed` from the top-level assistant `error` field. Claude CLI 2.1.330 also stamps `oauth_org_not_allowed`, `account_on_hold`, `verification_required`, `cloud_credential_error`, `billing_error`, `rate_limit`, `overloaded`, `server_error`, `invalid_request`, `model_not_found`, `max_output_tokens` and `unknown`; map the ones with a failure class (auth, rate limit, provider outage) to it. A steered run whose later turn fails auth takes the result branch and carries no flag. PRE-EXISTING.
 
