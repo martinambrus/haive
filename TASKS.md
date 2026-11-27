@@ -1260,7 +1260,7 @@ T542 fences the five destructive settlement members under the task row lock. Sib
 
 ### T777 · Collapsed step terminal keeps a stale "1 live" after the run ends
 
-status: open · kind: bug · found: session live check e06ad873 2026-11-27 · priority: P3
+status: done 2026-11-27, merged #1356 34264fc14 and live (web hot reload) · kind: bug · found: session live check e06ad873 2026-11-27 · priority: P3
 
 When a step leaves its active state (here `tr-glossary` to `waiting_form`), `StepTerminal` collapses itself (`web/src/components/terminal/StepTerminal.tsx` ~:98-102), and the poll effect returns early while collapsed (~:188), so the header keeps the last poll's `isActive` and reads "1 run · 1 live" for a run whose `cli_invocations.ended_at` is set. A reload clears it.
 
