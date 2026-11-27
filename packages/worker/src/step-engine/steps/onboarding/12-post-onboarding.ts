@@ -452,7 +452,7 @@ async function recordOnboardingArtifacts(
       })
       .from(schema.repositories)
       .where(eq(schema.repositories.id, repositoryId))
-      .for('update');
+      .for('no key update');
     if (
       detect.renderContextColumn !== undefined &&
       !sameValue(live?.renderContext ?? null, detect.renderContextColumn) &&

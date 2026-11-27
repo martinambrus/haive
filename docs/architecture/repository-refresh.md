@@ -318,8 +318,8 @@ Rollback reopens the covered races; it never moves an aside back automatically.
 
 ## Remote relink reconciliation
 
-Relink and reconciliation hold the checkout mutation lease before their existing intent/row
-locks. Repair on an error checkout stays available; cloning and a foreign claim hold work without
+Relink and reconciliation hold the checkout mutation lease before their remote advisory key
+and intent/row locks. Repair on an error checkout stays available; cloning and a foreign claim hold work without
 consuming the relink intent. The route uses a dedicated fresh client for its Git transaction,
 keeping the request pool free. Both reconciliation and attachment transactions drain callbacks
 through `withSettledTransaction`: a driver rejection cannot release replacement exclusion while
@@ -330,10 +330,12 @@ Git or filesystem work still runs.
 mutation. Recording intent uses a separate fresh database client and a short
 transaction with a bounded repository row lock. It stores no URL or credential.
 A failed intent write answers 409 before changing Git; a busy lock retains the
-ordinary busy refusal. The relink transaction then locks the row, verifies that
-its token is still current, inserts the required audit, changes Git and updates
-the repository columns. A token already settled by the sweep, or superseded by
-another request, refuses before any Git mutation.
+ordinary busy refusal. The relink transaction then takes the remote advisory key and the row
+`FOR KEY SHARE`, verifies that its token is still current, inserts the required audit, changes
+Git and takes bounded `FOR NO KEY UPDATE` only for its final compare-and-set.
+Concurrent non-key writers can finish during Git; only supplied relink columns are replaced.
+See [Integrations](integrations.md#audit-rows) for the lock order and audit comparison. A token
+already settled by the sweep, or superseded by another request, refuses before any Git mutation.
 
 The intent lives in the database, outside the sandbox trust boundary. Nothing in
 the repository tree can trigger a reconcile: the old
@@ -354,9 +356,11 @@ A failed clear fails the request; a clear that did not commit leaves repair pend
 
 A connection-class failure is reconciled only after this request successfully
 recorded intent. Reconciliation uses a fresh database client, rechecks ownership
-and non-null intent under the repository row lock, and aligns origin with the
+and non-null intent under the remote key and repository KEY SHARE, and aligns origin with the
 committed row, clearing push overrides when replacing an existing origin. It
-clears the locked token in that same transaction. Fresh clients end with
+rechecks the remote, paths and token under bounded NO KEY UPDATE before clearing the token
+in that same transaction; a changed committed remote retains intent for another repair.
+Fresh clients end with
 `end({ timeout: 5 })`. If the fresh read or Git repair fails, intent remains
 for another attempt and the request returns 500 explaining the uncertain outcome.
 A failure before this request records intent leaves Git alone, including a
@@ -364,7 +368,8 @@ folder import's Git-only origin whose database `remote_url` is null.
 
 A successful relink leaves intent for locked reconciliation. For a request with
 no predecessor repair, a known refusal before any mutation clears its token,
-as does a successful undo under the relink row lock. An unreadable previous-remote
+as does a successful undo while the relink holds the remote advisory key and row KEY SHARE.
+An unreadable previous-remote
 snapshot also clears its token even without an exit status: that read changed
 nothing. The add-origin and clear-push-URL mutation sites still retain intent when
 the outcome is unknown (deadline, signal or spawn failure). A failed undo also
@@ -380,8 +385,10 @@ scheduling only after the preceding pass finishes; its timers are unref'd. The
 request pool is used only to collect the page, never held across sweep Git.
 Each selected repository first takes the mutation lease; a live API writer's lease holds repair
 as `checkout`, including after its database connection drops. After API death the intent remains
-untouched until that lease expires. It is then rechecked under the fresh-client lock, taken with
-`SKIP LOCKED`: a repository a relink holds is passed over, not waited for, so the
+untouched until that lease expires. It is then rechecked under the fresh-client remote key
+(a nonwaiting try) and KEY SHARE row lock, taken with `SKIP LOCKED`: the advisory try-lock
+passes over a live relink or gate-4 origin writer; SKIP LOCKED passes over retained FOR UPDATE
+takers (delete and onboarding/upgrade admission), since KEY SHARE is compatible with relink's hold. The
 sweep never acts on a live request's intent the moment that request rolls back;
 the next tick sees it again. A dropped database connection releases that lock
 before the request's Git writes finish, so the lock alone is not enough: a relink
@@ -414,7 +421,7 @@ No durable pre-change origin snapshot is kept;
 preserving one across process death requires a separately designed snapshot
 with credential-handling rules. Each Git call has a 10-second deadline and a
 2-second kill grace, but there is no aggregate deadline over all calls under the
-row lock, and an uninterruptible kernel I/O wait cannot be made to exit by SIGKILL.
+KEY SHARE hold, and an uninterruptible kernel I/O wait cannot be made to exit by SIGKILL.
 The killed-after-config-rename boundary still needs live evidence; retained
 intent is the recovery mechanism for unknown Git outcomes.
 

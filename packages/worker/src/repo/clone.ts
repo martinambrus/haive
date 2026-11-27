@@ -233,7 +233,7 @@ async function importHaiveDataMirror(
       .select()
       .from(schema.repositories)
       .where(eq(schema.repositories.id, repositoryId))
-      .for('update');
+      .for('no key update');
     if (!stored) throw new Error('Repository no longer exists');
     for (const field of [
       'scopeExcludeGlobs',

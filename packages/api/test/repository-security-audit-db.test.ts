@@ -1,7 +1,8 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { logger } from '@haive/shared';
+import type { StepContext, StepDefinition } from '@haive/shared/step';
 import { eq, sql } from 'drizzle-orm';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { cp, mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { execFile } from 'node:child_process';
@@ -28,6 +29,15 @@ const h = vi.hoisted(() => ({
   gitHook: undefined as ((args: string[]) => Promise<void>) | undefined,
   lockTimeoutMs: 30_000,
   ragProbe: undefined as (() => Promise<boolean>) | undefined,
+  gate4Ensure: vi.fn(async () => ({ added: true, updated: false })),
+  gate4Push: vi.fn(async () => {}),
+}));
+// Only the gate-4 Git seam is faked; its transaction and the relink route use real Postgres.
+vi.mock('../../worker/src/repo/git-push.js', async (original) => ({
+  ...(await original<Record<string, unknown>>()),
+  getOriginUrl: async () => null,
+  ensureOrigin: h.gate4Ensure,
+  pushBranch: h.gate4Push,
 }));
 vi.mock('node:child_process', async (original) => {
   const actual = await original<typeof import('node:child_process')>();
@@ -84,6 +94,7 @@ vi.mock('@haive/database', async (original) => ({
   get REPOSITORY_TASKS_LOCK_TIMEOUT_MS() {
     return h.lockTimeoutMs;
   },
+  TASK_START_LOCK_TIMEOUT_MS: 300,
 }));
 vi.mock('../src/middleware/auth.js', async (original) => ({
   ...(await original<any>()),
@@ -94,14 +105,26 @@ vi.mock('../src/middleware/auth.js', async (original) => ({
 }));
 vi.mock('@haive/shared', async (original) => ({
   ...(await original<any>()),
-  configService: { getEncryptionKey: async () => 'ab'.repeat(32), get: async () => null },
+  configService: {
+    getEncryptionKey: async () => 'ab'.repeat(32),
+    get: async () => null,
+    getFresh: async () => 'normal',
+  },
 }));
+vi.mock('../src/queues.js', () => ({ getTaskQueue: () => ({ add: vi.fn() }) }));
 import { toolingUpgradeRoutes } from '../src/routes/tooling-upgrades.js';
+import { taskRoutes } from '../src/routes/tasks/index.js';
 import { repoRoutes } from '../src/routes/repos.js';
 import { repositoryIntegrationRoutes } from '../src/routes/repository-integrations.js';
 import { REPOSITORY_BUSY } from '../src/lib/repository-busy.js';
+import { lockRemoteRelink, markRemoteIntent } from '../src/lib/remote-reconcile.js';
 import { errorHandler } from '../src/middleware/error-handler.js';
 import type { AppEnv } from '../src/context.js';
+// Runtime-only test loading keeps the API typecheck independent of worker sources.
+const gate4Module = new URL(
+  '../../worker/src/step-engine/steps/workflow/11a-gate-4-push.ts',
+  import.meta.url,
+).pathname;
 
 /** The pending value, or an error naming the wait when `ms` pass first. */
 async function answeredWithin<T>(ms: number, pending: Promise<T>): Promise<T> {
@@ -119,6 +142,7 @@ async function answeredWithin<T>(ms: number, pending: Promise<T>): Promise<T> {
 }
 
 describe.skipIf(!url)('Repository security settings commit with their audit, on Postgres', () => {
+  let gate4PushStep: StepDefinition;
   let db: ReturnType<typeof createDatabase>;
   let repository: string;
   let connection: string;
@@ -129,6 +153,7 @@ describe.skipIf(!url)('Repository security settings commit with their audit, on 
     .onError(errorHandler)
     .route('/repositories', toolingUpgradeRoutes)
     .route('/repositories', repositoryIntegrationRoutes)
+    .route('/tasks', taskRoutes)
     .route('/repos', repoRoutes);
   const stored = () =>
     db.query.repositories.findFirst({ where: eq(schema.repositories.id, repository) });
@@ -139,14 +164,22 @@ describe.skipIf(!url)('Repository security settings commit with their audit, on 
       select a.query from pg_stat_activity a
       where a.datname = current_database() and ${pid} = any(pg_blocking_pids(a.pid))
     `);
-  beforeAll(() => {
+  let checkoutFixture: string;
+  beforeAll(async () => {
+    ({ gate4PushStep } = await import(gate4Module));
     db = createDatabase(url!);
     h.db = db;
+    checkoutFixture = await mkdtemp(path.join(tmpdir(), 'relink-fixture-'));
+    await git(checkoutFixture, ['init']);
+    await git(checkoutFixture, ['remote', 'add', 'origin', 'https://old.test/r']);
   });
   afterAll(async () => {
     await db.$client.end({ timeout: 5 });
+    if (checkoutFixture) await rm(checkoutFixture, { recursive: true, force: true });
   });
   beforeEach(async () => {
+    h.gate4Ensure.mockClear();
+    h.gate4Push.mockClear();
     h.freshCalls = 0;
     h.relinkDatabase = undefined;
     h.actor = (await makeActor(db)).id;
@@ -446,6 +479,287 @@ describe.skipIf(!url)('Repository security settings commit with their audit, on 
       h.relinkDatabase = undefined;
     }
   }, 30_000);
+  it.each(['plain writer', 'worker then task start', 'advisory waiter'] as const)(
+    'relink Git does not pin a %s behind its repository row',
+    async (kind) => {
+      const root = await mkdtemp(path.join(tmpdir(), 'relink-writer-'));
+      roots.push(root);
+      await cp(checkoutFixture, root, { recursive: true });
+      await db
+        .update(schema.repositories)
+        .set({ localPath: root, status: 'ready' })
+        .where(eq(schema.repositories.id, repository));
+      const [task] = await db
+        .insert(schema.tasks)
+        .values({
+          userId: h.actor,
+          repositoryId: repository,
+          type: 'workflow',
+          title: 'start control',
+        })
+        .returning();
+      let arrived!: () => void;
+      let release!: () => void;
+      const arrival = new Promise<void>((resolve) => {
+        arrived = resolve;
+      });
+      const resume = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      h.gitHook = async (args) => {
+        if (
+          args.includes('remote') &&
+          args.includes('add') &&
+          args.at(-1) === 'https://held.test/r'
+        ) {
+          arrived();
+          await resume;
+        }
+      };
+      const relink = Promise.resolve(
+        app.request(`/repos/${repository}/remote`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ remoteUrl: 'https://held.test/r' }),
+        }),
+      );
+      let writer: Promise<unknown> | undefined;
+      try {
+        await answeredWithin(5_000, arrival);
+        if (kind === 'plain writer') {
+          // The deadline is only a probe: production plain UPDATE has no lock bound.
+          writer = db.transaction(async (tx) => {
+            await tx.execute(sql`SET LOCAL lock_timeout = '300ms'`);
+            await tx
+              .update(schema.repositories)
+              .set({ name: 'concurrent writer' })
+              .where(eq(schema.repositories.id, repository));
+          });
+          await writer;
+          expect((await stored())!.name).toBe('concurrent writer');
+        } else if (kind === 'advisory waiter') {
+          h.lockTimeoutMs = 300;
+          const token = (await stored())!.remoteRelinkIntent;
+          expect(await db.transaction((tx) => lockRemoteRelink(tx, repository, true))).toBe(false);
+          await expect(markRemoteIntent(repository, h.actor)).rejects.toMatchObject({
+            status: 409,
+            message: REPOSITORY_BUSY,
+          });
+          expect((await stored())!.remoteRelinkIntent).toBe(token);
+        } else {
+          let taking!: () => void;
+          const take = new Promise<void>((resolve) => {
+            taking = resolve;
+          });
+          writer = db.transaction(async (tx) => {
+            // The project-state writer on current main takes these before its row.
+            await tx.execute(
+              sql`select pg_advisory_xact_lock(hashtextextended(${`onboarding-upgrade:${repository}`}, 0))`,
+            );
+            taking();
+            await tx
+              .select({ id: schema.repositories.id })
+              .from(schema.repositories)
+              .where(eq(schema.repositories.id, repository))
+              .for('no key update');
+          });
+          await take;
+          const answer = await answeredWithin(
+            5_000,
+            Promise.resolve(
+              app.request(`/tasks/${task!.id}/action`, {
+                method: 'POST',
+                headers: { 'content-type': 'application/json' },
+                body: JSON.stringify({ action: 'start' }),
+              }),
+            ),
+          );
+          expect(answer.status).toBe(409);
+          // T780 still refuses a Start under the mutation lease. It must not exhaust
+          // the task-key budget behind a worker waiting on relink's Git.
+          expect(await answer.json()).not.toMatchObject({ error: REPOSITORY_BUSY });
+          expect(
+            (await db.query.tasks.findFirst({ where: eq(schema.tasks.id, task!.id) }))!.status,
+          ).toBe('created');
+          await answeredWithin(1_000, writer);
+        }
+      } finally {
+        release();
+        await Promise.allSettled([relink, writer]);
+        h.gitHook = undefined;
+      }
+      expect((await relink).status).toBe(200);
+      if (kind === 'plain writer') expect((await stored())!.name).toBe('concurrent writer');
+    },
+    15_000,
+  );
+  it('upgrades the relink row while a deletion-order FOR UPDATE waiter holds the task key', async () => {
+    const root = await mkdtemp(path.join(tmpdir(), 'relink-delete-order-'));
+    roots.push(root);
+    await cp(checkoutFixture, root, { recursive: true });
+    await db
+      .update(schema.repositories)
+      .set({ localPath: root, remoteUrl: 'https://old.test/r' })
+      .where(eq(schema.repositories.id, repository));
+    let arrived!: () => void;
+    let release!: () => void;
+    const arrival = new Promise<void>((resolve) => {
+      arrived = resolve;
+    });
+    const resume = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    h.gitHook = async (args) => {
+      if (args.includes('--replace-all') && args.at(-1) === 'https://new.test/r') {
+        arrived();
+        await resume;
+      }
+    };
+    const relink = Promise.resolve(
+      app.request(`/repos/${repository}/remote`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ remoteUrl: 'https://new.test/r' }),
+      }),
+    );
+    let deleting: Promise<unknown> | undefined;
+    try {
+      await answeredWithin(5_000, arrival);
+      let pid = 0;
+      deleting = db.transaction(async (tx) => {
+        await tx.execute(sql`SET LOCAL lock_timeout = '2000ms'`);
+        const [backend] = await tx.execute<{ pid: number }>(sql`select pg_backend_pid() as pid`);
+        pid = backend!.pid;
+        await tx.execute(
+          sql`select pg_advisory_xact_lock(hashtextextended(${`onboarding-upgrade:${repository}`}, 0))`,
+        );
+        return tx
+          .select({ id: schema.repositories.id })
+          .from(schema.repositories)
+          .where(eq(schema.repositories.id, repository))
+          .for('update');
+      });
+      // Observe the server-side wait before allowing the KEY SHARE upgrade.
+      await expect
+        .poll(
+          async () =>
+            (
+              await db.execute(sql`
+        select 1 from pg_stat_activity where pid = ${pid} and wait_event_type = 'Lock'
+      `)
+            ).length,
+        )
+        .toBe(1);
+      release();
+      expect((await answeredWithin(5_000, relink)).status).toBe(200);
+      await answeredWithin(5_000, deleting);
+    } finally {
+      release();
+      await Promise.allSettled([relink, deleting]);
+      h.gitHook = undefined;
+    }
+  });
+  it.each(['omitted', 'branch', 'credential', 'remote', 'intent'] as const)(
+    'compares relink-owned columns and preserves concurrent %s changes',
+    async (kind) => {
+      const root = await mkdtemp(path.join(tmpdir(), 'relink-cas-'));
+      roots.push(root);
+      await cp(checkoutFixture, root, { recursive: true });
+      await db
+        .update(schema.repositories)
+        .set({ localPath: root, remoteUrl: 'https://old.test/r', branch: 'main' })
+        .where(eq(schema.repositories.id, repository));
+      const [cred] = await db
+        .insert(schema.repoCredentials)
+        .values({
+          userId: h.actor,
+          host: 'new.test',
+          label: 'concurrent',
+          usernameEncrypted: 'synthetic',
+          secretEncrypted: 'synthetic',
+          encryptedDek: 'synthetic',
+        })
+        .returning();
+      let arrived!: () => void;
+      let release!: () => void;
+      const arrival = new Promise<void>((resolve) => {
+        arrived = resolve;
+      });
+      const resume = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      h.gitHook = async (args) => {
+        if (args.includes('--replace-all') && args.at(-1) === 'https://new.test/r') {
+          arrived();
+          await resume;
+        }
+      };
+      const relink = Promise.resolve(
+        app.request(`/repos/${repository}/remote`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({
+            remoteUrl: 'https://new.test/r',
+            ...(kind === 'branch' ? { branch: 'requested' } : {}),
+            ...(kind === 'credential' ? { credentialsId: null } : {}),
+          }),
+        }),
+      );
+      try {
+        await answeredWithin(5_000, arrival);
+        await db.transaction(async (tx) => {
+          await tx.execute(sql`SET LOCAL lock_timeout = '300ms'`);
+          await tx
+            .update(schema.repositories)
+            .set({
+              name: 'concurrent',
+              ...(kind === 'omitted'
+                ? { branch: 'concurrent', credentialsSecretId: cred!.id }
+                : {}),
+              ...(kind === 'branch' ? { branch: 'concurrent' } : {}),
+              ...(kind === 'credential' ? { credentialsSecretId: cred!.id } : {}),
+              ...(kind === 'remote' ? { remoteUrl: 'https://concurrent.test/r' } : {}),
+              ...(kind === 'intent'
+                ? { remoteRelinkIntent: '00000000-0000-4000-8000-000000000516' }
+                : {}),
+            })
+            .where(eq(schema.repositories.id, repository));
+        });
+      } finally {
+        release();
+        await relink;
+        h.gitHook = undefined;
+      }
+      expect((await relink).status).toBe(kind === 'omitted' ? 200 : 409);
+      const current = (await stored())!;
+      expect(current.name).toBe('concurrent');
+      expect(current.branch).toBe(['omitted', 'branch'].includes(kind) ? 'concurrent' : 'main');
+      expect(current.credentialsSecretId).toBe(
+        ['omitted', 'credential'].includes(kind) ? cred!.id : null,
+      );
+      expect(current.remoteUrl).toBe(
+        kind === 'omitted'
+          ? 'https://new.test/r'
+          : kind === 'remote'
+            ? 'https://concurrent.test/r'
+            : 'https://old.test/r',
+      );
+      expect(await git(root, ['remote', 'get-url', 'origin'])).toBe(
+        kind === 'omitted' ? 'https://new.test/r' : 'https://old.test/r',
+      );
+      expect(current.remoteRelinkIntent).not.toBeNull();
+      if (kind === 'intent')
+        expect(current.remoteRelinkIntent).toBe('00000000-0000-4000-8000-000000000516');
+      const events = await audits(db);
+      expect(events).toHaveLength(kind === 'omitted' ? 1 : 0);
+      if (kind === 'omitted')
+        expect(events[0]!.metadata).toMatchObject({
+          fields: ['remoteUrl'],
+          credentialsChanged: false,
+          branchChanged: false,
+        });
+    },
+  );
   it('allows a task insert while a relink is held inside Git', async () => {
     const root = await mkdtemp(path.join(tmpdir(), 'remote-fk-'));
     roots.push(root);
@@ -569,6 +883,82 @@ describe.skipIf(!url)('Repository security settings commit with their audit, on 
       },
     ]);
   }, 30_000);
+  // PostgreSQL reads other uuid spellings too, so a relink addressed by one still reaches the row; its
+  // advisory key must match the one gate 4 takes from the database. One representative alternate here;
+  // the spelling matrix is unit-tested on `remoteRelinkKey` (database remote-relink-lock.test.ts).
+  it.each([
+    ['canonical', (id: string) => id],
+    ['uppercase unhyphenated', (id: string) => id.replaceAll('-', '').toUpperCase()],
+  ] as const)(
+    'bounds gate-4 origin writes behind a relink parked in Git (%s id)',
+    async (_, spell) => {
+      const root = await mkdtemp(path.join(tmpdir(), 'remote-gate4-'));
+      roots.push(root);
+      await cp(checkoutFixture, root, { recursive: true });
+      await git(root, ['remote', 'remove', 'origin']);
+      await db
+        .update(schema.repositories)
+        .set({ localPath: root, remoteUrl: null })
+        .where(eq(schema.repositories.id, repository));
+      h.lockTimeoutMs = 300;
+      let entered!: () => void;
+      let release!: () => void;
+      const reached = new Promise<void>((resolve) => {
+        entered = resolve;
+      });
+      const resume = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      h.gitHook = async (args) => {
+        if (args.includes('add') && args.at(-1) === 'https://relink.test/r') {
+          entered();
+          await resume;
+        }
+      };
+      const relink = Promise.resolve(
+        app.request(`/repos/${spell(repository)}/remote`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ remoteUrl: 'https://relink.test/r' }),
+        }),
+      );
+      let push: Promise<unknown> | undefined;
+      try {
+        await answeredWithin(5_000, reached);
+        push = gate4PushStep.apply({ db, userId: h.actor, logger } as unknown as StepContext, {
+          iteration: 0,
+          previousIterations: [],
+          detected: {
+            hasGit: true,
+            workspacePath: root,
+            branch: 'main',
+            hasOrigin: false,
+            originUrl: null,
+            recentCommits: '',
+            repositoryId: repository,
+            boundCredentialId: null,
+            credentials: [],
+          },
+          formValues: { push: true, remoteUrl: 'https://gate4.test/r' },
+        });
+        await expect(answeredWithin(5_000, push)).rejects.toThrow(
+          'Repository is busy. Retry this step in a moment.',
+        );
+        expect(h.gate4Ensure).not.toHaveBeenCalled();
+        expect(h.gate4Push).not.toHaveBeenCalled();
+        expect((await stored())!.remoteUrl).toBeNull();
+        expect(await audits(db)).toEqual([]);
+      } finally {
+        release();
+        await Promise.allSettled([relink, push]);
+        h.gitHook = undefined;
+      }
+      expect((await relink).status).toBe(200);
+      expect((await stored())!.remoteUrl).toBe('https://relink.test/r');
+      expect(await git(root, ['remote', 'get-url', 'origin'])).toBe('https://relink.test/r');
+    },
+    15_000,
+  );
   const sendSetting = (suffix: string, body: unknown, method = 'PATCH') =>
     app.request(`${suffix === 'exclusions' ? '/repos' : '/repositories'}/${repository}/${suffix}`, {
       method,
@@ -582,8 +972,12 @@ describe.skipIf(!url)('Repository security settings commit with their audit, on 
     cleanups: await db.select().from(schema.repoCleanups),
     outbox: await db.select().from(schema.projectStateOutbox),
   });
-  /** `send` is a plain writer of the repository row, sent while a relink holds that row inside git. */
-  const answeredBusyBehindRelink = async (send: () => Response | Promise<Response>) => {
+  /** Real Git is parked while a settings writer or deletion contends for the same row. */
+  const answeredBehindRelink = async (
+    send: () => Response | Promise<Response>,
+    expected = 200,
+    blockingWriter = false,
+  ) => {
     const root = await mkdtemp(path.join(tmpdir(), 'remote-held-'));
     roots.push(root);
     await git(root, ['init']);
@@ -612,15 +1006,42 @@ describe.skipIf(!url)('Repository security settings commit with their audit, on 
       }),
     );
     let writer: Promise<Response> | undefined;
+    let held: Promise<unknown> | undefined;
+    let unlock = () => {};
+    let preserved: Awaited<ReturnType<typeof stored>>;
     try {
       await vi.waitFor(() => expect(reached).toBe(true), { timeout: 15_000 });
+      if (blockingWriter) {
+        let acquired!: () => void;
+        const acquisition = new Promise<void>((resolve) => {
+          acquired = resolve;
+        });
+        const resumeWriter = new Promise<void>((resolve) => {
+          unlock = resolve;
+        });
+        held = db.transaction(async (tx) => {
+          await tx
+            .select({ id: schema.repositories.id })
+            .from(schema.repositories)
+            .where(eq(schema.repositories.id, repository))
+            .for('no key update');
+          acquired();
+          await resumeWriter;
+        });
+        await acquisition;
+      }
       const before = await writtenRows();
       writer = Promise.resolve(send());
       const answer = await answeredWithin(5_000, writer);
-      expect(answer.status).toBe(409);
-      expect(await answer.json()).toEqual({ error: REPOSITORY_BUSY, code: null });
-      expect(await writtenRows()).toEqual(before);
+      expect(answer.status).toBe(expected);
+      if (expected === 409) {
+        expect(await answer.json()).toEqual({ error: REPOSITORY_BUSY, code: null });
+        expect(await writtenRows()).toEqual(before);
+      }
+      preserved = await stored();
     } finally {
+      unlock();
+      await held;
       release();
       // A failing writer assertion must still wait for the released relink to commit
       // before afterEach deletes the actor and that actor's audit rows.
@@ -628,30 +1049,39 @@ describe.skipIf(!url)('Repository security settings commit with their audit, on 
       h.gitHook = undefined;
     }
     expect((await relink).status).toBe(200);
-    expect((await audits(db)).map((row) => row.action)).toEqual(['repository.remote.update']);
+    expect(
+      (await audits(db)).filter((row) => row.action === 'repository.remote.update'),
+    ).toHaveLength(1);
+    for (const field of [
+      'scopeExcludeGlobs',
+      'secretMaskEnabled',
+      'ragEmbedDegradedAt',
+      'ragEmbedDegradedReason',
+      'integrationsRestricted',
+    ] as const)
+      expect((await stored())![field]).toEqual(preserved![field]);
   };
   it(
-    'answers an exclusions save 409 busy within the lock bound while a relink holds the row',
-    () =>
-      answeredBusyBehindRelink(() => sendSetting('exclusions', { scopeExcludeGlobs: ['queued'] })),
+    'allows an exclusions save while relink Git holds KEY SHARE',
+    () => answeredBehindRelink(() => sendSetting('exclusions', { scopeExcludeGlobs: ['queued'] })),
     30_000,
   );
   it(
-    'answers a tooling security save 409 busy within the lock bound while a relink holds the row',
-    () => answeredBusyBehindRelink(() => sendSetting('tooling', { secretMaskEnabled: false })),
+    'allows a tooling security save while relink Git holds KEY SHARE',
+    () => answeredBehindRelink(() => sendSetting('tooling', { secretMaskEnabled: false })),
     30_000,
   );
   it(
-    'answers a tooling rebuild 409 busy before its pending flag or any other write behind a held relink',
+    'allows the bounded tooling rebuild pending flag while relink Git holds KEY SHARE',
     () =>
-      answeredBusyBehindRelink(() =>
+      answeredBehindRelink(() =>
         sendSetting('tooling', {
           ragEmbedAction: 'rebuild_index',
         }),
       ),
     30_000,
   );
-  it('keeps a committed retry answer while a relink holds the row across its second probe', async () => {
+  it('restores degradation after a committed retry while relink Git holds KEY SHARE', async () => {
     const root = await mkdtemp(path.join(tmpdir(), 'remote-retry-'));
     roots.push(root);
     await git(root, ['init']);
@@ -709,11 +1139,11 @@ describe.skipIf(!url)('Repository security settings commit with their audit, on 
     try {
       const answer = await answeredWithin(5_000, save);
       expect(answer.status).toBe(200);
-      expect(await answer.json()).toMatchObject({ degradationKept: false });
+      expect(await answer.json()).toMatchObject({ degradationKept: true });
       expect(await stored()).toMatchObject({
         secretMaskEnabled: true,
-        ragEmbedDegradedAt: null,
-        ragEmbedDegradedReason: null,
+        ragEmbedDegradedAt: degradedAt,
+        ragEmbedDegradedReason: 'pending fallback rows',
       });
       expect(probes).toBe(2);
       expect(relinkArrived).toBe(true);
@@ -721,7 +1151,7 @@ describe.skipIf(!url)('Repository security settings commit with their audit, on 
         warnings.mock.calls.some(
           (call) => call[1] === 'retry degraded flag restore deferred by repository lock',
         ),
-      ).toBe(true);
+      ).toBe(false);
     } finally {
       release();
       await Promise.all([save, relink]);
@@ -828,52 +1258,57 @@ describe.skipIf(!url)('Repository security settings commit with their audit, on 
     }
   });
   it(
-    'answers an integrations allow-list save 409 busy within the lock bound while a relink holds the row',
+    'allows an integrations allow-list save while relink Git holds KEY SHARE',
     () =>
-      answeredBusyBehindRelink(() =>
+      answeredBehindRelink(() =>
         sendSetting('integrations', { restricted: true, connectionIds: [connection] }, 'PUT'),
       ),
     30_000,
   );
   it(
-    'bounds both concurrent allow-list PUTs behind a held relink, including the advisory waiter',
+    'bounds both concurrent allow-list PUTs behind a row writer, including the advisory waiter',
     () =>
-      answeredBusyBehindRelink(async () => {
-        // Keep the first PUT on the row longer than the second PUT's advisory budget.
-        // Equal deadlines can let the second win the key at the exact timeout turn.
-        h.lockTimeoutMs = 2_000;
-        const body = { restricted: true, connectionIds: [connection] };
-        const first = Promise.resolve(sendSetting('integrations', body, 'PUT'));
-        let second: Promise<Response> | undefined;
-        try {
-          await expect
-            .poll(
-              async () =>
-                (
-                  await db.execute(sql`
+      answeredBehindRelink(
+        async () => {
+          // Keep the first PUT on the row longer than the second PUT's advisory budget.
+          // Equal deadlines can let the second win the key at the exact timeout turn.
+          h.lockTimeoutMs = 2_000;
+          const body = { restricted: true, connectionIds: [connection] };
+          const first = Promise.resolve(sendSetting('integrations', body, 'PUT'));
+          let second: Promise<Response> | undefined;
+          try {
+            await expect
+              .poll(
+                async () =>
+                  (
+                    await db.execute(sql`
           select 1 from pg_stat_activity a join pg_locks l on l.pid = a.pid
           where a.datname = current_database() and not l.granted
             and a.query like 'select %"repositories"%'
         `)
-                ).length,
-              { timeout: 3_000 },
-            )
-            .toBeGreaterThan(0);
-          h.lockTimeoutMs = 300;
-          second = Promise.resolve(sendSetting('integrations', body, 'PUT'));
-          const answer = await answeredWithin(1_000, second);
-          expect(answer.status).toBe(409);
-          expect(await answer.json()).toEqual({ error: REPOSITORY_BUSY, code: null });
-          return await answeredWithin(3_000, first);
-        } finally {
-          await Promise.all([first, second]);
-        }
-      }),
+                  ).length,
+                { timeout: 3_000 },
+              )
+              .toBeGreaterThan(0);
+            h.lockTimeoutMs = 300;
+            second = Promise.resolve(sendSetting('integrations', body, 'PUT'));
+            const answer = await answeredWithin(1_000, second);
+            expect(answer.status).toBe(409);
+            expect(await answer.json()).toEqual({ error: REPOSITORY_BUSY, code: null });
+            return await answeredWithin(3_000, first);
+          } finally {
+            await Promise.all([first, second]);
+          }
+        },
+        409,
+        true,
+      ),
     30_000,
   );
   it(
     'answers a repository delete 409 busy within the lock bound while a relink holds the row',
-    () => answeredBusyBehindRelink(() => app.request(`/repos/${repository}`, { method: 'DELETE' })),
+    () =>
+      answeredBehindRelink(() => app.request(`/repos/${repository}`, { method: 'DELETE' }), 409),
     30_000,
   );
   it('no-op tooling saves and quality knobs write no security row', async () => {

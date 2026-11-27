@@ -80,3 +80,4 @@ export {
 } from './repository-task-lock.js';
 
 export { withSettledTransaction } from './settled-transaction.js';
+export { remoteRelinkKey } from './remote-relink-lock.js';

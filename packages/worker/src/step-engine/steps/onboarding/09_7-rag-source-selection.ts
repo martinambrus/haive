@@ -223,7 +223,7 @@ export const ragSourceSelectionStep: StepDefinition<
           .select({ scopeExcludeGlobs: schema.repositories.scopeExcludeGlobs })
           .from(schema.repositories)
           .where(eq(schema.repositories.id, repositoryId))
-          .for('update');
+          .for('no key update');
         if (!stored) throw new Error('Repository no longer exists');
         auditEvents.push(
           ...(await auditRepositorySettings(tx, {
