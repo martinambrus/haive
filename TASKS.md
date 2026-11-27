@@ -159,7 +159,7 @@ Low unless marked. Code in `worker/src/project-state/refresh.ts`, `worker/src/qu
 
 ### T604 · docs · document the 5 s start-admission bound against a large claim ledger
 
-status: open · kind: docs · found: F1 (#318) review 2026-11-11 · priority: P4
+status: done 2026-11-27, merged #1358 (`worker-restarts.md` task-start admission paragraph) · kind: docs · found: F1 (#318) review 2026-11-11 · priority: P4
 DECIDED by the owner 2026-11-12: accept the current bound and document it (no publication protocol; T605 closed). A task start waits at most 5 s for the repository task lock and row admission, then answers 409 busy (`repository-task-lock.ts`). The worker project-state writer (`worker/src/project-state/write.ts:747`) holds that lock across preparation and publication, MEASURED 844-2,072 ms at 512 claim files, so a repository near the 4,096-entry cap (`shared/src/project-state/limits.ts`) can answer busy to routine starts while a write runs; retrying the start is the remedy. Document it in the topic file that covers task starts.
 
 ### T607 · FNF[a11y-sweep-2] · hand-faked React hooks in web tests (+1)
