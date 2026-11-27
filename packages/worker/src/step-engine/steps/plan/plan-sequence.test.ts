@@ -392,6 +392,15 @@ describe('foldSequenceResults', () => {
     vi.mocked(applyAgentPatch).mockReset();
   });
 
+  it('propagates repository deletion without a failed-apply stamp', async () => {
+    const gone = new PlanPatchError('repository_gone', 'gone');
+    vi.mocked(applyAgentPatch).mockRejectedValue(gone);
+    const { db, stamps } = fakeDb();
+    await expect(foldSequenceResults(ctx(db), 'r', [agentReply(ORDER)])).rejects.toBe(gone);
+    expect(applyAgentPatch).toHaveBeenCalledTimes(1);
+    expect(stamps).toEqual([]);
+  });
+
   it('retries a busy ordering fold without discarding its reply', async () => {
     vi.useFakeTimers();
     try {

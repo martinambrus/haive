@@ -1,3 +1,4 @@
+import { onboardingPlanBuildStep } from '../onboarding/10_8-plan-build.js';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { planBuildStep } from './01-plan-build.js';
 import { CODE_LINKS_DROPPED } from './_plan-events.js';
@@ -88,8 +89,12 @@ describe('plan build wave re-roll', () => {
     vi.mocked(applyAgentPatch).mockReset();
   });
 
-  const foldOneAgentWave = (ops: unknown[] = agent.output.ops, mode = 'from_repo') =>
-    planBuildStep
+  const foldOneAgentWave = (
+    ops: unknown[] = agent.output.ops,
+    mode = 'from_repo',
+    step = planBuildStep,
+  ) =>
+    step
       .apply(
         {
           db,
@@ -108,6 +113,17 @@ describe('plan build wave re-roll', () => {
         } as never,
       )
       .catch((err: unknown) => err);
+
+  it.each([planBuildStep, onboardingPlanBuildStep])(
+    '$id propagates repository deletion without re-rolling or stamping its reply',
+    async (step) => {
+      const gone = new PlanPatchError('repository_gone', 'gone');
+      vi.mocked(applyAgentPatch).mockRejectedValue(gone);
+      expect(await foldOneAgentWave(undefined, 'from_repo', step)).toBe(gone);
+      expect(applyAgentPatch).toHaveBeenCalledTimes(1);
+      expect(writes.stamps).toBe(0);
+    },
+  );
 
   it('retries an unversioned fold after a conflict and re-reads its derived input', async () => {
     vi.mocked(ensureSemanticExpansionResolution).mockClear();

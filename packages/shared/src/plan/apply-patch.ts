@@ -1,6 +1,12 @@
 import { randomUUID } from 'node:crypto';
 import { and, asc, eq, inArray, isNull, sql } from 'drizzle-orm';
-import { schema, type Database } from '@haive/database';
+import {
+  boundedLockWait,
+  isLockNotAvailable,
+  LATE_LOCK_WAIT_MS,
+  schema,
+  type Database,
+} from '@haive/database';
 import {
   planCodeLinkSchema,
   planPatchSchema,
@@ -206,55 +212,33 @@ export async function markPlanMirrorDirty(tx: DbOrTx, repositoryId: string): Pro
 }
 
 /**
- * Take the repository row FOR KEY SHARE, which is the lock a child INSERT's foreign key takes
- * anyway, but before the first plan row instead of after it.
- *
- * A repository delete holds that row FOR UPDATE and then cascades into every plan table, so it
- * waits for each plan row a patch holds. A patch that holds a node row and only then inserts a
- * child (a node, an edge, a code link, the first mirror row) waits for the repository row in turn:
- * a cycle (40P01). Taken first, the patch and the delete exclude each other for the whole of both
- * transactions, and a patch that loses finds no repository: `repository_gone`, a kind of its own
- * because a caller that re-rolls a refused patch must not re-roll this one. KEY SHARE conflicts
- * with nothing but FOR UPDATE and DELETE, so patches do not wait for each other.
+ * Exclude repository deletion before taking ANY plan row, including update-only writes.
+ * Domain advisory locks precede this row; plan/conflict/outbox rows follow it.
+ * A mining fold already holds its claim, while onboarding Retry takes R before that claim:
+ * bound this reverse-tier wait by the shared late-lock policy, then roll the fold back.
+ * KEY SHARE remains compatible with other plan writers and project-state NO KEY UPDATE.
  */
-async function lockRepositoryForPlanWrite(tx: DbOrTx, repositoryId: string): Promise<void> {
-  const [repository] = await tx
-    .select({ id: schema.repositories.id })
-    .from(schema.repositories)
-    .where(eq(schema.repositories.id, repositoryId))
-    .for('key share');
+export async function lockRepositoryForPlanWrite(tx: PlanPatchTx, repositoryId: string) {
+  let repository;
+  try {
+    [repository] = await boundedLockWait(
+      tx,
+      () =>
+        tx
+          .select({ id: schema.repositories.id, userId: schema.repositories.userId })
+          .from(schema.repositories)
+          .where(eq(schema.repositories.id, repositoryId))
+          .for('key share'),
+      LATE_LOCK_WAIT_MS,
+    );
+  } catch (err) {
+    if (!isLockNotAvailable(err)) throw err;
+    throw new PlanPatchError('busy', 'The repository is busy. Try again.');
+  }
   if (!repository) {
     throw new PlanPatchError('repository_gone', `repository ${repositoryId} not found`);
   }
-}
-
-/**
- * Whether a patch can insert a row that references the repository: a node it creates (a ref that
- * is neither a uuid nor an alias), an edge, a code link, or the repository's first mirror row.
- * Conservative: a link that already exists still counts. An update-only patch of a plan whose
- * mirror row exists inserts nothing and takes no repository lock, so an interactive edit never
- * waits on a repository delete or an upgrade admission (FOR UPDATE). A project-state write holds
- * the row only FOR NO KEY UPDATE, which an inserting patch's KEY SHARE does not wait for.
- */
-async function mayInsertPlanRows(
-  tx: DbOrTx,
-  ops: PlanPatch['ops'],
-  refs: ReadonlyMap<string, string>,
-  repositoryId: string,
-): Promise<boolean> {
-  const inserts = ops.some(
-    (op) =>
-      op.op === 'link' ||
-      (op.op === 'upsert' &&
-        ((op.codeLinks?.length ?? 0) > 0 || !(refs.has(op.nodeRef) || isPlanNodeId(op.nodeRef)))),
-  );
-  if (inserts) return true;
-  const [mirror] = await tx
-    .select({ repositoryId: schema.planMirrorState.repositoryId })
-    .from(schema.planMirrorState)
-    .where(eq(schema.planMirrorState.repositoryId, repositoryId))
-    .limit(1);
-  return !mirror;
+  return repository;
 }
 
 /**
@@ -906,12 +890,9 @@ async function applyOps(
   // Refs are normalised FIRST, once, feeding both the drop pre-flight and the op
   // loop below. Normalising in only one of them would make an op's survival
   // depend on which of the two looked at it.
-  // Before the drop pre-flight and the first write, from the whole patch: an agent patch whose
-  // every create is dropped for a repository that is gone is `repository_gone`, not an empty
-  // success.
-  if (await mayInsertPlanRows(tx, patchOps, refs, repositoryId)) {
-    await lockRepositoryForPlanWrite(tx, repositoryId);
-  }
+  // Before reference resolution and every plan write: a lost repository is
+  // repository_gone even when an agent's every op would otherwise be dropped.
+  await lockRepositoryForPlanWrite(tx, repositoryId);
   const ops =
     opts.onUnresolvableRef === 'drop'
       ? await dropUnresolvableOps(tx, patchOps, repositoryId, refs, result.dropped)

@@ -854,6 +854,13 @@ takes `rowsHeld` there) and sweep those rows' runs and agent rows with that same
 (`writeLoginHint`) and a Stop holds the runs it ended and then wants the step rows, and a FOR UPDATE on a row
 held FOR NO KEY UPDATE is an upgrade that conflicts with that run insert.
 
+Plan folds also bound their repository KEY SHARE by `LATE_LOCK_WAIT_MS`: they already
+hold a mining claim, while onboarding/upgrade Retry and revival hold the repository FOR UPDATE
+before sweeping agent rows. A timeout rolls the entire claim-and-patch transaction back and
+worker retry backs off after releasing it. Every multi-row plan writer takes repository KEY
+SHARE before plan rows, excluding the repository delete's cascade; the complete caller order
+and deterministic PostgreSQL controls are in [Plan canvas](plan-canvas.md#plan-writes-and-repository-deletion-t483).
+
 The late sweeps use the database's `boundedLockWait` with the shared, injectable
 `LATE_LOCK_WAIT_MS` (250 ms), including `rowsActivatedMeanwhile`, held guard-reset
 additions in both reset helpers, and retained Resume rows under an existing batch.

@@ -29,6 +29,7 @@ import {
   PlanPatchError,
   loadPlanEdges,
   loadPlanNodes,
+  lockRepositoryForPlanWrite,
   markPlanMirrorDirty,
   renderPlanMarkdownFrom,
   planNodePath,
@@ -406,6 +407,7 @@ async function writePlanMirrorLocked(
   repoPath: string,
   changes?: PlanMirrorChanges,
 ): Promise<{ written: string[]; failed?: unknown }> {
+  await lockRepositoryForPlanWrite(db, repositoryId);
   let state = await loadMirrorState(db, repositoryId);
   if (!state) {
     await db
@@ -692,6 +694,7 @@ export async function importPlanMirror(
       if (!(await admitWatchedRepository(tx, repositoryId)))
         throw new PlanMirrorHeldError(HELD_MOVED, 'checkout_changed');
     }
+    await lockRepositoryForPlanWrite(tx, repositoryId);
     await tx.insert(schema.planNodes).values(
       ordered.map((n) => ({
         id: n.id,
@@ -1079,6 +1082,7 @@ async function reconcilePlanLocked(
   opts: { requireStamp?: boolean; expectedCheckout?: NamedCheckout },
   beforeApply: () => Promise<void>,
 ): Promise<PlanPullOutcome> {
+  await lockRepositoryForPlanWrite(tx, repositoryId);
   const [state] = await tx
     .select({
       syncedHash: schema.planMirrorState.syncedHash,

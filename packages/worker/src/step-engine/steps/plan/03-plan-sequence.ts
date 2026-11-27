@@ -728,7 +728,8 @@ export async function foldSequenceResults(
       applied += outcome.updated.length;
     } catch (err) {
       // Busy retries are exhausted; fail this pass before classifying the reply as unusable.
-      if (err instanceof PlanPatchError && err.kind === 'busy') throw err;
+      if (err instanceof PlanPatchError && (err.kind === 'busy' || err.kind === 'repository_gone'))
+        throw err;
       const message = err instanceof Error ? err.message : String(err);
       ctx.logger.warn({ err, agentId: result.agentId }, 'plan sequencing patch failed');
       await stampMiningError(ctx, result.agentId, `${APPLY_FAILURE_PREFIX} ${message}`);

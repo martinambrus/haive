@@ -21,7 +21,7 @@ import {
   rewriteFileIfNoFollow,
   writeFileNoFollow,
 } from '@haive/shared/fs-safe';
-import { markPlanMirrorDirty } from '@haive/shared/plan';
+import { lockRepositoryForPlanWrite, markPlanMirrorDirty } from '@haive/shared/plan';
 import {
   PROJECT_STATE_DIR,
   PROJECT_STATE_LIMITS,
@@ -644,8 +644,14 @@ const planGuard = (
 ): RestoreGuard => ({
   repositoryId,
   owns: (path) => !path.startsWith(STATE_PREFIX),
-  lock: guardLock(repositoryId, fence, (tx) => lockPlanMirror(tx, repositoryId)),
-  judgeLock: (tx) => lockPlanMirror(tx, repositoryId),
+  lock: guardLock(repositoryId, fence, async (tx) => {
+    await lockPlanMirror(tx, repositoryId);
+    await lockRepositoryForPlanWrite(tx, repositoryId);
+  }),
+  judgeLock: async (tx) => {
+    await lockPlanMirror(tx, repositoryId);
+    await lockRepositoryForPlanWrite(tx, repositoryId);
+  },
   offender: (tx) => planOffender(tx, repositoryId, repoPath, plan),
   mark: (tx) => markPlanMirrorDirty(tx, repositoryId),
   generation: async (tx) =>

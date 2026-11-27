@@ -796,7 +796,9 @@ export async function foldCoverageResults(
       // is stamped below so a later wave asks it again with fresh versions.
       if (
         err instanceof PlanPatchError &&
-        (err.kind === 'busy' || (err.kind === 'conflict' && !hasCallerPlanVersion(patch.ops)))
+        (err.kind === 'repository_gone' ||
+          err.kind === 'busy' ||
+          (err.kind === 'conflict' && !hasCallerPlanVersion(patch.ops)))
       )
         throw err;
       hadFailure = true;

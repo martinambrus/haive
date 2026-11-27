@@ -139,6 +139,8 @@ const db = {
   select: () => ({
     from: (table: unknown) => ({
       where: () => ({
+        for: async () =>
+          table === schema.repositories ? [{ id: 'r1', userId: 'u1', ...row }] : [],
         limit: async () =>
           table === schema.planNodes
             ? [{ id: 'node' }]
