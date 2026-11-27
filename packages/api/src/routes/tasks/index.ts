@@ -150,7 +150,7 @@ import {
   findQueuedInvocationStepIds,
   loadFinishedRunsRevision,
   loadComposedProviderSets,
-  clearCancelledTaskPause,
+  auditCancelledTaskPause,
   liftReadPause,
   loadTaskTypeLabels,
   recordAdminResume,
@@ -1556,9 +1556,8 @@ taskRoutes.post('/:id/action', async (c) => {
       // or another cancel may have ended the task meanwhile, so it is decided again under the locks.
       const result = await db.transaction((tx) => cancelTaskIfOpen(tx, id, { by: userId }));
       if (!result.cancelled) return c.json({ ok: true, status: result.status });
-      // Cancel ends the pause as well. Step actions refuse cancelled tasks through
-      // unendedTask in steps.ts; clearing this marker records that no hold remains.
-      await clearCancelledTaskPause(db, id, userId, task.userId);
+      // The cancel transaction ended the pause; retain the administrator-resume audit.
+      if (result.clearedPause) await auditCancelledTaskPause(db, id, userId, task.userId);
       await enqueueCancelJob(id, userId);
       return c.json({ ok: true, status: 'cancelled' });
     }

@@ -891,7 +891,7 @@ export async function abandonCancelledTeardowns(
       if (await abandonTeardown(db, t.taskId, reason)) abandoned++;
     } catch (err) {
       log.error(
-        { err, taskId: t.taskId },
+        { err, taskId: t.taskId, code: 'cancel_abandon_failed' },
         'the teardown of a cancelled task could not be abandoned',
       );
     }

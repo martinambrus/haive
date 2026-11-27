@@ -1,3 +1,6 @@
+import { mkdtemp, mkdir, rm, readdir, readFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
 import { and, eq, sql } from 'drizzle-orm';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -31,6 +34,9 @@ vi.mock('../src/queues.js', () => {
     getUsagePollQueue: queue,
   };
 });
+vi.mock('../../worker/src/sandbox/sandbox-kill.js', () => ({
+  listCliSandboxesForTask: async () => [],
+}));
 vi.mock('../src/lib/sandbox-kill.js', () => ({
   killTaskSandboxes: async (taskId: string) => {
     h.killed.push(taskId);
@@ -62,12 +68,17 @@ vi.mock('@haive/shared', async (importOriginal) => {
 import { Hono } from 'hono';
 import { createDatabase, hasPgCode, schema, type Database } from '@haive/database';
 import { TASK_JOB_NAMES } from '@haive/shared';
+import { planRoutes } from '../src/routes/plan.js';
+import { repoRoutes } from '../src/routes/repos.js';
+import { cancelTaskIfOpen } from '../src/lib/cancel-task.js';
 import { taskRoutes } from '../src/routes/tasks/index.js';
 import { errorHandler } from '../src/middleware/error-handler.js';
 import type { AppEnv } from '../src/context.js';
 
 const app = new Hono<AppEnv>();
 app.route('/tasks', taskRoutes);
+app.route('/repositories', planRoutes);
+app.route('/repos', repoRoutes);
 app.onError(errorHandler);
 
 type Tx = Parameters<Parameters<Database['transaction']>[0]>[0];
@@ -320,6 +331,86 @@ describe.skipIf(!url)('a task cancel or step abort beside another writer, on Pos
       .update(schema.tasks)
       .set({ status: 'completed', completedAt: new Date(), updatedAt: new Date() })
       .where(eq(schema.tasks.id, taskId));
+
+  it.each(['cancel', 'abort', 'discard', 'repo-delete'] as const)(
+    'M1: %s cancels a paused task without ever publishing cancelled plus paused',
+    async (action) => {
+      const { taskId } = await seedTask('running', ['failed'], {
+        pausedAt: new Date(),
+        type: action === 'discard' ? 'plan_merge' : 'workflow',
+      });
+      // A fixture-only constraint observes the cancellation UPDATE itself, before any
+      // post-commit helper could clear the pause. Removed even when the route fails.
+      await db.execute(sql`alter table tasks add constraint t309_cancel_pause_control
+        check (status <> 'cancelled' or paused_at is null) not valid`);
+      try {
+        const res = await app.request(
+          action === 'discard'
+            ? `/repositories/${repositoryId}/plan/merge?taskId=${taskId}`
+            : action === 'repo-delete'
+              ? `/repos/${repositoryId}`
+              : action === 'abort'
+                ? `/tasks/${taskId}/steps/${STEP}/action`
+                : `/tasks/${taskId}/action`,
+          action === 'discard' || action === 'repo-delete'
+            ? { method: 'DELETE' }
+            : {
+                method: 'POST',
+                headers: { 'content-type': 'application/json' },
+                body: JSON.stringify({ action: action === 'abort' ? 'abort' : 'cancel' }),
+              },
+        );
+        expect(res.status).toBe(200);
+        expect(await taskStatus(taskId)).toBe('cancelled');
+        expect(await pausedAtOf(taskId)).toBeNull();
+        expect(cancelJobs().map((j) => j.payload)).toMatchObject([{ taskId }]);
+        if (action === 'abort')
+          expect(await eventsOf(taskId)).toEqual(
+            expect.arrayContaining([expect.objectContaining({ eventType: 'step.abort' })]),
+          );
+      } finally {
+        await db.execute(sql`alter table tasks drop constraint t309_cancel_pause_control`);
+      }
+    },
+  );
+
+  it('M1: a cancelled paused task can have its scratch workspace reaped', async () => {
+    const { taskId } = await seedTask('running', ['failed'], { pausedAt: new Date() });
+    const root = await mkdtemp(path.join(tmpdir(), 't309-scratch-'));
+    vi.stubEnv('REPO_STORAGE_ROOT', root);
+    try {
+      const scratch = path.join(root, USER, '_scratch', taskId);
+      await mkdir(scratch, { recursive: true });
+      // Runtime cross-package test seam; keep worker source out of the API's tsc root.
+      const scratchModule = new URL('../../worker/src/repo/scratch-workspace.ts', import.meta.url)
+        .href;
+      const { cleanupTaskScratchWorkspace } = (await import(scratchModule)) as {
+        cleanupTaskScratchWorkspace(db: Database, taskId: string): Promise<boolean>;
+      };
+      expect(await cleanupTaskScratchWorkspace(db, taskId)).toBe(false);
+      await db.transaction((tx) => cancelTaskIfOpen(tx, taskId, { by: USER }));
+      expect(await cleanupTaskScratchWorkspace(db, taskId)).toBe(true);
+      expect(await readdir(path.dirname(scratch))).toEqual([]);
+    } finally {
+      vi.unstubAllEnvs();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('M1: the pause repair migration is idempotent and retains failed and live holds', async () => {
+    const cancelled = await seedTask('cancelled', ['failed'], { pausedAt: new Date() });
+    const failed = await seedTask('failed', ['failed'], { pausedAt: new Date() });
+    const live = await seedTask('running', ['pending'], { pausedAt: new Date() });
+    const migration = await readFile(
+      new URL('../../database/migrations/0253_clear_cancelled_task_pause.sql', import.meta.url),
+      'utf8',
+    );
+    await db.execute(sql.raw(migration));
+    await db.execute(sql.raw(migration));
+    expect(await pausedAtOf(cancelled.taskId)).toBeNull();
+    expect(await pausedAtOf(failed.taskId)).toBeInstanceOf(Date);
+    expect(await pausedAtOf(live.taskId)).toBeInstanceOf(Date);
+  });
 
   it('leaves a task that completed while the cancel waited completed, with no event and no job', async () => {
     const { taskId, stepRowIds } = await seedTask('running', ['running']);

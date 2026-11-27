@@ -899,7 +899,7 @@ export type TaskCancelOutcome = 'cancelled' | 'already_cancelled' | 'completed' 
 export async function markTaskCancelled(db: Database, taskId: string): Promise<TaskCancelOutcome> {
   return db.transaction(async (tx) => {
     const [task] = await tx
-      .select({ status: schema.tasks.status })
+      .select({ status: schema.tasks.status, pausedAt: schema.tasks.pausedAt })
       .from(schema.tasks)
       .where(eq(schema.tasks.id, taskId))
       .for('no key update');
@@ -911,6 +911,7 @@ export async function markTaskCancelled(db: Database, taskId: string): Promise<T
         .update(schema.tasks)
         .set({
           status: 'cancelled',
+          pausedAt: null,
           completedAt: now,
           // Same epoch bump the api's cancelTaskRow makes, for a cancel that starts worker-side
           // (abort): it invalidates every advance-step job still queued for this task, so no park
@@ -919,6 +920,10 @@ export async function markTaskCancelled(db: Database, taskId: string): Promise<T
           updatedAt: now,
         })
         .where(eq(schema.tasks.id, taskId));
+    }
+    // Also heal an older API's cancelled row without restamping completion or cooldown.
+    if (task.status === 'cancelled' && task.pausedAt) {
+      await tx.update(schema.tasks).set({ pausedAt: null }).where(eq(schema.tasks.id, taskId));
     }
     await appendEvent(tx, taskId, null, 'task.cancelled', { source: 'worker' });
     return task.status === 'cancelled' ? 'already_cancelled' : 'cancelled';

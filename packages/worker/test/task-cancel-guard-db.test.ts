@@ -20,7 +20,12 @@ import {
 import { TASK_JOB_NAMES } from '@haive/shared';
 import { processTaskJob, setContainerCleanupRunner } from '../src/queues/task-queue.js';
 
-import { abandonCancelledTeardowns, CANCEL_REDRIVE_MAX } from '../src/queues/stalled-redrive.js';
+import {
+  abandonCancelledTeardowns,
+  redriveCancelledTasks,
+  CANCEL_REDRIVE_MAX,
+  CANCEL_REDRIVE_LOOKBACK_MS,
+} from '../src/queues/stalled-redrive.js';
 
 const url = process.env.WORKER_TASK_CANCEL_GUARD_TEST_URL;
 if (url && !new URL(url).pathname.startsWith('/worker_task_cancel_guard_test'))
@@ -787,6 +792,145 @@ describe.skipIf(!url)(
           .from(schema.mergeDirClaims)
           .where(eq(schema.mergeDirClaims.taskId, taskId)),
       ).toHaveLength(1);
+    });
+
+    it.each(['running', 'cancelled'] as const)(
+      'M1: worker cancellation clears a %s task pause',
+      async (status) => {
+        const taskId = await seedTask(status, {
+          pausedAt: T0,
+          completedAt: status === 'cancelled' ? T0 : null,
+        });
+        await runCancel(taskId);
+        const task = await db.query.tasks.findFirst({ where: eq(schema.tasks.id, taskId) });
+        expect(task).toMatchObject({ status: 'cancelled', pausedAt: null });
+        if (status === 'cancelled')
+          expect(task).toMatchObject({ completedAt: T0, updatedAt: T0, orchestrationEpoch: EPOCH });
+      },
+    );
+
+    it('L2/member 8: a throw in markTaskCancelled leaves a cancelled task for re-drive', async () => {
+      const taskId = await seedTask('cancelled', { completedAt: T0 });
+      await db
+        .insert(schema.taskEvents)
+        .values({ taskId, eventType: 'task.cancelled', createdAt: overdue() });
+      await db.execute(sql`create function t309_refuse_cancel_event() returns trigger language plpgsql as $$
+        begin
+          if new.event_type = 'task.cancelled' then raise sqlstate '40001'; end if;
+          return new;
+        end $$`);
+      await db.execute(sql`create trigger t309_refuse_cancel_event before insert on task_events
+        for each row execute function t309_refuse_cancel_event()`);
+      try {
+        await expect(runCancel(taskId)).rejects.toSatisfy((err: unknown) =>
+          hasPgCode(err, '40001'),
+        );
+      } finally {
+        await db.execute(sql`drop trigger t309_refuse_cancel_event on task_events`);
+        await db.execute(sql`drop function t309_refuse_cancel_event()`);
+      }
+      expect((await taskView(taskId)).status).toBe('cancelled');
+      expect(await eventsOfType(taskId, 'task.failed')).toEqual([]);
+      expect(await eventsOfType(taskId, 'task.cancel_finished')).toEqual([]);
+      const queued: string[] = [];
+      expect(
+        await redriveCancelledTasks(
+          db,
+          {
+            queuedCancelTaskIds: async () => new Set(),
+            enqueueCancel: async (id) => {
+              queued.push(id);
+            },
+          },
+          { staleMs },
+        ),
+      ).toBe(1);
+      expect(queued).toEqual([taskId]);
+      await runCancel(taskId);
+      expect(await eventsOfType(taskId, 'task.cancel_finished')).toHaveLength(1);
+    });
+
+    it('L2: an unreadable queue or a queued CANCEL never restamps the task', async () => {
+      const taskId = await capped('dag');
+      const before = await taskView(taskId);
+      expect(
+        await abandonCancelledTeardowns(db, { queuedCancelTaskIds: async () => null }, { staleMs }),
+      ).toBe(0);
+      expect(await taskView(taskId)).toEqual(before);
+      expect(await sweep([taskId])).toBe(0);
+      expect(await taskView(taskId)).toEqual(before);
+      expect(seamsOf(taskId)).toEqual([]);
+    });
+
+    it('L2: a competing restamp between selection and CAS prevents teardown', async () => {
+      const taskId = await capped('dag');
+      const stamp = new Date();
+      expect(
+        await abandonCancelledTeardowns(
+          db,
+          {
+            queuedCancelTaskIds: async () => {
+              await peer
+                .update(schema.tasks)
+                .set({ updatedAt: stamp })
+                .where(eq(schema.tasks.id, taskId));
+              return new Set();
+            },
+          },
+          { staleMs },
+        ),
+      ).toBe(0);
+      expect((await taskView(taskId)).updatedAt).toEqual(stamp);
+      expect(seamsOf(taskId)).toEqual([]);
+      expect(await eventsOfType(taskId, 'task.cancel_finished')).toEqual([]);
+    });
+
+    it('L2: cooldown and lookback boundaries admit only eligible attempts', async () => {
+      const taskId = await capped('dag');
+      await db
+        .update(schema.tasks)
+        .set({ updatedAt: new Date(Date.now() - staleMs + 60_000) })
+        .where(eq(schema.tasks.id, taskId));
+      expect(await sweep()).toBe(0);
+      expect(seamsOf(taskId)).toEqual([]);
+      await db
+        .update(schema.tasks)
+        .set({ updatedAt: new Date(Date.now() - staleMs - 60_000) })
+        .where(eq(schema.tasks.id, taskId));
+      expect(await sweep()).toBe(1);
+      expect(await eventsOfType(taskId, 'task.cancel_finished')).toHaveLength(1);
+
+      const uncapped = await capped('dag');
+      await db
+        .delete(schema.taskEvents)
+        .where(
+          and(
+            eq(schema.taskEvents.taskId, uncapped),
+            eq(schema.taskEvents.eventType, 'task.cancel_redriven'),
+          ),
+        );
+      const cancelEvent = and(
+        eq(schema.taskEvents.taskId, uncapped),
+        eq(schema.taskEvents.eventType, 'task.cancelled'),
+      );
+      await db
+        .update(schema.taskEvents)
+        .set({
+          createdAt: new Date(Date.now() - CANCEL_REDRIVE_LOOKBACK_MS + 60_000),
+        })
+        .where(cancelEvent);
+      expect(await sweep()).toBe(0);
+      expect(seamsOf(uncapped)).toEqual([]);
+      await db
+        .update(schema.taskEvents)
+        .set({
+          createdAt: new Date(Date.now() - CANCEL_REDRIVE_LOOKBACK_MS - 60_000),
+        })
+        .where(cancelEvent);
+      expect(await sweep()).toBe(1);
+      expect(await eventsOfType(uncapped, 'task.cancel_finished')).toMatchObject([
+        { payload: { abandoned: true, reason: 'cancelled before the re-drive window' } },
+      ]);
     });
 
     it('W1: a CANCEL for a completed task changes nothing and tears nothing down', async () => {

@@ -358,8 +358,24 @@ CANCEL causes no restamp. An uncapped cancel inside the seven-day window stays w
 ordinary cancellation re-drive, and a claimless task without either recorded merge shape
 stays outside this abandon pass.
 
+The first pass after deployment also begins a one-time backfill of legacy cancelled tasks:
+those with no finish record, no `task.cancelled` event in the seven-day window (including
+no event at all), and a claim or either recorded merge shape become eligible. Claimless
+recorded merges are newly covered. It processes at most 20 per pass, oldest task stamp first; the backlog drains
+on later minute ticks. Each attempt performs the sandbox guard and merge peek, and may
+settle an already-gone merge and re-sync Haive projections from historical state. Existing
+dir locks, claim/sharer checks and merge-identity checks still govern those operations.
+A successful finish record makes the task ineligible on every later pass.
+
+A persistently failing merge report remains unfinished and retries every five minutes
+indefinitely; it keeps its claims and writes no finish record. Each failed attempt bumps
+`updated_at`, so it can rise in task lists sorted by that column, and logs at error with
+`code: cancel_abandon_failed` on every attempt. Repeated identical failures are not lowered
+to warn: there is no durable failure identity/streak here, and this change adds no logging
+cache or retry ledger. A restart preserves the cooldown, not a failure classification.
+
 Rollback reverts these worker/API changes together, retaining task stamps and existing events.
-No schema or data rollback is required; the prior selector once again leaves claimless capped
+Retain applied migration 0253; the repaired pause markers need no reversal (migration rollback is roll-forward only). The prior selector once again leaves claimless capped
 merges unfinished and retries failing abandon reports every tick. Reverting code cannot
 restore resources already removed by a completed teardown.
 
@@ -864,12 +880,17 @@ the stalled sweep queues a CANCEL that was lost. The Cancel action, the step `ab
 `DELETE /repositories/:id/plan/merge` each run a Stop (`stopActiveCliInvocations`, `failTask: false`) before
 `cancelTaskIfOpen`; the Cancel action and the abort first answer the found status when the route's own read
 says the task is `completed` or `cancelled`, so a task that is already over is not stopped. After a cancel
-that applied, the three routes attempt to clear the task's pause (`clearCancelledTaskPause`)
-before they queue the CANCEL job. Its transaction failure warns and returns: cancellation
-already committed, so the response still truthfully reports cancelled, teardown is still queued,
-and step abort still records `step.abort`. A refused clear can leave `paused_at` on the terminal
-row; it does not reopen work. Administrator-resume auditing keeps its nested savepoint and
-best-effort behavior. A successful clear removes the stale hold. Step Retry, Resume and re-run refuse a `cancelled` or
+that applied, `cancelTaskRow` clears `paused_at` in the same UPDATE as `status = cancelled`,
+including repository deletion. `clearTaskPause` has no other pause columns, events or global
+counters to clear. The three routes retain the administrator-resume event and audit row
+(`auditCancelledTaskPause`) only when the locked task actually had a pause. That separate
+best-effort audit transaction writes no task state; its failures log at error with
+`code: cancel_pause_audit_failed` and cannot suppress the CANCEL job or `step.abort`.
+A refused cancel transaction commits neither cancellation nor pause clear and queues nothing.
+A cancelled row retaining a pause is harmful: scratch cleanup refuses it and list/sidebar
+badges can still show it as paused. Migration `0253_clear_cancelled_task_pause` idempotently
+clears existing cancelled rows only, without restamping their cooldown; failed tasks retain
+recovery holds. Step Retry, Resume and re-run refuse a `cancelled` or
 `completed` task (`unendedTask`, `api/src/routes/tasks/steps.ts`). `cancelTaskIfOpen` cancels a task that is neither `completed`
 nor `cancelled` (a `failed` one stays cancellable), judged under those locks and not from the status the
 route read earlier. A cancel that did not apply answers what it found (the plan merge DELETE answers
@@ -881,7 +902,7 @@ teardown removes the worktree and deletes the env template that a completed task
 ran its own. A `cancelled` task (the api commits the cancel before it queues the job) keeps its status,
 `completed_at` and epoch, but the job still writes its own `task.cancelled` event, ends the step rows opened
 after the api's batch and runs the teardown. Any other status, a `failed` task included, is cancelled by the
-job: status, `completed_at`, epoch + 1 and the event, in the same transaction. The transaction writes no step
+job: status, `completed_at`, epoch + 1, a cleared `paused_at` and the event, in the same transaction. An already-cancelled row also loses any legacy pause inside this transaction, without restamping its completion, epoch or cooldown. The transaction writes no step
 row, so it takes no `lockStepRows` batch and never waits for a step row while it holds the task row (the cycle
 with a pass's claim: a step row, then the task row FOR SHARE); the step sweep after it takes its open rows
 through `lockStepRows` in a short transaction of its own and holds no task row.

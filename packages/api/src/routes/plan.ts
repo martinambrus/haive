@@ -76,7 +76,7 @@ import { loadOpenPlanAdvisories, OPEN_PLAN_TASK_STATES } from '../lib/plan-advis
 import { enqueuePlanMirrorRefresh, pullPlanMirror, savePlanMirror } from '../lib/plan-mirror.js';
 import { cancelTaskIfOpen, enqueueCancelJob } from '../lib/cancel-task.js';
 import { stopActiveCliInvocations } from '../lib/task-control.js';
-import { clearCancelledTaskPause } from './tasks/_helpers.js';
+import { auditCancelledTaskPause } from './tasks/_helpers.js';
 
 const exec = promisify(execFile);
 
@@ -1471,8 +1471,8 @@ planRoutes.delete('/:id/plan/merge', async (c) => {
   await stopActiveCliInvocations(db, task.id, { failTask: false });
   const result = await db.transaction((tx) => cancelTaskIfOpen(tx, task.id, { by: userId }));
   if (!result.cancelled) return c.json({ ok: true, cancelled: false });
-  // Cancel ends the pause as well; step actions refuse this terminal task.
-  await clearCancelledTaskPause(db, task.id, userId, task.userId);
+  // The cancel transaction ended the pause; retain its administrator-resume audit.
+  if (result.clearedPause) await auditCancelledTaskPause(db, task.id, userId, task.userId);
   await enqueueCancelJob(task.id, userId);
   return c.json({ ok: true, cancelled: true, taskId: task.id });
 });

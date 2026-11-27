@@ -1541,45 +1541,25 @@ export async function recordAdminResume(
   return event;
 }
 
-/** Cancel already committed and stopped live work. Match Retry's audit-before-commit
- * ordering, with a savepoint so a refused audit cannot undo the clear or refuse teardown. */
-export async function clearCancelledTaskPause(
+/** Audit a pause the cancel transaction cleared under the task lock. No task write remains
+ * after commit: a refused audit cannot leave a cancelled task paused or suppress teardown. */
+export async function auditCancelledTaskPause(
   db: ReturnType<typeof getDb>,
   taskId: string,
   actorUserId: string,
   ownerUserId: string,
 ): Promise<void> {
-  const result = await db
-    .transaction(async (tx) => {
-      if (!(await clearTaskPause(tx, taskId))) return null;
-      // The clear holds the task row lock: judge the pause actually cleared, not a stale read.
+  try {
+    const audit = await db.transaction(async (tx) => {
       if (!(await findAdminPausedTaskIds(tx, [taskId])).has(taskId)) return null;
-      try {
-        const audit = await tx.transaction((auditTx) =>
-          recordAdminResume(auditTx, taskId, actorUserId, ownerUserId),
-        );
-        return { audit };
-      } catch (err) {
-        return { err };
-      }
-    })
-    .catch((err: unknown) => {
-      // The cancellation already stands. A failed pause clear must not suppress its teardown or
-      // step.abort event, or turn a committed cancel into an HTTP error.
-      logger.warn(
-        { err, taskId },
-        'failed to clear cancelled task pause; cancellation still stands',
-      );
-      return null;
+      return recordAdminResume(tx, taskId, actorUserId, ownerUserId);
     });
-  if (!result) return;
-  if ('err' in result) {
-    logger.warn(
-      { err: result.err, taskId },
+    if (audit) logAuditEvent(audit);
+  } catch (err) {
+    logger.error(
+      { err, taskId, code: 'cancel_pause_audit_failed' },
       'failed to audit administrator pause cleared by cancellation',
     );
-  } else {
-    logAuditEvent(result.audit);
   }
 }
 
