@@ -125,13 +125,16 @@ export function startRepoWorker(repoStorageRoot: string): Worker {
             .set({
               status: 'error',
               checkoutSessionReason: sessionFailure ? err.reason : null,
-              // Checks and recoveries keep the admitted repair cause through every failure.
-              // Detection alone clears it after success; a failed rebuild proves no new cause.
-              ...(payload.checkCheckoutOnly || payload.recoverCheckout
+              // A check-only job keeps its repair code whatever failed, so its Retry stays a
+              // check. A recovery keeps the admitted cause unless its failure proves one (the
+              // source folder fails its proof before any move); detection clears it on success.
+              ...(payload.checkCheckoutOnly
                 ? {}
-                : {
-                    errorCode: err instanceof CheckoutRepairNeededError ? err.code : null,
-                  }),
+                : err instanceof CheckoutRepairNeededError
+                  ? { errorCode: err.code }
+                  : payload.recoverCheckout
+                    ? {}
+                    : { errorCode: null }),
               statusMessage: message,
               updatedAt: new Date(),
             })

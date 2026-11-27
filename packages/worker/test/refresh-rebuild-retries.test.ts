@@ -383,6 +383,19 @@ describe.skipIf(!redisUrl)('a source folder that needs repair', () => {
     expect(await asides(dest)).toEqual([]);
     expect(h.persist).not.toHaveBeenCalled();
   });
+
+  it('a recovery that proves the source folder needs repair records that cause', async () => {
+    const { source, dest, payload } = await fixture();
+    row.errorCode = 'checkout_repair_needed';
+    await writeFile(path.join(dest, '.git/HEAD'), 'ref: refs/heads/main\n');
+    await writeFile(path.join(dest, '.git/config'), '[core\n');
+    await writeFile(path.join(source, '.git/config'), '[core\n');
+    const job = await refreshJob({ ...payload, recoverCheckout: true });
+    expect(await job.getState()).toBe('failed');
+    expect(row).toMatchObject({ status: 'error', errorCode: 'source_repair_needed' });
+    expect(await asides(dest)).toEqual([]);
+    expect(h.persist).not.toHaveBeenCalled();
+  });
 });
 
 describe.skipIf(!redisUrl)('failed explicit recovery', () => {

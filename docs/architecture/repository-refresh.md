@@ -99,7 +99,8 @@ checkout still unusable says so, a read that never finished stays a retryable fa
 recovery rebuilds, keeping this install's data. The
 code clears when an ordinary preparation starts or detection succeeds; a recovery keeps the exact
 admitted code through worker and enqueue failures, including `source_repair_needed`, so the guidance
-continues to name the original cause. A second refresh sent while the recovery is queued or running
+continues to name the original cause, unless the failure itself proves one: a source folder that fails
+its proof before any move records `source_repair_needed`. A second refresh sent while the recovery is queued or running
 answers 409, and a preparation stranded by a stop keeps its code too. A recovery job first
 re-checks the checkout: one that is
 usable again (held by a task or not) finishes as an ordinary refresh, moves nothing and clears the
@@ -135,12 +136,18 @@ Start or revival after the rename too (the admission rule above).
 Recovery restores the private tree and publishes it in one database transaction. The task key,
 project-state key, plan-mirror key and plan-patch key precede repository and projection rows;
 the ordinary writers use that transaction's savepoints, with no pool calls from inside it.
+The keys and the row are held for the whole restore, not only the rename: a task Start waits up to
+its 5 s bound on the tasks key, a plan edit answers busy meanwhile, and a recovery that meets an
+ancestry-changing plan edit holding the patch key past its 1 s bound fails retryably, keeping its
+replacement.
 Only the outer commit, after `renameNoFollow`, advances state bases, watermarks, plan stamps and
 outbox acknowledgements. A refused restore or publication rolls those changes back, retaining
 the private tree and its images. A death before rename leaves the old bases and an unpublished
 replacement; Retry rebuilds again. A death after rename but before commit leaves a complete
 restored checkout with old bases; after the dead claim expires, Retry's usable-checkout path
-imports that output and repairs the stamps. No connection spans the clone or copy. The
+imports that output and repairs the stamps when its importers succeed. They are best-effort: one that
+fails is logged as a warning, the row still goes ready, and the old bases wait for a later sweep or
+refresh. No connection spans the clone or copy. The
 transaction callback drains before the root claim/session barrier releases, including after a
 connection failure. Legacy committed private intents still use the abandonment handling above.
 
