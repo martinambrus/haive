@@ -186,7 +186,9 @@ export interface DockerRunner {
   ): Promise<DockerVolumeOpResult>;
   /** Missing label returns null; an inspect failure throws. */
   volumeLabel?(name: string, key: string): Promise<string | null>;
-  volumeExists(name: string): Promise<boolean>;
+  /** Strict callers require a successful listing to prove absence; lookup failures throw.
+   * Other callers keep the historical best-effort inspect/false contract. */
+  volumeExists(name: string, options?: { throwOnFailure?: boolean }): Promise<boolean>;
   volumeRemove(name: string): Promise<DockerVolumeOpResult>;
   /** Remove only non-running containers that still mount this volume. A worker killed
    *  between `docker create` and `docker start` can otherwise leave a Created helper
@@ -608,10 +610,20 @@ export const defaultDockerRunner: DockerRunner = {
     return typeof value === 'string' ? value : null;
   },
 
-  async volumeExists(name) {
-    const result = await spawnAndCollect('docker', ['volume', 'inspect', name], {
+  async volumeExists(name, options = {}) {
+    // Inspect's exit 1 conflates not-found and daemon failures. A successful list
+    // proves absence without interpreting Docker's human-readable error wording.
+    const args = options.throwOnFailure
+      ? ['volume', 'ls', '--filter', `name=${name}`, '--format', '{{.Name}}']
+      : ['volume', 'inspect', name];
+    const result = await spawnAndCollect('docker', args, {
       timeoutMs: 15_000,
     });
+    if (options.throwOnFailure) {
+      if (result.exitCode !== 0 || result.timedOut || result.error)
+        throw new Error('auth volume existence lookup failed');
+      return result.stdout.split(/\r?\n/).includes(name);
+    }
     return result.exitCode === 0;
   },
 

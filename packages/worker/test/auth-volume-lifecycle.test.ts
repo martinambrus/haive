@@ -16,7 +16,7 @@ import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { schema, type Database } from '@haive/database';
 import { createFakeDb } from '@haive/database/testing';
 import { cliAuthTaskVolumeName, resolveCliAuthUserVolumeName } from '@haive/shared';
-import type { SQL } from 'drizzle-orm';
+import { eq, type SQL } from 'drizzle-orm';
 import { readVolumeFile } from '../src/usage-window/token-source.js';
 import { harvestInTaskCredentials } from '../src/usage-window/credential-harvest.js';
 import { reapOrphanedAuthVolumes } from '../src/sandbox/auth-volume-reaper.js';
@@ -41,7 +41,7 @@ beforeEach(() => {
   vi.clearAllMocks();
   lock.afterAcquire = () => {};
   lock.acquire.mockReset().mockImplementation(async () => {
-    lock.afterAcquire();
+    await lock.afterAcquire();
     return Object.assign(async () => {}, { assertHeld: async () => {} });
   });
 });
@@ -783,3 +783,149 @@ it('boot retains an unknown version even when the provider scope moved under the
     'auth sync-back refused',
   );
 });
+
+it.each([
+  ['task volume', 1],
+  ['user volume', 2],
+  ['task credential volume', 3],
+  ['user credential volume', 4],
+  ['task mtime volume', 5],
+  ['user mtime volume', 6],
+] as const)(
+  'retains a failed %s lookup even if Docker recovers before removal',
+  async (_name, at) => {
+    const f = fixture();
+    let calls = 0;
+    vi.spyOn(f.runner, 'volumeExists').mockImplementation(
+      async (name, options?: { throwOnFailure?: boolean }) => {
+        if (++calls === at) {
+          if (options?.throwOnFailure) throw Object.assign(new Error('fixture'), { code: 'EIO' });
+          return false;
+        }
+        return f.dirs.has(name);
+      },
+    );
+    expect(await syncRefreshedAuthToUserVolumes(f.db, f.taskId, f.runner)).toEqual({
+      retainTaskCopy: true,
+    });
+    calls = 0;
+    expect(await f.reap()).toBe(0);
+    expect(f.dirs.has(f.taskVol)).toBe(true);
+    expect(f.events).toEqual([]);
+    f.unchanged();
+    expect(await f.reap()).toBe(1);
+    expect(f.events).toEqual(['copy', 'remove']);
+  },
+);
+
+async function deleteLastLedgerProvider(f: ReturnType<typeof fixture>, nullReference = true) {
+  // A sibling still serves the shared user volume, but has no invocation on this task.
+  f.fake.insert(schema.cliProviders, { ...f.provider, id: randomUUID() });
+  await f.db.delete(schema.cliProviders).where(eq(schema.cliProviders.id, f.provider.id));
+  // The fake implements cascades, not SET NULL; model PostgreSQL's FK action explicitly.
+  if (nullReference)
+    await f.db
+      .update(schema.cliInvocations)
+      .set({ cliProviderId: null })
+      .where(eq(schema.cliInvocations.taskId, f.taskId));
+}
+
+it.each(['labeled', 'unlabeled', 'unknown version', 'unparseable'] as const)(
+  'retains a %s copy after the last ledger provider is deleted while siblings share its volume',
+  async (kind) => {
+    const f = fixture();
+    await deleteLastLedgerProvider(f);
+    if (kind === 'unlabeled') f.labels.clear();
+    if (kind === 'unknown version') f.labels.set(f.taskVol, JSON.stringify({ version: 99 }));
+    if (kind === 'unparseable') writeFileSync(join(f.dirs.get(f.taskVol)!, 'auth.json'), '{');
+    for (let pass = 0; pass < 2; pass++) {
+      expect(await syncRefreshedAuthToUserVolumes(f.db, f.taskId, f.runner)).toEqual({
+        retainTaskCopy: true,
+      });
+      expect(await f.reap()).toBe(0);
+    }
+    expect(f.dirs.has(f.taskVol)).toBe(true);
+    expect(f.dirs.has(f.userVol)).toBe(true);
+    expect(f.events).toEqual([]);
+    f.unchanged();
+    expect(
+      logs.warn.mock.calls.filter(([fields]) => fields.reason === 'unresolved_auth_source'),
+    ).toEqual([
+      [
+        expect.objectContaining({ taskId: f.taskId, taskVol: f.taskVol, retained: true }),
+        expect.any(String),
+      ],
+    ]);
+  },
+);
+
+it('retains a copy whose non-null ledger reference no longer resolves', async () => {
+  const f = fixture();
+  await deleteLastLedgerProvider(f, false);
+  expect(await syncRefreshedAuthToUserVolumes(f.db, f.taskId, f.runner)).toEqual({
+    retainTaskCopy: true,
+  });
+  expect(await f.reap()).toBe(0);
+  f.unchanged();
+});
+
+it('retains the copy when the last provider is deleted while acquiring the auth lock', async () => {
+  const f = fixture();
+  lock.afterAcquire = async () => {
+    await deleteLastLedgerProvider(f);
+  };
+  expect(await syncRefreshedAuthToUserVolumes(f.db, f.taskId, f.runner)).toEqual({
+    retainTaskCopy: true,
+  });
+  expect(f.events).toEqual([]);
+  f.unchanged();
+});
+
+it.each(['existence', 'label', 'credential'] as const)(
+  'retains an unresolved copy when its %s inspection fails',
+  async (kind) => {
+    const f = fixture();
+    await deleteLastLedgerProvider(f);
+    if (kind === 'existence')
+      vi.spyOn(f.runner, 'volumeExists').mockRejectedValue(new Error('fixture'));
+    if (kind === 'label') vi.spyOn(f.runner, 'volumeLabel').mockRejectedValue(new Error('fixture'));
+    if (kind === 'credential') vi.spyOn(f.runner, 'run').mockRejectedValue(new Error('fixture'));
+    expect(await syncRefreshedAuthToUserVolumes(f.db, f.taskId, f.runner)).toEqual({
+      retainTaskCopy: true,
+    });
+    expect(await f.reap()).toBe(0);
+    expect(f.dirs.has(f.taskVol)).toBe(true);
+    f.unchanged();
+  },
+);
+
+it('does not treat an unresolved credential link as an empty copy', async () => {
+  const f = fixture();
+  await deleteLastLedgerProvider(f);
+  const path = join(f.dirs.get(f.taskVol)!, 'auth.json');
+  rmSync(path);
+  symlinkSync(join(f.root, 'absent'), path);
+  expect(await syncRefreshedAuthToUserVolumes(f.db, f.taskId, f.runner)).toEqual({
+    retainTaskCopy: true,
+  });
+  expect(await f.reap()).toBe(0);
+  f.unchanged();
+});
+
+it.each(['none', 'missing credential', 'empty credential', 'missing volume'] as const)(
+  'allows cleanup of a provably empty unresolved copy: %s',
+  async (kind) => {
+    const f = fixture();
+    await deleteLastLedgerProvider(f);
+    if (kind === 'none') f.labels.set(f.taskVol, 'none');
+    if (kind === 'missing credential') rmSync(join(f.dirs.get(f.taskVol)!, 'auth.json'));
+    if (kind === 'empty credential') writeFileSync(join(f.dirs.get(f.taskVol)!, 'auth.json'), '');
+    if (kind === 'missing volume') f.dirs.delete(f.taskVol);
+    expect(await syncRefreshedAuthToUserVolumes(f.db, f.taskId, f.runner)).toEqual({
+      retainTaskCopy: false,
+    });
+    expect(logs.warn).not.toHaveBeenCalled();
+    expect(await f.reap()).toBe(kind === 'missing volume' ? 0 : 1);
+    f.unchanged();
+  },
+);

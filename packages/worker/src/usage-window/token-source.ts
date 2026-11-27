@@ -52,7 +52,7 @@ export async function readVolumeFile(
   runner: DockerRunner = defaultDockerRunner,
   options: { throwOnFailure?: boolean } = {},
 ): Promise<string | null> {
-  if (!(await runner.volumeExists(vol))) return null;
+  if (!(await runner.volumeExists(vol, { throwOnFailure: options.throwOnFailure }))) return null;
   // relPath is a fixed constant from the provider registry, but strip quotes
   // defensively since it's interpolated into a shell command.
   const safeRel = relPath.replace(/["'`$]/g, '');

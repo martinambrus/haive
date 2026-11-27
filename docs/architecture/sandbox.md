@@ -30,6 +30,15 @@ A labeled copy can name its source
 among multiple ledger rows of the same CLI with different scopes. Harvest considers each distinct
 target volume and lets this locked label check choose the source.
 
+A null or deleted invocation-provider reference also triggers inspection of all existing task
+auth copies, even when no provider row remains in the ledger. Copies with unresolvable sources
+are retained read-only (labeled, unlabeled and unknown-version alike), with one structured
+`unresolved_auth_source` warning per copy in this worker process. A provider deleted while
+sync waits for its auth lock follows the same rule. A surviving sibling on the shared user volume
+does not establish the deleted row's source. Only a `none` label or a provably absent/empty
+registered credential permits disposal; unparseable bytes and non-regular paths remain unknown.
+An inspection failure retains the copies with `unresolved_auth_source_lookup_failed`.
+
 For a copy from before labels, task-end, summary and non-terminal mid-task harvest use a guarded
 transition. After acquiring the auth lock, require the task's creation time and owner, complete
 invocation-ledger ownership (no null or deleted provider), provider rows created no later than the
@@ -77,6 +86,11 @@ old copy only after confirming it is no longer needed. Do not relabel a legacy c
 verification. Unknown-version copies require a compatible worker reader or the same operator
 review before disposal. Worker restarts alone do not resolve either refusal.
 
+Sync's task/user volume probes, credential reads and mtime reads use strict volume existence
+checks. Docker inspect's generic failure exit cannot prove absence: strict checks instead use
+a successful filtered volume listing and compare the exact name. A failed listing, spawn or
+timeout throws, so sync retains the task copy even when Docker recovers before teardown.
+Other volume-existence callers keep their best-effort inspect/false contract.
 Credential reads and mtime reads distinguish a missing file from a failed or timed-out helper:
 transient failures (including Docker exit 125, spawn errors and timeout) retain the copy for a
 later cleanup attempt/boot. Before `cat`, the read helper checks file type: a directory, FIFO or
@@ -111,7 +125,9 @@ been recreated before that partial rollback. No schema/data rollback is needed. 
 already synced remain in user volumes, and removed task copies cannot be restored by
 reverting code. Before downgrading past the retention changes, recover or explicitly retire
 retained unlabeled and unknown-version copies as described above; an older reaper can discard
-them unsynced. Structural leftovers already disposed of cannot be recovered by a code rollback.
+them unsynced. The same applies to copies retained after their provider was deleted: recover or
+explicitly retire them before downgrading past that guard. Structural leftovers already disposed
+of cannot be recovered by a code rollback.
 
 **Committed mining views are immutable mounts.** `repo/committed-snapshot.ts` owns the bounded
 resolver. `resolveInvocationRepoMount` chooses a snapshot before repository-less scratch,

@@ -1300,12 +1300,66 @@ export async function syncRefreshedAuthToUserVolumes(
   allowUnlabeled = true,
 ): Promise<{ retainTaskCopy: boolean }> {
   let retainTaskCopy = false;
-  for (const provider of await taskAuthProviders(db, taskId)) {
+  const ledger = { missingProvider: false };
+  for (const provider of await taskAuthProviders(db, taskId, ledger)) {
     const outcome = { retry: false };
     await syncProviderAuthBack(taskId, provider, db, runner, lockWaitMs, outcome, allowUnlabeled);
     retainTaskCopy ||= outcome.retry;
   }
+  // SET NULL loses even the CLI name of a deleted provider. Inspect every existing
+  // copy instead of letting an empty provider loop authorize destructive cleanup.
+  if (ledger.missingProvider) {
+    for (const meta of CLI_PROVIDER_LIST) {
+      for (let idx = 0; idx < meta.authConfigPaths.length; idx++) {
+        const taskVol = cliAuthTaskVolumeName(taskId, meta.name, idx);
+        try {
+          if (!(await runner.volumeExists(taskVol, { throwOnFailure: true }))) continue;
+          const label = await runner.volumeLabel?.(taskVol, AUTH_SOURCE_LABEL);
+          const retained = await retainUnresolvedAuthCopy(taskId, meta.name, idx, runner, label);
+          retainTaskCopy ||= retained;
+        } catch {
+          retainTaskCopy = true;
+          warnAuthCopyOnce(
+            taskVol,
+            'unresolved_auth_source_lookup_failed',
+            { taskId, provider: meta.name, retained: true },
+            'keeping task auth copy; unresolved source inspection failed',
+          );
+        }
+      }
+    }
+  }
   return { retainTaskCopy };
+}
+
+/** A lost provider has no trustworthy lock/target. Read only; never recover to a
+ * sibling merely because it currently shares the old volume. Unknown bytes survive. */
+async function retainUnresolvedAuthCopy(
+  taskId: string,
+  provider: CliProviderName,
+  idx: number,
+  runner: DockerRunner,
+  label: string | null | undefined,
+): Promise<boolean> {
+  if (label === NO_SOURCE_SENTINEL) return false;
+  const taskVol = cliAuthTaskVolumeName(taskId, provider, idx);
+  const relPath = credentialRelPath(provider, idx);
+  if (relPath) {
+    try {
+      if ((await readVolumeFile(taskVol, relPath, runner, { throwOnFailure: true })) === null)
+        return false;
+    } catch (err) {
+      // With no source, even a non-regular path cannot prove the copy empty.
+      if (!(err instanceof NonRegularVolumeFileError)) throw err;
+    }
+  }
+  warnAuthCopyOnce(
+    taskVol,
+    'unresolved_auth_source',
+    { taskId, provider, retained: true },
+    'keeping task auth copy; source provider no longer resolves',
+  );
+  return true;
 }
 
 /** Read actual rows from the ledger; a CLI name alone cannot identify an auth scope. */
@@ -1493,7 +1547,7 @@ export async function syncProviderAuthBack(
       }
       return false;
     }
-    if (!(await runner.volumeExists(taskVol))) return false;
+    if (!(await runner.volumeExists(taskVol, { throwOnFailure: true }))) return false;
     // Re-read after waiting: a settings save holds both old and new scope locks.
     const ledger = { missingProvider: false };
     const rows = (await taskAuthProviders(db, taskId, ledger)).filter(
@@ -1514,6 +1568,17 @@ export async function syncProviderAuthBack(
     const label = await runner.volumeLabel?.(taskVol, AUTH_SOURCE_LABEL);
     // No source was mounted at preparation, so there is nothing attributable to carry.
     if (label === NO_SOURCE_SENTINEL) return false;
+    if (!current) {
+      const retained = await retainUnresolvedAuthCopy(
+        taskId,
+        provider.name,
+        source.authPathIdx,
+        runner,
+        label,
+      );
+      if (retained && outcome) outcome.retry = true;
+      return false;
+    }
     const unlabeled = label === null;
     const sourceRefusal = unlabeled
       ? null
@@ -1522,7 +1587,7 @@ export async function syncProviderAuthBack(
     let reason =
       sourceRefusal === 'unsupported_source_version'
         ? sourceRefusal
-        : !current || identity(current) !== authSourceIdentity(ctx, source.authPathIdx)
+        : identity(current) !== authSourceIdentity(ctx, source.authPathIdx)
           ? 'provider_scope_changed'
           : null;
     if (!reason) {
@@ -1567,7 +1632,7 @@ export async function syncProviderAuthBack(
       return false;
     }
     // A sign-out that won the lock must not be undone by a helper mount recreating it.
-    if (!(await runner.volumeExists(userVol))) return false;
+    if (!(await runner.volumeExists(userVol, { throwOnFailure: true }))) return false;
     await release.assertHeld();
     const taskRaw = await readVolumeFile(taskVol, source.relPath, runner, { throwOnFailure: true });
     if (!taskRaw) return false;
@@ -1628,7 +1693,7 @@ async function readVolumeFileMtimeMs(
   relPath: string,
   runner: DockerRunner,
 ): Promise<number | null> {
-  if (!(await runner.volumeExists(vol))) return null;
+  if (!(await runner.volumeExists(vol, { throwOnFailure: true }))) return null;
   const safeRel = relPath.replace(/["'`$]/g, '');
   const result = await runner.run({
     image: HELPER_IMAGE,
