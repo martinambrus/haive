@@ -1232,7 +1232,7 @@ status: open · kind: test-flake · found: PR #1354 CI (T308 fix-3 analysis) 202
 
 ### T779 · Multi-call steps show a false "earlier attempts could not be used" banner
 
-status: open · kind: bug · found: session live check e06ad873 2026-11-27 · priority: P2
+status: done 2026-11-27, merged #1355 27614f5e3 and live (worker hot-reloaded): `step.reply_rejected` events at the three host retry sites, banner counts `rejectedReplyCount`; earlier rejections not backfilled · kind: bug · found: session live check e06ad873 2026-11-27 · priority: P2
 
 `attemptCount` counts every non-mining invocation of a step row (`api/src/routes/tasks/_helpers.ts` ~:948), and the task page shows "N earlier attempts produced output this step could not use, so it re-ran automatically" whenever it exceeds 1 with no loop iterations (`web/src/app/(app)/tasks/[id]/page.tsx` ~:4169). A step that makes one successful call per unit (translator `tr-translate`: 12 runs, `tr-review`: 4 runs plus re-reviews, all exit 0) therefore claims 11 or 4 failed attempts. The owner's task ae8fb29c shows the same.
 
