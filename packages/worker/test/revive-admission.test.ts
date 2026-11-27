@@ -204,15 +204,31 @@ describe('the allowance auto-resume of a failed onboarding or upgrade', () => {
   });
 
   it.each(['onboarding', 'onboarding_upgrade'] as const)(
-    'refuses a failed %s under a held root claim',
+    'keeps a failed %s retryable under a held root claim',
     async (type) => {
-      const t = setup({ ...admitted(), type, repo: claim });
-      expect(await t.resume()).toBe(false);
-      expect(t.task()).toMatchObject({ status: 'failed', allowanceAutoResumeCount: 0 });
-      expect(t.events()[0]).toMatchObject({
-        eventType: 'upgrade.revive_refused',
-        payload: { reason: 'root-claim' },
+      const since = new Date(Date.now() - DAY);
+      const t = setup({
+        ...admitted(),
+        type,
+        repo: claim,
+        task: {
+          awaitingAllowanceProviderId: PROVIDER,
+          awaitingProviderReason: 'rate_limit',
+          awaitingProviderSince: since,
+        },
       });
+      await expect(t.resume()).rejects.toMatchObject({
+        name: 'RevivalBusy',
+        cause: { reason: 'root-claim' },
+      });
+      expect(t.task()).toMatchObject({
+        status: 'failed',
+        allowanceAutoResumeCount: 0,
+        awaitingAllowanceProviderId: PROVIDER,
+        awaitingProviderSince: since,
+      });
+      expect(t.task().allowanceReplenishedAt ?? null).toBeNull();
+      expect(t.events()).toEqual([]);
     },
   );
 

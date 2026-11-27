@@ -118,6 +118,18 @@ export type ReviveCheck =
   | { task: ReviveTask; refusal: ReviveRefusal; repo?: undefined }
   | { task: ReviveTask; refusal: null; repo: LockedRepository };
 
+/** Read after the creation key: live tasks retain Retry/Resume admission; dead ones re-enter. */
+async function retainsLiveAdmission(tx: DbTx, taskId: string): Promise<boolean> {
+  const [current] = await tx
+    .select({ status: schema.tasks.status, deadAt: schema.tasks.deadAt })
+    .from(schema.tasks)
+    .where(eq(schema.tasks.id, taskId));
+  return (
+    !current ||
+    (!current.deadAt && (LIVE_TASK_STATUSES as readonly string[]).includes(current.status))
+  );
+}
+
 /**
  * The checks that decide whether a failed onboarding or upgrade may be revived, under the lock
  * creation takes: a live root claim, then an onboarding beside a live upgrade, rollback or other
@@ -147,10 +159,21 @@ export async function checkRevive(
   if (row.type !== 'onboarding' && row.type !== 'onboarding_upgrade') {
     await lockRepositoryTasksKey(tx, row.repositoryId);
     const [repo] = await tx
-      .select({ id: schema.repositories.id })
+      .select({
+        id: schema.repositories.id,
+        rootClaimedAt: schema.repositories.rootClaimedAt,
+        rootClaimKind: schema.repositories.rootClaimKind,
+      })
       .from(schema.repositories)
       .where(eq(schema.repositories.id, row.repositoryId));
-    return repo ? null : { task: row, refusal: { reason: 'no-repository' } };
+    if (!repo) return { task: row, refusal: { reason: 'no-repository' } };
+    if (await retainsLiveAdmission(tx, taskId)) return null;
+    if (isRootClaimLive(repo.rootClaimedAt))
+      return {
+        task: row,
+        refusal: { reason: 'root-claim', claimKind: repo.rootClaimKind as RootClaimKind | null },
+      };
+    return null;
   }
   const task: ReviveTask & { repositoryId: string } = {
     type: row.type,
@@ -160,17 +183,9 @@ export async function checkRevive(
   };
   const repo = await lockRepositoryRow(tx, task.repositoryId);
   if (!repo) return { task, refusal: { reason: 'no-repository' } };
-  const [current] = await tx
-    .select({ status: schema.tasks.status, deadAt: schema.tasks.deadAt })
-    .from(schema.tasks)
-    .where(eq(schema.tasks.id, taskId));
   // Dead tasks keep their live status but gave up the checkout; revival must re-admit them.
   // An active task's Retry/Resume retains the existing admission behaviour.
-  if (
-    !current ||
-    (!current.deadAt && (LIVE_TASK_STATUSES as readonly string[]).includes(current.status))
-  )
-    return null;
+  if (await retainsLiveAdmission(tx, taskId)) return null;
   if (isRootClaimLive(repo.rootClaimedAt)) {
     return {
       task,

@@ -266,7 +266,8 @@ Same stance as `computePlanReady` — a rule strict enough to CHOOSE must not RE
 **FOUR writers can touch a repository root, and the live-task read guards one of them.** The
 survey that established this is worth not repeating:
 
-1. **A revived task job** writing while the walk runs. Still open, deliberately. Two gate designs
+1. **A revived task job** writing while the walk runs. Revival admission now refuses the live
+   root claim. A job already admitted before the claim can still be picked up during the walk. Two gate designs
    were built and abandoned: one on the task queue (`task-queue.ts` is concurrency 5 for the whole
    INSTALLATION, `worker/src/index.ts` force-closes with `close(true)`, and a gate throw inside the
    processor's `try` reaches `markTaskFailed`), one on the repo queue (below). Neither buys much —
@@ -287,8 +288,9 @@ and the three repo-queue handlers that `rm -rf` the root take the same claim
 direction; `refresh-tree` and the knowledge-file editor refuse while it is held. The handlers HOLD
 it across their destructive work rather than checking once before it — a one-directional check
 leaves the window where a handler has already passed it and the reset claims the row before
-`rm(dest)` runs, and both then walk the same tree. `root_claim_kind` exists only so a refusal can
-name what it is waiting for; nothing branches on it.
+`rm(dest)` runs, and both then walk the same tree. `root_claim_kind` names what a refusal is waiting for. Deferred Starts and revivals of every
+task type now refuse a live claim too, under the task-creation key, so they cannot enter after a
+rebuild has renamed the checkout and released that short key. See [Repository refresh](repository-refresh.md).
 
 `DELETE /repos/:id` refuses while a claim is live, reading it on the repository row it locks: a
 delete during a clone used to let the resource cleanup it queues run before the clone finished

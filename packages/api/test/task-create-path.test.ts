@@ -312,10 +312,17 @@ describe.skipIf(!url)('POST /tasks create path on Postgres', () => {
     );
   });
 
-  it('takes the repository root lock only when the snapshot has 01-worktree-setup', async () => {
+  it('allows deferred non-root creation under a claim but refuses every immediate Start', async () => {
+    await db
+      .update(schema.repositories)
+      .set({ writable: true, storagePath: '/tmp/x' })
+      .where(eq(schema.repositories.id, REPO));
     await claimRoot(true);
     expect((await post({ type: 'cp-lock', repositoryId: REPO })).status).toBe(409);
-    expect((await post({ type: 'cp-plain', repositoryId: REPO })).status).toBe(201);
+    expect((await post({ type: 'cp-plain', repositoryId: REPO, deferStart: true })).status).toBe(
+      201,
+    );
+    expect((await post({ type: 'cp-plain', repositoryId: REPO })).status).toBe(409);
     expect((await post({ type: 'cp-sync', repositoryId: REPO })).status).toBe(409);
   });
 
@@ -444,7 +451,7 @@ describe.skipIf(!url)('POST /tasks create path on Postgres', () => {
     expect(body.error).toContain('cp-not-in-catalog');
   });
 
-  it('creates a task of a built-in type exactly as before', async () => {
+  it('preserves built-in creation outputs and refuses every Start under a root claim', async () => {
     await db.insert(schema.taskTypeDefinitions).values([
       typeRow('onboarding', ['cp-b-1', 'cp-b-2'], { source: 'builtin', requiresRepository: true }),
       typeRow('workflow', [], {
@@ -513,9 +520,9 @@ describe.skipIf(!url)('POST /tasks create path on Postgres', () => {
         snapshot: null,
         simplifyCode: false,
         pinned: true,
-        locked: false,
+        locked: true,
       },
-      'run_app/true': { ...none, snapshot: null, simplifyCode: true, pinned: true, locked: false },
+      'run_app/true': { ...none, snapshot: null, simplifyCode: true, pinned: true, locked: true },
     });
   });
 
@@ -1020,6 +1027,31 @@ describe.skipIf(!url)('POST /tasks create path on Postgres', () => {
       }
       expect(await start).toMatchObject({ status: 'queued' });
       expect(await statusOf(task.id)).toBe('queued');
+    });
+
+    it('T594 C2: refuses after the rename key is released while the rebuild lease remains', async () => {
+      const task = await newTask();
+      await db.transaction(async (tx) => {
+        await lockRepositoryTasksKey(tx, REPO);
+        await tx
+          .update(schema.repositories)
+          .set({ rootClaimedAt: new Date(), rootClaimKind: 'rebuild' })
+          .where(eq(schema.repositories.id, REPO));
+      });
+      try {
+        await expect(markQueuedForStart(db, task.id)).rejects.toMatchObject({
+          status: 409,
+          message:
+            'This repository is being rebuilt from its source. Wait for that to finish and try again.',
+        });
+        expect(await statusOf(task.id)).toBe('created');
+      } finally {
+        await db
+          .update(schema.repositories)
+          .set({ rootClaimedAt: null, rootClaimKind: null })
+          .where(eq(schema.repositories.id, REPO));
+      }
+      expect(await markQueuedForStart(db, task.id)).toMatchObject({ status: 'queued' });
     });
 
     it('keeps the lock until the transaction it runs in commits', async () => {

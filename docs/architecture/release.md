@@ -295,7 +295,7 @@ One `--drain-timeout` covers the first wait and every re-wait: past it, work sti
 admissions still reopened stop the upgrade with an error, or with `--force` enter maintenance
 anyway. The journal (`upgrade_runs.phase`) reads `draining` during a re-wait and `maintenance` again
 on entry. Then the updater takes the snapshot. Live work (`liveWorkCount`) is a live task or a
-background job a route queued: a repository `cloning`, a bundle `syncing`, a CLI provider whose
+background job a route queued: a repository `cloning` or with `refresh_pending` set, a bundle `syncing`, a CLI provider whose
 sandbox image is `building` or whose model is `provisioning`. `GET /admin/maintenance/blocking` and
 the admin maintenance page list both, so what the page shows is what the updater waits for; a job
 row stuck in its in-progress status holds the drain until the deadline, and `--force` passes it.
@@ -389,7 +389,11 @@ read answers 500, so a read that failed never enables the start buttons and neve
 
 Draining runs against the source release's schema before migration. The counter detects
 `tasks.dead_at` in the catalog and excludes dead tasks only when that column exists (0197); older
-schemas count every task in the selected live statuses. Its repositories, bundles and provider
+schemas count every task in the selected live statuses. It also detects `repositories.refresh_pending`
+(0250) in the catalog before counting that marker beside `cloning`, so a ready checkout being
+refreshed still holds the drain. Older source schemas retain the cloning-only count. Deploy the
+marker-aware updater with the API/worker that set it; before downgrading, settle pending refreshes
+and retain the additive column and migration. Its other repositories, bundles and provider
 columns all exist in the first release baseline. If configuration boot needs its encrypted-row
 inventory, it detects the integration tables added in 0192 and counts only those present; failed
 reads still refuse key generation. The journal is created independently of migrations.

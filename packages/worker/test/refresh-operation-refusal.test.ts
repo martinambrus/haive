@@ -113,7 +113,12 @@ const git = async (cwd: string, args: string[]) =>
   ).stdout.trim();
 let root: string;
 let shim: FakeGit | null = null;
-const row: { status: string; statusMessage?: string; errorCode?: string | null } = {
+const row: {
+  status: string;
+  statusMessage?: string;
+  errorCode?: string | null;
+  refreshPending?: boolean;
+} = {
   status: 'ready',
 };
 const db = {
@@ -278,7 +283,7 @@ it('Check repair resumes an ordinary refresh once the checkout is usable', async
 
 async function runRefresh(payload: RepoJobPayload) {
   startRepoWorker(root);
-  return h.processor!({ name: REPO_JOB_NAMES.REFRESH, data: payload } as Job);
+  return h.processor!({ id: 'refresh-job', name: REPO_JOB_NAMES.REFRESH, data: payload } as Job);
 }
 
 it.each(['usable', 'unusable', 'unknown', 'holding', 'refused'] as const)(
@@ -1020,4 +1025,30 @@ it('does not report a private replacement after its publication acknowledgement 
     await git(payload.localPath!, ['rev-parse', 'HEAD']),
   );
   expect((await readdir(path.dirname(dest))).filter((n) => n.includes('.rebuild-'))).toEqual([]);
+});
+
+it('T594 R1: keeps pending refresh work through backoff, then clears it on final failure', async () => {
+  const { payload } = await fixture();
+  h.seed.mockRejectedValue(new Error('transient seed failure'));
+  row.refreshPending = true;
+  startRepoWorker(root);
+  const job = {
+    id: 'refresh-job',
+    name: REPO_JOB_NAMES.REFRESH,
+    data: payload,
+    opts: { attempts: 3 },
+    attemptsMade: 0,
+  } as Job<RepoJobPayload>;
+  await expect(h.processor!(job, 'token')).rejects.toThrow();
+  expect(row.refreshPending).toBe(true);
+  job.attemptsMade = 2;
+  await expect(h.processor!(job, 'token')).rejects.toThrow();
+  expect(row.refreshPending).toBe(false);
+});
+
+it('T594 R1: clears pending refresh work only after its handler succeeds', async () => {
+  const { payload } = await fixture();
+  row.refreshPending = true;
+  await runRefresh(payload);
+  expect(row).toMatchObject({ status: 'ready', refreshPending: false });
 });

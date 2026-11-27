@@ -1275,7 +1275,7 @@ describe.skipIf(!url)('T266 real PostgreSQL record writer', () => {
           .select()
           .from(schema.repositories)
           .where(eq(schema.repositories.id, m.s.repo.id));
-        expect(repo!.rootClaimKind).toBe('refresh');
+        expect(repo!.rootClaimKind).toBe('rebuild');
         expect(repo!.rootClaimedAt).not.toBeNull();
         claimSeen = true;
       };

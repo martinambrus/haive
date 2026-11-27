@@ -797,3 +797,28 @@ describe('the usage ticks when the config store is unavailable', () => {
     await expect(runUsagePollTick(untouched().db)).rejects.toBe(boom);
   });
 });
+
+describe('T594 M1: a recovered allowance survives revival refusals', () => {
+  afterEach(() => vi.restoreAllMocks());
+  it('keeps the watch armed through a root claim and resumes when it clears', async () => {
+    config('auto', 'normal');
+    const t = setup();
+    t.fake.patch(schema.repositories, REPO, {
+      rootClaimedAt: new Date(),
+      rootClaimKind: 'rebuild',
+    });
+    await checkProviderRecovery(t.db);
+    await checkProviderRecovery(t.db);
+    expect(t.task()).toMatchObject({
+      status: 'failed',
+      awaitingAllowanceProviderId: PROVIDER,
+      allowanceReplenishedAt: null,
+      allowanceAutoResumeCount: 0,
+    });
+    expect(h.queued).toEqual([]);
+    t.fake.patch(schema.repositories, REPO, { rootClaimedAt: null });
+    await checkProviderRecovery(t.db);
+    expect(t.task()).toMatchObject({ status: 'running', allowanceAutoResumeCount: 1 });
+    expect(h.queued).toHaveLength(1);
+  });
+});

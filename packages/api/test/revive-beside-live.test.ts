@@ -525,3 +525,34 @@ describe('reviving a task whose repository was deleted', () => {
     expect(res.status).toBe(200);
   });
 });
+
+describe('T594 C2: workflow revival during checkout rebuild', () => {
+  it.each(revivals)('refuses $name while the root lease remains held', async (revival) => {
+    const t = setup('workflow', revival, undefined, {
+      rootClaimedAt: new Date(),
+      rootClaimKind: 'rebuild',
+    });
+    const res = await revival.request();
+    expect(res.status).toBe(409);
+    expect(await res.text()).toContain('being rebuilt from its source');
+    expect(t.task().status).toBe('failed');
+    expect(h.add).not.toHaveBeenCalled();
+    expect(h.kill).not.toHaveBeenCalled();
+  });
+});
+
+describe('T594 M1: live workflow actions retain admission under a root claim', () => {
+  it.each(
+    ['running', 'paused', 'waiting_user'].flatMap((status) =>
+      [2, 3, 4, 9].map((index) => ({ status, revival: revivals[index]! })),
+    ),
+  )('admits $revival.name on a $status task', async ({ status, revival }) => {
+    const t = setup('workflow', revival, undefined, {
+      rootClaimedAt: new Date(),
+      rootClaimKind: 'verify',
+    });
+    t.fake.patch(schema.tasks, TASK, { status });
+    const res = await revival.request();
+    expect(res.status, await res.text()).toBe(200);
+  });
+});

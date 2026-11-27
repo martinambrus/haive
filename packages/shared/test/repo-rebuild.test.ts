@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { schema, type Database } from '@haive/database';
 import { createFakeDb } from '@haive/database/testing';
+import { CANCEL_REDRIVE_LOOKBACK_MS } from '../src/cancel-teardown.js';
 import { checkoutWorktreeRefusal } from '../src/repo-rebuild.js';
 
 const checkout = '/repos/checkout';
@@ -10,7 +11,11 @@ const repositoryId = '00000000-0000-4000-8000-000000000002';
 const otherTaskId = '00000000-0000-4000-8000-000000000003';
 
 function fixture(status = 'failed', worktreePath: string | null = null) {
-  const fake = createFakeDb({ tasks: schema.tasks, taskSteps: schema.taskSteps });
+  const fake = createFakeDb({
+    tasks: schema.tasks,
+    taskSteps: schema.taskSteps,
+    taskEvents: schema.taskEvents,
+  });
   fake.insert(schema.tasks, {
     id: taskId,
     repositoryId,
@@ -68,4 +73,47 @@ describe('checkoutWorktreeRefusal', () => {
     fake.step({ worktreePath: inside }, 0, taskId, '02-other-step');
     expect(await checkoutWorktreeRefusal(fake.db, repositoryId, checkout)).toBeNull();
   });
+});
+
+describe('T594 C5: cancelled worktree teardown', () => {
+  it.each([false, true])(
+    'holds a cancelled task until teardown finished (legacy=%s)',
+    async (legacy) => {
+      const fake = fixture('cancelled', legacy ? null : inside);
+      if (legacy) fake.step({ worktreePath: inside });
+      fake.insert(schema.taskEvents, {
+        taskId,
+        eventType: 'task.cancelled',
+        createdAt: new Date(),
+      });
+      expect(await checkoutWorktreeRefusal(fake.db, repositoryId, checkout)).toContain(
+        '1 task has',
+      );
+      fake.insert(schema.taskEvents, { taskId: otherTaskId, eventType: 'task.cancel_finished' });
+      expect(await checkoutWorktreeRefusal(fake.db, repositoryId, checkout)).toContain(
+        '1 task has',
+      );
+      fake.insert(schema.taskEvents, { taskId, eventType: 'task.cancel_finished' });
+      expect(await checkoutWorktreeRefusal(fake.db, repositoryId, checkout)).toBeNull();
+    },
+  );
+});
+
+describe('T594 H1: cancellation re-drive window', () => {
+  it('matches migration 0186’s seven-day re-drive bound', () => {
+    expect(CANCEL_REDRIVE_LOOKBACK_MS).toBe(7 * 24 * 60 * 60 * 1000);
+  });
+  it.each([false, true])(
+    'ignores an expired cancel without a finish event (legacy=%s)',
+    async (legacy) => {
+      const fake = fixture('cancelled', legacy ? null : inside);
+      if (legacy) fake.step({ worktreePath: inside });
+      fake.insert(schema.taskEvents, {
+        taskId,
+        eventType: 'task.cancelled',
+        createdAt: new Date(Date.now() - CANCEL_REDRIVE_LOOKBACK_MS - 1),
+      });
+      expect(await checkoutWorktreeRefusal(fake.db, repositoryId, checkout)).toBeNull();
+    },
+  );
 });

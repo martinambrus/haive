@@ -1,4 +1,6 @@
 import { describe, expect, it } from 'vitest';
+import { schema } from '@haive/database';
+import { createFakeDb } from '@haive/database/testing';
 import { addRepoJobOrMarkError } from '../src/routes/repos.js';
 
 /**
@@ -65,5 +67,28 @@ describe('addRepoJobOrMarkError', () => {
     ).rejects.toThrow('redis is down');
 
     expect(recorded).toHaveLength(0);
+  });
+});
+
+it('an initial enqueue failure cannot clear a newer refresh marker', async () => {
+  const fake = createFakeDb({ repositories: schema.repositories });
+  fake.insert(schema.repositories, {
+    id: '00000000-0000-4000-8000-0000000000b1',
+    status: 'ready',
+    refreshPending: true,
+    refreshJobId: 'newer-job',
+  });
+  await expect(
+    addRepoJobOrMarkError(
+      fake.db as unknown as Parameters<typeof addRepoJobOrMarkError>[0],
+      '00000000-0000-4000-8000-0000000000b1',
+      async () => {
+        throw new Error('initial enqueue acknowledgement lost');
+      },
+    ),
+  ).rejects.toThrow('initial enqueue acknowledgement lost');
+  expect(fake.rows(schema.repositories)[0]).toMatchObject({
+    refreshPending: true,
+    refreshJobId: 'newer-job',
   });
 });

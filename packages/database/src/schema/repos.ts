@@ -292,6 +292,10 @@ export const repositories = pgTable(
     checkoutBranch: text('checkout_branch'),
     /** Trusted repair intent, outside the repository sandbox. Declared LAST for migration parity. */
     remoteRelinkIntent: uuid('remote_relink_intent'),
+    /** Queued/running refresh work, independent of checkout availability. LAST for migration parity. */
+    refreshPending: boolean('refresh_pending').notNull().default(false),
+    /** BullMQ job owning refreshPending; only that job may clear it. LAST for migration parity. */
+    refreshJobId: text('refresh_job_id'),
   },
   (table) => [
     index('repositories_user_id_idx').on(table.userId),

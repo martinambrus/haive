@@ -13,7 +13,13 @@ import {
 } from '@haive/database';
 import { computeFoldContribution } from '@haive/shared/timing';
 import { isProviderOutage } from './cli-exec/failure-class.js';
-import { admitReopen, NewWorkHeld, refuseRevive, type ReviveRefused } from './_revive-check.js';
+import {
+  admitReopen,
+  NewWorkHeld,
+  refuseRevive,
+  RevivalBusy,
+  type ReviveRefused,
+} from './_revive-check.js';
 
 // Reset a step + its downstream back to `pending` so the worker re-runs the step from
 // detect. Used by the `revise` route (handleResult): a review step asks to re-run an
@@ -494,6 +500,9 @@ export async function autoResumeFailedStep(
           ? { reason: 'live-upgrade-index' }
           : null;
     if (!refusal) throw err;
+    // A repository root claim (refresh or rebuild) clears by itself: keep the watch armed and
+    // let the usage poller's busy/backoff path retry. Every other refusal stays final, as before.
+    if (refusal.reason === 'root-claim') throw new RevivalBusy(refusal);
     await refuseAutoResume(db, taskId, stepId, refusal, watchSince);
   }
   return flipped;

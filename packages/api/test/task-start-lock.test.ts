@@ -135,3 +135,23 @@ describe('markQueuedForStart beside a checkout move', () => {
     expect(status()).toBe('created');
   });
 });
+
+describe('T594 C2: Start during a root rebuild', () => {
+  it.each(['rebuild', 'refresh'])(
+    'refuses while the %s lease is live after the rename lock ended',
+    async (kind) => {
+      const { fake, status } = world(REPO);
+      fake.patch(schema.repositories, REPO, { rootClaimedAt: new Date(), rootClaimKind: kind });
+      await expect(markQueuedForStart(fake.db as never, TASK)).rejects.toMatchObject({
+        status: 409,
+      });
+      expect(status()).toBe('created');
+    },
+  );
+
+  it('admits Start after release, and ignores an abandoned lease', async () => {
+    const { fake } = world(REPO);
+    fake.patch(schema.repositories, REPO, { rootClaimedAt: new Date(0), rootClaimKind: 'rebuild' });
+    expect(await markQueuedForStart(fake.db as never, TASK)).toMatchObject({ status: 'queued' });
+  });
+});

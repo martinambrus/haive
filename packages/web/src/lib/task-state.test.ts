@@ -407,3 +407,28 @@ describe('empty Stop result notice', () => {
     expect(stopResultNotice({ stopped: 0, cancelled: 0 })).toBeNull();
   });
 });
+
+describe('T594 C4: deleted task repository', () => {
+  it('hides Retry from a failed workflow whose repository FK is NULL', () => {
+    const task = { status: 'failed', type: 'workflow', repositoryId: null, metadata: {} };
+    expect(taskMenuKeys(task, { stepRunning: false })).not.toContain('retry');
+    expect(taskMenuKeys({ ...task, repositoryId: 'repo' }, { stepRunning: false })).toContain(
+      'retry',
+    );
+  });
+  it('keeps Retry for tasks deliberately created without a repository', () => {
+    const task = {
+      status: 'failed',
+      type: 'kb_author',
+      repositoryId: null,
+      metadata: { anchorRepositoryId: null },
+    };
+    expect(taskMenuKeys(task, { stepRunning: false })).toContain('retry');
+    expect(
+      taskMenuKeys(
+        { ...task, metadata: { anchorRepositoryId: 'deleted' } },
+        { stepRunning: false },
+      ),
+    ).not.toContain('retry');
+  });
+});

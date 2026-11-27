@@ -77,6 +77,7 @@ import {
   deadBanner,
   failureBanner,
   rejectedReplyBanner,
+  taskRepositoryDeleted,
   isTaskDead,
   modelIdentityBanner,
   moduleStopBanner,
@@ -2317,6 +2318,7 @@ export default function TaskDetailPage() {
                     taskId={task.id}
                     taskStatus={task.status}
                     taskDead={taskDead}
+                    repositoryDeleted={taskRepositoryDeleted(task)}
                     pauseLocked={task.pauseLocked === true}
                     taskCompletedAt={taskStoppedAt(task)}
                     taskRepositoryId={task.repositoryId}
@@ -2860,6 +2862,7 @@ interface StepCardProps {
   taskStatus: TaskStatus;
   /** Dead (see isTaskDead): nothing runs on it, so the card offers no way to advance it. */
   taskDead: boolean;
+  repositoryDeleted?: boolean;
   /** An administrator's pause the viewer cannot lift: no copy on the card may tell them to resume. */
   pauseLocked: boolean;
   /** Caps step timers when the task ended without the step itself ending. */
@@ -3661,6 +3664,7 @@ function StepCardImpl({
   taskId,
   taskStatus,
   taskDead,
+  repositoryDeleted = false,
   pauseLocked,
   taskCompletedAt,
   taskRepositoryId,
@@ -3742,6 +3746,7 @@ function StepCardImpl({
   // retry once the task is done (cancelled is excluded above; failed stays
   // retryable — that is the whole point of retry on a failed step).
   const canRetry =
+    !repositoryDeleted &&
     !taskCancelled &&
     !taskDead &&
     taskStatus !== 'completed' &&
@@ -3753,7 +3758,11 @@ function StepCardImpl({
   // its failed step keeps Retry / Retry with AI / Abort for recovery. Gates the
   // whole action-button group below (the stepId label stays visible).
   const canActOnStep =
-    !taskCancelled && !taskDead && taskStatus !== 'completed' && !isDownstreamOfActive;
+    !repositoryDeleted &&
+    !taskCancelled &&
+    !taskDead &&
+    taskStatus !== 'completed' &&
+    !isDownstreamOfActive;
   // Only steps that actually dispatch a CLI (llm | agentMining | dagExecute) get a
   // provider picker; deterministic steps never consume a per-step provider, so the
   // picker would be a dead control. usesCli comes from step_catalog.

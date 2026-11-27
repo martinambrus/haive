@@ -595,6 +595,13 @@ async function rebuild(
       }
     }
   }
+  // Ordinary refreshes stay available until they must replace the checkout. Commit this
+  // status before the rename: a write inside its transaction would remain invisible to
+  // archive, Terminal and Editor readers while the public checkout is being moved.
+  await db
+    .update(schema.repositories)
+    .set({ status: 'cloning', updatedAt: new Date() })
+    .where(eq(schema.repositories.id, payload.repositoryId));
   const aside = await db.transaction(async (tx) => {
     // Starts and revivals take this key before writing task state. Recount after the slow
     // preparation, then hold the key only through the rename, never through the clone or copy.
@@ -777,6 +784,6 @@ export async function handleRefresh(
       }
       await persistDetection(db, payload.repositoryId, dest, await fastForward(db, payload, dest));
     },
-    'refresh',
+    payload.recoverCheckout ? 'rebuild' : 'refresh',
   );
 }
