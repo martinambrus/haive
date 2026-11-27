@@ -5,7 +5,7 @@ import { HAIVE_DATA_FILES } from '@haive/shared';
 import { PROJECT_STATE_DIR } from '@haive/shared/project-state';
 import { removeNoFollow } from '@haive/shared/fs-safe';
 import { parsePorcelainZ } from '../step-engine/steps/workflow/_commit-diff.js';
-import { PROJECTION_TEMP_EXCLUDE } from './git-stage.js';
+import { FS_RECOVERY_EXCLUDES } from './git-stage.js';
 import { GIT_MAX_BUFFER, gitRun } from './git-exec.js';
 
 /** Run-app edits never own the project record, plan, or internal writer files. */
@@ -15,7 +15,7 @@ export const RUN_APP_PATHSPECS = [
   ...[PROJECT_STATE_DIR, HAIVE_DATA_FILES.plan, HAIVE_DATA_FILES.planMarkdown].map(
     (rel) => `:(top,exclude)${rel}`,
   ),
-  PROJECTION_TEMP_EXCLUDE,
+  ...FS_RECOVERY_EXCLUDES,
 ];
 
 /** The scope holds assume-unchanged or skip-worktree entries; no preview can show their bytes. */

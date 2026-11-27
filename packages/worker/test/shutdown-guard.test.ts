@@ -93,6 +93,11 @@ describe('guardShutdown', () => {
 describe('the worker entry point', () => {
   const boot = readFileSync(new URL('../src/index.ts', import.meta.url), 'utf8');
 
+  it('L5 starts the background alias sweep after bootstrap and stops it with the other reapers', () => {
+    expect(boot).toMatch(/worktreeAliasSweeper\.start\(\)/);
+    expect(boot).toContain('worktreeAliasSweeper.stop()');
+  });
+
   it('binds both signals to the one guarded shutdown', () => {
     expect(boot).toMatch(
       /const shutdown = guardShutdown\(runShutdown, \(code\) => process\.exit\(code\)\);/,
