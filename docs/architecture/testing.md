@@ -171,18 +171,17 @@ Editor identity controls simulate a surviving container after loss of process-lo
 `editor-handshake.test.ts` and the mocked terminal socket fixture pin late attach refusal,
 replacement epoch binding and retained exit reasons. `browser-vnc-attach.test.ts` uses mocked
 transports to hold input and the VNC greeting until the TCP attach admission settles, and to
-prove a refused attach forwards no input. Ordinary fake-Docker lifecycle tests stub
+prove a refused attach forwards no input. `browser-vnc-upgrade-checkout.test.ts` drives the
+installed upgrade handler with fake transports and real epoch admission: an omitted or stale
+epoch must refuse before probing or ensuring a runtime, while a matching or initial null epoch
+can attach. `interactive-status.test.ts` exercises both task and repository routers for owner
+status/epoch responses, no-store caching and foreign-user/invalid-ID refusals. Ordinary fake-Docker lifecycle tests stub
 only the filesystem identity seam, keeping actual reuse comparisons and labels in the test.
 Projection/refresh tests that are about Git/SQL stub the suspension seam; they must not contact a
 live daemon or session registry.
 
-An isolated Docker mount-identity control used only uniquely named
-throwaway containers/volumes and a temporary bind mount. The baseline demonstrates
-writes following the renamed old inode; the production strict-stop pass proves absence before
-rename, writes to the new checkout on reopen, retained old bytes, and preserved user-data,
-extension and auth volume markers. It does not run a real code-server hot-exit session or kill a
-live worker. Those surface behaviors use the fake Docker/socket controls. No development service,
-queue, runtime or task terminal is a fixture.
+A Docker mount-identity control must use uniquely named throwaway containers/volumes and a
+temporary bind mount; no development service, queue, runtime or task terminal is a fixture.
 
 Recovery controls pin legacy-container retention, inode-only remount comparison, scratch
 shell reuse without repository lookups, ordinary runtime recovery during running steps, upload
