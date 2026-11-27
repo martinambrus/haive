@@ -1244,6 +1244,75 @@ describe('mergeGeminiMcpIntoSettings', () => {
 // DIFFERENT surfaces running their helper containers against one file at the same time. That
 // cost only a wrong surface until `toolProfile: 'none'` started CLEARING the file.
 describe('preparations against one file are serialised', () => {
+  it('keeps each merge failure after a sibling surface succeeds and the task cache clears', async () => {
+    const task = 'task-mcp-run-diagnostics';
+    const first = { failedNames: [] as readonly string[] };
+    const coalesced = { failedNames: [] as readonly string[] };
+    const sibling = { failedNames: [] as readonly string[] };
+    let n = 0;
+    const runner = {
+      volumeExists: async () => true,
+      run: async (): Promise<DockerRunResult> => ({
+        exitCode: ++n === 1 ? 1 : 0,
+        stdout: '',
+        stderr: n === 1 ? 'haive-mcp: add haive-custom failed\n' : '',
+        durationMs: 1,
+        timedOut: false,
+      }),
+    } as unknown as DockerRunner;
+    const servers = [{ name: 'haive-custom', command: 'node', args: ['/custom.mjs'] }];
+    const results = await Promise.all([
+      mergeCliMcpIntoTaskVolume(task, 'grok', 'img:tag', servers, runner, first),
+      mergeCliMcpIntoTaskVolume(task, 'grok', 'img:tag', servers, runner, coalesced),
+      mergeCliMcpIntoTaskVolume(task, 'grok', 'img:tag', [], runner, sibling),
+    ]);
+    clearTaskAuthPreparationState(task);
+    expect(results).toEqual([false, false, true]);
+    expect(n).toBe(2);
+    expect(failedMcpAddNames(task, 'grok', first)).toEqual(['haive-custom']);
+    expect(failedMcpAddNames(task, 'grok', coalesced)).toEqual(['haive-custom']);
+    expect(failedMcpAddNames(task, 'grok', sibling)).toEqual([]);
+  });
+
+  it.each([undefined, 'codex'])(
+    'keeps live provider locks across a clear for %s',
+    async (provider) => {
+      const task = `task-clear-live-lock-${provider ?? 'all'}`;
+      clearTaskAuthPreparationState(task);
+      const started = Promise.withResolvers<void>();
+      const release = Promise.withResolvers<void>();
+      const events: string[] = [];
+      let n = 0;
+      const runner = {
+        volumeExists: async () => true,
+        run: async (): Promise<DockerRunResult> => {
+          const id = ++n;
+          events.push(`start${id}`);
+          if (id === 1) {
+            started.resolve();
+            await release.promise;
+          }
+          events.push(`end${id}`);
+          return { exitCode: 0, stdout: '', stderr: '', durationMs: 1, timedOut: false };
+        },
+      } as unknown as DockerRunner;
+      const first = mergeGeminiMcpIntoSettings(task, { first: { command: 'node' } }, runner);
+      await started.promise;
+      clearTaskAuthPreparationState(task, provider);
+      const second = mergeGeminiMcpIntoSettings(task, {}, runner, { clear: true });
+      // A microtask barrier, not a wall-clock wait: let an incorrectly unlocked helper start.
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+      const whileHeld = [...events];
+      release.resolve();
+      await Promise.all([first, second]);
+      clearTaskAuthPreparationState(task);
+      expect(whileHeld).toEqual(['start1']);
+      expect(events).toEqual(['start1', 'end1', 'start2', 'end2']);
+    },
+  );
+
   it('does not start a second surface while the first is still writing', async () => {
     clearTaskAuthPreparationState('taskgem-lock');
     const events: string[] = [];

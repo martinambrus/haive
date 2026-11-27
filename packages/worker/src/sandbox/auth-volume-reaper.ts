@@ -1,5 +1,4 @@
 import { spawn } from 'node:child_process';
-import { notInArray } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
 import {
   cliAuthIdSlug,
@@ -7,8 +6,15 @@ import {
   cliAuthVolumeOwner,
   cliAuthVolumePrefix,
   logger,
+  setTaskSettlementTimeout,
+  taskWriteTarget,
+  withTaskSettlementTransaction,
 } from '@haive/shared';
 import { defaultDockerRunner } from './docker-runner.js';
+import {
+  clearTaskAuthPreparationState,
+  syncRefreshedAuthToUserVolumes,
+} from './task-auth-volume.js';
 
 const log = logger.child({ module: 'auth-volume-reaper' });
 
@@ -42,7 +48,7 @@ export interface AuthVolumeReaperDeps {
   listAuthVolumes: () => Promise<string[]>;
   /** Every container mounting the volume, running or not: only called once its owner row is gone. */
   removeContainersUsingVolume?: (name: string) => Promise<void>;
-  removeStoppedContainersUsingVolume?: (name: string) => Promise<void>;
+  removeStoppedContainersUsingVolume?: (name: string, signal?: AbortSignal) => Promise<void>;
   removeVolume: (name: string) => Promise<void>;
 }
 
@@ -84,8 +90,8 @@ const defaultDeps: AuthVolumeReaperDeps = {
     const result = await defaultDockerRunner.volumeRemove(name);
     if (!result.ok) throw new Error(result.stderr || `failed to remove volume ${name}`);
   },
-  async removeStoppedContainersUsingVolume(name) {
-    const result = await defaultDockerRunner.removeStoppedContainersUsingVolume?.(name);
+  async removeStoppedContainersUsingVolume(name, signal) {
+    const result = await defaultDockerRunner.removeStoppedContainersUsingVolume?.(name, signal);
     if (result && !result.ok) {
       throw new Error(result.stderr || `failed to remove stopped containers using ${name}`);
     }
@@ -117,12 +123,19 @@ export async function reapOrphanedAuthVolumes(
   if (names.length === 0) return 0;
 
   const slugs = (rows: { id: string }[]) => new Set(rows.map((r) => cliAuthIdSlug(r.id)));
+  // Keep the full id for ledger-based sync-back. A volume's truncated slug alone cannot
+  // identify the provider row (in particular an isolated provider's user volume).
+  const tasks = await db
+    .select({ id: schema.tasks.id, status: schema.tasks.status })
+    .from(schema.tasks);
+  const tasksBySlug = new Map<string, typeof tasks>();
+  for (const task of tasks) {
+    const slug = cliAuthIdSlug(task.id);
+    tasksBySlug.set(slug, [...(tasksBySlug.get(slug) ?? []), task]);
+  }
   const live: LiveAuthOwners = {
     tasks: slugs(
-      await db
-        .select({ id: schema.tasks.id })
-        .from(schema.tasks)
-        .where(notInArray(schema.tasks.status, [...TERMINAL_STATUSES])),
+      tasks.filter((task) => !TERMINAL_STATUSES.some((status) => task.status === status)),
     ),
     providers: slugs(await db.select({ id: schema.cliProviders.id }).from(schema.cliProviders)),
     users: slugs(await db.select({ id: schema.users.id }).from(schema.users)),
@@ -136,17 +149,64 @@ export async function reapOrphanedAuthVolumes(
     'reaping CLI auth volumes whose task, provider or user is gone',
   );
   let removed = 0;
-  for (const name of orphans) {
+  const handledTasks = new Set<string>();
+  const remove = async (name: string, signal?: AbortSignal) => {
     try {
-      // A task copy spares a running container, which may be a recap of that task still starting.
-      // A provider's or user's has no owner left to serve, so a login session still holding it goes.
+      signal?.throwIfAborted();
+      // A running task container may still be finishing a recap. Never force it off.
       if (cliAuthVolumeOwner(name)?.kind === 'task') {
-        await deps.removeStoppedContainersUsingVolume?.(name);
+        await deps.removeStoppedContainersUsingVolume?.(name, signal);
       } else {
         await deps.removeContainersUsingVolume?.(name);
       }
+      signal?.throwIfAborted();
       await deps.removeVolume(name);
       removed += 1;
+    } catch (err) {
+      log.warn({ err, volume: name }, 'orphaned auth volume cleanup failed');
+    }
+  };
+  for (const name of orphans) {
+    try {
+      const owner = cliAuthVolumeOwner(name);
+      const matches = owner?.kind === 'task' ? tasksBySlug.get(owner.slug) : undefined;
+      if (matches?.length) {
+        // Slug collisions are ambiguous; never sync or destroy either task's credential.
+        if (matches.length !== 1) continue;
+        const taskId = matches[0]!.id;
+        if (handledTasks.has(taskId)) continue;
+        handledTasks.add(taskId);
+        const task = await db.query.tasks.findFirst({
+          where: taskWriteTarget(taskId, { settled: true }),
+          columns: { id: true },
+        });
+        if (!task) continue;
+        // As in terminal-summary cleanup: auth lock waits must stay OUTSIDE task-row
+        // locks. A lookup failure retains the task copies for the next boot.
+        await syncRefreshedAuthToUserVolumes(db, taskId);
+        const volumes = orphans.filter((volume) => {
+          const candidate = cliAuthVolumeOwner(volume);
+          return candidate?.kind === 'task' && candidate.slug === owner!.slug;
+        });
+        await withTaskSettlementTransaction(db, async (tx, signal) => {
+          await setTaskSettlementTimeout(tx);
+          const [settled] = await tx
+            .select({ id: schema.tasks.id })
+            .from(schema.tasks)
+            .where(taskWriteTarget(taskId, { settled: true }))
+            .for('no key update');
+          if (!settled) return;
+          signal.throwIfAborted();
+          clearTaskAuthPreparationState(taskId);
+          for (const volume of volumes) {
+            signal.throwIfAborted();
+            await remove(volume, signal);
+          }
+        });
+      } else {
+        // No task/provider/user row remains to sync or lock, as on the original path.
+        await remove(name);
+      }
     } catch (err) {
       log.warn({ err, volume: name }, 'orphaned auth volume cleanup failed');
     }

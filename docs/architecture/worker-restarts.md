@@ -755,6 +755,17 @@ holding a row lock. The summary's deferred auth cleanup repeats the terminal che
 this fence after sync-back, before invalidating preparations. The superseded pass also
 refuses to initiate a settlement at a newer task epoch.
 
+Boot's auth-volume reaper uses that same ordering for an existing terminal task: one
+ledger-based credential sync outside the task-row lock, then a bounded settlement
+transaction holding the task row through cache invalidation, stopped-helper cleanup and
+each volume removal. It checks the section signal between destructive calls and forwards
+it to stopped-helper cleanup. Retry during sync or before the row lock preserves the task's
+copies. A failed sync lookup leaves those copies for another boot, while unrelated orphans
+continue. A deleted task has no row or invocation ledger left, so its original orphan-removal
+path remains. In-flight preparation locks survive cache invalidation and remove themselves
+on settlement; sync-back temporary files and MCP failure diagnostics are owned by their run
+(see [Sandbox](sandbox.md)). No schema change is required; revert the code to roll back.
+
 The kb-author sibling (`reconcileKbAuthorEntryOnTaskEnd`, shared by failed settlement and
 Cancel) now takes that same bounded task-row fence through its separate-store mutation,
 rechecking the exact ending status and forwarding the section signal to the store call.

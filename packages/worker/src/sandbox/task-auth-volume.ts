@@ -1,5 +1,5 @@
 import { SANDBOX_CORE_IMAGE } from './image-composer.js';
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { eq } from 'drizzle-orm';
 import { schema, type CliAuthLock, type Database } from '@haive/database';
 import { cliAuthScope } from '@haive/shared/cli-auth-state';
@@ -185,7 +185,7 @@ const VOLUME_REMOVE_RETRIES = 5;
  */
 const ensureVolumeRuns = new Map<string, Promise<void>>();
 const rtkSeedRuns = new Map<string, Promise<boolean>>();
-const cliMcpMergeRuns = new Map<string, Promise<boolean>>();
+const cliMcpMergeRuns = new Map<string, Promise<CliMcpMergeResult>>();
 const geminiMcpMergeRuns = new Map<string, Promise<boolean>>();
 const mcpFileWriteRuns = new Map<string, Promise<boolean>>();
 
@@ -278,11 +278,11 @@ async function applyAuthPreparationOnce(
 /** Forget applied-preparation slots whose volume no longer holds what they recorded.
  *
  *  Called from two places, and the difference matters. The task-end funnel passes no provider:
- *  every volume for the task is being destroyed, so the in-flight LOCKS go too. A volume
- *  RECREATE passes the provider, and then only the applied identities are dropped — a sibling
- *  may be queued on that scope's lock, and removing the lock mid-flight would let its
+ *  every applied identity for the task is forgotten. A volume RECREATE passes the provider
+ *  and only that provider's identities are dropped. Neither clears in-flight locks: a sibling
+ *  may still be queued on a scope's lock, and removing the lock mid-flight would let its
  *  preparation run concurrently with the next one, which is the whole thing the lock exists to
- *  stop.
+ *  stop. withScopeLock removes each lock when its own tail settles.
  *
  *  Scopes are `taskId|provider|phase` for exactly this reason: a per-provider prefix is then
  *  an exact match rather than a substring search over four differently-shaped keys.
@@ -299,10 +299,6 @@ export function clearTaskAuthPreparationState(taskId: string, providerName?: str
   }
   for (const scope of failedMcpAdds.keys()) {
     if (scope.startsWith(prefix)) failedMcpAdds.delete(scope);
-  }
-  if (providerName) return;
-  for (const scope of authPreparationLocks.keys()) {
-    if (scope.startsWith(prefix)) authPreparationLocks.delete(scope);
   }
 }
 
@@ -960,12 +956,22 @@ const failedMcpAdds = new Map<string, string[]>();
 const cliMcpScope = (taskId: string, providerName: string): string =>
   `${taskId}|${providerName}|cli-mcp`;
 
-/** The servers whose `mcp add` failed in the last merge for this task and CLI. */
+/** Owned by one caller; filled even when its helper is coalesced with a sibling's. */
+export interface CliMcpMergeDiagnostics {
+  failedNames: readonly string[];
+}
+interface CliMcpMergeResult extends CliMcpMergeDiagnostics {
+  applied: boolean;
+}
+
+/** With diagnostics, reads that call's failures even after another surface ran or cleanup
+ *  cleared the task cache. Without it, retains the legacy last-merge diagnostic contract. */
 export function failedMcpAddNames(
   taskId: string,
   providerName: CliProviderName,
+  diagnostics?: CliMcpMergeDiagnostics,
 ): readonly string[] {
-  return failedMcpAdds.get(cliMcpScope(taskId, providerName)) ?? [];
+  return diagnostics?.failedNames ?? failedMcpAdds.get(cliMcpScope(taskId, providerName)) ?? [];
 }
 
 /**
@@ -996,23 +1002,42 @@ export function failedMcpAddNames(
  * Best-effort by contract, like {@link mergeGeminiMcpIntoSettings}: every failure is logged and
  * swallowed. A missing MCP server degrades a run; throwing here would kill it.
  */
-export function mergeCliMcpIntoTaskVolume(
+export async function mergeCliMcpIntoTaskVolume(
   taskId: string,
   providerName: CliProviderName,
   image: string | null,
   servers: McpServerSpec[],
   runner: DockerRunner = defaultDockerRunner,
+  diagnostics?: CliMcpMergeDiagnostics,
 ): Promise<boolean> {
   // The surface is the same for siblings of one fan-out. Include it in the key
   // so only byte-equivalent preparations coalesce or skip; a genuinely different
   // surface still runs its own reconciliation.
   const surfaceKey = contentKey(JSON.stringify({ image, servers }));
-  return applyAuthPreparationOnce(
-    cliMcpMergeRuns,
-    cliMcpScope(taskId, providerName),
-    surfaceKey,
-    () => mergeCliMcpIntoTaskVolumeUnlocked(taskId, providerName, image, servers, runner),
-  );
+  const scope = cliMcpScope(taskId, providerName);
+  const success: CliMcpMergeResult = { applied: true, failedNames: [] };
+  // Carry diagnostics in the coalesced promise, never by reading the scope's mutable
+  // last-failure cache after await: a different surface may already have cleared it.
+  const result =
+    appliedAuthPreparations.get(scope) === surfaceKey
+      ? success
+      : await coalesceAuthPreparation(cliMcpMergeRuns, `${scope}|${surfaceKey}`, () =>
+          withScopeLock(scope, async () => {
+            if (appliedAuthPreparations.get(scope) === surfaceKey) return success;
+            const result = await mergeCliMcpIntoTaskVolumeUnlocked(
+              taskId,
+              providerName,
+              image,
+              servers,
+              runner,
+            );
+            if (result.applied) appliedAuthPreparations.set(scope, surfaceKey);
+            else appliedAuthPreparations.delete(scope);
+            return result;
+          }),
+        );
+  if (diagnostics) diagnostics.failedNames = result.failedNames;
+  return result.applied;
 }
 
 async function mergeCliMcpIntoTaskVolumeUnlocked(
@@ -1021,19 +1046,19 @@ async function mergeCliMcpIntoTaskVolumeUnlocked(
   image: string | null,
   servers: McpServerSpec[],
   runner: DockerRunner,
-): Promise<boolean> {
+): Promise<CliMcpMergeResult> {
   failedMcpAdds.delete(cliMcpScope(taskId, providerName));
   const meta = getCliProviderMetadata(providerName);
   // Index 0 is the CLI's own home dir for both cli-merge providers (`~/.grok`, `~/.codex`).
   const authPath = meta.authConfigPaths[0];
-  if (!authPath) return true;
+  if (!authPath) return { applied: true, failedNames: [] };
   if (!image) {
     log.warn(
       { taskId, providerName },
       'mcp merge skipped: no sandbox image resolved, so the CLI binary is unreachable',
     );
     // Not applied: the image is resolved per invocation and a later one may have it.
-    return false;
+    return { applied: false, failedNames: [] };
   }
   const taskVol = cliAuthTaskVolumeName(taskId, providerName, 0);
   // ensureTaskAuthVolumes (via resolveAuthMounts) is what creates this, and it must have run
@@ -1045,7 +1070,7 @@ async function mergeCliMcpIntoTaskVolumeUnlocked(
       { taskId, providerName, taskVol },
       'mcp merge skipped: task auth volume does not exist yet — resolveAuthMounts must run first',
     );
-    return false;
+    return { applied: false, failedNames: [] };
   }
 
   const home = expandTildeToSandbox(authPath);
@@ -1097,23 +1122,21 @@ async function mergeCliMcpIntoTaskVolumeUnlocked(
     timeoutMs: HELPER_TIMEOUT_MS,
   });
   if (result.exitCode !== 0) {
-    failedMcpAdds.set(
-      cliMcpScope(taskId, providerName),
-      result.stderr
-        .split('\n')
-        .filter(
-          (line) => line.startsWith(MCP_ADD_FAILED_PREFIX) && line.endsWith(MCP_ADD_FAILED_SUFFIX),
-        )
-        .map((line) => line.slice(MCP_ADD_FAILED_PREFIX.length, -MCP_ADD_FAILED_SUFFIX.length)),
-    );
+    const failedNames = result.stderr
+      .split('\n')
+      .filter(
+        (line) => line.startsWith(MCP_ADD_FAILED_PREFIX) && line.endsWith(MCP_ADD_FAILED_SUFFIX),
+      )
+      .map((line) => line.slice(MCP_ADD_FAILED_PREFIX.length, -MCP_ADD_FAILED_SUFFIX.length));
+    failedMcpAdds.set(cliMcpScope(taskId, providerName), failedNames);
     log.warn(
       { taskId, providerName, exitCode: result.exitCode, stderr: result.stderr.slice(-500) },
       'mcp merge helper exited non-zero',
     );
-    return false;
+    return { applied: false, failedNames };
   }
   log.info({ taskId, providerName, count: servers.length }, 'merged mcp servers into CLI config');
-  return true;
+  return { applied: true, failedNames: [] };
 }
 
 /**
@@ -1407,14 +1430,18 @@ async function copyAuthFileBack(
   runner: DockerRunner,
 ): Promise<boolean> {
   const safeRel = relPath.replace(/["'`$]/g, '');
+  const temp = `/dst/${safeRel}.haive-tmp-${randomUUID()}`;
   const script = [
     'set -e',
     `if [ -e "/dst/${safeRel}" ] && [ ! "/src/${safeRel}" -nt "/dst/${safeRel}" ]; then exit ${SYNC_SKIPPED_NOT_NEWER_EXIT}; fi`,
     `mkdir -p "$(dirname "/dst/${safeRel}")"`,
-    `cp "/src/${safeRel}" "/dst/${safeRel}.haive-tmp"`,
-    `chown 1000:1000 "/dst/${safeRel}.haive-tmp"`,
-    `chmod 600 "/dst/${safeRel}.haive-tmp"`,
-    `mv "/dst/${safeRel}.haive-tmp" "/dst/${safeRel}"`,
+    // Every helper owns its temp, including its exit cleanup; a concurrent sync cannot
+    // overwrite, rename or remove another helper's in-progress credential.
+    `trap 'rm -f -- "${temp}"' EXIT`,
+    `cp "/src/${safeRel}" "${temp}"`,
+    `chown 1000:1000 "${temp}"`,
+    `chmod 600 "${temp}"`,
+    `mv "${temp}" "/dst/${safeRel}"`,
   ].join('; ');
 
   const result = await runner.run({

@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { schema, type Database } from '@haive/database';
 import { createFakeDb } from '@haive/database/testing';
 import {
@@ -13,6 +13,19 @@ import {
   reapOrphanedAuthVolumes,
   selectOrphanAuthVolumes,
 } from '../src/sandbox/auth-volume-reaper.js';
+import {
+  clearTaskAuthPreparationState,
+  syncRefreshedAuthToUserVolumes,
+} from '../src/sandbox/task-auth-volume.js';
+
+vi.mock('../src/sandbox/task-auth-volume.js', () => ({
+  syncRefreshedAuthToUserVolumes: vi.fn(async () => undefined),
+  clearTaskAuthPreparationState: vi.fn(),
+}));
+afterEach(() => {
+  vi.mocked(syncRefreshedAuthToUserVolumes).mockReset().mockResolvedValue(undefined);
+  vi.mocked(clearTaskAuthPreparationState).mockReset();
+});
 
 const USER = 'aaaaaaaa-1111-4111-8111-111111111111';
 const PROVIDER = 'bbbbbbbb-2222-4222-8222-222222222222';
@@ -60,18 +73,137 @@ describe('selectOrphanAuthVolumes', () => {
 });
 
 describe('reapOrphanedAuthVolumes', () => {
-  function db(): Database {
-    const fake = createFakeDb({
-      tasks: schema.tasks,
-      cliProviders: schema.cliProviders,
-      users: schema.users,
-    });
+  function fixture(status = 'completed') {
+    const fake = createFakeDb(
+      {
+        tasks: schema.tasks,
+        cliProviders: schema.cliProviders,
+        users: schema.users,
+      },
+      { rowLocks: true },
+    );
     fake.insert(schema.users, { id: USER });
     fake.insert(schema.cliProviders, { id: PROVIDER, userId: USER, name: 'gemini' });
     fake.insert(schema.tasks, { id: LIVE_TASK, userId: USER, status: 'running' });
-    fake.insert(schema.tasks, { id: DONE_TASK, userId: USER, status: 'completed' });
-    return fake.db as unknown as Database;
+    fake.insert(schema.tasks, { id: DONE_TASK, userId: USER, status, orchestrationEpoch: 1 });
+    return fake;
   }
+  const db = () => fixture().db as unknown as Database;
+
+  it.each(['completed', 'failed', 'cancelled'])(
+    'syncs a %s task once before fenced removal of all its volumes',
+    async (status) => {
+      const fake = fixture(status);
+      const database = fake.db as unknown as Database;
+      const names = [
+        cliAuthTaskVolumeName(DONE_TASK, 'gemini', 0),
+        cliAuthTaskVolumeName(DONE_TASK, 'gemini', 1),
+      ];
+      const events: string[] = [];
+      vi.mocked(syncRefreshedAuthToUserVolumes).mockImplementationOnce(async (db, task) => {
+        expect(db).toBe(database);
+        expect(task).toBe(DONE_TASK);
+        expect(fake.rowLocked(schema.tasks, DONE_TASK)).toBe(false);
+        events.push('sync');
+      });
+      const count = await reapOrphanedAuthVolumes(database, {
+        listAuthVolumes: async () => names,
+        removeStoppedContainersUsingVolume: async () => {
+          expect(fake.rowLocked(schema.tasks, DONE_TASK)).toBe(true);
+          events.push('stopped');
+        },
+        removeVolume: async () => {
+          expect(fake.rowLocked(schema.tasks, DONE_TASK)).toBe(true);
+          events.push('remove');
+        },
+      });
+      expect(count).toBe(2);
+      expect(events).toEqual(['sync', 'stopped', 'remove', 'stopped', 'remove']);
+      expect(syncRefreshedAuthToUserVolumes).toHaveBeenCalledOnce();
+      expect(clearTaskAuthPreparationState).toHaveBeenCalledWith(DONE_TASK);
+      expect(fake.rowLocked(schema.tasks, DONE_TASK)).toBe(false);
+    },
+  );
+
+  it('keeps auth volumes and preparations when Retry wins during sync', async () => {
+    const fake = fixture('failed');
+    vi.mocked(syncRefreshedAuthToUserVolumes).mockImplementationOnce(async () => {
+      fake.patch(schema.tasks, DONE_TASK, { status: 'running', orchestrationEpoch: 2 });
+    });
+    const stopped = vi.fn();
+    const remove = vi.fn();
+    const count = await reapOrphanedAuthVolumes(fake.db as unknown as Database, {
+      listAuthVolumes: async () => [cliAuthTaskVolumeName(DONE_TASK, 'codex', 0)],
+      removeStoppedContainersUsingVolume: stopped,
+      removeVolume: remove,
+    });
+    expect(count).toBe(0);
+    expect(stopped).not.toHaveBeenCalled();
+    expect(remove).not.toHaveBeenCalled();
+    expect(clearTaskAuthPreparationState).not.toHaveBeenCalled();
+  });
+
+  it('keeps volumes on a sync lookup error and continues with another orphan', async () => {
+    vi.mocked(syncRefreshedAuthToUserVolumes).mockRejectedValueOnce(
+      new Error('ledger unavailable'),
+    );
+    const remove = vi.fn();
+    const gone = cliAuthVolumeName(GONE_USER, 'codex', 0);
+    expect(
+      await reapOrphanedAuthVolumes(db(), {
+        listAuthVolumes: async () => [cliAuthTaskVolumeName(DONE_TASK, 'codex', 0), gone],
+        removeVolume: remove,
+      }),
+    ).toBe(1);
+    expect(remove).toHaveBeenCalledExactlyOnceWith(gone);
+  });
+
+  it('keeps an ambiguous task slug without syncing either task', async () => {
+    const fake = fixture('failed');
+    fake.insert(schema.tasks, { id: 'dddddddd-4444-4444-8444-555555555555', status: 'failed' });
+    const remove = vi.fn();
+    expect(
+      await reapOrphanedAuthVolumes(fake.db as unknown as Database, {
+        listAuthVolumes: async () => [cliAuthTaskVolumeName(DONE_TASK, 'codex', 0)],
+        removeVolume: remove,
+      }),
+    ).toBe(0);
+    expect(syncRefreshedAuthToUserVolumes).not.toHaveBeenCalled();
+    expect(remove).not.toHaveBeenCalled();
+  });
+
+  it('starts no volume removal after the settlement transaction ends during helper cleanup', async () => {
+    const fake = fixture('failed');
+    const expire = Promise.withResolvers<never>();
+    const started = Promise.withResolvers<AbortSignal>();
+    const release = Promise.withResolvers<void>();
+    let callback: Promise<unknown> = Promise.resolve();
+    const database = {
+      ...fake.db,
+      transaction: (section: Parameters<Database['transaction']>[0]) => {
+        const pending = (fake.db as unknown as Database).transaction(section);
+        callback = pending.catch(() => undefined);
+        return Promise.race([pending, expire.promise]);
+      },
+    } as unknown as Database;
+    const remove = vi.fn();
+    const reaping = reapOrphanedAuthVolumes(database, {
+      listAuthVolumes: async () => [cliAuthTaskVolumeName(DONE_TASK, 'codex', 0)],
+      removeStoppedContainersUsingVolume: async (_name, signal) => {
+        started.resolve(signal!);
+        await release.promise;
+      },
+      removeVolume: remove,
+    });
+    const signal = await started.promise;
+    expect(signal.aborted).toBe(false);
+    expire.reject(new Error('transaction ended'));
+    expect(await reaping).toBe(0);
+    expect(signal.aborted).toBe(true);
+    release.resolve();
+    await callback;
+    expect(remove).not.toHaveBeenCalled();
+  });
 
   it('removes only volumes nothing needs, after their stopped containers', async () => {
     const goneOwners = [

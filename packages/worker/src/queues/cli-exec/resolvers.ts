@@ -616,13 +616,16 @@ export async function resolveMcpExtraFiles(
       );
       return { files: serverFiles, extraArgs: [] };
     case 'cli-merge': {
+      const diagnostics = { failedNames: [] as readonly string[] };
       const merged = await mergeCliMcpIntoTaskVolume(
         taskId,
         providerName,
         sandboxImage,
         resolveStdioMcpServers(servers, userServers),
+        undefined,
+        diagnostics,
       );
-      const failed = merged ? [] : failedMcpAddNames(taskId, providerName);
+      const failed = merged ? [] : failedMcpAddNames(taskId, providerName, diagnostics);
       requireWritten(
         merged,
         failed.length > 0
