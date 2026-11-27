@@ -51,6 +51,8 @@ interface CliProviderFormProps {
   mode: 'create' | 'edit';
   provider?: CliProvider;
   metadata: CliProviderCatalogEntry;
+  // Reports the persisted row for sibling controls after either Save or Rebuild image.
+  onProviderSaved?: (provider: CliProvider) => void;
   // Emits a human-readable reason the Test connection button should be
   // disabled, or null if it should be enabled. Lets the parent page render
   // the matching notice and gate the sibling test component without knowing
@@ -177,6 +179,7 @@ export function CliProviderForm({
   mode,
   provider,
   metadata,
+  onProviderSaved,
   onTestBlockChange,
   secretsReloadNonce = 0,
 }: CliProviderFormProps) {
@@ -583,7 +586,12 @@ export function CliProviderForm({
       egressDomains: parseLinesList(snapshot.egressDomainsText),
     };
 
-    await api.patch(`/cli-providers/${provider.id}`, payload);
+    const { provider: updated } = await api.patch<{ provider: CliProvider }>(
+      `/cli-providers/${provider.id}`,
+      payload,
+    );
+    // The settings are committed even if a later secret write or image build fails.
+    onProviderSaved?.(updated);
 
     const parsedSecrets = { ...movedSecrets, ...parseEnvVars(snapshot.secretsText) };
     const submittedNames = new Set(Object.keys(parsedSecrets));

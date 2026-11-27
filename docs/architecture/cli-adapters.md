@@ -207,6 +207,10 @@ and generic secret deletion can still remove that legacy grant. Manual usage-gra
 API-key rows are refused, as are OAuth start/complete, with `usage_auth_subscription_required`.
 Completion rechecks auth mode as well as login scope after taking the advisory lock. List and
 edit-page authorization controls require subscription auth; legacy grants can still be disconnected.
+The edit form reports the persisted provider to its parent after every settings save, including
+the save before Rebuild image, so usage authorization and Disconnect scope follow the saved auth
+mode and isolation without reloading. A later secret-write or image-build failure does not undo
+that settings save.
 The usage API excludes frozen API-key Claude snapshots, and the task header also filters on
 the provider's auth mode, so neither header surface keeps prompting an impossible reconnect.
 The task header's empty-meter fallback is also suppressed on API-key Claude rows.

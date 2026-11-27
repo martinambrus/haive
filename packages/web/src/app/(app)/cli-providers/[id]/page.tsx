@@ -101,6 +101,7 @@ export default function EditCliProviderPage() {
           mode="edit"
           provider={provider}
           metadata={meta}
+          onProviderSaved={setProvider}
           onTestBlockChange={setTestBlockMessage}
           secretsReloadNonce={secretsReloadNonce}
         />

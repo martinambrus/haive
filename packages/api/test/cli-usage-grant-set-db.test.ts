@@ -500,17 +500,58 @@ describe.skipIf(!url)('every writer of the Claude usage connection covers the lo
       expect(await outside(OUTSIDE)).toEqual(before);
     });
 
-    it.each([
-      ['an isolated row', 'D'],
-      ['an API-key row', 'E'],
-    ] as [string, Key][])('through %s writes that row only', async (_n, key) => {
-      const rest = ALL.filter((k) => k !== key);
+    it('through an isolated row writes that row only', async () => {
+      const rest = ALL.filter((k) => k !== 'D');
       const before = await outside(rest);
       const value = grant();
-      expect((await postUsage(rows[key].id, value)).status).toBe(200);
-      await expectGrantEverywhere([key], JSON.parse(value));
-      await expectUsageEvents(SET_ACTION, 'manual', key, [key], 1);
+      expect((await postUsage(rows.D.id, value)).status).toBe(200);
+      await expectGrantEverywhere(['D'], JSON.parse(value));
+      await expectUsageEvents(SET_ACTION, 'manual', 'D', ['D'], 1);
       expect(await outside(rest)).toEqual(before);
+    });
+
+    it.each([false, true])(
+      'refuses an API-key row (isolated=%s) without writing to it or its login set',
+      async (isolateAuth) => {
+        await db
+          .update(schema.cliProviders)
+          .set({ isolateAuth })
+          .where(eq(schema.cliProviders.id, rows.E.id));
+        const [sibling] = await db
+          .insert(schema.cliProviders)
+          .values({
+            userId: U,
+            name: 'claude-code',
+            authMode: 'api_key',
+            label: rnd(),
+          })
+          .returning();
+        const before = await world();
+        const siblingBefore = await snapshot([sibling!.id]);
+        const res = await postUsage(rows.E.id, grant());
+        expect(res.status).toBe(400);
+        expect(await res.json()).toMatchObject({ code: 'usage_auth_subscription_required' });
+        expect(await world()).toEqual(before);
+        expect(await snapshot([sibling!.id])).toEqual(siblingBefore);
+        expect(h.insert).not.toHaveBeenCalled();
+        expect(h.log).not.toHaveBeenCalled();
+        expect(h.poll).not.toHaveBeenCalled();
+      },
+    );
+
+    it('still accepts an ordinary API-key secret write on that row only', async () => {
+      const before = await outside(ALL.filter((k) => k !== 'E'));
+      const grantsBefore = await usageCopies(idsOf(ALL));
+      const snapshotsBefore = await snapshotRows(idsOf(ALL));
+      const value = rnd();
+      const res = await call('POST', `/${rows.E.id}/secrets`, { secretName: OTHER, value });
+      expect(res.status).toBe(200);
+      expect(await plain(rows.E.id, OTHER)).toBe(value);
+      expect(await usageCopies(idsOf(ALL))).toEqual(grantsBefore);
+      expect(await snapshotRows(idsOf(ALL))).toEqual(snapshotsBefore);
+      expect(await outside(ALL.filter((k) => k !== 'E'))).toEqual(before);
+      await expectNoUsageEvents();
+      expect(h.poll).not.toHaveBeenCalled();
     });
 
     // The value variants are unit tests of isUsageGrantValue; this one proves the route's refusal.
