@@ -2884,7 +2884,7 @@ From the T341 review (2026-10-31). Minor; PRE-EXISTING unless stated.
 
 ### T486 · FNF[aside-trees] · a kept-aside repository tree is never swept, reported or named on failure (+7)
 
-status: open · priority: P2
+status: open for items 1, 3, 5, 7, 8, 9, 10 (fenced run 2026-11-27: items 4, 2 and 6 DONE, merged #1391 (39b800efc) and live, migrations 0255 and 0256 applied: remote rebuilds stage into a sibling and verify before publishing, every aside is recorded in `repositories.checkout_aside_paths` and named in failure copy, the notice is scoped to the rebuild's own job by `checkout_aside_job_id` so its retries keep it and a later ordinary refresh clears it) · priority: P2
 From the T479 review (2026-10-31). PRE-EXISTING, minor (needs a crash between two renames or two consecutive failures).
 
 1. `.haive-extract-*` stages (worker repo/clone.ts ~:543) are never swept, reported or documented: upload-reaper.ts (~:408-452) sweeps `_uploads` only and scratch-workspace.ts (~:167-196) `_scratch` only. Since T479 a stage kept after a failed restore holds the only copy of the previous tree, and a crash between the swap's two renames leaves one too. Decide whether a sweep reports or removes them (removal must never take the only copy).
@@ -2899,6 +2899,9 @@ From the T479 review (2026-10-31). PRE-EXISTING, minor (needs a crash between tw
 8. T397 round7 introduces a unique <repoId>.rebuild-<uuid> staging sibling for folder refreshes. A kill or refused cleanup retains it, and repository deletion/sweeps do not list it. REGRESSION-adjacent retention limit, minor; include these exact owned siblings in this task's eventual report/sweep design, never remove the only copy blindly. Item4's partial folder-destination defect is fixed by staging; the equivalent remote clone path still writes directly at dest and remains open. A clone checkout failing after HEAD resolves may then be accepted as usable on Retry (code trace verified, git interruption order still unmeasured).
 
 Reconciled 2026-11-01: item2 is RESOLVED by T397: failedAfterMove names the kept aside on rebuild failure. Item4 is RESOLVED for folder copies by staging; the remote-clone equivalent remains a verification candidate as item8 records. Never count the folder case as an open defect or sweep the only remaining copy. Retention/reporting design remains open.
+
+9. (T486 review 1 L3) After a worker death mid-rebuild nothing user-visible names the aside until the next job completes or fails; the row's `checkout_aside_paths` holds it only after the next inventory write.
+10. (T486 review 2) A user Retry gets a new job id, so it names the asides only if it reaches the rebuild's own marker write; one that fails earlier (credential gone, source folder moved) shows the bare error while the checkout path is absent and the old tree sits in an aside, and a Retry that finds the published checkout usable shows no names. No worse than before #1391. Fix direction: owe the notice structurally while the checkout is unusable and asides exist. Item 8 now also covers unfinished `.rebuild-*` stages of remote rebuilds (review 1 L5).
 
 ### T490 · FNF[error-text-paths-2] [verify-first] · other surfaces still show raw worker error text with server paths (+8) [parked: fence]
 
