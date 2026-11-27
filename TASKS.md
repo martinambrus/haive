@@ -579,7 +579,7 @@ PRE-EXISTING, from the T355 build. Use `boundedAdd`/`addBestEffort`/`addOrRefuse
 
 ### T551 · FNF[outage-503-web-copy] · web shows a generic error for 503 config_unavailable
 
-status: open · kind: fix · priority: P4
+status: done 2026-11-27, merged #1360 3f8b2871a and live (web and worker reloaded): outage copy for both 503 codes, Redis card on admin, `readTolerant` deduplicated; `runtimeOccupancyMb` left (dead, pre-existing) · kind: fix · priority: P4
 From the T355 build, cosmetic. The web client renders the 503 as a generic failure; name it as a temporary outage with a retry hint. Nits for the same pass: `readTolerant` duplicated in worker 08c ~:129 and 08d ~:140; dead `runtimeOccupancyMb` at runtime-admission.ts ~:438 (mention only, pre-existing). The custom tool Start gate (T346) answers the same 503 on a config outage. Since T549: the same for 503 `redis_unavailable`, and `/admin/health` reports `redis: 'up' | 'down'` that the admin page does not show (web app/(app)/admin/page.tsx ~:356; `AdminHealthResponse` in lib/api-client.ts ~:1596 lacks the field).
 
 ### T665 · FNF[price-tier-lows] · prompt-size price tier lows, after #1164 (+21)
