@@ -157,6 +157,19 @@ describe('kb_author entry reconciliation on task end', () => {
     },
   );
 
+  it('deletes a cancelled task’s already failed entry on the sweep after Cancel’s store call failed', async () => {
+    const state = setup('failed');
+    state.fake.patch(schema.tasks, state.taskId, { status: 'cancelled' });
+    await reconcilePendingGlobalKbSyncs();
+    expect(state.stored()).toEqual([]);
+  });
+
+  it('leaves a failed task’s already failed entry as settled', async () => {
+    const state = setup('failed');
+    await reconcilePendingGlobalKbSyncs();
+    expect(state.stored()).toMatchObject([{ status: 'failed' }]);
+  });
+
   it('keeps an entry when Retry commits after the sweep selected its failed task', async () => {
     const state = setup('enriching');
     let reads = 0;

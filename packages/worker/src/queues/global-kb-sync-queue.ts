@@ -514,15 +514,21 @@ async function embedderMatchesStore(settings: {
  * Close the store scan before taking any task row; the helper rechecks status under its fence. */
 async function reconcileUnfinishedKbAuthorEntries(): Promise<void> {
   const db = getDb();
+  // A `failed` entry is still owed a delete when its task was cancelled (Cancel's store call can
+  // fail after Stop marked it failed); for a failed task it is already settled.
   const unfinished = await withGlobalKb(db, ({ db: gdb }) =>
     gdb
-      .select({ taskId: globalKbEntries.sourceTaskId })
+      .select({ taskId: globalKbEntries.sourceTaskId, status: globalKbEntries.status })
       .from(globalKbEntries)
-      .where(inArray(globalKbEntries.status, ['skeleton', 'enriching'])),
+      .where(inArray(globalKbEntries.status, ['skeleton', 'enriching', 'failed'])),
   );
-  const ids = [
-    ...new Set(unfinished.map((e) => e.taskId).filter((id): id is string => id !== null)),
-  ];
+  const openFor = new Set<string>();
+  const failedFor = new Set<string>();
+  for (const e of unfinished) {
+    if (e.taskId === null) continue;
+    (e.status === 'failed' ? failedFor : openFor).add(e.taskId);
+  }
+  const ids = [...new Set([...openFor, ...failedFor])];
   if (ids.length === 0) return;
   const tasks = await db
     .select({ id: schema.tasks.id, status: schema.tasks.status })
@@ -535,7 +541,7 @@ async function reconcileUnfinishedKbAuthorEntries(): Promise<void> {
       ),
     );
   for (const task of tasks) {
-    if (task.status === 'failed' || task.status === 'cancelled')
+    if (task.status === 'cancelled' || (task.status === 'failed' && openFor.has(task.id)))
       await reconcileKbAuthorEntryOnTaskEnd(db, task.id, task.status, log);
   }
 }
