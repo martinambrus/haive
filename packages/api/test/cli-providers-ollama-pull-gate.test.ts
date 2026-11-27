@@ -52,6 +52,7 @@ function setup(row?: {
       id: PROVIDER,
       userId: USER,
       label: 'p',
+      enabled: true,
       rulesContent: DEFAULT_AGENT_RULES,
       ...row,
     });
@@ -89,6 +90,68 @@ beforeEach(() => {
 afterEach(() => vi.restoreAllMocks());
 
 describe('in-stack Ollama provider save policy', () => {
+  it.each(['draining', 'disallowed model'])(
+    'allows disabling and metadata-only edits after model failure during %s',
+    async (condition) => {
+      for (const body of [
+        { enabled: false },
+        { enabled: false, model: condition === 'draining' ? 'allowed' : 'blocked' },
+        { label: 'renamed' },
+        {
+          label: 'renamed',
+          model: condition === 'draining' ? 'allowed' : 'blocked',
+          modelfile: null,
+          enabled: true,
+        },
+        { rulesContent: 'Updated rules' },
+      ]) {
+        const fake = setup({
+          name: 'ollama',
+          model: condition === 'draining' ? 'allowed' : 'blocked',
+        });
+        fake.patch(schema.cliProviders, PROVIDER, { modelProvisionStatus: 'failed' });
+        if (condition === 'draining')
+          vi.mocked(configService.getFresh).mockResolvedValue('draining');
+        expect((await patch(body)).status).toBe(200);
+        expect(fake.rows(schema.cliProviders)[0]).toMatchObject({
+          ...body,
+          modelProvisionStatus: 'failed',
+        });
+        expect(h.add).not.toHaveBeenCalled();
+        expect(configService.getFresh).not.toHaveBeenCalled();
+        expect(configService.get).not.toHaveBeenCalled();
+      }
+    },
+  );
+
+  it('does not retry unchanged model inputs while the provider stays disabled', async () => {
+    const fake = setup({ name: 'ollama', model: 'blocked' });
+    fake.patch(schema.cliProviders, PROVIDER, {
+      enabled: false,
+      modelProvisionStatus: 'failed',
+    });
+    expect((await patch({ model: 'blocked' })).status).toBe(200);
+    expect(h.add).not.toHaveBeenCalled();
+    expect(configService.get).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    { model: 'allowed' },
+    { modelfile: '' },
+    { model: 'allowed', label: 'p', enabled: true, modelfile: null },
+  ])('retries unchanged failed model inputs for an enabled provider: %j', async (body) => {
+    const fake = setup({ name: 'ollama', model: 'allowed' });
+    fake.patch(schema.cliProviders, PROVIDER, { modelProvisionStatus: 'failed' });
+    expect((await patch(body)).status).toBe(200);
+    expect(fake.rows(schema.cliProviders)[0]).toMatchObject({
+      enabled: true,
+      modelProvisionStatus: 'provisioning',
+      modelProvisionError: null,
+    });
+    expect(h.add).toHaveBeenCalledTimes(1);
+    expect(h.add.mock.calls[0]?.[0]).toBe('cli-provision-ollama-model');
+  });
+
   it('checks the allowlist before retrying an unchanged failed model', async () => {
     const fake = setup({ name: 'ollama', model: 'blocked' });
     fake.patch(schema.cliProviders, PROVIDER, { modelProvisionStatus: 'failed' });

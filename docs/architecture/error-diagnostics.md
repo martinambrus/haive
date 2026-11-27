@@ -329,9 +329,11 @@ or provisioning forever; an already-ready worker result is kept. The per-kind UU
 `sandbox_image_enqueue_id` / `model_provision_enqueue_id` also serves as the BullMQ job id and fences
 compensation to its own attempt. The independent nullable columns (migration 0252) are needed because
 `updated_at` changes on unrelated edits and worker results, and one shared revision loses image
-compensation when only a model save overlaps it. An unchanged save retries failed model provisioning
-through the same pull policy and maintenance admission checks. Runtime access keeps its 202
-pending response, VNC its starting refusal, and plan/data Save and Pull their existing refusal
+compensation when only a model save overlaps it. Saving model or Modelfile fields on an enabled
+provider retries failed model provisioning even with unchanged inputs, through the same pull policy
+and maintenance admission checks. Disabling or editing metadata alone does not retry provisioning,
+including a form save that echoes unchanged model fields alongside a metadata change.
+Runtime access keeps its 202 pending response, VNC its starting refusal, and plan/data Save and Pull their existing refusal
 contracts. Optional wake-ups (plan/project-state sweeps, module-source outbox, global-KB pending
 embeds and usage polls) are best effort. The API queue-add ratchet resolves the called BullMQ method declaration
 across routes, libraries and modules; `routes/repos.ts` remains explicitly excluded for its

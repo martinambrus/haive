@@ -821,10 +821,21 @@ cliProviderRoutes.patch('/:id', async (c) => {
   ) {
     modelInputsChanged = true;
   }
-  // A failed enqueue is retried by saving, even with unchanged model inputs.
-  // Such a retry needs the same policy and admission checks as a new pull.
+  // The form echoes model fields even for metadata edits. Only an otherwise
+  // unchanged model save on an enabled provider retries a failed enqueue;
+  // metadata edits and disabling must not require model policy or admission.
+  const otherInputsChanged =
+    Object.entries(updates).some(
+      ([field, value]) =>
+        !['updatedAt', 'model', 'modelfile', 'enabled'].includes(field) &&
+        !isDeepStrictEqual(value, existing[field as keyof typeof existing]),
+    ) || Object.keys(split?.secrets ?? {}).length > 0;
   const retryModel =
-    existing.modelProvisionStatus === 'failed' && shouldProvisionOllamaModel(candidate);
+    candidate.enabled &&
+    (body.model !== undefined || body.modelfile !== undefined) &&
+    !otherInputsChanged &&
+    existing.modelProvisionStatus === 'failed' &&
+    shouldProvisionOllamaModel(candidate);
   const from = (modelfile: string | null) =>
     modelfile ? parseModelfile(modelfile).from : undefined;
   const policyInputsChanged =

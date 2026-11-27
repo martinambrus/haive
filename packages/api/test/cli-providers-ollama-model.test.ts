@@ -46,6 +46,7 @@ function setup(row?: { name: string; model: string | null }) {
       id: PROVIDER,
       userId: USER,
       label: 'p',
+      enabled: true,
       rulesContent: DEFAULT_AGENT_RULES,
       ...row,
     });
