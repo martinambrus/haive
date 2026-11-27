@@ -489,8 +489,8 @@ The lifecycle fence is a per-process Map and relies on **one worker per install*
 runs. Two workers can admit a boot in one process past the other's drain; horizontal worker
 scaling needs a shared lifecycle fence before it is supported.
 
-Deploy the warning web and API attach guards before this worker layer. Drain preparations,
-interactive boots and task work through maintenance. Apply migration 0254 first and rebuild database/shared libraries.
+Deploy API, worker and web together after draining preparations, interactive boots and task
+work through maintenance. Apply migration 0254 first and rebuild database/shared libraries.
 Use `pnpm docker restart api worker web` for deployment after that drain; never restart live
 services as a test. Legacy unstamped containers survive deployment and ordinary next ensures
 regardless of replacement history. A worker recreation still interrupts PTYs.
@@ -506,3 +506,14 @@ layer. Reopening a session remains a user action.
 Unreadable Docker identity labels preserve app/Editor runners. DDEV wraps that probe failure
 in `RunnerProbeError`, retaining its transient retry classification. Filesystem identity failures
 still refuse admission; the pre-swap stop/absence barrier remains the replacement guarantee.
+
+The web's Retry preparation and Rebuild checkout actions open the shared Escape-dismissable
+Dialog before posting. It warns that commands in terminals, Editors and runtimes stop and that
+Editor buffers survive for review; Check repair remains an in-place check. Editor/Browser panels
+poll the authenticated `interactive-status` endpoint, whose structural status and replacement
+epoch drive `checkoutSessionBanner`. A changed epoch is noticed even if cloning and ready both
+happened between polls. The old surface unmounts and stays closed until **Reopen session** is
+clicked after ready. Terminal code 4426 keeps its output visible and offers **Reopen terminal**
+once that same endpoint reports ready. Neither path reconnects automatically for a rebuild.
+The replacement banner asks users to review retained buffers before saving. Error or
+status-message copy alone never drives a replacement banner.

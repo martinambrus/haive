@@ -379,6 +379,7 @@ export interface Repository {
   status: 'cloning' | 'ready' | 'error';
   statusMessage: string | null;
   errorCode?: RepositoryErrorCode | null;
+  checkoutSessionReason?: string | null;
   /** List-only retry capability. Absent means unknown; the API still checks admission. */
   canRetry?: boolean;
   /** List-only: recorded reason an errored repository cannot be retried. Absent means unknown. */
