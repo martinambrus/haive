@@ -507,3 +507,40 @@ export function taskRepositoryDeleted(task: {
     !taskMayRunWithoutRepository({ type: task.type ?? '', metadata: task.metadata })
   );
 }
+
+/** Structural replacement state only; repository status_message can outlive its rebuild. */
+export function checkoutSessionBanner(
+  status: string | undefined,
+  suspended: boolean,
+): string | null {
+  if (!suspended && status === 'ready') return null;
+  if (!status) return null;
+  return status === 'ready'
+    ? 'The repository is ready. Reopen the session explicitly. Editor unsaved buffers were kept for review; compare them with the rebuilt files before saving.'
+    : 'The checkout is unavailable. Reopening sessions is paused. A rebuild stops running terminal, Editor and runtime commands; unsaved Editor buffers are kept for review.';
+}
+
+/** Repository replacement waits/failures are keyed on a durable code, never stale copy. */
+export function checkoutPreparationBanner(repo: {
+  status: string;
+  checkoutSessionReason?: string | null;
+}): { text: string; waiting: boolean } | null {
+  if (!repo.checkoutSessionReason || (repo.status !== 'cloning' && repo.status !== 'error'))
+    return null;
+  const reasons: Record<string, string> = {
+    draining: 'Waiting for Terminal, Editor and runtime opens to finish before stopping sessions.',
+    foreign_container:
+      'A container belonging to another installation still mounts this checkout. Resolve its ownership before retrying.',
+    container_remains:
+      'A session container remains after removal. Inspect and remove the blocked container before retrying.',
+    docker_unknown: 'Docker could not confirm that session containers stopped.',
+    session_transport_unknown: 'Session notifications could not be delivered.',
+    drain_timeout: 'An in-flight session open did not finish within the drain deadline.',
+    already_suspending: 'Another session suspension is still in progress.',
+  };
+  const waiting = repo.status === 'cloning';
+  return {
+    waiting,
+    text: `${reasons[repo.checkoutSessionReason] ?? 'Session suspension needs repair.'} (${repo.checkoutSessionReason}) ${waiting ? 'Retrying within the 30-minute preparation deadline.' : 'Automatic retries ended. Repair the cause and Retry.'} The checkout has not moved.`,
+  };
+}

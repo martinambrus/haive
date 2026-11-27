@@ -3863,6 +3863,7 @@ async function refreshRepository(c: Context<AppEnv>, recovery = false) {
         refreshPending: true,
         refreshJobId,
         statusMessage: null,
+        checkoutSessionReason: null,
         // Keep the repair signal until recovery settles: even before enqueue, another refresh
         // must remain check-only rather than rebuild without restoring this install's data.
         errorCode: checkCheckoutOnly || recovery ? repairErrorCode : null,

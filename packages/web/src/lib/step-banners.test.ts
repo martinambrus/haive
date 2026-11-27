@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import {
+  checkoutPreparationBanner,
   archiveExpansionBanner,
   rejectedReplyBanner,
   upgradeAttemptBanner,
@@ -844,5 +845,35 @@ describe('rejectedReplyBanner', () => {
       rejectedReplyBanner({ ...{ attemptCount: 4 }, rejectedReplyCount: 2, iterationCount: 1 }),
     ).toBeNull();
     expect(rejectedReplyBanner({ ...{ attemptCount: 4 }, iterationCount: 0 })).toBeNull();
+  });
+});
+
+describe('repository checkout suspension reasons', () => {
+  it.each([
+    'draining',
+    'docker_unknown',
+    'drain_timeout',
+    'already_suspending',
+    'session_transport_unknown',
+  ])('shows a cloning wait keyed on %s', (checkoutSessionReason) => {
+    expect(checkoutPreparationBanner({ status: 'cloning', checkoutSessionReason })).toMatchObject({
+      waiting: true,
+      text: expect.stringContaining(checkoutSessionReason),
+    });
+  });
+  it.each(['foreign_container', 'container_remains', 'drain_timeout'])(
+    'shows repair for terminal %s',
+    (checkoutSessionReason) => {
+      expect(checkoutPreparationBanner({ status: 'error', checkoutSessionReason })).toMatchObject({
+        waiting: false,
+        text: expect.stringContaining('Repair the cause and Retry'),
+      });
+    },
+  );
+  it('suppresses stale codes after ready and has no banner without a structural reason', () => {
+    expect(
+      checkoutPreparationBanner({ status: 'ready', checkoutSessionReason: 'docker_unknown' }),
+    ).toBeNull();
+    expect(checkoutPreparationBanner({ status: 'cloning' })).toBeNull();
   });
 });

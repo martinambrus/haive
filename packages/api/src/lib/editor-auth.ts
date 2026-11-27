@@ -28,7 +28,7 @@ export async function editorIdentity(
 export async function authenticateEditorUpgrade(
   req: IncomingMessage,
   target: EditorTarget,
-): Promise<{ userId: string; session: UpgradeSession } | null> {
+): Promise<{ userId: string; session: UpgradeSession; checkoutEpoch?: string | null } | null> {
   let session: UpgradeSession | undefined;
   try {
     const payload = await editorIdentity(req.headers.cookie, target);
@@ -37,7 +37,7 @@ export async function authenticateEditorUpgrade(
     session = trackUserUpgrade(payload.sub, req.socket);
     await requireEditorUser(payload.sub, payload.tv);
     if (session.revoked) return null;
-    return { userId: payload.sub, session };
+    return { userId: payload.sub, session, checkoutEpoch: payload.checkoutEpoch };
   } catch {
     if (!session?.revoked) session?.dispose();
     return null;

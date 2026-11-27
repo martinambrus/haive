@@ -29,7 +29,11 @@ vi.mock('../src/queues.js', () => ({
   getIdeEnsureQueueEvents: () => ({}),
 }));
 vi.mock('../src/redis.js', () => ({
-  getRedis: () => ({ set: h.set, getdel: h.getdel }),
+  getRedis: () => ({
+    set: h.set,
+    getdel: h.getdel,
+    get: async (key: string) => h.store.get(key)?.value ?? null,
+  }),
   getPatientRedis: () => ({
     scan: async () => ['0', []],
     hset: async () => 1,
@@ -141,6 +145,7 @@ describe('editor grants', () => {
         target: { kind: kind === 'repos' ? 'repo' : 'task', id: ID },
         runtimeSessionId: kind === 'repos' ? `repo-${ID}` : ID,
         editorOrigin: 'https://ide.example.com',
+        checkoutEpoch: null,
       });
       expect(h.ensure.mock.calls[0]![1]).toEqual(
         kind === 'repos' ? { repositoryId: ID, userId: USER } : { taskId: ID, userId: USER },
@@ -661,3 +666,48 @@ it.each(['tasks', 'repos'])(
     expect(h.ensure).not.toHaveBeenCalled();
   },
 );
+
+it('refuses old Editor HTTP and WS sessions after replacement; an explicit handshake reopens with retained data', async () => {
+  const old = await issued('repos');
+  h.store.set(`repo-interactive-epoch:${ID}`, { value: 'replacement', expires: Infinity });
+  const http = await app.request(`/ide/repos/${ID}/`, { headers: { cookie: old.cookie } });
+  expect(http.status).toBe(409);
+  const port = await editorWsRig();
+  expect(await wsHandshake(port, old.cookie, `/ide/repos/${ID}/socket`).result).toBe(409);
+  expect(h.ensure).toHaveBeenCalledTimes(1);
+  const fresh = await issued('repos');
+  const payload = await verifyEditorSession(fresh.cookie.slice(fresh.cookie.indexOf('=') + 1));
+  expect(payload.checkoutEpoch).toBe('replacement');
+  fake.patch(schema.repositories, ID, { status: 'cloning' });
+  expect((await grant('repos')).status).toBe(409);
+});
+
+it('rechecks checkout admission when an Editor ensure finishes after cloning committed', async () => {
+  h.ensure.mockResolvedValueOnce({
+    waitUntilFinished: async () => {
+      fake.patch(schema.repositories, ID, { status: 'cloning' });
+      return { ok: true };
+    },
+  });
+  expect((await grant('repos')).status).toBe(409);
+  expect(h.set).not.toHaveBeenCalled();
+});
+
+it('rechecks Editor admission at the TCP attach after an earlier ready ensure', async () => {
+  const old = await issued('repos');
+  const port = await editorWsRig();
+  const connect = vi.mocked(net.connect).getMockImplementation()! as unknown as (
+    opts: net.NetConnectOpts,
+  ) => Socket;
+  vi.spyOn(net, 'connect').mockImplementation(((opts: net.NetConnectOpts) => {
+    const socket = connect(opts);
+    if ('host' in opts && opts.host?.startsWith('haive-ide-')) {
+      socket.prependOnceListener('connect', () =>
+        fake.patch(schema.repositories, ID, { status: 'cloning' }),
+      );
+    }
+    return socket;
+  }) as typeof net.connect);
+  expect(await wsHandshake(port, old.cookie, `/ide/repos/${ID}/socket`).result).toBe(409);
+  expect(h.upstreamHeaders).not.toHaveBeenCalled();
+});
