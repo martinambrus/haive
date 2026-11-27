@@ -395,9 +395,9 @@ describe.skipIf(!url)('the stalled sweep and a running or waiting_cli row, on Po
       via: 'test',
       watchSince: null,
     });
-    expect(resumed, 'the poller auto-resumed the failed step').toBe(true);
+    expect(resumed, 'the poller auto-resumed the failed step').toEqual({ epoch: E + 1 });
     const after = await state(taskId);
-    expect(after.task).toMatchObject({ status: 'running', orchestrationEpoch: E });
+    expect(after.task).toMatchObject({ status: 'running', orchestrationEpoch: E + 1 });
     expect(after.steps[0]).toMatchObject({ status: 'running' });
     return { taskId, rowId };
   };
@@ -470,7 +470,7 @@ describe.skipIf(!url)('the stalled sweep and a running or waiting_cli row, on Po
         redriveStalledTasks(db, deps, { staleMs: STALE_MS }),
         'ten minutes on, with no job, the sweep took the auto-resumed row',
       ).resolves.toBe(1);
-      await expectRedriven(taskId, before, advances);
+      await expectRedriven(taskId, before, advances, E + 2);
     });
 
     it('R5: is re-driven when it is a fan-out row with pending and running agent rows but no live run, writing nothing to the row', async () => {

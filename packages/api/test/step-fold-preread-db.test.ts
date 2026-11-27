@@ -1251,13 +1251,13 @@ describe.skipIf(!url)(
       TEST_TIMEOUT,
     );
 
-    // A row whose wait was already closed when read is still answered. It is also the shape of a merge
-    // resolver's fresh park, before handleResult stamps the wait: that stamp must not refuse the answer.
+    // A legacy unmarked park with no saved answer still accepts its first answer.
+    // C3 below also pins first-answer ownership once that marker has been closed.
     it.each([
       ['the form submit', 'submit', { values: { answer: 'yes' } }],
       ['the clarification answer', 'clarify', { answer: 'keep both' }],
     ] as const)(
-      'C3: %s still answers a form whose wait was closed before it was read',
+      'C3 legacy: %s still answers an unmarked form with no saved answer',
       async (_what, route, body) => {
         const taskId = await seedTask('running');
         await seedStep(taskId, { status: 'waiting_form', waitingStartedAt: null });
@@ -1270,6 +1270,54 @@ describe.skipIf(!url)(
           route === 'submit' ? 'step.form_submitted' : 'step.clarified',
         );
       },
+    );
+
+    it('C3: a closed form keeps its accepted answer; identical retry requeues without writes and replacement is 409', async () => {
+      const taskId = await seedTask('running');
+      await seedStep(taskId, {
+        status: 'waiting_form',
+        waitingStartedAt: null,
+        formValues: { answer: 'first' },
+      });
+      const before = await wholeRow();
+      expect(
+        await post(`/tasks/${taskId}/steps/${STEP.stepId}/submit`, { values: { answer: 'first' } }),
+      ).toMatchObject({ status: 200, body: { ok: true, queued: true } });
+      await expect(
+        post(`/tasks/${taskId}/steps/${STEP.stepId}/submit`, { values: { answer: 'replacement' } }),
+      ).rejects.toMatchObject(formNotWaiting('form submission'));
+      expect(await wholeRow()).toEqual(before);
+      expect(await eventTypes(taskId)).toEqual([]);
+      expect(h.jobs).toHaveLength(1);
+      expect(h.jobs[0]!.data).toMatchObject({ epoch: 3 });
+    });
+
+    it(
+      'C3 race: an identical submit closing the wait after the read is an idempotent success',
+      async () => {
+        const taskId = await seedTask('running');
+        await seedParkedForm(taskId);
+        const response = await besidePeer(
+          () =>
+            post(`/tasks/${taskId}/steps/${STEP.stepId}/submit`, { values: { answer: 'peer' } }),
+          async (tx) => {
+            await peerSets(
+              STEP.id,
+              sql`form_values = '{"answer":"peer"}'::jsonb, waiting_started_at = null`,
+            )(tx);
+            await tx
+              .update(schema.tasks)
+              .set({ orchestrationEpoch: 7 })
+              .where(eq(schema.tasks.id, taskId));
+          },
+        );
+        expect(response).toMatchObject({ status: 200, body: { ok: true, queued: true } });
+        expect((await wholeRow()).formValues).toEqual({ answer: 'peer' });
+        expect(await eventTypes(taskId)).toEqual([]);
+        expect(h.jobs).toHaveLength(1);
+        expect(h.jobs[0]!.data).toMatchObject({ epoch: 7 });
+      },
+      TEST_TIMEOUT,
     );
 
     it.each([

@@ -598,11 +598,13 @@ jobs:
           GATED_SHARDS: ${{ strategy.job-total }}
           PG_CONTAINER: ${{ job.services.postgres.id }}
           PGVECTOR_CONTAINER: ${{ job.services.pgvector.id }}
-          # This job owns its Redis service: gated databases 11-14, job default 0.
+          # This job owns its Redis service: gated databases 11-14, job default 0. Rows run one at a
+          # time, so advance-epochs shares database 11 under its own random queue name.
           INTEGRATIONS_BROKER_TEST_REDIS_URL: redis://localhost:6379/13
           MODULE_PURGE_API_TEST_REDIS_URL: redis://localhost:6379/12
           INTEGRATIONS_AUDIT_TEST_REDIS_URL: redis://localhost:6379/11
           T117_REDIS_URL: redis://127.0.0.1:6379/14
+          ADVANCE_EPOCHS_TEST_REDIS_URL: redis://localhost:6379/11
         run: |
           set -uo pipefail
           failed=0
@@ -751,6 +753,7 @@ jobs:
           api test/plan-merge-cancel-db.test.ts PLAN_MERGE_CANCEL_TEST_URL plan_merge_cancel_test pg
           api test/step-row-lock-order-db.test.ts STEP_ROW_LOCK_ORDER_TEST_URL step_row_lock_order_test pg
           api test/step-fold-preread-db.test.ts STEP_FOLD_PREREAD_TEST_URL step_fold_preread_test pg
+          api test/advance-epochs-db.test.ts ADVANCE_EPOCHS_TEST_URL advance_epochs_test pg
           api test/lock-tier-order-db.test.ts LOCK_TIER_ORDER_TEST_URL lock_tier_order_test pg
           api test/plan-advisory-delete-db.test.ts PLAN_ADVISORY_DELETE_TEST_URL plan_advisory_delete_test pg
           api test/admin-config-pool-db.test.ts ADMIN_CONFIG_POOL_TEST_URL admin_config_pool_test pg

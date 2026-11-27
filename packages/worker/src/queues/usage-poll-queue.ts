@@ -772,7 +772,7 @@ export async function checkProviderRecovery(db: Database): Promise<void> {
           }
           continue;
         }
-        let resumed: boolean;
+        let resumed: Awaited<ReturnType<typeof autoResumeFailedStep>>;
         try {
           resumed = await autoResumeFailedStep(db, {
             taskId: task.id,
@@ -810,22 +810,8 @@ export async function checkProviderRecovery(db: Database): Promise<void> {
         if (resumed) {
           // Keep the narrowed step id across the enqueue callback.
           const stepId = task.currentStepId;
-          // Stamped with the epoch the re-open left the task at, so that a Retry or a re-drive that
-          // moves it on before the job is picked up drops the job as stale; an unstamped one is
-          // exempt from that drop and re-enters the step by its status. A read that fails costs the
-          // stamp and never the advance: the re-open has committed and nothing else queues this job.
-          const reopened = await db.query.tasks
-            .findFirst({
-              where: eq(schema.tasks.id, task.id),
-              columns: { orchestrationEpoch: true },
-            })
-            .catch((err: unknown) => {
-              log.warn(
-                { taskId: task.id, providerId: task.providerId, err },
-                'provider recovered; the task epoch could not be read, so the auto-resume advance is queued without one',
-              );
-              return undefined;
-            });
+          // The reopen returns its committed epoch. Reading it back could stamp
+          // this old wakeup with a concurrent Retry's newer epoch.
           await retrying(async () => {
             await getTaskQueue().add(
               TASK_JOB_NAMES.ADVANCE_STEP,
@@ -834,7 +820,7 @@ export async function checkProviderRecovery(db: Database): Promise<void> {
                 userId: task.userId,
                 stepId,
                 round: task.currentRound ?? 0,
-                epoch: reopened?.orchestrationEpoch,
+                epoch: resumed.epoch,
               },
               {
                 attempts: 3,

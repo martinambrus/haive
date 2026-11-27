@@ -1441,22 +1441,28 @@ taskRoutes.patch('/:id', async (c) => {
   if (!task) throw new HttpError(404, 'Task not found');
 
   const patch: Partial<typeof schema.tasks.$inferInsert> = {};
-  if (
-    body.autoContinue === true &&
-    task.status === 'waiting_user' &&
-    task.currentStepId &&
-    !isTaskDead(task)
-  ) {
-    assertExecutionContractUsable(task.executionContract);
-  }
   if (body.title !== undefined) patch.title = body.title;
   if (body.autoContinue !== undefined) patch.autoContinue = body.autoContinue;
 
-  const updated = await db
-    .update(schema.tasks)
-    .set({ ...patch, updatedAt: new Date() })
-    .where(eq(schema.tasks.id, id))
-    .returning();
+  const updated = await db.transaction(async (tx) => {
+    // RETURNING reads the pointer and epoch under the toggle's own row lock. A Retry
+    // before this write is observed; one after commit makes the queued wakeup stale.
+    const rows = await tx
+      .update(schema.tasks)
+      .set({ ...patch, updatedAt: new Date() })
+      .where(eq(schema.tasks.id, id))
+      .returning();
+    const toggled = rows[0];
+    if (
+      body.autoContinue === true &&
+      toggled?.status === 'waiting_user' &&
+      toggled.currentStepId &&
+      !isTaskDead(toggled)
+    )
+      assertExecutionContractUsable(toggled.executionContract);
+    return rows;
+  });
+  const toggled = updated[0];
 
   if (body.title !== undefined) {
     await appendTaskEvent(db, id, null, 'task.renamed', { title: body.title, by: userId });
@@ -1471,9 +1477,9 @@ taskRoutes.patch('/:id', async (c) => {
     // a step that still needs input just re-enters waiting_form.
     if (
       body.autoContinue === true &&
-      task.status === 'waiting_user' &&
-      task.currentStepId &&
-      !isTaskDead(task)
+      toggled?.status === 'waiting_user' &&
+      toggled.currentStepId &&
+      !isTaskDead(toggled)
     ) {
       await addOrRefuse(
         () =>
@@ -1482,8 +1488,9 @@ taskRoutes.patch('/:id', async (c) => {
             {
               taskId: id,
               userId,
-              stepId: task.currentStepId,
-              round: task.currentRound,
+              stepId: toggled.currentStepId,
+              round: toggled.currentRound,
+              epoch: toggled.orchestrationEpoch,
             } as TaskJobPayload,
             {
               attempts: 3,
