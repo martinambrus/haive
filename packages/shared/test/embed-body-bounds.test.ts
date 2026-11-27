@@ -1,4 +1,4 @@
-import { expect, it, vi } from 'vitest';
+import { beforeEach, expect, it, vi } from 'vitest';
 import { endpointBody, oversizedJson } from '../../../tests/fixtures/endpoint-body.mjs';
 
 // Lower the existing bounded-reader seam, keeping all HTTP and stream handling real.
@@ -6,13 +6,15 @@ vi.mock('../src/forge/index.js', async (original) => {
   const real = await original<typeof import('../src/forge/index.js')>();
   return {
     ...real,
-    readForgeJson: (res: Response, max = real.FORGE_RESPONSE_MAX_BYTES) =>
+    readForgeJson: vi.fn((res: Response, max = real.FORGE_RESPONSE_MAX_BYTES) =>
       real.readForgeJson(res, Math.min(max, 128)),
-    readBounded: (res: Response, max: number) => real.readBounded(res, Math.min(max, 128)),
+    ),
+    readBounded: (res: Response, max: number) => real.readBounded(res, Math.min(max, 256)),
   };
 });
 import {
   OLLAMA_ERROR_MAX_BYTES,
+  OLLAMA_EMBED_MAX_BYTES,
   ollamaEmbed,
   listResidentOllamaModels,
   getOllamaModelPlacement,
@@ -20,11 +22,23 @@ import {
   warmOllamaModel,
   unloadOllamaModel,
 } from '../src/rag/embed.js';
-import { FORGE_RESPONSE_MAX_BYTES } from '../src/forge/index.js';
+import { FORGE_RESPONSE_MAX_BYTES, readForgeJson } from '../src/forge/index.js';
 
-it('pins the production JSON body bound', () => {
+beforeEach(() => vi.clearAllMocks());
+
+it('pins the production JSON body bounds', () => {
   expect(FORGE_RESPONSE_MAX_BYTES).toBe(8 * 1024 * 1024);
+  expect(OLLAMA_EMBED_MAX_BYTES).toBe(32 * 1024 * 1024);
   expect(OLLAMA_ERROR_MAX_BYTES).toBe(64 * 1024);
+});
+
+it('passes the dedicated production bound to the embedding JSON reader', async () => {
+  await expect(
+    ollamaEmbed('http://unused.invalid', 'm', ['q'], {
+      fetchFn: async () => Response.json({ embeddings: [[1, 2]] }),
+    }),
+  ).resolves.toEqual([[1, 2]]);
+  expect(readForgeJson).toHaveBeenLastCalledWith(expect.any(Response), 32 * 1024 * 1024);
 });
 
 it('rejects an oversized /api/embed success without returning its vectors', async () => {
@@ -39,12 +53,17 @@ it('rejects an oversized /api/embed success without returning its vectors', asyn
   }
 });
 
-it('bounds an /api/embed error before cutting display text and drops the oversized body', async () => {
-  const endpoint = await endpointBody(500, 'private-marker'.repeat(30));
+it('keeps the first 200 characters and size note from a bounded oversized embed error', async () => {
+  const body = 'upstream diagnostic '.repeat(20);
+  const endpoint = await endpointBody(500, body);
   try {
     await expect(
       ollamaEmbed(endpoint.url, 'm', ['q'], { fetchFn: endpoint.fetchFn }),
-    ).rejects.toThrow('Ollama embed failed (500): response is larger than 65536 bytes');
+    ).rejects.toThrow(
+      new Error(
+        `Ollama embed failed (500): ${body.slice(0, 200)} (response is larger than 65536 bytes)`,
+      ),
+    );
     expect(endpoint.cancelled).toBe(true);
   } finally {
     await endpoint.close();
@@ -62,6 +81,7 @@ it.each(['list', 'placement'] as const)('bounds /api/ps for %s', async (site) =>
         ? await listResidentOllamaModels(endpoint.url, 1000, endpoint.fetchFn)
         : await getOllamaModelPlacement(endpoint.url, 'm', 1000, endpoint.fetchFn);
     expect(result).toBe(site === 'list' ? null : 'unreachable');
+    expect(readForgeJson).toHaveBeenLastCalledWith(expect.any(Response));
     expect(endpoint.cancelled).toBe(true);
   } finally {
     await endpoint.close();

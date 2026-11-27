@@ -23,6 +23,8 @@ export const EMBED_BATCH_SIZE = 8;
 /** Sent on every embed so Ollama keeps the model resident between batches (and
  *  after warmup) instead of unloading it (default 5m) and reloading cold. */
 export const OLLAMA_KEEP_ALIVE = '30m';
+/** Headroom for 64 inputs × 8192 dimensions, including float64-emitting proxies. */
+export const OLLAMA_EMBED_MAX_BYTES = 32 * 1024 * 1024;
 /** Error replies need only short diagnostics, even from a user-configured proxy. */
 export const OLLAMA_ERROR_MAX_BYTES = 64 * 1024;
 /** Generous timeout for the one-off warmup call: a cold multi-billion-parameter
@@ -117,12 +119,12 @@ export async function ollamaEmbed(
       text: '',
       truncated: false,
     }));
-    const detail = answer.truncated
-      ? `response is larger than ${OLLAMA_ERROR_MAX_BYTES} bytes`
-      : answer.text.slice(0, 200);
+    const detail =
+      answer.text.slice(0, 200) +
+      (answer.truncated ? ` (response is larger than ${OLLAMA_ERROR_MAX_BYTES} bytes)` : '');
     throw new Error(`Ollama embed failed (${resp.status}): ${detail}`);
   }
-  const data = (await readForgeJson(resp)) as { embeddings?: number[][] };
+  const data = (await readForgeJson(resp, OLLAMA_EMBED_MAX_BYTES)) as { embeddings?: number[][] };
   if (!data.embeddings || data.embeddings.length === 0) {
     throw new Error('Ollama returned no embeddings');
   }
