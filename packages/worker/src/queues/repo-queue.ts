@@ -12,7 +12,6 @@ import {
   withRepoJobOwner,
 } from '../repo/job-owner.js';
 import { CheckoutRepairNeededError } from '../repo/repair-needed.js';
-import { scrubErrorPaths } from '@haive/shared/logger';
 import { safeProcessor } from './safe-processor.js';
 import { Worker, DelayedError, UnrecoverableError, type Job } from 'bullmq';
 import { and, eq } from 'drizzle-orm';
@@ -34,7 +33,7 @@ import {
   handleInit,
   handleScan,
 } from '../repo/clone.js';
-import { handleRefresh } from '../repo/refresh.js';
+import { checkoutFailureMessage, handleRefresh } from '../repo/refresh.js';
 
 export function startRepoWorker(repoStorageRoot: string): Worker {
   const worker = new Worker<RepoJobPayload>(
@@ -122,7 +121,7 @@ export function startRepoWorker(repoStorageRoot: string): Worker {
             await job.moveToDelayed(Date.now() + 5_000, token);
             throw new DelayedError();
           }
-          const message = scrubErrorPaths(err);
+          const message = checkoutFailureMessage(err);
           logger.error(
             { repositoryId: payload.repositoryId, jobName: job.name, err },
             'Repo job failed',

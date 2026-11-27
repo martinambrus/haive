@@ -34,23 +34,57 @@ Before moving an unusable checkout, a folder source must itself pass the same us
 and a remote must pass the clone URL rule. A missing, unborn, unusable or unreadable folder source
 ends in `error` with nothing moved. Whatever stood at the destination is then renamed to a
 `<repoId>.aside-<time>` sibling, never removed; strict stat failures stop before that move. Folder
-copies, and remote clones requested by a recovery, build in a fresh `<repoId>.rebuild-<uuid>`
-sibling and publish with `renameNoFollow` and `noReplace` only after the build and its verification
-complete. A failure before the data restore (below) removes only that attempt's staging entry;
+copies and every remote rebuild, including ordinary refresh and explicit recovery, build in a
+fresh `<repoId>.rebuild-<uuid>` sibling and publish with `renameNoFollow` and `noReplace` only after
+the build and its verification complete. A failure before the data restore (below) removes only that attempt's staging entry;
 failed cleanup names both retained siblings. Once the restore has started, a failure keeps the
-private replacement and its journal images. Ordinary remote rebuilds still build directly at the
-destination (the separate incomplete-clone recovery finding remains queued in T486).
+private replacement and its journal images. A clone interrupted after its `.git` becomes readable
+therefore cannot expose a partial public checkout or finish ready on Retry.
 
-The rebuilt tree must pass `usableCheckout` before detection is persisted. A build or verification
-failure after the move is final for that BullMQ job (`UnrecoverableError`), names the aside by its
-basename so path scrubbing cannot hide it, and requires a manual Retry. This prevents automatic
-retries from moving another partial tree aside and replacing the pointer to the original. Undo by
-renaming the kept aside back once the destination is free; the aside is the old tree, not a backup
-of later work. A process death can still leave an unnamed aside or staging sibling, and a later
-Retry can clear the only notice; T486 tracks retention and durable reporting. A failure of the final
-`persistDetection` write remains retryable. Neither rebuild nor Retry deletes the preserved tree. A read-only folder
-import is re-scanned as before, and a repository with no remote and no folder answers 409 without
+The private tree must pass `usableCheckout` before publication, and the rebuilt tree is checked
+again before detection is persisted. A build or verification failure after the move is final for
+that BullMQ job (`UnrecoverableError`), names every retained aside by its basename so path
+scrubbing cannot hide them, and requires a manual Retry with a new job.
+Refresh lists this repository's exact `<repoId>.aside-<ISO timestamp with colon/dot replaced>`
+siblings through fs-safe under the renewing root claim, before preparation and after a move or
+failure. It records all nonempty-directory, file and link basenames, sorted oldest first, in
+`repositories.checkout_aside_paths` (migration 0255). Disk discovery is the inventory evidence;
+the stored list is informational and is not read to render the page. The rebuild's ready note
+and failure text use the in-memory discovery list; no recovery decision parses a message.
+Failure objects also carry the list as
+`checkoutAsidePaths`. The queue appends those names after sanitizing a bound-query failure, whose
+diagnosis remains `Database operation failed`; neither query values nor paths are recovered from
+error text. Discovery never follows links, restores or removes an entry. `renameNoFollow` with
+`noReplace` claims a directory name with mkdir before rename: a death between them can leave an
+empty `<repoId>.aside-<time>` directory while the old tree still stands at the checkout. Discovery
+omits empty directory claims from both the notice and column, leaving them on disk. Review the
+chosen tree's contents before undo; age alone does not prove it contains the original files.
+A death between rename and recording is recovered by listing on the next Retry, including
+legacy siblings absent from the row. A failure of the final `persistDetection` write remains
+retryable. Before attempting the move, the owned inventory write stamps
+`repositories.checkout_aside_job_id` with the current pending preparation's job ID (additive
+migration 0256, declared last). Usable-checkout and held-task redeliveries of that same job
+recover notice ownership even if the rename transaction's reply was lost. They
+reconstruct its notice even when the queue has replaced its error copy. A later ordinary refresh
+has a different admission ID and restores ordinary status-message clearing: old aside names
+remain in the inventory, but do not become a permanent ready warning or annotate unrelated
+refresh failures. A new rebuild reports all retained trees again. No message text gates this policy.
+
+Undo requires choosing the original tree after reviewing **all** retained names: an older attempt
+may have left a partial tree in a later aside. Once preparations and interactive commands have
+settled, keep the current replacement at a separate name, then rename the chosen aside back to
+the free destination. The aside retains the old tree, not later work. Unfinished `.rebuild-*`
+stages retained after a death or refused cleanup are not swept or adopted by refresh.
+Extraction stages and deletion-time leftovers remain separate board findings (T486 members 1/5);
+this change adds no removal policy. Neither rebuild nor Retry deletes the preserved tree. A
+read-only folder import is re-scanned as before, and a repository with no remote and no folder answers 409 without
 touching its row.
+
+T486 deployment/rollback: apply additive migrations 0255 and 0256 before loading the worker/database
+barrel. Settle preparation work before reverting the code and rebuild the database library from
+the reverted revision. Keep both migration files and columns applied, and retain every `.aside-*`
+and `.rebuild-*` sibling. Reverting restores ordinary remote cloning in place and notice-loss
+risks; it neither restores the original tree nor removes retained data.
 
 **A checkout git cannot read gets a repair code and an explicit rebuild.** When the refresh
 cannot prove the checkout usable or unusable (the unknown path above) the row is `error` with
