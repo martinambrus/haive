@@ -528,7 +528,8 @@ async function putConfig(c: Context<AppEnv>) {
   const saved = await resolveGlobalKbSettings();
   // Blank keeps the stored URL. A redaction keeps it only at the same visible destination.
   if (d.ollamaUrl !== undefined) {
-    if (!d.ollamaUrl.trim()) delete d.ollamaUrl;
+    d.ollamaUrl = d.ollamaUrl.trim();
+    if (!d.ollamaUrl) delete d.ollamaUrl;
     else if (isOllamaUrlRedaction(d.ollamaUrl)) {
       if (!ollamaUrlRedactionMatches(d.ollamaUrl, saved.ollamaUrl || IN_STACK_OLLAMA_URL)) {
         throw new HttpError(
@@ -750,6 +751,7 @@ globalKbRoutes.post('/test-ollama', async (c) => {
     const parsed = testOllamaSchema.safeParse(await c.req.json().catch(() => null));
     if (!parsed.success) throw new HttpError(400, 'invalid test request', 'invalid_body');
     input = parsed.data;
+    input.ollamaUrl = input.ollamaUrl.trim();
     if (isOllamaUrlRedaction(input.ollamaUrl)) {
       const saved = await resolveGlobalKbSettings();
       if (!ollamaUrlRedactionMatches(input.ollamaUrl, saved.ollamaUrl || IN_STACK_OLLAMA_URL)) {

@@ -117,6 +117,7 @@ tooling.post('/test-ollama', async (c) => {
     let dims: number | null = null;
     let dimsMatch: boolean | null = null;
     let dimsError: string | undefined;
+    let probeTimedOut = false;
     if (modelFound && body.model && typeof body.dimensions === 'number') {
       try {
         const [vec] = await probeGlobalKbEmbedding(url, body.model, {
@@ -127,14 +128,7 @@ tooling.post('/test-ollama', async (c) => {
         dimsMatch = dims === body.dimensions;
       } catch (err) {
         if (err instanceof OllamaProbeTimeoutError) {
-          return c.json({
-            ok: false,
-            reachable: true,
-            code: 'ollama_probe_timeout',
-            retryable: true,
-            message: err.message,
-            dimsError: err.message,
-          });
+          probeTimedOut = true;
         }
         dimsError = safeErrorMessage(err);
       }
@@ -150,6 +144,7 @@ tooling.post('/test-ollama', async (c) => {
       dimsMatch,
       expectedDims: typeof body.dimensions === 'number' ? body.dimensions : null,
       dimsError,
+      ...(probeTimedOut ? { code: 'ollama_probe_timeout', retryable: true } : {}),
     });
   } catch (err) {
     return c.json({

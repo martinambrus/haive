@@ -1,7 +1,7 @@
 import { ollamaEmbed } from '@haive/shared/rag';
 
 // Both interactive routes allow a cold embed: MEASURED 4.6–42.8 s (docs/architecture/global-kb.md).
-export const GLOBAL_KB_EMBED_PROBE_TIMEOUT_MS = 60_000;
+export const OLLAMA_EMBED_PROBE_TIMEOUT_MS = 60_000;
 
 export class OllamaProbeTimeoutError extends Error {
   constructor() {
@@ -15,7 +15,7 @@ export async function probeGlobalKbEmbedding(
   model: string,
   opts: { fetchFn: typeof fetch; timeoutMs?: number; signal?: AbortSignal },
 ): Promise<number[][]> {
-  const timeoutMs = opts.timeoutMs ?? GLOBAL_KB_EMBED_PROBE_TIMEOUT_MS;
+  const timeoutMs = opts.timeoutMs ?? OLLAMA_EMBED_PROBE_TIMEOUT_MS;
   const controller = new AbortController();
   const forwardAbort = () => controller.abort(opts.signal!.reason);
   opts.signal?.addEventListener('abort', forwardAbort, { once: true });

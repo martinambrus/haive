@@ -205,7 +205,8 @@ including the reconcile sweep's unreachable-embedder warning. Config audit rows 
 log lines use the same redaction for both `from` and `to`, including partial saves. The admin audit viewer redacts
 these same fields in historical rows at read time; the append-only stored rows are unchanged.
 The administrator's replacement field starts blank, masks typed input and clears after a
-successful save. Blank input keeps the currently stored URL. An echoed redaction keeps it only when its
+successful save. Leading and trailing whitespace is trimmed before recognizing a redaction or
+storing a replacement URL. Blank input keeps the currently stored URL. An echoed redaction keeps it only when its
 visible scheme, host and port match the stored destination, even after another save changes hidden parts.
 An ordinary origin returned by GET is accepted as unchanged for non-admin saves after URL case,
 default-port and root-slash normalization too.
@@ -219,12 +220,15 @@ hidden parts while its displayed form stayed the same; partial rows consider onl
 The unreachable Test result displays only the redacted URL. Embedding failures return fixed
 repair guidance, never transport messages or Ollama error bodies, which may echo credentials.
 The probe makes no audit row and logs no endpoint or raw error. `probeGlobalKbEmbedding` bounds
-the embedding request and body to `GLOBAL_KB_EMBED_PROBE_TIMEOUT_MS` (60 seconds, injectable),
+the embedding request and body to `OLLAMA_EMBED_PROBE_TIMEOUT_MS` (60 seconds, injectable),
 after the existing five-second reachability check. `/tooling/test-ollama` uses the same helper and
-budget after its ten-second tags check; its expiry returns the same coded retryable result with
-`reachable: true` and `dimsError` guidance. The budget allows for the measured 4.6–42.8 s cold embed. Both routes pass that budget explicitly
-instead of inheriting the 240-second ingest budget, aborts the transport at expiry and settles
-even if a transport ignores cancellation. Expiry returns `{ok: false, code:
+budget after its ten-second tags check. Its timeout reply keeps `ok: true`, `reachable: true`
+and the tags/model results; `dimsError` names the embedding timeout, with
+`code: 'ollama_probe_timeout'` and `retryable: true`. The web button shows the reachable server
+and an "Embedding check failed" line. The budget allows for the measured 4.6–42.8 s cold embed.
+The shared helper defaults to this budget instead of inheriting the 240-second ingest budget;
+neither route overrides it. It aborts the transport at expiry and settles even if a transport
+ignores cancellation. Global KB Test expiry returns `{ok: false, code:
 'ollama_probe_timeout', retryable: true, message}`. Request cancellation and normal completion
 clear the deadline. A timeout reports an incomplete check and allows retry; it makes no claim that
 model loading continues after cancellation.

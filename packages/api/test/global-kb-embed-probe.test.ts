@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import {
-  GLOBAL_KB_EMBED_PROBE_TIMEOUT_MS,
+  OLLAMA_EMBED_PROBE_TIMEOUT_MS,
   OllamaProbeTimeoutError,
   probeGlobalKbEmbedding,
 } from '../src/lib/global-kb-embed-probe.js';
@@ -17,7 +17,7 @@ afterEach(() => {
 });
 
 it('pins the production interactive budget', () => {
-  expect(GLOBAL_KB_EMBED_PROBE_TIMEOUT_MS).toBe(60_000);
+  expect(OLLAMA_EMBED_PROBE_TIMEOUT_MS).toBe(60_000);
 });
 
 it.each(['headers', 'body'])(

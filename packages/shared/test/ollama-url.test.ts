@@ -1,6 +1,31 @@
 import { randomBytes } from 'node:crypto';
 import { expect, it } from 'vitest';
-import { displayOllamaUrl, isOllamaUrlRedaction } from '../src/ollama-url.js';
+import {
+  displayOllamaUrl,
+  isOllamaUrlRedaction,
+  ollamaUrlRedactionMatches,
+} from '../src/ollama-url.js';
+
+it.each([
+  ['IPv6', 'http://[2001:DB8::1]:11434', 'http://[2001:db8::1]:11434', '/private'],
+  ['IDN', 'https://bücher.example:443', 'https://xn--bcher-kva.example', '/private'],
+  ['punycode', 'https://xn--bcher-kva.example', 'https://xn--bcher-kva.example', '/private'],
+  ['HTTP default port', 'http://embed.example:80', 'http://embed.example', '/private'],
+  ['HTTPS default port', 'https://embed.example:443', 'https://embed.example', '/private'],
+  ['trailing dot', 'http://embed.example.:11434', 'http://embed.example.:11434', '/private'],
+  ['empty path query', 'http://host:11434', 'http://host:11434', '?'],
+  ['root path fragment', 'http://host', 'http://host', '/#'],
+])('fix2 L3 round-trips %s with hidden components', (_kind, origin, safeOrigin, suffix) => {
+  const secret = randomBytes(24).toString('hex');
+  const value = `${origin}${suffix}${secret}`;
+  const safe = `${safeOrigin}${suffix === '?' ? '?***' : suffix === '/#' ? '#***' : '/***'}`;
+  expect(displayOllamaUrl(value)).toBe(safe);
+  expect(safe).not.toContain(secret);
+  expect(displayOllamaUrl(safe)).toBe(safe);
+  expect(isOllamaUrlRedaction(safe)).toBe(true);
+  expect(ollamaUrlRedactionMatches(safe, value)).toBe(true);
+  expect(ollamaUrlRedactionMatches(safe, 'http://another.example:11434')).toBe(false);
+});
 
 it.each(['password', 'username', 'encoded', 'malformed'])('never displays %s userinfo', (kind) => {
   const secret = randomBytes(24).toString('hex');

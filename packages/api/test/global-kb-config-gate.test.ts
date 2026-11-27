@@ -1662,6 +1662,33 @@ describe('review URL controls', () => {
   const secret = randomBytes(24).toString('hex');
   const privateUrl = `https://user:${secret}@embed.example:11434/${secret}?token=${secret}#${secret}`;
   const display = 'https://***@embed.example:11434/***?***#***';
+  it.each(['admin', 'user'])('fix2 L1 keeps a padded redaction on %s save', async (role) => {
+    h.role = role;
+    h.settings = { ...SAVED, ollamaUrl: privateUrl };
+    const res = await put({ ollamaUrl: `  ${display}\n`, digestEnabled: false });
+    expect(res.status).toBe(200);
+    expect(written().some(([key]) => key === CONFIG_KEYS.GLOBAL_KB_OLLAMA_URL)).toBe(false);
+    expect(h.settings.ollamaUrl).toBe(privateUrl);
+  });
+  it('fix2 L1 resolves a padded redaction to the saved URL on admin Test', async () => {
+    h.settings = { ...SAVED, ollamaUrl: privateUrl };
+    const res = await send('POST', '/global-kb/test-ollama', {
+      ollamaUrl: `  ${display}\n`,
+      model: 'embed',
+      dimensions: 2,
+    });
+    expect(res.status).toBe(200);
+    expect(h.probe.mock.calls[0]?.[0]).toBe(privateUrl);
+  });
+  it('fix2 L3 refuses a non-admin bare-origin replacement of hidden URL parts', async () => {
+    h.role = 'user';
+    h.settings = { ...SAVED, ollamaUrl: privateUrl };
+    const res = await put({ ollamaUrl: 'https://embed.example:11434' });
+    expect(res.status).toBe(403);
+    expect(h.set).not.toHaveBeenCalled();
+    expect(h.audits).toEqual([]);
+    expect(h.settings.ollamaUrl).toBe(privateUrl);
+  });
   it.each([
     'localhost:11434',
     `admin:${secret}@10.0.0.5:11434`,
@@ -1755,9 +1782,13 @@ describe('review URL controls', () => {
   );
 });
 
-it('L4 does not flag a formatting-only URL write as a hidden change', async () => {
+it('fix2 L2 trims a formatting-only URL write without flagging a hidden change', async () => {
   h.rawConfig.set(CONFIG_KEYS.GLOBAL_KB_OLLAMA_URL, 'http://embed.example:11434/');
   expect((await put({ ollamaUrl: '  http://embed.example:11434  ' })).status).toBe(200);
+  expect(written()).toContainEqual([
+    CONFIG_KEYS.GLOBAL_KB_OLLAMA_URL,
+    'http://embed.example:11434',
+  ]);
   expect(h.audits[0]?.row).toMatchObject({ metadata: { ollamaUrlHiddenChanged: false } });
 });
 

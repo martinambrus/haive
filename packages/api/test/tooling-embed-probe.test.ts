@@ -13,24 +13,32 @@ vi.mock('../src/middleware/auth.js', () => ({
 vi.mock('../src/lib/probe-hosts.js', () => ({
   probeEgressFor: async () => ({ fetchFn: h.fetchFn }),
 }));
-// Lower the shared injectable seam; exercise the real deadline and embed transport.
-vi.mock('../src/lib/global-kb-embed-probe.js', async (original) => {
-  const actual = await original<typeof import('../src/lib/global-kb-embed-probe.js')>();
-  return {
-    ...actual,
-    probeGlobalKbEmbedding: (
-      url: string,
-      model: string,
-      opts: Parameters<typeof actual.probeGlobalKbEmbedding>[2],
-    ) => actual.probeGlobalKbEmbedding(url, model, { ...opts, timeoutMs: 17 }),
-  };
-});
+// Keep the real shared default: a route-specific timeout must not override it.
 import { toolingRoutes } from '../src/routes/tooling.js';
 const app = new Hono().route('/tooling', toolingRoutes);
 afterEach(() => {
   vi.useRealTimers();
   vi.restoreAllMocks();
   h.fetchFn.mockReset();
+});
+it('fix2 L3 uses the shared default for a 42.8-second cold embed without a route override', async () => {
+  vi.useFakeTimers();
+  vi.spyOn(AbortSignal, 'timeout').mockImplementation(() => new AbortController().signal);
+  h.fetchFn.mockImplementation(async (url: string) => {
+    if (url.endsWith('/api/tags')) return Response.json({ models: [{ name: 'embed' }] });
+    await new Promise<void>((resolve) => setTimeout(resolve, 42_800));
+    return Response.json({ embeddings: [[1, 2]] });
+  });
+  const pending = app.request('/tooling/test-ollama', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ ollamaUrl: 'http://embed.example', model: 'embed', dimensions: 2 }),
+  });
+  await vi.advanceTimersByTimeAsync(0);
+  expect(AbortSignal.timeout).toHaveBeenLastCalledWith(60_000);
+  await vi.advanceTimersByTimeAsync(42_800);
+  expect(await (await pending).json()).toMatchObject({ ok: true, dims: 2, dimsMatch: true });
+  expect(vi.getTimerCount()).toBe(0);
 });
 it.each(['headers', 'body'])(
   'M4 bounds a never-answering embed %s and returns the coded retryable result',
@@ -55,12 +63,20 @@ it.each(['headers', 'body'])(
     ).then(async (res) => {
       answer = await res.json();
     });
-    await vi.advanceTimersByTimeAsync(16);
+    await vi.advanceTimersByTimeAsync(59_999);
     expect(answer).toBeUndefined();
+    expect(AbortSignal.timeout).toHaveBeenLastCalledWith(60_000);
     await vi.advanceTimersByTimeAsync(1);
-    expect(answer).toMatchObject({
-      ok: false,
+    expect(answer).toEqual({
+      ok: true,
       reachable: true,
+      modelCount: 1,
+      modelFound: true,
+      models: ['embed'],
+      dims: null,
+      dimsMatch: null,
+      expectedDims: 2,
+      dimsError: 'Embedding probe timed out; try again.',
       code: 'ollama_probe_timeout',
       retryable: true,
     });

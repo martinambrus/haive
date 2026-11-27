@@ -1,4 +1,3 @@
-import { displayOllamaUrl } from '@haive/shared/ollama-url';
 import { readTextNoFollow } from '@haive/shared/fs-safe';
 import { eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
@@ -610,7 +609,7 @@ export const ragPopulateStep: StepDefinition<RagPopulateDetect, RagPopulateApply
       `KB files: ${detected.kbFiles.length}`,
       `Code files: ${detected.codeFiles.length}`,
       `RAG mode: ${detected.ragMode}`,
-      `Ollama: ${detected.ollamaReachable ? 'reachable' : 'UNREACHABLE'} at ${detected.ollamaUrl ? displayOllamaUrl(detected.ollamaUrl) : '(not configured)'}`,
+      `Ollama: ${detected.ollamaReachable ? 'reachable' : 'UNREACHABLE'} at ${detected.ollamaUrl ?? '(not configured)'}`,
       `Model: ${detected.embeddingModel ?? '(not set)'}`,
       `Dimensions: ${detected.embeddingDimensions}`,
     ];
