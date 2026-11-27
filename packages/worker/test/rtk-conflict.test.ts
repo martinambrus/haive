@@ -11,7 +11,7 @@ import {
   raiseRtkQuestions,
   type RtkQuestionInput,
 } from '../src/project-state/rtk-conflict.js';
-import { persistDetection } from '../src/repo/clone.js';
+import { persistDetection } from './support/repo-preparation.js';
 import { syncProjectStateFromCheckout } from '../src/project-state/sync.js';
 
 vi.mock('../src/project-state/sync.js', () => ({

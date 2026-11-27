@@ -16,7 +16,7 @@ import { syncProjectStateFromCheckout } from '../src/project-state/sync.js';
 import { resolveProjectStateConflict } from '../src/project-state/resolve.js';
 import * as audit from '../src/audit.js';
 import { writeProjectStateColumn } from '../src/project-state/write.js';
-import { persistDetection } from '../src/repo/clone.js';
+import { persistDetection } from './support/repo-preparation.js';
 import { ragSourceSelectionStep } from '../src/step-engine/steps/onboarding/09_7-rag-source-selection.js';
 import type { StepContext } from '../src/step-engine/step-definition.js';
 

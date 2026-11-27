@@ -84,6 +84,8 @@ beforeEach(async () => {
     source: 'git_https',
     remoteUrl: REMOTE,
     status: 'cloning',
+    refreshPending: true,
+    refreshJobId: 'job',
   });
   h.db = fake.db;
   startRepoWorker(base);

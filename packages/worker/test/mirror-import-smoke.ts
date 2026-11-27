@@ -17,7 +17,7 @@ import {
   emptyProjectState,
   renderProjectState,
 } from '@haive/shared/project-state';
-import { handleScan } from '../src/repo/clone.js';
+import { handleScan } from './support/repo-preparation.js';
 import { raiseRtkQuestions } from '../src/project-state/rtk-conflict.js';
 import { resolveProjectStateConflict } from '../src/project-state/resolve.js';
 import { sweepDirtyProjectStates } from '../src/project-state/refresh.js';

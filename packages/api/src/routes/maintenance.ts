@@ -107,7 +107,7 @@ const jobOwner = {
 };
 
 /** The background jobs the updater counts beside the tasks; a provider with two in progress is one row. */
-async function listBlockingJobs(db: ReturnType<typeof getDb>) {
+export async function listBlockingJobs(db: ReturnType<typeof getDb>) {
   const [repositories, bundles, providers] = await Promise.all([
     db
       .select({
@@ -162,7 +162,7 @@ async function listBlockingJobs(db: ReturnType<typeof getDb>) {
     ...repositories.map(({ refreshPending, ...r }) => ({
       kind: 'repository' as const,
       ...r,
-      status: refreshPending ? 'refreshing' : r.status,
+      status: refreshPending ? 'pending preparation' : r.status,
     })),
     ...bundles.map((r) => ({ kind: 'bundle' as const, ...r })),
     ...providers.map(({ building, provisioning, ...r }) => ({

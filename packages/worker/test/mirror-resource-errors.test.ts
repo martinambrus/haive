@@ -23,7 +23,7 @@ vi.mock('node:fs/promises', async (original) => {
 import { schema, type Database } from '@haive/database';
 import { createFakeDb } from '@haive/database/testing';
 import { logger } from '@haive/shared';
-import { persistDetection } from '../src/repo/clone.js';
+import { persistDetection } from './support/repo-preparation.js';
 let root: string;
 afterEach(async () => {
   h.error = null;

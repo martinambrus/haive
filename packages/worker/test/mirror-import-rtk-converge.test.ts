@@ -5,7 +5,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { schema, type Database } from '@haive/database';
 import { createFakeDb } from '@haive/database/testing';
 import { RTK_ENABLED_UNIT, conflictSide } from '@haive/shared/project-state';
-import { persistDetection } from '../src/repo/clone.js';
+import { persistDetection } from './support/repo-preparation.js';
 
 vi.mock('../src/project-state/rtk-conflict.js', () => ({ raiseRtkQuestion: vi.fn() }));
 vi.mock('../src/project-state/sync.js', () => ({

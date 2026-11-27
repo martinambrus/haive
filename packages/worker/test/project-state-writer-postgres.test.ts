@@ -73,8 +73,8 @@ import { settleProjections } from '../src/step-engine/merge-projections.js';
 import { withProjectionMove } from '../src/project-state/projection-move.js';
 import { sweepKeptProjectionMetadata } from '../src/project-state/kept-metadata-recovery.js';
 import { writePlanMirror, reconcilePlanFromCheckout } from '../src/plan/mirror.js';
-import { persistDetection } from '../src/repo/clone.js';
-import { handleRefresh } from '../src/repo/refresh.js';
+import { persistDetection } from './support/repo-preparation.js';
+import { handleRefresh } from './support/repo-preparation.js';
 import {
   putBackProjections,
   resyncAfterTaskEnd,

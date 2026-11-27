@@ -1,3 +1,10 @@
+import path from 'node:path';
+import {
+  assertRepoJobOwner,
+  ObsoleteRepoJobError,
+  repoJobPredicate,
+  withRepoJobOwner,
+} from '../repo/job-owner.js';
 import { CheckoutRepairNeededError } from '../repo/repair-needed.js';
 import { scrubErrorPaths } from '@haive/shared/logger';
 import { safeProcessor } from './safe-processor.js';
@@ -14,6 +21,7 @@ import {
 import { getDb } from '../db.js';
 import { getBullRedis } from '../redis.js';
 import {
+  completePreparationImports,
   handleClone,
   handleCopyLocal,
   handleExtract,
@@ -25,83 +33,110 @@ import { handleRefresh } from '../repo/refresh.js';
 export function startRepoWorker(repoStorageRoot: string): Worker {
   const worker = new Worker<RepoJobPayload>(
     QUEUE_NAMES.REPO,
-    safeProcessor(async (job: Job<RepoJobPayload>) => {
-      const db = getDb();
-      const payload = job.data;
-      const clearRefreshPending = async () => {
-        if (!job.id) return;
-        // An initial scan can publish ready before its imports finish. Only the job named
-        // by refresh admission owns its marker, even if an older handler finishes later.
-        await db
-          .update(schema.repositories)
-          .set({ refreshPending: false, refreshJobId: null })
-          .where(
-            and(
-              eq(schema.repositories.id, payload.repositoryId),
-              eq(schema.repositories.refreshJobId, job.id),
-            ),
+    safeProcessor(async (job: Job<RepoJobPayload>) =>
+      withRepoJobOwner(job.data.repositoryId, job.id ?? '', async () => {
+        const db = getDb();
+        const payload = job.data;
+        const clearRefreshPending = async () => {
+          if (!job.id) return;
+          // Every preparation stays pending through its post-ready imports. Only its
+          // admission token can retire that obligation, even if an older handler ends later.
+          await db
+            .update(schema.repositories)
+            .set({ refreshPending: false, refreshJobId: null })
+            .where(
+              and(
+                eq(schema.repositories.id, payload.repositoryId),
+                eq(schema.repositories.refreshJobId, job.id),
+              ),
+            );
+        };
+        try {
+          const owned = await assertRepoJobOwner(db, payload.repositoryId);
+          const initialOnly = [
+            REPO_JOB_NAMES.COPY,
+            REPO_JOB_NAMES.INIT,
+            REPO_JOB_NAMES.CLONE,
+            REPO_JOB_NAMES.EXTRACT,
+          ].some((name) => name === job.name);
+          // Ready precedes imports. A redelivery must finish that obligation without
+          // replacing a checkout that may already carry user work or task worktrees.
+          if (initialOnly && owned.status === 'ready') {
+            await completePreparationImports(
+              db,
+              payload.repositoryId,
+              owned.storagePath ?? path.join(repoStorageRoot, payload.userId, payload.repositoryId),
+            );
+          } else if (job.name === REPO_JOB_NAMES.CLONE) {
+            await handleClone(payload, db, repoStorageRoot);
+          } else if (job.name === REPO_JOB_NAMES.SCAN) {
+            await handleScan(payload, db);
+          } else if (job.name === REPO_JOB_NAMES.EXTRACT) {
+            await handleExtract(payload, db, repoStorageRoot);
+          } else if (job.name === REPO_JOB_NAMES.COPY) {
+            await handleCopyLocal(payload, db, repoStorageRoot);
+          } else if (job.name === REPO_JOB_NAMES.INIT) {
+            await handleInit(payload, db, repoStorageRoot);
+          } else if (job.name === REPO_JOB_NAMES.REFRESH) {
+            await handleRefresh(payload, db, repoStorageRoot);
+          } else {
+            throw new Error(`Unknown repo job: ${job.name}`);
+          }
+        } catch (err) {
+          if (err instanceof ObsoleteRepoJobError) {
+            logger.warn(
+              { repositoryId: payload.repositoryId, jobId: job.id, reason: err.reason },
+              'Obsolete or ownerless repository job refused',
+            );
+            return;
+          }
+          const message = scrubErrorPaths(err);
+          logger.error(
+            { repositoryId: payload.repositoryId, jobName: job.name, err },
+            'Repo job failed',
           );
-      };
-      try {
-        if (job.name === REPO_JOB_NAMES.CLONE) {
-          await handleClone(payload, db, repoStorageRoot);
-        } else if (job.name === REPO_JOB_NAMES.SCAN) {
-          await handleScan(payload, db);
-        } else if (job.name === REPO_JOB_NAMES.EXTRACT) {
-          await handleExtract(payload, db, repoStorageRoot);
-        } else if (job.name === REPO_JOB_NAMES.COPY) {
-          await handleCopyLocal(payload, db, repoStorageRoot);
-        } else if (job.name === REPO_JOB_NAMES.INIT) {
-          await handleInit(payload, db, repoStorageRoot);
-        } else if (job.name === REPO_JOB_NAMES.REFRESH) {
-          await handleRefresh(payload, db, repoStorageRoot);
-        } else {
-          throw new Error(`Unknown repo job: ${job.name}`);
+          await db
+            .update(schema.repositories)
+            .set({
+              status: 'error',
+              // A check-only job runs for a repair code and keeps it whatever failed, so its
+              // Retry stays a check and a rebuild still needs the explicit recovery.
+              ...(payload.checkCheckoutOnly
+                ? {}
+                : {
+                    errorCode:
+                      err instanceof CheckoutRepairNeededError
+                        ? err.code
+                        : payload.recoverCheckout
+                          ? REPOSITORY_ERROR_CODES.CHECKOUT_REPAIR_NEEDED
+                          : null,
+                  }),
+              statusMessage: message,
+              updatedAt: new Date(),
+            })
+            .where(repoJobPredicate(payload.repositoryId));
+          // A delayed retry still owes work; only its final failure releases its own marker.
+          if (
+            (job.attemptsMade ?? 0) + 1 >= (job.opts?.attempts ?? 1) ||
+            err instanceof UnrecoverableError
+          )
+            await clearRefreshPending();
+          throw err;
         }
+        // Completion cleanup is separate from handler failure. Keep the ready result
+        // if this write fails so an owned retry resumes imports instead of rebuilding
+        // a checkout that may already contain user edits or task worktrees.
         await clearRefreshPending();
-      } catch (err) {
-        const message = scrubErrorPaths(err);
-        logger.error(
-          { repositoryId: payload.repositoryId, jobName: job.name, err },
-          'Repo job failed',
-        );
-        await db
-          .update(schema.repositories)
-          .set({
-            status: 'error',
-            // A check-only job runs for a repair code and keeps it whatever failed, so its
-            // Retry stays a check and a rebuild still needs the explicit recovery.
-            ...(payload.checkCheckoutOnly
-              ? {}
-              : {
-                  errorCode:
-                    err instanceof CheckoutRepairNeededError
-                      ? err.code
-                      : payload.recoverCheckout
-                        ? REPOSITORY_ERROR_CODES.CHECKOUT_REPAIR_NEEDED
-                        : null,
-                }),
-            statusMessage: message,
-            updatedAt: new Date(),
-          })
-          .where(eq(schema.repositories.id, payload.repositoryId));
-        // A delayed retry still owes work; only its final failure releases its own marker.
-        if (
-          (job.attemptsMade ?? 0) + 1 >= (job.opts?.attempts ?? 1) ||
-          err instanceof UnrecoverableError
-        )
-          await clearRefreshPending();
-        throw err;
-      }
-    }),
+      }),
+    ),
     {
       connection: getBullRedis(),
       concurrency: 5,
       // Default 1 makes the SECOND stall of a job terminal, and terminal here means the deferred
       // failure is raised on the next pickup BEFORE the processor runs — so the catch that writes
-      // `status: 'error'` never executes and the repository strands at `cloning` for good. Two
+      // `status: 'error'` never executes and the repository stays `cloning` until reconciliation. Two
       // restarts inside one clone is ordinary (a crash loop, an OOM cycle, a deploy). The boot
-      // reconciler in `data-migrations.ts` is the backstop for the strand this still leaves.
+      // and periodic (60s) reconciler in `data-migrations.ts` is the backstop for the strand this still leaves.
       maxStalledCount: 10,
       // `lockDuration` is deliberately LEFT at the 30s default, unlike task-queue and cli-exec.
       // Raising it here makes the common case worse: shutdown force-closes this worker, so an

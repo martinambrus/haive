@@ -1,3 +1,4 @@
+import { assertRepoJobOwner, ObsoleteRepoJobError, repoJobPredicate } from './job-owner.js';
 import { withProjectionMove } from '../project-state/projection-move.js';
 import { checkoutWorktreeRefusal } from '@haive/shared/repo-rebuild';
 import { CheckoutRepairNeededError } from './repair-needed.js';
@@ -598,10 +599,12 @@ async function rebuild(
   // Ordinary refreshes stay available until they must replace the checkout. Commit this
   // status before the rename: a write inside its transaction would remain invisible to
   // archive, Terminal and Editor readers while the public checkout is being moved.
-  await db
+  const escalated = await db
     .update(schema.repositories)
     .set({ status: 'cloning', updatedAt: new Date() })
-    .where(eq(schema.repositories.id, payload.repositoryId));
+    .where(repoJobPredicate(payload.repositoryId))
+    .returning({ id: schema.repositories.id });
+  if (escalated.length === 0) throw new ObsoleteRepoJobError();
   const aside = await db.transaction(async (tx) => {
     // Starts and revivals take this key before writing task state. Recount after the slow
     // preparation, then hold the key only through the rename, never through the clone or copy.
@@ -744,6 +747,7 @@ export async function handleRefresh(
     db,
     payload.repositoryId,
     async () => {
+      await assertRepoJobOwner(db, payload.repositoryId);
       const state = await usableCheckout(dest);
       // A read that never finished stays the transient failure below, not a repair verdict.
       if (payload.checkCheckoutOnly && state === 'unusable') {

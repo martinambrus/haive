@@ -10,7 +10,7 @@ import {
   recordPlanMirrorError,
 } from '../src/plan/mirror.js';
 import { syncProjectStateFromCheckout } from '../src/project-state/sync.js';
-import { persistDetection } from '../src/repo/clone.js';
+import { persistDetection } from './support/repo-preparation.js';
 
 vi.mock('../src/project-state/sync.js', () => ({ syncProjectStateFromCheckout: vi.fn() }));
 vi.mock('../src/plan/mirror.js', () => ({
