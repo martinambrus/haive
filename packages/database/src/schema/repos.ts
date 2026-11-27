@@ -312,6 +312,8 @@ export const repositories = pgTable(
     }>(),
     /** Structural drain/defer/failure reason, independent of display copy. LAST for parity. */
     checkoutSessionReason: text('checkout_session_reason'),
+    /** Preserved rebuild siblings, as basenames under the owner's storage directory. LAST for parity. */
+    checkoutAsidePaths: jsonb('checkout_aside_paths').$type<string[]>().notNull().default([]),
   },
   (table) => [
     index('repositories_user_id_idx').on(table.userId),

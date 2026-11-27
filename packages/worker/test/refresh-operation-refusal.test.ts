@@ -603,7 +603,7 @@ it.each(['copy', 'clone'] as const)(
     expect(more).toEqual([]);
     expect(err).toBeInstanceOf(UnrecoverableError);
     expect((err as Error).message).toContain(path.basename(aside!));
-    expect((err as Error).message).toMatch(/the rebuilt checkout is not usable\.$/);
+    expect((err as Error).message).toContain('the rebuilt checkout is not usable.');
     expect(row.status).toBe('error');
     expect(row.statusMessage).toContain(`kept next to the checkout as ${path.basename(aside!)}`);
     expect(row.statusMessage).toBe((err as Error).message);
@@ -623,7 +623,7 @@ it('a rebuilt tree git gave no answer about ends the job unrecoverably too, and 
   expect(err).toBeInstanceOf(UnrecoverableError);
   expect((err as Error).message).toContain(path.basename(aside!));
   expect((err as Error).message).toMatch(
-    /the rebuilt checkout could not be examined \(.*SIGKILL.*\)\.$/,
+    /the rebuilt checkout could not be examined \(.*SIGKILL.*\)\./,
   );
   expect(row.status).toBe('error');
   expect(h.persist).not.toHaveBeenCalled();
@@ -660,19 +660,26 @@ it('the credential built before the move reaches the clone that follows it', asy
   await rm(path.join(dest, '.git/HEAD'));
   const auth = { argv: ['-c', 'credential.helper=x'], env: { GIT_HAIVE_USER: 'u' }, secret: 's' };
   h.helper.mockResolvedValueOnce(auth);
-  h.clone.mockImplementationOnce(async () => {
+  h.clone.mockImplementationOnce(async (_url, to) => {
     const siblings = await readdir(path.dirname(dest));
     expect(siblings.filter((entry) => entry.startsWith('r1.aside-'))).toHaveLength(1);
     expect(siblings).not.toContain('r1');
     // What a real clone leaves, since the rebuild reads what it built.
-    await git(root, ['clone', path.join(root, 'source'), dest]);
+    expect(to).toMatch(/r1\.rebuild-[0-9a-f-]{36}$/);
+    await git(root, ['clone', path.join(root, 'source'), to]);
   });
   await handleRefresh(remotePayload, db, root);
   expect(h.helper).toHaveBeenCalledWith(db, 'cred-1', 'u1', 'https://git.example.test/r1.git');
-  expect(h.clone).toHaveBeenCalledWith('https://git.example.test/r1.git', dest, 'main', auth, {
-    db,
-    userId: 'u1',
-  });
+  expect(h.clone).toHaveBeenCalledWith(
+    'https://git.example.test/r1.git',
+    expect.stringMatching(/r1\.rebuild-[0-9a-f-]{36}$/),
+    'main',
+    auth,
+    {
+      db,
+      userId: 'u1',
+    },
+  );
   expect(row.status).toBe('ready');
 });
 
@@ -951,7 +958,9 @@ it('holds the task lock for the rename and releases the transaction before cloni
   } as unknown as Database;
   const rename = fsSafe.renameNoFollow;
   vi.spyOn(fsSafe, 'renameNoFollow').mockImplementation(async (...args) => {
-    expect(inTransaction).toBe(true);
+    // The old checkout's move holds the task key; publication of the complete private build
+    // follows the clone with the renewing root claim still held, outside a database transaction.
+    expect(inTransaction).toBe(args[1] === 'u1/r1');
     expect(lock).toHaveBeenCalledWith(tx, 'r1');
     return rename(...args);
   });

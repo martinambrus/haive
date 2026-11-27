@@ -4,7 +4,7 @@ vi.mock('../src/repo/interactive-checkout.js', async (original) => ({
 }));
 import { execFile } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { cp, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
+import { cp, mkdir, mkdtemp, readFile, readdir, rename, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
@@ -77,6 +77,7 @@ const row: {
   id: string;
   status: string;
   statusMessage?: string;
+  checkoutAsidePaths?: string[];
   errorCode?: string | null;
   refreshPending: boolean;
   refreshJobId: string | null;
@@ -125,6 +126,7 @@ beforeEach(async () => {
   vi.clearAllMocks();
   row.status = 'cloning';
   delete row.statusMessage;
+  delete row.checkoutAsidePaths;
   row.errorCode = 'stale';
   row.refreshPending = false;
   row.refreshJobId = null;
@@ -243,6 +245,65 @@ async function endedAfterOneRun(job: Job, dest: string) {
 }
 
 describe.skipIf(!redisUrl)('a refresh job with attempts: 3 on a real queue', () => {
+  it('keeps the aside notice in page copy when a bound-query failure is sanitized', async () => {
+    const { dest } = await fixture();
+    const secret = 'never-publish-this-bound-value';
+    failBuilding(
+      'clone',
+      Object.assign(new Error(`query failed: ${secret}`), {
+        query: 'update repository set secret=$1',
+        params: [secret],
+        code: 'XX000',
+      }),
+    );
+    await refreshJob(remote);
+    const kept = await asides(dest);
+    expect(kept).toHaveLength(1);
+    expect(row.status).toBe('error');
+    expect(row.checkoutAsidePaths).toEqual(kept);
+    expect(row.statusMessage).toContain('Database operation failed');
+    expect(row.statusMessage).toContain(kept[0]);
+    expect(row.statusMessage).not.toContain(secret);
+  });
+
+  it('persists every aside as structured data and in the failure shown by the repository page', async () => {
+    const { dest } = await fixture();
+    const original = `${REPO}.aside-2026-01-01T00-00-00-000Z`;
+    await rename(dest, path.join(path.dirname(dest), original));
+    await mkdir(dest);
+    await writeFile(path.join(dest, 'half.txt'), 'an older interrupted clone');
+    failBuilding('clone', new Error('clone failed again'));
+    const job = await refreshJob(remote);
+    const kept = (await asides(dest)).sort();
+    expect(kept).toHaveLength(2);
+    expect(row.checkoutAsidePaths).toEqual(kept);
+    expect(row.status).toBe('error');
+    for (const name of kept) expect(row.statusMessage).toContain(name);
+    expect(job.failedReason).toBe(row.statusMessage);
+    expect(job.attemptsMade).toBe(1);
+    expect(await readFile(path.join(path.dirname(dest), original, 'notes.md'), 'utf8')).toBe(
+      'keep me\n',
+    );
+  });
+
+  it('a real BullMQ retry after detection publication retains the aside notice', async () => {
+    const { dest, payload } = await fixture();
+    const publish = h.persist.getMockImplementation()!;
+    h.persist.mockImplementationOnce(async (...args) => {
+      await publish(...args);
+      throw new Error('detection import failed after ready');
+    });
+    const job = await refreshJob(payload);
+    expect(await job.getState()).toBe('completed');
+    expect(job.attemptsMade).toBe(2);
+    expect(row.status).toBe('ready');
+    const kept = await asides(dest);
+    expect(kept).toHaveLength(1);
+    expect(row.checkoutAsidePaths).toEqual(kept);
+    expect(row.statusMessage).toContain(kept[0]);
+    expect(h.persist).toHaveBeenCalledTimes(2);
+  });
+
   it('a dead folder source leaves the checkout where it was, whichever attempt runs', async () => {
     const { source, dest, payload } = await fixture();
     await rm(path.join(source, '.git/objects'), { recursive: true });
