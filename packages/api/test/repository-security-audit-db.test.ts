@@ -883,72 +883,81 @@ describe.skipIf(!url)('Repository security settings commit with their audit, on 
       },
     ]);
   }, 30_000);
-  it('bounds gate-4 origin writes behind a relink parked in Git', async () => {
-    const root = await mkdtemp(path.join(tmpdir(), 'remote-gate4-'));
-    roots.push(root);
-    await cp(checkoutFixture, root, { recursive: true });
-    await git(root, ['remote', 'remove', 'origin']);
-    await db
-      .update(schema.repositories)
-      .set({ localPath: root, remoteUrl: null })
-      .where(eq(schema.repositories.id, repository));
-    h.lockTimeoutMs = 300;
-    let entered!: () => void;
-    let release!: () => void;
-    const reached = new Promise<void>((resolve) => {
-      entered = resolve;
-    });
-    const resume = new Promise<void>((resolve) => {
-      release = resolve;
-    });
-    h.gitHook = async (args) => {
-      if (args.includes('add') && args.at(-1) === 'https://relink.test/r') {
-        entered();
-        await resume;
-      }
-    };
-    const relink = Promise.resolve(
-      app.request(`/repos/${repository}/remote`, {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ remoteUrl: 'https://relink.test/r' }),
-      }),
-    );
-    let push: Promise<unknown> | undefined;
-    try {
-      await answeredWithin(5_000, reached);
-      push = gate4PushStep.apply({ db, userId: h.actor, logger } as unknown as StepContext, {
-        iteration: 0,
-        previousIterations: [],
-        detected: {
-          hasGit: true,
-          workspacePath: root,
-          branch: 'main',
-          hasOrigin: false,
-          originUrl: null,
-          recentCommits: '',
-          repositoryId: repository,
-          boundCredentialId: null,
-          credentials: [],
-        },
-        formValues: { push: true, remoteUrl: 'https://gate4.test/r' },
+  // PostgreSQL matches a uuid in any letter case, so a relink addressed by another spelling of the
+  // id still reaches the row; its advisory key must match the one gate 4 takes from the database.
+  it.each([
+    ['canonical', (id: string) => id],
+    ['uppercase', (id: string) => id.toUpperCase()],
+  ] as const)(
+    'bounds gate-4 origin writes behind a relink parked in Git (%s id)',
+    async (_, spell) => {
+      const root = await mkdtemp(path.join(tmpdir(), 'remote-gate4-'));
+      roots.push(root);
+      await cp(checkoutFixture, root, { recursive: true });
+      await git(root, ['remote', 'remove', 'origin']);
+      await db
+        .update(schema.repositories)
+        .set({ localPath: root, remoteUrl: null })
+        .where(eq(schema.repositories.id, repository));
+      h.lockTimeoutMs = 300;
+      let entered!: () => void;
+      let release!: () => void;
+      const reached = new Promise<void>((resolve) => {
+        entered = resolve;
       });
-      await expect(answeredWithin(5_000, push)).rejects.toThrow(
-        'Repository is busy. Retry this step in a moment.',
+      const resume = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      h.gitHook = async (args) => {
+        if (args.includes('add') && args.at(-1) === 'https://relink.test/r') {
+          entered();
+          await resume;
+        }
+      };
+      const relink = Promise.resolve(
+        app.request(`/repos/${spell(repository)}/remote`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ remoteUrl: 'https://relink.test/r' }),
+        }),
       );
-      expect(h.gate4Ensure).not.toHaveBeenCalled();
-      expect(h.gate4Push).not.toHaveBeenCalled();
-      expect((await stored())!.remoteUrl).toBeNull();
-      expect(await audits(db)).toEqual([]);
-    } finally {
-      release();
-      await Promise.allSettled([relink, push]);
-      h.gitHook = undefined;
-    }
-    expect((await relink).status).toBe(200);
-    expect((await stored())!.remoteUrl).toBe('https://relink.test/r');
-    expect(await git(root, ['remote', 'get-url', 'origin'])).toBe('https://relink.test/r');
-  }, 15_000);
+      let push: Promise<unknown> | undefined;
+      try {
+        await answeredWithin(5_000, reached);
+        push = gate4PushStep.apply({ db, userId: h.actor, logger } as unknown as StepContext, {
+          iteration: 0,
+          previousIterations: [],
+          detected: {
+            hasGit: true,
+            workspacePath: root,
+            branch: 'main',
+            hasOrigin: false,
+            originUrl: null,
+            recentCommits: '',
+            repositoryId: repository,
+            boundCredentialId: null,
+            credentials: [],
+          },
+          formValues: { push: true, remoteUrl: 'https://gate4.test/r' },
+        });
+        await expect(answeredWithin(5_000, push)).rejects.toThrow(
+          'Repository is busy. Retry this step in a moment.',
+        );
+        expect(h.gate4Ensure).not.toHaveBeenCalled();
+        expect(h.gate4Push).not.toHaveBeenCalled();
+        expect((await stored())!.remoteUrl).toBeNull();
+        expect(await audits(db)).toEqual([]);
+      } finally {
+        release();
+        await Promise.allSettled([relink, push]);
+        h.gitHook = undefined;
+      }
+      expect((await relink).status).toBe(200);
+      expect((await stored())!.remoteUrl).toBe('https://relink.test/r');
+      expect(await git(root, ['remote', 'get-url', 'origin'])).toBe('https://relink.test/r');
+    },
+    15_000,
+  );
   const sendSetting = (suffix: string, body: unknown, method = 'PATCH') =>
     app.request(`${suffix === 'exclusions' ? '/repos' : '/repositories'}/${repository}/${suffix}`, {
       method,
