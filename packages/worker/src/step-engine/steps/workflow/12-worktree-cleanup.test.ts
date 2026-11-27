@@ -345,6 +345,7 @@ function makeDb(
   const stateWrites: MergeResolveState[] = [];
   const taskWrites: Record<string, unknown>[] = [];
   const invocationInserts: { prompt?: string; truncationRetry?: boolean }[] = [];
+  const invocationRows: Record<string, unknown>[] = [];
   const applyPatch = (patch: Record<string, unknown>) => {
     if ('mergeResolveState' in patch) {
       mergeState = patch.mergeResolveState as MergeResolveState;
@@ -375,27 +376,35 @@ function makeDb(
       set: (patch: Record<string, unknown>) => {
         if (table === schema.tasks) taskWrites.push(patch);
         return {
-          where: (cond: unknown) => ({
-            returning: async () => {
-              const values = conditionValues(cond);
-              const guarded = values.includes('pending') && values.includes('skipped');
-              if (guarded && (status === 'pending' || status === 'skipped')) return [];
-              applyPatch(patch);
-              return [{ id: 'step1', status, errorMessage, warningMessage }];
-            },
-            then: (resolve: (v: unknown) => void) => {
-              applyPatch(patch);
-              resolve(undefined);
-            },
-          }),
+          where: (cond: unknown) => {
+            if (table === schema.cliInvocations) {
+              const id = conditionValues(cond)[0];
+              for (const row of invocationRows) if (row.id === id) Object.assign(row, patch);
+            }
+            return {
+              returning: async () => {
+                const values = conditionValues(cond);
+                const guarded = values.includes('pending') && values.includes('skipped');
+                if (guarded && (status === 'pending' || status === 'skipped')) return [];
+                applyPatch(patch);
+                return [{ id: 'step1', status, errorMessage, warningMessage }];
+              },
+              then: (resolve: (v: unknown) => void) => {
+                applyPatch(patch);
+                resolve(undefined);
+              },
+            };
+          },
         };
       },
     }),
     insert: (table?: unknown) => ({
       values: (v: { eventType: string; payload: unknown }) => {
         if (table === schema.taskEvents) events.push(v);
-        if (table === schema.cliInvocations)
+        if (table === schema.cliInvocations) {
           invocationInserts.push(v as { prompt?: string; truncationRetry?: boolean });
+          invocationRows.push({ ...v, id: 'inv1', endedAt: null, supersededAt: null });
+        }
         return {
           returning: async () => {
             if (opts.insertRejects) throw opts.insertRejects;
@@ -475,6 +484,7 @@ function makeDb(
     },
     events,
     invocationInserts,
+    invocationRows,
   };
 }
 
@@ -1807,6 +1817,24 @@ describe('12 merge fix-agent dispatch', () => {
       // failed, so a crash right there still leaves the run tracked rather than orphaned.
       expect(h.getState()?.fixInvocationId).toBe('inv1');
       expect(h.getState()?.phase).toBe('resolving');
+      expect(h.invocationRows).toHaveLength(1);
+      expect(h.invocationRows[0]!.supersededAt).toBeInstanceOf(Date);
+      // Retry/recovery reads the saved id, consumes the superseded run and refunds it.
+      const released = h.invocationRows[0]!;
+      vi.spyOn(h.db.query.cliInvocations, 'findFirst').mockResolvedValue(released as never);
+      const recovered = await resolveMergePhase(
+        h.db as never,
+        step,
+        mkCurrent(det(wt), { action: 'merge_remove' }, h.getState()),
+        ctx,
+        mkParams(h.db, dispatching),
+      );
+      expect(recovered.resolved).toBe(false);
+      if (!recovered.resolved) expect(recovered.result.status).toBe('waiting_cli');
+      expect(released.consumedAt).toBeInstanceOf(Date);
+      expect(h.invocationRows).toHaveLength(2);
+      expect(h.invocationRows[1]!.supersededAt).toBeNull();
+      expect(h.getState()?.conflictRetries).toBe(1);
     } finally {
       await rm(parent, { recursive: true, force: true });
     }

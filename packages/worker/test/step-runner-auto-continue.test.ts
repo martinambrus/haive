@@ -3628,7 +3628,7 @@ describe('approved apply pre-form continuation', () => {
       if (hook === 'enqueue') {
         expect(h.enqueue).toHaveBeenCalledOnce();
         expect(h.state.invocation!.endedAt).toBeNull();
-        expect(h.state.invocation!.supersededAt).toBeUndefined();
+        expect(h.state.invocation!.supersededAt).toBeInstanceOf(Date);
         expect(h.state.invocation!.consumedAt).toBeUndefined();
       } else expect(h.enqueue).not.toHaveBeenCalled();
     },

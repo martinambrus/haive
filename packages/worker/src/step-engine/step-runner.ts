@@ -1,3 +1,4 @@
+import { enqueueReservedInvocation } from './enqueue-reserved-invocation.js';
 import { resolveRunTitle } from './run-title.js';
 import { finalizeCanonicalCheckResult } from './check-result-output.js';
 import { parseExecutionContract } from '@haive/shared/modularity';
@@ -1500,7 +1501,7 @@ async function resolveLlmPhase(
     const deferred = await deferPreFormContinuation(db, ctx, current, invRow.id);
     if (deferred) return { resolved: false, result: deferred };
   }
-  await params.deps.enqueueCliInvocation({
+  await enqueueReservedInvocation(db, params.deps, {
     invocationId: invRow.id,
     taskId: params.taskId,
     taskStepId: current.id,
@@ -1696,7 +1697,7 @@ async function resolveAiFixPhase(
     );
     return { resolved: false, result: { status: 'waiting_cli', row: current } };
   }
-  await params.deps.enqueueCliInvocation({
+  await enqueueReservedInvocation(db, params.deps, {
     invocationId: invRow.id,
     taskId: params.taskId,
     taskStepId: current.id,
