@@ -1,5 +1,6 @@
+import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
@@ -133,7 +134,7 @@ it.each(['next promotion', 'later work', 'unknown outcome'])(
 it('preserves a newer local file when replaying the recovery journal', async () => {
   const { restoreKbReroutes } =
     await import('../src/step-engine/steps/onboarding/_kb-reroute-recovery.js');
-  const remember = await restoreKbReroutes(repo, 'task');
+  const { rememberReroute: remember } = await restoreKbReroutes(repo, 'task');
   await remember('a.md', '# Original');
   await mkdir(path.join(repo, '.haive-data/knowledge_base'), { recursive: true });
   await writeFile(path.join(repo, '.haive-data/knowledge_base/a.md'), '# Newer local edit');
@@ -146,7 +147,7 @@ it('preserves a newer local file when replaying the recovery journal', async () 
 it('keeps recovery bodies out of a full-tree onboarding Git stage', async () => {
   const { restoreKbReroutes } =
     await import('../src/step-engine/steps/onboarding/_kb-reroute-recovery.js');
-  const remember = await restoreKbReroutes(repo, 'task');
+  const { rememberReroute: remember } = await restoreKbReroutes(repo, 'task');
   await remember('a.md', '# Original');
   await writeFile(path.join(repo, 'README.md'), '# Project');
   execFileSync('git', ['init', '-q'], { cwd: repo });
@@ -154,4 +155,79 @@ it('keeps recovery bodies out of a full-tree onboarding Git stage', async () => 
   expect(
     execFileSync('git', ['diff', '--cached', '--name-only'], { cwd: repo, encoding: 'utf8' }),
   ).toBe('README.md\n');
+});
+
+it.each([
+  'directory file',
+  'directory symlink',
+  'malformed JSON',
+  'schema mismatch',
+  'invalid path',
+  'KB directory',
+  'journal directory',
+  'journal symlink',
+])('Retry completes and retains drafts and bytes with a planted %s', async (shape) => {
+  const recovery = path.join(repo, '.haive/kb-reroute-recovery');
+  const journal = path.join(recovery, `${createHash('sha256').update('t1').digest('hex')}.json`);
+  const kb = path.join(repo, '.haive-data/knowledge_base');
+  await mkdir(path.join(kb, 'ANTI_PATTERNS'), { recursive: true });
+  const body = '# Local original\n\nUse public Drupal APIs.\n';
+  await writeFile(path.join(kb, 'ANTI_PATTERNS/a.md'), body);
+  await mkdir(path.join(repo, '.haive'), { recursive: true });
+  const sentinel = path.join(repo, 'sentinel');
+  await writeFile(sentinel, 'private sentinel');
+  if (shape === 'directory file') await writeFile(recovery, 'private sentinel');
+  else if (shape === 'directory symlink') await symlink(sentinel, recovery);
+  else {
+    await mkdir(recovery);
+    if (shape === 'journal directory') await mkdir(journal);
+    else if (shape === 'journal symlink') await symlink(sentinel, journal);
+    else if (shape === 'malformed JSON') await writeFile(journal, '{private sentinel');
+    else if (shape === 'schema mismatch') await writeFile(journal, '{"private sentinel":true}');
+    else {
+      await writeFile(
+        journal,
+        JSON.stringify({
+          version: 1,
+          files: [
+            {
+              path: shape === 'invalid path' ? '../private sentinel.md' : 'blocked.md',
+              body: '# Saved original',
+            },
+          ],
+        }),
+      );
+      if (shape === 'KB directory') await mkdir(path.join(kb, 'blocked.md'));
+    }
+  }
+  h.drafts.push({ title: 'prior', body: '# Saved original' });
+  const context = ctx();
+  const warn = vi.spyOn(context.logger, 'warn');
+  // First replay has no re-route selected; recovery must never wedge apply.
+  await knowledgeAcquisitionStep.apply(context, {
+    iteration: 0,
+    previousIterations: [],
+    detected,
+    formValues: { selectedTopics: [], rerouteGlobal: [] },
+    llmOutput: { placements: [] },
+  });
+  expect(h.drafts).toContainEqual({ title: 'prior', body: '# Saved original' });
+  expect(await readFile(path.join(kb, 'ANTI_PATTERNS/a.md'), 'utf8')).toBe(body);
+  expect(await readFile(sentinel, 'utf8')).toBe('private sentinel');
+  expect(warn).toHaveBeenCalled();
+  expect(JSON.stringify(warn.mock.calls)).not.toContain('private sentinel');
+  // A directory slot that cannot hold a journal must also preserve a selected source.
+  if (shape.startsWith('directory ') || shape === 'journal directory') {
+    await knowledgeAcquisitionStep.apply(context, {
+      iteration: 0,
+      previousIterations: [],
+      detected,
+      formValues: { selectedTopics: [], rerouteGlobal: ['ANTI_PATTERNS/a.md'] },
+      llmOutput: {
+        placements: [{ path: 'ANTI_PATTERNS/a.md', category: 'anti_pattern', tech: 'drupal' }],
+      },
+    });
+    expect(await readFile(path.join(kb, 'ANTI_PATTERNS/a.md'), 'utf8')).toBe(body);
+    expect(h.drafts).toContainEqual({ title: 'prior', body: '# Saved original' });
+  }
 });

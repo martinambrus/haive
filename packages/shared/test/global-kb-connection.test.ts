@@ -1,12 +1,21 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Database } from '@haive/database';
 
-const h = vi.hoisted(() => ({ calls: [] as Array<[string, Record<string, unknown>]> }));
+const h = vi.hoisted(() => ({
+  calls: [] as Array<[string, Record<string, unknown>]>,
+  error: null as unknown,
+}));
 
 vi.mock('postgres', () => ({
   default: (url: string, options: Record<string, unknown>) => {
     h.calls.push([url, options]);
-    return { end: async () => {}, unsafe: async () => [{ exists: 1 }] };
+    return {
+      end: async () => {},
+      unsafe: async () => {
+        if (options.max === 5 && h.error) throw h.error;
+        return [{ exists: 1 }];
+      },
+    };
   },
 }));
 
@@ -111,3 +120,49 @@ it('memoizes a successful internal database existence check per process and serv
     else process.env.DATABASE_URL = before;
   }
 });
+
+it.each(['raw', 'wrapped', 'message only'])(
+  'invalidates internal database readiness only by SQLSTATE 3D000 (%s)',
+  async (shape) => {
+    const { withGlobalKbConnection } = await import('../src/global-kb/client.js');
+    const before = process.env.DATABASE_URL;
+    process.env.DATABASE_URL = `postgres://u:p@drop-${shape.replaceAll(' ', '')}.example/haive`;
+    h.calls = [];
+    const opts = { settings: settings({ mode: 'internal' }) };
+    try {
+      await withGlobalKbConnection(
+        existingDatabase,
+        async ({ conn }) => conn.pg.unsafe('SELECT 1'),
+        opts,
+      );
+      const error = Object.assign(new Error('opaque'), { code: '3D000' });
+      h.error =
+        shape === 'wrapped'
+          ? new Error('opaque wrapper', { cause: error })
+          : shape === 'raw'
+            ? error
+            : new Error('database does not exist 3D000');
+      await expect(
+        withGlobalKbConnection(
+          existingDatabase,
+          async ({ conn }) => conn.pg.unsafe('SELECT 1'),
+          opts,
+        ),
+      ).rejects.toBe(h.error);
+      h.error = null;
+      await withGlobalKbConnection(
+        existingDatabase,
+        async ({ conn }) => conn.pg.unsafe('SELECT 1'),
+        opts,
+      );
+      expect(
+        h.calls.filter(([, options]) => options.max === 1),
+        'missing database must be probed again on the next call',
+      ).toHaveLength(shape === 'message only' ? 1 : 2);
+    } finally {
+      h.error = null;
+      if (before === undefined) delete process.env.DATABASE_URL;
+      else process.env.DATABASE_URL = before;
+    }
+  },
+);

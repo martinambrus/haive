@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { databaseName } from '../naming/index.js';
 import postgres from 'postgres';
-import { isDuplicateDatabase, type Database } from '@haive/database';
+import { hasPgCode, isDuplicateDatabase, type Database } from '@haive/database';
 import { logger } from '../logger/index.js';
 import { IN_STACK_OLLAMA_URL } from '../constants/index.js';
 import { configService, CONFIG_KEYS, type ConfigService } from '../config/config.service.js';
@@ -65,6 +65,8 @@ export interface GlobalKbConnection {
   ollamaUrl: string | null;
   embedModel: string | null;
   close: () => Promise<void>;
+  /** Invalidate this connection's internal bootstrap memo on a coded missing database. */
+  onError?: (err: unknown) => void;
 }
 
 /** An absent key reads on, as the seed has it, for every reader. */
@@ -232,7 +234,12 @@ async function resolveInternal(
     // Internal only: end abandoned statements on Haive's server when close() drops the socket.
     connection: { client_connection_check_interval: CONNECTION_CHECK_MS },
   });
-  return buildConnection('internal', pg, settings);
+  return {
+    ...buildConnection('internal', pg, settings),
+    onError: (err) => {
+      if (hasPgCode(err, '3D000')) internalDatabaseReady.delete(adminKey);
+    },
+  };
 }
 
 function resolveExternal(

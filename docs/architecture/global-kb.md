@@ -357,7 +357,11 @@ which PostgreSQL refuses inside the transaction required by `SET LOCAL`. Expiry 
 client alone; abort checks prevent a late SELECT reply from creating a database. No abandoned
 query occupies the application's pool. A successful existence/create probe is remembered per
 process and main-server DSN (hashed), as schema readiness is; failures and aborts are never cached,
-and concurrent first callers retain independently cancellable admin clients. A timed-out CREATE
+and concurrent first callers retain independently cancellable admin clients. A store operation
+that reports SQLSTATE `3D000` (including through a cause) clears both the internal database
+existence memo and schema readiness: that call fails, and the next call probes/recreates the
+dropped database and ensures its schema again. Bare probes and width checks clear the same
+existence memo. Error message text never triggers invalidation. A timed-out CREATE
 may have completed; the next attempt's
 existence check reconciles it. External connections keep transaction-local schema/lock limits and
 never receive these internal-only startup parameters.
@@ -470,15 +474,26 @@ file it atomically writes and fsyncs its original body and validated relative pa
 `.haive/kb-reroute-recovery/<sha256(taskId)>.json`, anchored at the repository through fs-safe.
 This keeps the exact pre-scrub bytes, including after an unknown-outcome promote, a later
 apply failure or process death. Before clearing prior promoted drafts it restores absent local
-sources with exclusive creation; a newer regular local file wins, while a link, unreadable or
-malformed recovery record refuses cleanup. Retry then replaces prior drafts normally, without
-creating duplicates. Re-route deadlines remain coded step failures; the uncertain file stays local.
+sources by writing and fsyncing a temporary sibling, publishing it exclusively without
+replacing an existing name, then syncing its parent. A death during writing cannot leave a
+truncated final file mistaken for a newer local copy; an existing regular local file still wins.
+Any journal read, parse, validation or restore failure skips the draft purge for that run and
+warns with the error class only (no journal body or path text). Journal reads have an injectable
+16 MiB bound and refuse truncated data. The journal is rewritten for the current run through
+fs-safe, preserving validated entries even when restoration failed. A planted leaf link is
+replaced as a link, never followed. If the recovery directory slot is a file or link, or a journal
+cannot be safely written/synced, the step continues without deleting any local source that run;
+promotion may still add a draft. Healthy Retry replaces prior drafts without duplicates. Re-route deadlines remain coded step failures; the uncertain file stays local.
 
 The recovery directory carries its own `*` ignore file (itself ignored), written before a body,
 so an onboarding that initializes Git and stages the full tree cannot commit recovery copies.
+The directory entry in `.haive` is fsynced before publishing a journal; the journal file and its
+containing directory are synced before permitting a local delete.
 The journal stays outside the KB/RAG tree and is retained after successful apply, because a lost
 done write or later explicit Retry still needs it. This costs one original-body copy per re-routed
-file per task. Existing failures that predate the journal cannot be reconstructed from it. Rollback
+file per task, agent-readable under writable `.haive`; it is never staged as an agent body.
+An explicit Retry after success can restore files already consumed by the global KB, leaving
+local/global duplicates; retention and this later Retry behavior remain unchanged. Existing failures that predate the journal cannot be reconstructed from it. Rollback
 must retain this recovery path and journals until affected onboarding tasks no longer need Retry;
 reverting code alone cannot restore already-moved uncommitted sources. No database migration is added.
 

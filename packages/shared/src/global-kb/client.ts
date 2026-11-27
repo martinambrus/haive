@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { type Database } from '@haive/database';
+import { hasPgCode, type Database } from '@haive/database';
 import {
   resolveGlobalKbConnection,
   resolveGlobalKbSettings,
@@ -146,6 +146,10 @@ async function openAndRun<T>(
   try {
     opts.signal?.throwIfAborted();
     return await fn({ conn, settings, signal: opts.signal });
+  } catch (err) {
+    conn.onError?.(err);
+    if (hasPgCode(err, '3D000')) schemaReady.delete(storeKey(settings));
+    throw err;
   } finally {
     await conn.close().catch(() => {});
   }

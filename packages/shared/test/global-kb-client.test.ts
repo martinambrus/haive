@@ -547,3 +547,18 @@ describe('bounded call policy and bare probes', () => {
     expect(h.ends).toEqual([{ timeout: 0 }]);
   });
 });
+
+it('clears schema readiness after a wrapped missing-database error', async () => {
+  const withKb = await load();
+  await withKb(haiveDb, async () => {});
+  const error = new Error('wrapped', {
+    cause: Object.assign(new Error('opaque'), { code: '3D000' }),
+  });
+  await expect(
+    withKb(haiveDb, async () => {
+      throw error;
+    }),
+  ).rejects.toBe(error);
+  await withKb(haiveDb, async () => {});
+  expect(h.ensure).toHaveBeenCalledTimes(2);
+});

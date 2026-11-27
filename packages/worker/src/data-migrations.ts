@@ -1288,9 +1288,10 @@ const HEADING_ONLY_PREFILTER_CHARS = 1024;
  *  The per-repo indexes need no equivalent — `_rag-index.ts` re-extracts every
  *  file on each run and sweeps section keys it no longer produces.
  *
- *  Idempotent: a second run matches nothing. Best-effort and flag-gated — a
- *  global KB that is disabled or unreachable must never fail worker boot, and a
- *  disabled one must not be connected to (that would create its database). */
+ *  Idempotent and flag-gated: a disabled KB is never connected to (that would
+ *  create its database). Ordinary store errors warn and skip; cancellation, coded
+ *  deadlines and typed config outages propagate to the caller, including the
+ *  destructive updater, which fails rather than reporting incomplete cleanup as done. */
 async function dropHeadingOnlyGlobalKbChunks(
   db: Database,
   opts: GlobalKbCallOptions = {},
