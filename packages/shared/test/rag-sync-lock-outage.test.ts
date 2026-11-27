@@ -56,3 +56,19 @@ it('still propagates server failures and one-shot acquire outages', async () => 
     tryAcquireRagSyncLock(redisWith(vi.fn().mockRejectedValue(outage)), 'repo'),
   ).rejects.toBe(outage);
 });
+
+it('reports unreadable attempts separately from another holder', async () => {
+  const onWait = vi.fn();
+  const set = vi
+    .fn()
+    .mockRejectedValueOnce(outage)
+    .mockResolvedValueOnce(null)
+    .mockResolvedValue('OK');
+  const waiting = acquireRagSyncLock(redisWith(set), 'repo', { waitMs: 100, pollMs: 10, onWait });
+  await vi.advanceTimersByTimeAsync(0);
+  expect(onWait).toHaveBeenLastCalledWith('redis_unavailable');
+  await vi.advanceTimersByTimeAsync(10);
+  expect(onWait).toHaveBeenLastCalledWith('held');
+  await vi.advanceTimersByTimeAsync(10);
+  await (await waiting).release();
+});

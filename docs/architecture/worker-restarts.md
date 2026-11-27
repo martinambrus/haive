@@ -763,7 +763,11 @@ an evicted model again. A wedged volume existence probe still looks like absence
 cleanup until boot. Cancel still withholds its finish marker when a CLI sandbox remains or its
 listing is unknown, or no-change directory discard fails, since merge-directory safety depends
 on those checks. The existing Cancel re-drive is capped at three, as described above; resource
-section failure alone no longer consumes that recovery path. Volume existence
+section failures normally do not consume that recovery path. Terminal reap exhaustion is an
+exception: its bounded retries keep the worktree, safe model/KB cleanup still runs, and Cancel
+rethrows before its finish marker so the existing re-drive repeats the worktree step. Completion
+instead records `worktree.cleanup_deferred` with the retained path and structural reason in Activity;
+it remains completed and has no automatic teardown re-drive. Volume existence
 probes and the embed live-task scan run before the transaction; the task's settlement is
 rechecked after those reads, under the row lock. Auth sync-back remains outside
 the row lock: it may wait for the CLI auth session lock, which must never be awaited while

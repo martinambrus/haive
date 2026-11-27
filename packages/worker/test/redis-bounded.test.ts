@@ -201,6 +201,9 @@ describe('consequential gates against a silent store', () => {
     await waiting;
     expect(state.error).toBeUndefined();
     expect(state.value).toBeDefined();
+    const fields = fake!.commands.filter((c) => c[0]!.toUpperCase() === 'EVAL').map((c) => c[6]);
+    expect(fields.length).toBeGreaterThan(1);
+    expect(new Set(fields).size).toBe(1);
     await state.value?.release();
   });
 
@@ -240,7 +243,9 @@ describe('consequential gates against a silent store', () => {
     await fake!.nextCommand('SET');
     await vi.advanceTimersByTimeAsync(DEADLINE);
     expect(state.settled).toBe(false);
-    expect(ctx.emitProgress).toHaveBeenCalledOnce();
+    expect(ctx.emitProgress).toHaveBeenCalledWith(
+      'Waiting for Redis to recover before acquiring the RAG sync lock...',
+    );
     await recover();
     // Stop at the next SET, before advancing its command deadline ahead of socket I/O.
     await vi.advanceTimersByTimeAsync(5_000 - 50);

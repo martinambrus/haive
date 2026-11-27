@@ -375,22 +375,27 @@ The worker's shared finite-command client (`worker/src/redis.ts`, `getRedis()`) 
 `REDIS_COMMAND_TIMEOUT_MS` (2000 ms, injectable through `initRedis`'s `commandTimeoutMs`),
 `enableOfflineQueue: false`, `autoResendUnfulfilledCommands: false` and the same capped retry
 strategy. A transport failure or command deadline rejects with the worker's
-`RedisUnavailableError` (`code: redis_unavailable`, original `cause`); a server `ReplyError`
+`RedisUnavailableError` (`code: REDIS_UNAVAILABLE_CODE`, original `cause`); a server `ReplyError`
 passes through by identity. Pipelines retain typed errors in their result tuples. A command
 issued during connect, reconnect or a LOADING ready check rejects without queueing. A write
 whose answer timed out may still have landed; it is never automatically replayed on reconnect.
-Connection warnings are throttled to one per ten seconds.
+Connection warnings are throttled to one per ten seconds. `REDIS_UNAVAILABLE_CODE` in
+`@haive/shared/constants` is the one contract used by every writer and matcher, including the web client.
 
 This changes how long a gate waits while retaining its documented outage policy. INVOKE lane
 reservation fails open without a slot. Step-command leases treat `code: redis_unavailable` as
 not acquired and keep polling under their existing ten-minute wait and abort signal; one-shot
-lease and slot attempts still propagate the failure. Agent-slot release stops its heartbeat and
+lease and slot attempts still propagate the failure. A polling acquire reuses one lease UUID,
+since a timed-out EVAL may have inserted its field. RAG and agent polls distinguish an unreadable
+Redis attempt from a held lock or full pool when publishing progress copy. Agent-slot release stops its heartbeat and
 finishes after a failed HDEL, relying on the existing two-minute field expiry. Runtime
 reservation/surcharge accounting keeps its live-runners-only fallback. A cold boot's own
-reservation check distinguishes unknown from absent: an unreadable HEXISTS refuses the boot
-with the original error before joining the local queue. Guessing absent can queue behind the
-task's own reservation; guessing held can admit capacity that was never reserved. Retry can
-read it again. These decisions use error structure, never message wording. The RAG lock's
+reservation check distinguishes unknown from absent: an unreadable HEXISTS polls every two
+seconds under the same eight-minute admission read bound as unreadable limits, then throws
+the retryable typed outage. This gate also wraps a server refusal as unreadable without
+matching its wording; the finite client itself still preserves ReplyError identity. Both bounds are injectable and honor abort. A recovered read of a
+held reservation bypasses the local queue. Guessing absent can queue behind the task's own
+reservation; guessing held can admit capacity that was never reserved. These decisions use error structure, never message wording. The RAG lock's
 polling acquire treats both its own five-second command timeout and `code: redis_unavailable`
 as not acquired, retaining the two-hour worker wait and abort signal; one-shot acquire still
 throws. A timed-out SET's compensating release can also fail on the finite client, leaving the
@@ -402,13 +407,22 @@ counter, terminal output and registry bookkeeping, and the dedicated mid-run ste
 duplicated from it. Each boot command waits for its own client's ready check, independently of
 ConfigService's connection, so a LOADING store cannot silently skip the clears or counter or
 abort the module report. Shared clear helpers accept a client and retain the finite default
-for other callers. Later module report changes still use the finite client and retry only on
-the next change. The CLI exit frame and its TTL use the patient client too: an open API stream
-reader closes on that frame and otherwise keeps reading even after the invocation ended.
-Other best-effort stream frames, cache/hint writes and the soft-timeout wind-down publish stay
-finite and can be dropped during an outage. A failed task-end terminal reap logs and skips
-worktree removal for that teardown; the next teardown can retry it. The cancel-only task-label
-sweep may already have removed task shells, but is best effort, and completion does not run it.
+for other callers. Later module report changes use the finite client; failure clears the
+published digest, so the next 15-second reconcile pass retries even without a new change.
+The CLI exit frame waits for pending chunk writes before using the patient client and setting
+its TTL: an open API stream reader closes on that frame. The drain and exit write share the
+injectable `CLI_EXIT_WAIT_MS` (five seconds); expiry logs and lets database finalization proceed.
+A patient write already issued may still land later. Other best-effort stream frames,
+cache/hint writes and the soft-timeout wind-down publish stay finite and can be dropped during
+an outage. Terminal teardown retries a coded Redis outage up to `TASK_TERMINAL_REAP_ATTEMPTS`
+(three), separated by `TASK_TERMINAL_REAP_RETRY_MS` (250 ms); both are injectable. Every attempt
+uses the finite client because reap holds a Postgres task-row settlement lock. Exhaustion keeps
+the worktree. Cancel finishes other safe cleanup, then rethrows before `task.cancel_finished`,
+leaving the existing capped cancel re-drive eligible. Completion has no automatic retry:
+`worktree.cleanup_deferred` in the task's Activity records the retained worktree path and
+structural reason `terminal_reap_failed`, while the task stays completed. The cancel-only
+task-label sweep may already have removed task shells, but is best effort, and completion
+does not run it.
 
 A finite client's `duplicate()` throws so a subscriber or future blocking reader cannot inherit
 its deadline. There are no worker BLPOP/XREAD BLOCK consumers today. The terminal manager's

@@ -1,3 +1,4 @@
+import { REDIS_UNAVAILABLE_CODE } from '@haive/shared/constants';
 import {
   RagSyncLockAbortedError,
   RagSyncLockTimeoutError,
@@ -16,16 +17,20 @@ export async function acquireRepoRagSyncLock(
   ctx: StepContext,
   repositoryId: string,
 ): Promise<RagSyncLock> {
-  let announced = false;
+  let announced: string | undefined;
   try {
     return await acquireRagSyncLock(getRedis(), repositoryId, {
       waitMs: RAG_SYNC_LOCK_WAIT_MS,
       signal: ctx.signal,
-      onWait: () => {
-        if (announced) return;
-        announced = true;
+      onWait: (reason) => {
+        if (announced === reason) return;
+        announced = reason;
         void ctx
-          .emitProgress('Waiting for another RAG sync of this repository to finish...')
+          .emitProgress(
+            reason === REDIS_UNAVAILABLE_CODE
+              ? 'Waiting for Redis to recover before acquiring the RAG sync lock...'
+              : 'Waiting for another RAG sync of this repository to finish...',
+          )
           .catch(() => undefined);
       },
     });

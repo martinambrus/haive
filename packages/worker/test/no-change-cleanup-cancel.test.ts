@@ -4,11 +4,19 @@ import { beforeEach, afterEach, expect, it, vi } from 'vitest';
 import type { Job } from 'bullmq';
 import { schema, type Database } from '@haive/database';
 import { TASK_JOB_NAMES, logger } from '@haive/shared';
-import { processTaskJob, setContainerCleanupRunner } from '../src/queues/task-queue.js';
+import {
+  markTaskCompleted,
+  processTaskJob,
+  setContainerCleanupRunner,
+} from '../src/queues/task-queue.js';
 
 const h = vi.hoisted(() => ({
   calls: [] as string[],
   reapError: null as Error | null,
+  reapFailures: Infinity,
+  completing: false,
+  type: 'run_app',
+  events: [] as { eventType: string; payload: unknown }[],
   seen: (name: string, _taskId?: string) => {
     h.calls.push(name);
   },
@@ -89,7 +97,7 @@ vi.mock('../src/sandbox/terminal-session-reaper.js', async (importOriginal) => (
   ...(await importOriginal<object>()),
   reapAllSessionsForTask: async (_redis: unknown, _docker: unknown, taskId: string) => {
     h.seen('reapAllSessionsForTask', taskId);
-    if (h.reapError) throw h.reapError;
+    if (h.reapError && h.reapFailures-- > 0) throw h.reapError;
     return 0;
   },
 }));
@@ -148,6 +156,10 @@ const job = { name: TASK_JOB_NAMES.CANCEL, data: { taskId: 'task', userId: 'user
 beforeEach(() => {
   h.calls = [];
   h.reapError = null;
+  h.reapFailures = Infinity;
+  h.completing = false;
+  h.type = 'run_app';
+  h.events = [];
   h.sandboxes = [];
   h.journal = [{ payload: { version: 999 } }];
   const builder = {
@@ -158,14 +170,20 @@ beforeEach(() => {
     table: undefined as unknown,
     where: () => builder,
     orderBy: () => builder,
-    for: async () => (builder.table === schema.tasks ? [{ status: 'cancelled' }] : []),
-    returning: async () => [],
+    for: async () =>
+      builder.table === schema.tasks ? [{ status: h.completing ? 'completed' : 'cancelled' }] : [],
+    returning: async () => (h.completing ? [{ id: 'task' }] : []),
     then: (resolve: (rows: unknown[]) => unknown) => Promise.resolve(resolve([])),
   };
   const db = {
     query: {
       tasks: {
-        findFirst: async () => ({ status: 'cancelled', runListSnapshot: ['12-no-change-cleanup'] }),
+        findFirst: async () => ({
+          status: h.completing ? 'completed' : 'cancelled',
+          type: h.type,
+          worktreePath: '/wt',
+          runListSnapshot: h.completing ? ['01-worktree-setup'] : ['12-no-change-cleanup'],
+        }),
       },
       taskEvents: {
         findMany: async () => {
@@ -176,7 +194,12 @@ beforeEach(() => {
     },
     select: () => builder,
     update: () => ({ set: () => builder }),
-    insert: () => ({ values: async (event: { eventType: string }) => h.seen(event.eventType) }),
+    insert: () => ({
+      values: async (event: { eventType: string; payload: unknown }) => {
+        h.events.push(event);
+        h.seen(event.eventType);
+      },
+    }),
     execute: async () => undefined,
     transaction: async (fn: (tx: unknown) => unknown) => fn(db),
   };
@@ -186,6 +209,7 @@ beforeEach(() => {
   vi.spyOn(logger, 'error').mockImplementation(() => {});
 });
 afterEach(() => {
+  vi.useRealTimers();
   vi.restoreAllMocks();
   setContainerCleanupRunner(null);
 });
@@ -236,16 +260,64 @@ it('does not read a task without a cleanup journal', async () => {
   expect(read).not.toHaveBeenCalled();
 });
 
-it('retains the worktree on a failed terminal reap, then removes it on the next teardown', async () => {
+it('retries a terminal reap before worktree removal after a transient outage', async () => {
+  vi.useFakeTimers();
   h.journal = [];
   h.reapError = Object.assign(new Error('store unavailable'), { code: 'redis_unavailable' });
-  await processTaskJob(job);
-  expect(h.calls).toContain('reapAllSessionsForTask');
+  h.reapFailures = 1;
+  const result = processTaskJob(job).catch((error) => error);
+  await vi.advanceTimersByTimeAsync(1000);
+  await result;
+  expect(h.calls.filter((call) => call === 'reapAllSessionsForTask')).toHaveLength(2);
+  expect(h.calls.indexOf('removeTaskWorktree')).toBeGreaterThan(
+    h.calls.lastIndexOf('reapAllSessionsForTask'),
+  );
+  expect(h.calls.at(-1)).toBe('task.cancel_finished');
+});
+it('keeps cancel eligible for its production redrive after terminal reap retries are exhausted', async () => {
+  vi.useFakeTimers();
+  h.journal = [];
+  h.reapError = Object.assign(new Error('store unavailable'), { code: 'redis_unavailable' });
+  const result = processTaskJob(job).then(
+    () => ({ ok: true }),
+    (error) => ({ error }),
+  );
+  await vi.advanceTimersByTimeAsync(1000);
+  expect(await result).toEqual({ error: h.reapError });
+  expect(h.calls.filter((call) => call === 'reapAllSessionsForTask')).toHaveLength(3);
   expect(h.calls).not.toContain('removeTaskWorktree');
+  expect(h.calls).not.toContain('task.cancel_finished');
+  expect(h.calls).toContain('reconcileKbAuthorEntryOnTaskEnd');
   h.reapError = null;
   h.calls = [];
   await processTaskJob(job);
   expect(h.calls.indexOf('removeTaskWorktree')).toBeGreaterThan(
     h.calls.indexOf('reapAllSessionsForTask'),
   );
+  expect(h.calls.at(-1)).toBe('task.cancel_finished');
 });
+it.each(['run_app', 'review_only'])(
+  'durably identifies a retained %s worktree in Activity without failing completion',
+  async (type) => {
+    vi.useFakeTimers();
+    h.journal = [];
+    h.completing = true;
+    h.type = type;
+    h.reapError = Object.assign(new Error('store unavailable'), { code: 'redis_unavailable' });
+    const result = markTaskCompleted(h.db, 'task', { epoch: 1 }).catch((error) => error);
+    await vi.advanceTimersByTimeAsync(1000);
+    await result;
+    expect(h.calls).not.toContain('removeTaskWorktree');
+    expect(h.events).toContainEqual(
+      expect.objectContaining({
+        eventType: 'worktree.cleanup_deferred',
+        payload: {
+          reason: 'terminal_reap_failed',
+          taskEndReason: 'completed',
+          worktreePath: '/wt',
+        },
+      }),
+    );
+    expect(h.calls).toContain('task.completed');
+  },
+);

@@ -1,3 +1,4 @@
+import { REDIS_UNAVAILABLE_CODE } from '../constants/index.js';
 import { randomUUID } from 'node:crypto';
 import type { Redis } from 'ioredis';
 import { logger } from '../logger/index.js';
@@ -76,7 +77,7 @@ export interface AcquireRagSyncLockOptions extends RagSyncLockTuning {
   waitMs: number;
   pollMs?: number;
   signal?: AbortSignal;
-  onWait?: () => void;
+  onWait?: (reason: 'held' | typeof REDIS_UNAVAILABLE_CODE) => void;
 }
 
 export function ragSyncLockKey(repositoryId: string): string {
@@ -190,19 +191,21 @@ export async function acquireRagSyncLock(
   for (;;) {
     if (signal?.aborted) throw new RagSyncLockAbortedError();
     let got: RagSyncLock | null = null;
+    let reason: 'held' | typeof REDIS_UNAVAILABLE_CODE = 'held';
     try {
       got = await attempt(redis, repositoryId, options, signal);
     } catch (err) {
       if (
         !(err instanceof RagSyncLockCommandTimeoutError) &&
-        (err as { code?: unknown } | null)?.code !== 'redis_unavailable'
+        (err as { code?: unknown } | null)?.code !== REDIS_UNAVAILABLE_CODE
       )
         throw err;
+      reason = REDIS_UNAVAILABLE_CODE;
       log.warn({ err, repositoryId }, 'RAG sync lock attempt got no answer; retrying');
     }
     if (got) return got;
     if (Date.now() - startedAt >= waitMs) throw new RagSyncLockTimeoutError(waitMs);
-    onWait?.();
+    onWait?.(reason);
     await new Promise<void>((resolve) => {
       const timer = setTimeout(done, pollMs);
       function done(): void {

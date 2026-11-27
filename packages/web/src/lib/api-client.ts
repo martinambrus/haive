@@ -1,3 +1,4 @@
+import { REDIS_UNAVAILABLE_CODE } from '@haive/shared/constants';
 import type { LegacyStepRoleId as StepRoleId } from '@haive/shared/step-outputs';
 import type {
   RepositoryErrorCode,
@@ -157,7 +158,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     };
     const isOutage =
       res.status === 503 &&
-      (body.code === 'config_unavailable' || body.code === 'redis_unavailable');
+      (body.code === 'config_unavailable' || body.code === REDIS_UNAVAILABLE_CODE);
     const outcomeUnknown = res.status === 503 && body.code === 'queue_outcome_unknown';
     const baseMsg = outcomeUnknown
       ? 'The action may still complete. It is safe to retry.'

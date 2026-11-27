@@ -51,3 +51,26 @@ it('keeps one-shot INVOKE failures and unrelated errors visible', async () => {
   h.eval.mockRejectedValue(error);
   await expect(acquireAgentLease(deps)).rejects.toBe(error);
 });
+
+it('reuses one field when muted EVAL replies hide reservations that landed', async () => {
+  h.eval.mockRejectedValueOnce(outage).mockRejectedValueOnce(outage).mockResolvedValue([1, 1]);
+  const waiting = acquireAgentLease(deps, { waitMs: 100, pollMs: 10 });
+  await vi.advanceTimersByTimeAsync(20);
+  const lease = await waiting;
+  const fields = h.eval.mock.calls.map((args) => args[5]);
+  expect(fields).toHaveLength(3);
+  expect(new Set(fields).size).toBe(1);
+  expect(fields[0]).toBe(`lease:${lease.id}`);
+  await lease.release();
+});
+it('reports an outage distinctly from an occupied pool, and clears it on recovery', async () => {
+  const onWait = vi.fn();
+  h.eval.mockRejectedValueOnce(outage).mockResolvedValueOnce([0, 2]).mockResolvedValue([1, 1]);
+  const waiting = acquireAgentLease(deps, { waitMs: 100, pollMs: 10, onWait });
+  await vi.advanceTimersByTimeAsync(0);
+  expect(onWait).toHaveBeenLastCalledWith(0, 2, 'redis_unavailable');
+  await vi.advanceTimersByTimeAsync(10);
+  expect(onWait).toHaveBeenLastCalledWith(2, 2);
+  await vi.advanceTimersByTimeAsync(10);
+  await (await waiting).release();
+});

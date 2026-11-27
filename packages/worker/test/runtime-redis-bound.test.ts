@@ -1,4 +1,5 @@
 import { once } from 'node:events';
+import { ReplyError } from 'ioredis';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { deriveRuntimeCaps } from '@haive/shared';
 import { closeRedis, getRedis, initRedis } from '../src/redis.js';
@@ -61,10 +62,13 @@ describe('runtime capacity keeps its documented soft-state outage policy', () =>
     expect(busy).toBe(0);
   });
 
-  it('refuses a cold boot when its reservation check is unreadable', async () => {
+  it('waits for an unreadable reservation before refusing at the injected bound', async () => {
     let settled = false;
     let failure: unknown;
-    void acquireRuntimeSlot('task', 'app').then(
+    void acquireRuntimeSlot('task', 'app', undefined, undefined, {
+      readWaitMs: 40,
+      readPollMs: 5,
+    }).then(
       (release) => {
         settled = true;
         release();
@@ -76,17 +80,54 @@ describe('runtime capacity keeps its documented soft-state outage policy', () =>
     );
     await fake.nextCommand('HEXISTS');
     await vi.advanceTimersByTimeAsync(DEADLINE);
+    expect(settled).toBe(false);
+    await vi.advanceTimersByTimeAsync(30);
     expect(settled).toBe(true);
     expect(failure).toMatchObject({ code: 'redis_unavailable' });
     expect(fake.commands.some((c) => c[0]!.toUpperCase() === 'HGETALL')).toBe(false);
   });
 });
 
-it('refuses an unknown reservation before a readable occupancy can queue on its own slot', async () => {
+it.each([
+  Object.assign(new Error('lost HEXISTS reply'), { code: 'redis_unavailable' }),
+  new ReplyError('LOADING arbitrary reply'),
+])('rides out a reservation-read blip without queueing behind its own slot: %s', async (error) => {
   fake.mute = false;
-  const error = Object.assign(new Error('lost HEXISTS reply'), { code: 'redis_unavailable' });
-  vi.spyOn(getRedis(), 'hexists').mockRejectedValueOnce(error);
+  const read = vi
+    .spyOn(getRedis(), 'hexists')
+    .mockRejectedValueOnce(error)
+    .mockResolvedValueOnce(1);
   const occupancy = vi.spyOn(getRedis(), 'hgetall');
-  await expect(acquireRuntimeSlot('reserved-task', 'app')).rejects.toBe(error);
+  let release: (() => void) | undefined;
+  let failure: unknown;
+  const waiting = acquireRuntimeSlot('reserved-task', 'app', undefined, undefined, {
+    readWaitMs: 100,
+    readPollMs: 10,
+  }).then(
+    (value) => {
+      release = value;
+    },
+    (error) => {
+      failure = error;
+    },
+  );
+  await vi.advanceTimersByTimeAsync(0);
+  expect(failure).toBeUndefined();
+  expect(release).toBeUndefined();
+  await vi.advanceTimersByTimeAsync(10);
+  await waiting;
+  expect(release).toBeTypeOf('function');
+  expect(read).toHaveBeenCalledTimes(2);
   expect(occupancy).not.toHaveBeenCalled();
+  release?.();
+});
+it('aborts a reservation-read outage without admitting or another read', async () => {
+  const error = Object.assign(new Error('outage'), { code: 'redis_unavailable' });
+  const read = vi.spyOn(getRedis(), 'hexists').mockRejectedValue(error);
+  const ac = new AbortController();
+  const waiting = acquireRuntimeSlot('task', 'app', undefined, ac.signal).catch((error) => error);
+  await vi.advanceTimersByTimeAsync(0);
+  ac.abort();
+  expect(await waiting).toMatchObject({ name: 'RuntimeSlotAbortedError' });
+  expect(read).toHaveBeenCalledTimes(1);
 });

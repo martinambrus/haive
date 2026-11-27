@@ -1,3 +1,4 @@
+import { REDIS_UNAVAILABLE_CODE } from '@haive/shared/constants';
 import { ReplyError, type Redis, type RedisOptions } from 'ioredis';
 import { createRedisConnection, createBullRedisConnection, logger } from '@haive/shared';
 
@@ -7,7 +8,8 @@ const ERROR_LOG_INTERVAL_MS = 10_000;
 
 /** The command may have reached Redis; a timeout is an unknown write outcome. */
 export class RedisUnavailableError extends Error {
-  readonly code = 'redis_unavailable';
+  readonly code = REDIS_UNAVAILABLE_CODE;
+  readonly retryable = true;
   constructor(cause: unknown) {
     super('Worker Redis temporarily unavailable', { cause });
     this.name = 'RedisUnavailableError';
