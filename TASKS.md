@@ -548,7 +548,7 @@ PRE-EXISTING, from the T393 build (2026-11-07); cost is a cold start or lost she
 
 ### T543 · FNF[task-auth-volume-lifecycle] · task auth volume teardown leftovers (+1)
 
-status: open · kind: fix · priority: P3
+status: open, PARKED for owner decision 2026-11-27 (PR #1370 at f00671c65; fixes 7-9 unpushed on branch fix/task-auth-volume-lifecycle at 2d1d1fcd6, review `.claude/tmp/codex-run/T543-S/review-fix9.md`): after 9 fix rounds the last review left M-1 (the admission retry counter counts since `started_at`, which Resume keeps, so Resume after exhaustion re-fails; the counter also prefix-matches `cli_invocations.error_message`) and M-2, an owner call: an unrecognized Grok `auth.json` fails closed (20 retries, then exhausted; re-login cannot help) versus admit with a coded warning when no refresh fence is set (recommended). Proposed finish: one narrow fix 10 (M-1 count since the later of `started_at` and the last Resume, keyed on a structural signal; M-2 as decided), gate only, merge · kind: fix · priority: P3
 PRE-EXISTING, from the T393 build (2026-11-07).
 
 1. The boot reaper removes failed-task volumes without syncing a rotated single-use token back (worker auth-volume-reaper.ts ~:19, 125, 148).
