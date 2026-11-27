@@ -421,6 +421,25 @@ states, and stops repository/task shells, Editors and app/DDEV runners, includin
 shells and failed root tasks. Holder/worktree guards still govern rebuild eligibility.
 The barrier remains held through replacement/detection and releases in `finally`.
 
+The epoch write and all terminal closers share `CHECKOUT_TRANSPORT_TIMEOUT_MS` (10 seconds,
+injectable); expiry raises `session_transport_unknown`. Container discovery, legacy mount
+inspection, sequential stop/removal and the final absence listing share
+`CHECKOUT_DOCKER_TIMEOUT_MS` (five minutes, injectable); expiry raises `docker_unknown`.
+The Docker budget is deliberately a generous fixed aggregate bound: it covers a hung initial
+listing too, before a candidate count exists, and leaves room for many ten-second stop graces.
+An unusually large or slow set that exhausts it defers safely rather than moving unverified mounts.
+Both errors release the process-local admission fence and unwind the root claim before the queue
+applies the existing 30-second retry and 30-minute submission-age cap; the cap is checked on
+failure, so an attempt already running can finish its bounded phase past that age.
+
+Deadline timers clear on success or failure. Redis/Docker requests already sent cannot be
+cancelled: their eventual rejections remain observed, and expiry checks after each await prevent
+an abandoned attempt from starting another closer, Docker call or rename. A late Redis epoch
+write can only fail closed (even a grant from a newer attempt then needs explicit reopen).
+A terminal closer already running holds its original session snapshot. A Docker stop/remove
+already sent names an immutable container ID, so its late completion cannot target a replacement
+container; the next attempt independently enumerates and proves absence before proceeding.
+
 Removal uses immutable Docker IDs, SIGTERM with ten seconds' grace, and `remove({ v: true })`.
 The reuse-repair paths for DDEV/app runners also pass `docker rm -v`. This removes anonymous
 volumes only: DDEV's Dockerfile-declared `/var/lib/docker` stores its nested image cache and DB,
