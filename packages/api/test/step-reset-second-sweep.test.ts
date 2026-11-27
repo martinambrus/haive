@@ -5,9 +5,9 @@ import { describe, expect, it, vi } from 'vitest';
 vi.mock('../src/db.js', () => ({ getDb: () => undefined }));
 vi.mock('../src/queues.js', () => ({ getTaskQueue: () => ({ add: async () => undefined }) }));
 
-import { schema } from '@haive/database';
+import { LATE_LOCK_WAIT_MS, schema } from '@haive/database';
 import { createFakeDb } from '@haive/database/testing';
-import { resetRowsForRerun } from '../src/routes/tasks/steps.js';
+import { refusingWhenLocked, resetRowsForRerun } from '../src/routes/tasks/steps.js';
 
 const TASK = '00000000-0000-4000-8000-000000000001';
 
@@ -213,7 +213,9 @@ it('F4 returns extra held rows with their pre-reset liveness', async () => {
     stepIndex: 2,
     guardState: { run: true },
   });
-  const result = await resetRowsForRerun(fake.db as never, TASK, [target as never], new Date());
+  const result = await fake.db.transaction((tx) =>
+    resetRowsForRerun(tx as never, TASK, [target as never], new Date()),
+  );
   expect(result).toEqual([expect.objectContaining({ id: extra.id, status: 'running' })]);
   expect(fake.rows(schema.taskSteps).find((r) => r.id === extra.id)).toMatchObject({
     status: 'pending',
@@ -295,3 +297,61 @@ function captureStatements(db: ReturnType<typeof createFakeDb>['db']) {
   };
   return { handle, statements };
 }
+
+describe('late reset lock wait', () => {
+  it('pins the production wait below the default Postgres deadlock detector', () => {
+    expect(LATE_LOCK_WAIT_MS).toBe(250);
+    // Leave 750 ms for a peer that began waiting before the reverse-tier sweep.
+    // Growing this bound shrinks that margin against the default 1 s detector.
+    expect(LATE_LOCK_WAIT_MS).toBeLessThan(1000);
+  });
+
+  it.each([undefined, 7])('sets and restores the injectable wait (%s)', async (waitMs) => {
+    const log: string[] = [];
+    const tx = {
+      execute: async (query: Parameters<PgDialect['sqlToQuery']>[0]) => {
+        log.push(new PgDialect().sqlToQuery(query).sql);
+      },
+    };
+    const result = await refusingWhenLocked(
+      tx as never,
+      async () => {
+        log.push('held sweep');
+        return 'reset';
+      },
+      waitMs,
+    );
+    expect(result).toBe('reset');
+    expect(log).toEqual([
+      `SET LOCAL lock_timeout = '${waitMs ?? 250}ms'`,
+      'held sweep',
+      'SET LOCAL lock_timeout = DEFAULT',
+    ]);
+  });
+
+  it('maps a wrapped 55P03 by code, preserving unrelated errors by identity', async () => {
+    const tx = { execute: async () => undefined };
+    const timeout = Object.assign(new Error('opaque'), {
+      cause: Object.assign(new Error('opaque'), { code: '55P03' }),
+    });
+    await expect(
+      refusingWhenLocked(
+        tx as never,
+        async () => {
+          throw timeout;
+        },
+        7,
+      ),
+    ).rejects.toMatchObject({ status: 503 });
+    const unrelated = new Error('55P03');
+    await expect(
+      refusingWhenLocked(
+        tx as never,
+        async () => {
+          throw unrelated;
+        },
+        7,
+      ),
+    ).rejects.toBe(unrelated);
+  });
+});

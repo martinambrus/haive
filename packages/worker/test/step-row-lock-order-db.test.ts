@@ -1,5 +1,5 @@
 import { eq, inArray, sql } from 'drizzle-orm';
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   createDatabase,
   hasPgCode,
@@ -8,6 +8,7 @@ import {
   type Database,
 } from '@haive/database';
 import { resetStepAndDownstream } from '../src/queues/_step-reset.js';
+import { RevivalBusy } from '../src/queues/_revive-check.js';
 import { foldOtherTaskParks } from '../src/queues/cli-park-timing.js';
 
 const url = process.env.WORKER_STEP_ROW_LOCK_ORDER_TEST_URL;
@@ -180,6 +181,7 @@ describe.skipIf(!url)(
       codeUnderTest: () => Promise<T>,
       { first, second }: { first: Lock; second: Lock },
       mustNotHold: string[],
+      mayRefuse = false,
     ) {
       let peerHolds!: () => void;
       const holding = new Promise<void>((resolve) => (peerHolds = resolve));
@@ -214,6 +216,7 @@ describe.skipIf(!url)(
         const deadline = Date.now() + BLOCKED_WITHIN_MS;
         for (;;) {
           if (underTestEnded) {
+            if (mayRefuse) break;
             const early = await underTest;
             throw new Error(
               `the code under test ended without waiting for the peer: ${early.ok ? 'no error' : describeError(early.error)}`,
@@ -230,7 +233,7 @@ describe.skipIf(!url)(
               `the code under test was not blocked by the peer within ${BLOCKED_WITHIN_MS} ms`,
             );
           }
-          await sleep(20);
+          await sleep(5);
         }
         heldWhileWaiting = await stepRowsHeld(mustNotHold);
       } finally {
@@ -247,6 +250,8 @@ describe.skipIf(!url)(
             : [`code under test: ${describeError(underTestOutcome.error)}`]),
         ],
         heldWhileWaiting,
+        peerOutcome,
+        underTestOutcome,
         result: underTestOutcome.ok ? underTestOutcome.value : undefined,
       };
     }
@@ -289,6 +294,128 @@ describe.skipIf(!url)(
         expect((await rowOf(B.id)).status).toBe('pending');
         expect((await rowOf(A.id)).status).toBe('pending');
         expect((await taskOf(taskId)).orchestrationEpoch).toBe(4);
+      },
+      TEST_TIMEOUT,
+    );
+
+    it.each([
+      ['run', false],
+      ['agent', false],
+      ['run', true],
+      ['agent', true],
+    ] as const)(
+      'T482 worker: guard addition %s hold (cyclic: %s)',
+      async (kind, cyclic) => {
+        const taskId = await seedTask('running');
+        await seedRow(taskId, B, { status: 'failed', runSeq: 1 });
+        await seedRow(taskId, A, { runSeq: 2 });
+        const [run] = await db
+          .insert(schema.cliInvocations)
+          .values({
+            taskId,
+            taskStepId: A.id,
+            mode: 'cli',
+            prompt: 'guard addition',
+          })
+          .returning();
+        const [agent] = await db
+          .insert(schema.taskStepAgentMinings)
+          .values({
+            taskStepId: A.id,
+            agentId: 'guard-agent',
+            status: 'running',
+          })
+          .returning();
+        const contract = {
+          version: 1,
+          guardedSpans: [
+            {
+              id: 'tail',
+              firstStepId: A.stepId,
+              lastStepId: A.stepId,
+              predicateId: 'module.test.check',
+              args: {},
+            },
+          ],
+        };
+        // Commit a decision after the downstream pre-read and before the ordered batch.
+        const transaction = db.transaction.bind(db);
+        const hook = vi.spyOn(db, 'transaction').mockImplementationOnce(async (callback) => {
+          await db
+            .update(schema.taskSteps)
+            .set({ guardState: { decision: true } })
+            .where(eq(schema.taskSteps.id, A.id));
+          return transaction(callback);
+        });
+        try {
+          const result = await interleave(
+            // Disable only this control's server timer: the explicit peer signal releases
+            // the real lock after observing its wait, regardless of observer scheduling.
+            () =>
+              resetStepAndDownstream(
+                db,
+                taskId,
+                B.stepId,
+                0,
+                3,
+                false,
+                [],
+                contract,
+                cyclic ? 40 : 0,
+              ),
+            {
+              first: (tx) =>
+                kind === 'run'
+                  ? tx
+                      .select()
+                      .from(schema.cliInvocations)
+                      .where(eq(schema.cliInvocations.id, run!.id))
+                      .for('no key update')
+                  : tx
+                      .select()
+                      .from(schema.taskStepAgentMinings)
+                      .where(eq(schema.taskStepAgentMinings.id, agent!.id))
+                      .for('update'),
+              second: cyclic ? lockStepRow(A.id) : async () => undefined,
+            },
+            [],
+            cyclic,
+          );
+          if (cyclic) {
+            expect(result.peerOutcome.ok).toBe(true);
+            expect(result.underTestOutcome.ok).toBe(false);
+            if (!result.underTestOutcome.ok) {
+              expect(result.underTestOutcome.error).toBeInstanceOf(RevivalBusy);
+              expect(isLockNotAvailable(result.underTestOutcome.error)).toBe(true);
+              expect(hasPgCode(result.underTestOutcome.error, '40P01')).toBe(false);
+            }
+            expect((await rowOf(B.id)).status).toBe('failed');
+            expect((await rowOf(A.id)).guardState).toEqual({ decision: true });
+            expect((await taskOf(taskId)).orchestrationEpoch).toBe(3);
+            expect(
+              (await db.query.cliInvocations.findFirst({
+                where: eq(schema.cliInvocations.id, run!.id),
+              }))!.supersededAt,
+            ).toBeNull();
+            expect(await db.$count(schema.taskStepAgentMinings)).toBe(1);
+            return;
+          }
+          expectClean(result);
+          expect(result.result).toEqual({ downstreamReset: 1, newEpoch: 4 });
+          expect(await rowOf(A.id)).toMatchObject({
+            status: 'pending',
+            guardState: null,
+            rerunGeneration: 1,
+          });
+          expect(
+            (await db.query.cliInvocations.findFirst({
+              where: eq(schema.cliInvocations.id, run!.id),
+            }))!.supersededAt,
+          ).not.toBeNull();
+          expect(await db.$count(schema.taskStepAgentMinings)).toBe(0);
+        } finally {
+          hook.mockRestore();
+        }
       },
       TEST_TIMEOUT,
     );

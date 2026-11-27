@@ -317,7 +317,7 @@ task-level cutoff gives way to the row's, since the pull-request poller rewrites
 every few minutes. For a `waiting_user` or `waiting_pr` task the fence stamps the row's `updated_at`,
 so an advance dropped before pickup is re-driven once per cutoff rather than on every pass, and it
 locks that row before the task row, the order a Retry takes (the other order deadlocked); an action
-whose NOWAIT re-check meets that lock answers 503 and can be sent again. A
+whose bounded late-row re-check cannot take that lock within 250 ms answers 503 and can be sent again. A
 `running` task's fence locks only the task row: it reads the row inside the update its epoch guards,
 and that update's stamp on the task throttles the next pass. A dead `waiting_user` or `waiting_pr` task revived
 with an answered form gets that advance at revival (`jobAfterRevive`).
@@ -668,8 +668,8 @@ transaction then reads the task under the job's fence (`taskWriteTarget`: its ep
 or finished) FOR SHARE and rolls the flip back when the fence fails. A reset's epoch bump in flight
 holds that read until it commits, so no row is ever activated at an epoch a reset has moved past. A
 claim that committed before the bump is on the rows the reset reads after it: the api Retry and the
-fan-out Resume reset every row still active once they have bumped (`rowsActivatedMeanwhile`, NOWAIT,
-since they hold the task row, answering 503 when a pass is mid-write on a row they do not hold already,
+fan-out Resume reset every row still active once they have bumped (`rowsActivatedMeanwhile`, with a 250 ms LOCAL lock timeout,
+since they hold the task row, answering 503 when a pass still holds a row after that bound,
 see the batch below). Both kill the task's CLI
 sandboxes only once that has committed: a refused action then leaves every run alive, and a dying
 run's completion finds its invocation already superseded.
@@ -845,13 +845,33 @@ held there, since `markTaskCancelled` committed before it. The batch goes behind
 runs and agent rows and its DAG reset, since a pass holds a run and then wants its step row, and before its
 first step write. The rows stay held until the action commits, so a pass that goes to flip or lock one of them
 waits for the action, and a claim then finds the epoch moved past it, instead of activating the row between the
-batch and the bump. The batch is never a waiting statement once the task row has been written, since a pass
+batch and the bump. The batch never waits indefinitely once the task row has been written, since a pass
 holding a step row waits for the task row: the Retry, the fan-out Resume and `moveTaskToStep` reset what a pass
-activated meanwhile with the rows already held (`rowsActivatedMeanwhile` stays NOWAIT, and `resetRowsForRerun`
-takes `rowsHeld` there) and sweep those rows' runs and agent rows without waiting as well (`sweepRunsOf` with
-`noWait`: runs FOR NO KEY UPDATE, agent rows FOR UPDATE), since a pass holds a run and then wants its step row
+activated meanwhile with the rows already held (`rowsActivatedMeanwhile` uses the bounded wait below, and `resetRowsForRerun`
+takes `rowsHeld` there) and sweep those rows' runs and agent rows with that same bound (`sweepRunsOf` with
+`lockFirst`: runs FOR NO KEY UPDATE, agent rows FOR UPDATE), since a pass holds a run and then wants its step row
 (`writeLoginHint`) and a Stop holds the runs it ended and then wants the step rows, and a FOR UPDATE on a row
-held FOR NO KEY UPDATE is an upgrade that conflicts with that run insert. The 503 of that NOWAIT is therefore
+held FOR NO KEY UPDATE is an upgrade that conflicts with that run insert.
+
+The late sweeps use the database's `boundedLockWait` with the shared, injectable
+`LATE_LOCK_WAIT_MS` (250 ms), including `rowsActivatedMeanwhile`, held guard-reset
+additions in both reset helpers, and retained Resume rows under an existing batch.
+The helper sets LOCAL `lock_timeout` and restores DEFAULT on success; timeout aborts
+roll back the whole transaction. SQLSTATE 55P03 maps to HTTP 503 in the API and a
+`RevivalBusy` hold in the worker: job callers delay for 30 s without spending an
+attempt, then re-drive the handoff; boot reconcile logs the failure and leaves it
+to the stalled sweep. Longer benign holds still refuse.
+The bound is below the default 1 s `deadlock_timeout`, allowing up to 750 ms of
+earlier waiting before a reverse-tier wait begins. Earlier benign waits in the same
+transaction consume that budget: each bounded block can run several statements,
+each with its own 250 ms lock timeout, and an action can run several blocks.
+The remaining margin can approach zero. This is not an absolute deadlock guarantee:
+if a pass or Stop has already waited 750–1000 ms when the reverse-tier wait begins,
+its detector can fire first and choose that peer as the 40P01 victim. Deployments
+must retain the timeout ordering; increasing the late bound shrinks that margin.
+Ordinary first and second sweeps retain their wait policy.
+
+The 503 after that timeout is therefore
 left to a row created after the batch that a pass has activated and still writes when the bump lands, to a run
 or agent row of such a late row that a pass or a Stop holds, and to an action that took no batch (a fan-out
 Resume with nothing to reset, the loop Resume, `retry_ai`, Skip or a CLI switch with no row left active), which
@@ -871,6 +891,7 @@ step form (`holdReopenedForm`) consumes its agent rows before it writes the step
 fan-out Resume that also resets downstream or left-active rows still writes the clicked step's agent rows before
 the sweep of THOSE rows' runs; it meets a Retry-family action only through a worker reset of the same range or
 on a task with no repository (every other Retry-family action takes the repository's creation key first).
+
 Statements that match several runs or agent rows are not batched: each locks its rows in heap order (MEASURED at
 96,000 runs: a Seq Scan or Bitmap Heap Scan, rows locked in ctid order), the same order for all of them, so an
 id-ordered batch on some of them would be inconsistent with the rest.
@@ -1346,15 +1367,15 @@ Explicit upstream reruns (API task/step Retry and worker revise/recheck/fix rese
 clear forward decisions and their skips, including pending entries read after the
 ordered batch. They advance affected generations in the same transaction as the
 ordinary reset and epoch fence. Newly included rows have their runs and agents
-swept under NOWAIT, so a busy writer rolls back the reset rather than crossing
-lock tiers. A full START Retry invalidates recorded branches
+swept under the shared 250 ms bound in both worker and API, so a lasting hold rolls back
+the reset rather than crossing lock tiers indefinitely. A full START Retry invalidates recorded branches
 too. A degraded done fan-out's Resume cascade regenerates downstream producers,
 so it invalidates their decisions/skips too. The forward rescan starts at the
 clicked producer under the ordered batch even when the initial downstream reset
 selection was empty. One boolean both supplies the batch-forcing rescan anchor
 and marks that batch held for the retained-row sweep. Guarded done-producer controls
 with an empty initial downstream reset set interleave Resume with a Retry-order peer
-and a decision writer (step batch before task SHARE), and exercise NOWAIT refusal
+and a decision writer (step batch before task SHARE), and exercise bounded refusal
 beside a pass and Stop holding a retained row's run. They assert no 40P01,
 committed-decision invalidation and complete rollback on contention. Only retained
 left-active and loop Resume work preserves guards. Recovery keeps guard state and generations and
@@ -1376,13 +1397,14 @@ pins. Ordinary resets omit guard_state from SET and ordinary START adds no full
 step-row SELECT. Both reset helpers accept the caller's immutable executionContract
 and only project it when the argument is undefined (worker before its transaction,
 API on its supplied transaction). Every production caller supplies the loaded pin;
-orphan reconcile adds it to the existing joined read. Ordinary resets therefore
-add no statement; literal all-table query captures pin the main statement list,
+orphan reconcile adds it to the existing joined read. Passing the loaded pin therefore
+adds no projection statement; literal all-table query captures pin the main statement list,
 lock predicates, reads and complete SET key sets for null and inert pins.
-No reset lock_timeout is added. API resets report extra rows
+Ordinary first and second run sweeps add no lock timeout; held late sweeps use the shared bound above.
+Every API Retry also sets and restores that bound around `rowsActivatedMeanwhile`. API resets report extra rows
 with their pre-reset statuses, so every caller includes their sandbox cleanup
 and audit even if a guard row was claimed after its initial selection. Retained
-Resume rows reset after a held batch use NOWAIT run sweeps to avoid reversing
+Resume rows reset after a held batch use bounded run sweeps to avoid an indefinite wait in reverse
 lock tiers.
 
 ## No-change cleanup recovery

@@ -2,6 +2,9 @@ import { guardResetRows, parseExecutionContract } from '@haive/shared/modularity
 import { and, desc, eq, gt, gte, inArray, isNull, ne, or, sql } from 'drizzle-orm';
 import {
   isUniqueViolationOf,
+  boundedLockWait,
+  isLockNotAvailable,
+  LATE_LOCK_WAIT_MS,
   lockStepRows,
   ONE_LIVE_UPGRADE_INDEX,
   schema,
@@ -25,7 +28,8 @@ import {
 // detect. Used by the `revise` route (handleResult): a review step asks to re-run an
 // earlier generator (e.g. 03c reject → re-mine 03b). Mirrors the API retry reset
 // (packages/api/src/routes/tasks/steps.ts) but lives worker-side so the queue can drive
-// it without an HTTP round-trip. The two are intentional duplicates — keep them in sync.
+// it without an HTTP round-trip. Keep reset fields and the shared late-lock bound in
+// sync. A late 55P03 maps to a worker hold here and to HTTP 503 in the API.
 
 class EpochMovedOn extends Error {}
 class ResumeClaimLost extends Error {}
@@ -57,6 +61,7 @@ export async function resetStepAndDownstream(
   recovery = false,
   heldStepIds: readonly string[] = [],
   executionContract?: unknown,
+  lateLockWaitMs = LATE_LOCK_WAIT_MS,
 ): Promise<{ downstreamReset: number; newEpoch: number } | 'superseded' | null> {
   const targetRows = await db
     .select()
@@ -190,31 +195,45 @@ export async function resetStepAndDownstream(
         recovery,
       );
       // Guard state may have been committed since the pre-lock downstream read.
-      // An extra row can already have a run: take it without waiting while we
-      // hold steps, or roll this reset back instead of crossing the run/step order.
+      // An extra row can already have a run: bound its wait while we hold steps,
+      // or roll this reset back instead of waiting indefinitely across lock tiers.
       const extraIds = held.filter((r) => !allStepIds.includes(r.id)).map((r) => r.id);
       if (extraIds.length) {
-        await tx
-          .select({ id: schema.cliInvocations.id })
-          .from(schema.cliInvocations)
-          .where(
-            and(
-              or(
-                inArray(schema.cliInvocations.taskStepId, extraIds),
-                inArray(schema.cliInvocations.summaryForStepId, extraIds),
-              ),
-              isNull(schema.cliInvocations.supersededAt),
-            ),
-          )
-          .for('no key update', { noWait: true });
-        await tx
-          .select({ id: schema.taskStepAgentMinings.id })
-          .from(schema.taskStepAgentMinings)
-          .where(inArray(schema.taskStepAgentMinings.taskStepId, extraIds))
-          .for('update', { noWait: true });
-        allStepIds.push(...extraIds);
-        extraReset = extraIds.length;
-        await sweepRuns();
+        try {
+          await boundedLockWait(
+            tx,
+            async () => {
+              await tx
+                .select({ id: schema.cliInvocations.id })
+                .from(schema.cliInvocations)
+                .where(
+                  and(
+                    or(
+                      inArray(schema.cliInvocations.taskStepId, extraIds),
+                      inArray(schema.cliInvocations.summaryForStepId, extraIds),
+                    ),
+                    isNull(schema.cliInvocations.supersededAt),
+                  ),
+                )
+                .for('no key update');
+              await tx
+                .select({ id: schema.taskStepAgentMinings.id })
+                .from(schema.taskStepAgentMinings)
+                .where(inArray(schema.taskStepAgentMinings.taskStepId, extraIds))
+                .for('update');
+              allStepIds.push(...extraIds);
+              extraReset = extraIds.length;
+              await sweepRuns();
+            },
+            lateLockWaitMs,
+          );
+        } catch (err) {
+          // A timeout aborted the transaction. Job callers delay for 30 s without
+          // failing the task or spending an attempt, then re-drive the handoff.
+          // Boot reconcile logs the failure and leaves recovery to the stalled sweep.
+          if (isLockNotAvailable(err)) throw new RevivalBusy(err);
+          throw err;
+        }
       }
       // Clearing formSchema is essential: the runner only re-renders the form when the
       // persisted schema is null. formValues is cleared so the regenerated form re-decides.

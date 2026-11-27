@@ -22,6 +22,12 @@ used `String(error)` must preserve that ordinary conversion, including its class
 sanitizing bound members; replacing every such conversion with `.message` changes diagnoses.
 This matters for fix-loop input, retry guidance and plan-mirror refusal reasons.
 
+The cli-exec failure handler treats its login hint as optional display copy: a failed
+hint transaction warns with the original structured hint error under `err`, never a string
+conversion. It then accounts the CLI park and resumes the step using the CLI failure,
+which remains the thrown error. This applies to every hint-write failure, including a
+40P01 deadlock; it does not retry the hint or change locking.
+
 Every BullMQ processor uses `safeProcessor`, which passes its job to `safeErrorForTransport`.
 The latter logs sanitized structured diagnostics with job identity before replacing a bound
 error with safe text and its database code for BullMQ's persisted reason and stack. An ordinary
