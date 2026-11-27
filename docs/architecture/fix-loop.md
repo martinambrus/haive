@@ -62,6 +62,16 @@ pinned target's round as 07's. `custom-fix-recovery-db.test.ts` (worker) and
 equal traces. The one target-sensitive check is the dead-task judge, which also refuses a pinned
 target this worker cannot run (see [Worker restarts](worker-restarts.md#dead-tasks)).
 
+An unroutable target's failure UPDATE refuses `failed`, `cancelled` and `completed`
+tasks in the same statement as its epoch check. Stop does not move the epoch and
+can leave a finished source row owned, so the row lock alone cannot protect its
+failure. A late loop-back or Continue keeps Stop's diagnosis and completion stamp,
+including the stamp used by Stop attribution and settlement re-drive, and records
+no new unroutable event. The shared `writeTaskFailed` enforces this for every caller,
+including an unqualified `markTaskFailed`, a missing revise target and gate Abort;
+recovery must reopen the failed task before a fresh failure can replace it.
+Retry remains the explicit revival path; Stop needs no epoch change.
+
 **The target is fixed; what varies is whether 07 runs.** In DAG mode
 (`06b-sprint-planning.output.mode === 'dag'`) 07 used to skip at EVERY round, so every
 loop_back wrote a diagnosis nothing consumed and re-ran the whole review chain against

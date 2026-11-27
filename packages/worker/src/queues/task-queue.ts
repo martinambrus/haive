@@ -848,7 +848,7 @@ export async function markTaskCompleted(
   }
 }
 
-/** Fail the task, never one that was cancelled or completed. With `epoch`, only while the task is
+/** Fail an open task, preserving an existing failure, cancellation or completion. With `epoch`, only while the task is
  *  still at it, as a step's own failure is, and with `statuses` only from one of them; false when
  *  nothing was written. */
 export async function markTaskFailed(
@@ -881,7 +881,9 @@ async function writeTaskFailed(
     .where(
       and(
         eq(schema.tasks.id, taskId),
-        notInArray(schema.tasks.status, [...TERMINAL_TASK_STATUSES]),
+        // Stop keeps the epoch and may leave the source step done. Preserve its
+        // failure stamp: settlement and stop attribution both depend on it.
+        notInArray(schema.tasks.status, [...TERMINAL_TASK_STATUSES, 'failed']),
         ...(epoch === undefined ? [] : [eq(schema.tasks.orchestrationEpoch, epoch)]),
         ...(statuses ? [inArray(schema.tasks.status, [...statuses])] : []),
       ),

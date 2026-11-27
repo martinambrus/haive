@@ -116,7 +116,7 @@ interface MockDbOptions {
 }
 
 function makeMockDb(state: MockState, opts: MockDbOptions = {}, inTransaction = false): Database {
-  let nextId = 1;
+  let nextId = state.inserts.length + 1;
   const db = {
     select: () => ({
       from: (table: unknown) => {
@@ -2043,6 +2043,51 @@ describe('advanceStep LLM phase', () => {
     expect(invInsert).toBeDefined();
     expect(invInsert!.row.prompt).toContain('prompt with detected=');
   });
+
+  it.each(['llm', 'retry_ai'] as const)(
+    'supersedes the reservation when %s enqueue throws and dispatches fresh work after Retry',
+    async (phase) => {
+      const state = freshState();
+      if (phase === 'retry_ai')
+        state.taskStepRow.aiFixContext = { priorError: 'boom', priorOutput: 'partial' };
+      const enqueueCliInvocation = vi.fn().mockRejectedValueOnce(new Error('queue unavailable'));
+      const params = {
+        db: makeMockDb(state),
+        taskId: 'task-1',
+        userId: 'user-1',
+        repoPath: '/tmp',
+        workspacePath: '/tmp',
+        cliProviderId: 'prov-1',
+        stepDef: baseStep(),
+        providers: [makeProvider()],
+        deps: { enqueueCliInvocation },
+      };
+      expect(await advanceStep(params)).toMatchObject({ status: 'failed' });
+      expect(state.taskStepRow.status).toBe('failed');
+      expect(enqueueCliInvocation).toHaveBeenCalledTimes(1);
+      expect(state.cliInvocationRow).toBeNull();
+      expect(state.updates).toContainEqual({
+        table: 'cli_invocations',
+        supersededAt: expect.any(Date),
+      });
+      // Model Retry's row reset. Keep the invocation history: the dispatch must
+      // see its released reservation, rather than park behind a run never queued.
+      Object.assign(state.taskStepRow, {
+        status: 'pending',
+        errorMessage: null,
+        endedAt: null,
+        detectOutput: null,
+      });
+      expect(await advanceStep(params)).toMatchObject({ status: 'waiting_cli' });
+      expect(enqueueCliInvocation).toHaveBeenCalledTimes(2);
+      const [first, second] = enqueueCliInvocation.mock.calls.map(
+        ([payload]) => payload.invocationId,
+      );
+      expect(second).not.toBe(first);
+      expect(state.cliInvocationRow).toMatchObject({ id: second, endedAt: null });
+      expect(state.inserts.filter((entry) => entry.table === 'cli_invocations')).toHaveLength(2);
+    },
+  );
 
   it('carries the worktree a step names onto the cli-exec payload', async () => {
     const state = freshState();

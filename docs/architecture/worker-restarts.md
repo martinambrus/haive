@@ -962,6 +962,16 @@ and errors from other hooks retain their existing behavior. This adds no polling
 chain or durable state; the winner's completion and the existing recovery sweep
 own the next advance. Revert module consumers before removing this host support.
 
+Singleton LLM and Retry-with-AI dispatch release their exact inserted reservation
+when enqueue throws, just as a `prepareWorkspace` failure does: they stamp
+`cli_invocations.superseded_at` before propagating the failure to the step runner.
+The failed row therefore retains no live run that could block a later Retry or
+hold scratch indefinitely. A lost queue acknowledgement may have queued the job;
+its ordinary supersede checks refuse or stop that invocation too. A failed release
+still relies on the existing orphan recovery; this is not an atomic database/queue
+commit. Successful enqueues keep the reservation until the normal run lifecycle
+ends it. Fan-out and recap dispatch retain their separate failure contracts.
+
 ## Task scratch cleanup
 
 `cleanupTaskScratchWorkspace` (`repo/scratch-workspace.ts`) removes only

@@ -675,6 +675,25 @@ async function hasLiveInvocation(db: Database, taskStepId: string): Promise<bool
   return rows.length > 0;
 }
 
+/** Release this pass's reservation if enqueue fails, as prepareWorkspace does.
+ * A lost queue acknowledgement may still have queued it; superseding also fences
+ * that job, while a failed step and its later Retry owe no live reservation. */
+async function enqueueReservedInvocation(
+  db: Database,
+  deps: WorkerDeps,
+  payload: CliExecJobPayload,
+): Promise<void> {
+  try {
+    await deps.enqueueCliInvocation(payload);
+  } catch (err) {
+    await db
+      .update(schema.cliInvocations)
+      .set({ supersededAt: new Date() })
+      .where(eq(schema.cliInvocations.id, payload.invocationId));
+    throw err;
+  }
+}
+
 /** Insert a cli_invocations row, returning null instead of throwing when the
  *  live-per-step unique index rejects it (a concurrent dispatch won the race).
  *  The caller re-parks the step; the winner's invocation drives the loop. */
@@ -1500,7 +1519,7 @@ async function resolveLlmPhase(
     const deferred = await deferPreFormContinuation(db, ctx, current, invRow.id);
     if (deferred) return { resolved: false, result: deferred };
   }
-  await params.deps.enqueueCliInvocation({
+  await enqueueReservedInvocation(db, params.deps, {
     invocationId: invRow.id,
     taskId: params.taskId,
     taskStepId: current.id,
@@ -1696,7 +1715,7 @@ async function resolveAiFixPhase(
     );
     return { resolved: false, result: { status: 'waiting_cli', row: current } };
   }
-  await params.deps.enqueueCliInvocation({
+  await enqueueReservedInvocation(db, params.deps, {
     invocationId: invRow.id,
     taskId: params.taskId,
     taskStepId: current.id,

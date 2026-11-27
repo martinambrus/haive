@@ -65,8 +65,8 @@ for (const file of scanTree('')) {
         }
       } else if (name === 'noteSavedCliSkip') {
         noteCalls[file] = (noteCalls[file] ?? 0) + 1;
-      } else if (name === 'enqueueCliInvocation') {
-        const payload = node.arguments[0];
+      } else if (name === 'enqueueCliInvocation' || name === 'enqueueReservedInvocation') {
+        const payload = node.arguments[name === 'enqueueReservedInvocation' ? 2 : 0];
         if (payload && ts.isObjectLiteralExpression(payload)) {
           const effort = propertyOf(payload, 'effortLevel');
           if (effort) {
