@@ -191,6 +191,7 @@ jobs:
                 for arch in amd64 arm64; do
                   echo "go vet: $os/$arch"
                   GOOS=$os GOARCH=$arch go vet -p 1 ./... || exit 1
+                  GOOS=$os GOARCH=$arch go test -p 1 -c -o "/tmp/bridge-$os-$arch.test" . || exit 1
                 done
               done
             '
