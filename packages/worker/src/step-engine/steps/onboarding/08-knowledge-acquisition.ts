@@ -1,3 +1,4 @@
+import { restoreKbReroutes } from './_kb-reroute-recovery.js';
 import { rethrowIfGlobalKbTimeout } from '@haive/shared/global-kb';
 import {
   ensureDirNoFollow,
@@ -2092,6 +2093,9 @@ export const knowledgeAcquisitionStep: StepDefinition<KnowledgeDetect, Knowledge
     }[] = [];
     let globalPromoted = 0;
 
+    // Restore original local bytes before purging drafts, including after a later apply failure.
+    const rememberReroute = await restoreKbReroutes(ctx.repoPath, ctx.taskId);
+
     // Idempotent re-runs (Retry): drop this task's prior promoted drafts ONCE,
     // before any promotion below (placement re-routes AND entry promotes), so a
     // retry replaces rather than duplicates them. No-op when global KB is off.
@@ -2214,6 +2218,9 @@ export const knowledgeAcquisitionStep: StepDefinition<KnowledgeDetect, Knowledge
           // MOVE it to the Global KB as a draft (deduped above) and delete the local
           // copy so it never feeds RAG.
           handledSrc.add(src.relPath);
+          // Write recovery before issuing a promotion: its commit can have an unknown outcome.
+          // A journal failure must abort BEFORE a local source can be removed.
+          await rememberReroute(src.relPath, content);
           try {
             const promo = await promoteToGlobalKbDraft(
               ctx.db,

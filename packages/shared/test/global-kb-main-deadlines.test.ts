@@ -1,5 +1,6 @@
 import postgres from 'postgres';
-import { drizzle } from 'drizzle-orm/postgres-js';
+import { PgDialect } from 'drizzle-orm/pg-core';
+import type { SQL } from 'drizzle-orm';
 import { afterEach, expect, it, vi } from 'vitest';
 import { withGlobalKb } from '../src/global-kb/client.js';
 import type { GlobalKbSettings } from '../src/global-kb/connection.js';
@@ -35,8 +36,10 @@ it.each([false, true])(
       archiveRetentionDays: 30,
     };
     let outcome: unknown = 'pending';
-    const db = drizzle(main);
-    const execute = vi.spyOn(db, 'execute');
+    // Compile the Drizzle statement but send a simple query: the control is about pool
+    // ownership, not Drizzle's prepared-statement/describe protocol.
+    const execute = vi.fn(async (query: SQL) => main.unsafe(new PgDialect().sqlToQuery(query).sql));
+    const db = { execute };
     const run = withGlobalKb(db as never, async () => 'never', {
       deadlineMs: 20,
       signal: new AbortController().signal,
@@ -53,9 +56,12 @@ it.each([false, true])(
     expect(outcome).toMatchObject({ code: 'GLOBAL_KB_DEADLINE' });
     await run;
     await vi.advanceTimersByTimeAsync(1);
+    expect(
+      execute,
+      'internal database bootstrap must not issue work on the shared main pool',
+    ).not.toHaveBeenCalled();
     // I/O is drained without advancing another deadline: no accepted socket may remain abandoned.
     await until(() => server.open() === 0);
-    expect(execute).not.toHaveBeenCalled();
     expect(server.startups.join('')).toContain('statement_timeout\u000020\u0000');
   },
 );

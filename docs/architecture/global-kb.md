@@ -299,8 +299,11 @@ sync or repair must finish it before short reads can succeed.
 ## Store call deadlines outside boot
 
 Every production `withGlobalKb` caller passes bounded options. `globalKbCallOptions` defaults to
-`GLOBAL_KB_CALL_DEADLINE_MS` (60 s) and a 3 s connect timeout; its options and default budget are
-injectable. The API CRUD budget leaves room for the 30 s namespace lock. Promotion, article loading
+`GLOBAL_KB_CALL_DEADLINE_MS` (60 s) and the prior 30 s connect allowance; its options and default budget are
+injectable. Dispatch, similarity, RAG search and the width check keep their explicit 3 s
+connect bounds (as does the short task-end settlement below). The overall deadline still wins
+when shorter than the connect allowance, including the 8 s Test DB probe. The API CRUD budget
+leaves room for the 30 s namespace lock. Promotion, article loading
 and author enrichment use `GLOBAL_KB_STEP_DEADLINE_MS` (300 s), which includes the 240 s ingest
 embedding budget and leaves room in the author's 30-minute CLI budget (the merge CLI has an hour).
 The merge/review store operations use 60 s. These are per store call limits, not a new whole-step
@@ -313,14 +316,21 @@ request disconnect cannot suppress removal of a skeleton whose task insert faile
 helper supplies an idle signal when no owner exists. A timeout aborts the callback's context signal,
 destroys its private pool and rejects with `GlobalKbDeadlineError` (`GLOBAL_KB_DEADLINE`). Optional
 step lookups/promotions still skip ordinary outages, but rethrow timeouts as a coded step failure
-with Retry guidance. The API answers that deadline with 503, the code, `retryable: true` and
-`Retry-After: 1`. An interrupted write may already have committed; Retry must reconcile stored state.
+with Retry guidance. The API answers that deadline with 503 and the code, warning with its error class only.
+GET and idempotent mutations include `retryable: true` and `Retry-After: 1`. Non-idempotent
+POSTs (entry creation and enrich) instead return `retryable: false`, no retry header, and
+unknown-write guidance; they must be inspected before another submission. An interrupted write
+may already have committed; Retry must reconcile stored state.
 Cancellation cannot retract an external operation already issued by a callback.
 
 The sync entry budget is separately injectable (`GLOBAL_KB_SYNC_DEADLINE_MS`, 60 minutes) because
 one entry can require many CPU embedding batches. Store-only purge/reconcile calls, including
 unfinished-author scans, re-embed candidate/width reads and identifier-backfill retries, use 60 s.
-An interrupted identifier backfill remains owed. The five-minute reconcile scheduler and daily
+An interrupted identifier backfill remains owed. Classification and heading cleanup propagate
+owner aborts and coded deadlines, while ordinary
+SQL/permission errors retain their log-and-continue contract even when a signal is supplied. A
+classify failure of that kind cannot starve identifier retry or lost-sync requeue.
+The five-minute reconcile scheduler and daily
 purge scheduler survive a failed tick; they have no per-job exponential retries. Pending/failed
 entries remain the durable recovery record for later reconcile ticks. The boot repair loop retains
 its 1 s to 60 s exponential backoff; alias recompute now checks Enabled like classification, and
@@ -335,6 +345,9 @@ that lock on expiry could let an ensure create the old width while an issued Red
 publishes the new one. This exception bounds the store wait, not the subsequent main-database audit
 or config write; their existing failure and partial-write contract still applies. After those writes
 settle, the store COMMIT or ROLLBACK gets a fresh 6 s deadline and any deferred request cancellation is honored.
+If confirmation fails after publication, the API returns 503 `global_kb_config_outcome_unknown`,
+`retryable: false` and no retry header, asking the client to reload settings before saving again.
+A failed `apply` retains its original error even when ROLLBACK subsequently stalls.
 
 Internal resolution never runs `SELECT pg_database` or `CREATE DATABASE` on the shared API/worker
 pool. It uses a disposable one-connection admin client, `fetch_types: false`, an injectable client
@@ -342,7 +355,10 @@ deadline capped at `GLOBAL_KB_ADMIN_DEADLINE_MS` (10 s), the caller's signal and
 `statement_timeout`. Startup settings are supported on Haive's own server and cover `CREATE DATABASE`,
 which PostgreSQL refuses inside the transaction required by `SET LOCAL`. Expiry destroys this
 client alone; abort checks prevent a late SELECT reply from creating a database. No abandoned
-query occupies the application's pool. A timed-out CREATE may have completed; the next attempt's
+query occupies the application's pool. A successful existence/create probe is remembered per
+process and main-server DSN (hashed), as schema readiness is; failures and aborts are never cached,
+and concurrent first callers retain independently cancellable admin clients. A timed-out CREATE
+may have completed; the next attempt's
 existence check reconciles it. External connections keep transaction-local schema/lock limits and
 never receive these internal-only startup parameters.
 
@@ -446,6 +462,25 @@ row is PARTIAL and holds Approve: "the change was modified after the last house-
 covers 08e's writes and quick_bugfix's 08b; a leftover untracked file trips it too. MEASURED: 112-170
 ms per fingerprint on a 90-file change. A capped file list is attributed to the check it was given to
 ("the validator" or "the code review").
+
+## Onboarding re-route recovery
+
+Step 08 uses restore-before-purge on Retry. Before issuing a promotion of an existing local
+file it atomically writes and fsyncs its original body and validated relative path into
+`.haive/kb-reroute-recovery/<sha256(taskId)>.json`, anchored at the repository through fs-safe.
+This keeps the exact pre-scrub bytes, including after an unknown-outcome promote, a later
+apply failure or process death. Before clearing prior promoted drafts it restores absent local
+sources with exclusive creation; a newer regular local file wins, while a link, unreadable or
+malformed recovery record refuses cleanup. Retry then replaces prior drafts normally, without
+creating duplicates. Re-route deadlines remain coded step failures; the uncertain file stays local.
+
+The recovery directory carries its own `*` ignore file (itself ignored), written before a body,
+so an onboarding that initializes Git and stages the full tree cannot commit recovery copies.
+The journal stays outside the KB/RAG tree and is retained after successful apply, because a lost
+done write or later explicit Retry still needs it. This costs one original-body copy per re-routed
+file per task. Existing failures that predate the journal cannot be reconstructed from it. Rollback
+must retain this recovery path and journals until affected onboarding tasks no longer need Retry;
+reverting code alone cannot restore already-moved uncommitted sources. No database migration is added.
 
 ## Author task failure and cancellation
 

@@ -128,6 +128,7 @@ vi.mock('@haive/shared/global-kb', async (importOriginal) => ({
     run: (ctx: unknown) => Promise<unknown>,
     opts: { settings: unknown },
   ) => {
+    h.checks.push(opts);
     const conn = await h.connect(opts.settings, db);
     try {
       return await run({ conn });
@@ -142,7 +143,7 @@ vi.mock('@haive/shared/global-kb', async (importOriginal) => ({
 
 import { Hono } from 'hono';
 import { schema } from '@haive/database';
-import { CONFIG_KEYS, SECRET_KEYS } from '@haive/shared';
+import { CONFIG_KEYS, SECRET_KEYS, logger } from '@haive/shared';
 import { adminRoutes } from '../src/routes/admin.js';
 import { globalKbRoutes } from '../src/routes/global-kb.js';
 import { errorHandler } from '../src/middleware/error-handler.js';
@@ -1120,7 +1121,9 @@ describe('PUT /global-kb/config with a different embedding width', () => {
     'bounds store %s after guarded config writes settle',
     async (phase) => {
       vi.useFakeTimers();
-      if (phase === 'ROLLBACK') h.set.mockRejectedValueOnce(new Error('config write refused'));
+      const original = new Error('config write refused');
+      const errorLog = vi.spyOn(logger, 'error').mockImplementation(() => {});
+      if (phase === 'ROLLBACK') h.set.mockRejectedValueOnce(original);
       let release!: () => void;
       let started!: () => void;
       const entered = new Promise<void>((resolve) => {
@@ -1139,11 +1142,21 @@ describe('PUT /global-kb/config with a different embedding width', () => {
         await entered;
         await vi.advanceTimersByTimeAsync(6001);
         expect(settled).toBe(true);
-        expect((await saving).status).toBe(503);
+        const response = await saving;
+        expect(response.status).toBe(phase === 'COMMIT' ? 503 : 500);
+        expect(response.headers.get('Retry-After')).toBeNull();
+        expect(await response.json()).toMatchObject(
+          phase === 'COMMIT'
+            ? { code: 'global_kb_config_outcome_unknown', retryable: false }
+            : { error: 'Internal server error' },
+        );
+        if (phase === 'COMMIT') expect(h.audits.length).toBeGreaterThan(0);
+        else expect(errorLog).toHaveBeenCalledWith({ err: original }, 'Unhandled API error');
       } finally {
         release();
         await saving;
         await vi.advanceTimersByTimeAsync(0);
+        errorLog.mockRestore();
       }
     },
   );
@@ -1461,4 +1474,12 @@ describe('/admin/config/house-rules', () => {
     expect((await send('PUT', '/admin/config/house-rules', { enabled: 'no' })).status).toBe(400);
     expect(h.set).not.toHaveBeenCalled();
   });
+});
+
+it('keeps the probe connection allowance at 30 s inside its 8 s overall deadline', async () => {
+  await send('POST', '/global-kb/test-db', {
+    mode: 'external',
+    connectionString: 'postgres://u:p@kb.example/kb',
+  });
+  expect(h.checks.at(-1)).toMatchObject({ connectTimeoutSeconds: 30, deadlineMs: 8000 });
 });

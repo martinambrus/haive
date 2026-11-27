@@ -59,7 +59,7 @@ export interface GlobalKbCallOptions {
 // Ordinary store work leaves room around a 30 s namespace lock. Embedding callers choose a
 // longer budget explicitly; tests inject milliseconds through the same options.
 export const GLOBAL_KB_CALL_DEADLINE_MS = 60_000;
-export const GLOBAL_KB_CONNECT_TIMEOUT_SECONDS = 3;
+export const GLOBAL_KB_CONNECT_TIMEOUT_SECONDS = 30;
 
 export function globalKbCallOptions(
   opts: GlobalKbCallOptions = {},

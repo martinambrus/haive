@@ -44,6 +44,7 @@ import {
   FACET_VALUE_ALIAS_PAIRS,
   globalKbEntries,
   GlobalKbDeadlineError,
+  rethrowIfGlobalKbTimeout,
   type GlobalKbCallOptions,
   resolveGlobalKbEnabled,
   withGlobalKb,
@@ -1312,7 +1313,8 @@ async function dropHeadingOnlyGlobalKbChunks(
       globalKbCallOptions(opts),
     );
   } catch (err) {
-    if (opts.signal) throw err;
+    opts.signal?.throwIfAborted();
+    rethrowIfGlobalKbTimeout(err);
     rethrowIfConfigUnavailable(err);
     log.warn({ err }, 'heading-only global KB chunk cleanup skipped');
   }

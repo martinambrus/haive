@@ -527,12 +527,12 @@ describe('bounded call policy and bare probes', () => {
     const { globalKbCallOptions, GLOBAL_KB_CALL_DEADLINE_MS, GLOBAL_KB_CONNECT_TIMEOUT_SECONDS } =
       await import('../src/global-kb/client.js');
     expect(GLOBAL_KB_CALL_DEADLINE_MS).toBe(60_000);
-    expect(GLOBAL_KB_CONNECT_TIMEOUT_SECONDS).toBe(3);
+    expect(GLOBAL_KB_CONNECT_TIMEOUT_SECONDS).toBe(30);
     const signal = new AbortController().signal;
     expect(globalKbCallOptions({ deadlineMs: 12, signal })).toEqual({
       deadlineMs: 12,
       signal,
-      connectTimeoutSeconds: 3,
+      connectTimeoutSeconds: 30,
     });
   });
 

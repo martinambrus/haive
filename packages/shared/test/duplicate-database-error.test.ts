@@ -54,10 +54,13 @@ const SITES: Array<[string, (db: Database) => Promise<unknown>]> = [
   ['per-project RAG', (db) => resolveRagConnection(ragPrefs, db, 'project')],
 ];
 
+let serverCase = 0;
+
 describe.each(SITES)('CREATE DATABASE lost to a concurrent creator (%s)', (_site, resolve) => {
   const before = process.env.DATABASE_URL;
   beforeEach(() => {
-    process.env.DATABASE_URL = 'postgres://u:p@main.example:5432/haive';
+    // Each case boots a different fake server; a prior success must not bypass its injected CREATE error.
+    process.env.DATABASE_URL = `postgres://u:p@main-${++serverCase}.example:5432/haive`;
   });
   afterEach(() => {
     if (before === undefined) delete process.env.DATABASE_URL;

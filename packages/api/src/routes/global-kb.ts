@@ -1,3 +1,4 @@
+import { GlobalKbConfigOutcomeUnknownError } from '../lib/global-kb-config-outcome.js';
 import { globalKbCallOptions } from '@haive/shared/global-kb';
 import { addBestEffort } from '../lib/queue-bounded.js';
 import { safeErrorMessage } from '@haive/shared/logger';
@@ -339,10 +340,18 @@ async function withVectorWidthLock(
   apply: () => Promise<void>,
   opts: GlobalKbCallOptions = {},
 ) {
-  const bounds = globalKbCallOptions(opts, VECTOR_CHECK_DEADLINE_MS);
+  const bounds = globalKbCallOptions(
+    {
+      ...opts,
+      connectTimeoutSeconds: opts.connectTimeoutSeconds ?? VECTOR_CHECK_CONNECT_TIMEOUT_SECONDS,
+    },
+    VECTOR_CHECK_DEADLINE_MS,
+  );
   const controller = new AbortController();
   let conn: Awaited<ReturnType<typeof resolveGlobalKbConnection>> | undefined;
   let applying = false;
+  let applied = false;
+  let applyFailure: { error: unknown } | undefined;
   const destroy = () => {
     void conn?.pg.end({ timeout: 0 }).catch(() => {});
   };
@@ -398,6 +407,10 @@ async function withVectorWidthLock(
         bounds.signal!.removeEventListener('abort', forwardAbort);
         try {
           await apply();
+          applied = true;
+        } catch (error) {
+          applyFailure = { error };
+          throw error;
         } finally {
           // Only config/audit work is exempt. Bound COMMIT and ROLLBACK too, and honor a
           // disconnect deferred while publishing config, once dropping this lock is safe.
@@ -414,6 +427,12 @@ async function withVectorWidthLock(
     await Promise.race([locked, deadline]);
   } catch (err) {
     destroy();
+    // Main-db audit/Redis writes are outside this read-only store transaction. Losing its
+    // confirmation cannot turn published settings into an invitation to repeat the save.
+    if (applyFailure) throw applyFailure.error;
+    if (applied) {
+      throw new GlobalKbConfigOutcomeUnknownError(err);
+    }
     rethrowIfGlobalKbTimeout(err);
     throw err;
   } finally {

@@ -36,7 +36,10 @@ describe('resolveGlobalKbConnection pool options', () => {
   const before = process.env.DATABASE_URL;
   beforeEach(() => {
     h.calls = [];
-    process.env.DATABASE_URL = 'postgres://u:p@main.example:5432/haive';
+    process.env.DATABASE_URL = `postgres://u:p@main-${expect
+      .getState()
+      .currentTestName?.replace(/[^a-z0-9]/gi, '')
+      .toLowerCase()}.example:5432/haive`;
   });
   afterEach(() => {
     if (before === undefined) delete process.env.DATABASE_URL;
@@ -89,4 +92,22 @@ describe('resolveGlobalKbConnection pool options', () => {
     expect('connect_timeout' in h.calls[0]![1]).toBe(true);
     expect('connect_timeout' in h.calls[1]![1]).toBe(false);
   });
+});
+
+it('memoizes a successful internal database existence check per process and server', async () => {
+  const before = process.env.DATABASE_URL;
+  process.env.DATABASE_URL = 'postgres://u:p@memo-main.example:5432/haive';
+  h.calls = [];
+  try {
+    await resolveGlobalKbConnection(settings({ mode: 'internal' }), existingDatabase);
+    await resolveGlobalKbConnection(settings({ mode: 'internal' }), existingDatabase);
+    expect(
+      h.calls.filter(([, opts]) => opts.max === 1),
+      'repeated internal admin handshake',
+    ).toHaveLength(1);
+    expect(h.calls.filter(([, opts]) => opts.max === 5)).toHaveLength(2);
+  } finally {
+    if (before === undefined) delete process.env.DATABASE_URL;
+    else process.env.DATABASE_URL = before;
+  }
 });

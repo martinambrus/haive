@@ -245,3 +245,24 @@ describe('global-store repair admission', () => {
     expect(h.opts).toMatchObject({ deadlineMs: 12, signal });
   });
 });
+
+it.each([undefined, new AbortController().signal])(
+  'keeps ordinary heading cleanup errors best effort (signal=%s)',
+  async (signal) => {
+    vi.spyOn(configService, 'getBoolean').mockResolvedValue(true);
+    h.error = Object.assign(new Error('permission denied'), { code: '42501' });
+    await expect(
+      original.find((m) => m.id === 'dropHeadingOnlyGlobalKbChunks')!.run(db, { signal }),
+    ).resolves.toBeUndefined();
+  },
+);
+it.each([undefined, new AbortController().signal])(
+  'propagates coded heading cleanup deadlines (signal=%s)',
+  async (signal) => {
+    vi.spyOn(configService, 'getBoolean').mockResolvedValue(true);
+    h.error = Object.assign(new Error('private details'), { code: '57014' });
+    await expect(
+      original.find((m) => m.id === 'dropHeadingOnlyGlobalKbChunks')!.run(db, { signal }),
+    ).rejects.toMatchObject({ code: 'GLOBAL_KB_DEADLINE' });
+  },
+);
