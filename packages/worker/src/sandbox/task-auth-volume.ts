@@ -18,7 +18,11 @@ import { SANDBOX_GID, SANDBOX_UID } from './sandbox-identity.js';
 import { ensureSandboxCoreImage } from './sandbox-core-image.js';
 import { SANDBOX_USER, SANDBOX_USER_HOME } from './sandbox-runner.js';
 import { CLI_CREDENTIAL_FILES } from '../usage-window/credential-files.js';
-import { readVolumeFile, VOLUME_FILE_ABSENT_EXIT } from '../usage-window/token-source.js';
+import {
+  readVolumeFile,
+  VOLUME_FILE_ABSENT_EXIT,
+  NonRegularVolumeFileError,
+} from '../usage-window/token-source.js';
 import { shellQuote } from './shell-quote.js';
 import { waitForCliAuthLock } from './cli-auth-lock.js';
 
@@ -128,9 +132,25 @@ function authSourceLabelRefusal(label: string | undefined, expected: string): st
   }
 }
 
-// A pre-label copy may survive many harvest ticks. Warn once in this worker process,
-// forgetting it on recreation or ordinary task cleanup, rather than once per provider/tick.
-const warnedUnlabeledCopies = new Set<string>();
+// Copies may survive many harvest ticks. Warn once per refusal in this worker process
+// (once total for an unlabeled copy), forgetting on recreation or ordinary task cleanup.
+const warnedAuthCopies = new Map<string, Set<string>>();
+function warnAuthCopyOnce(
+  taskVol: string,
+  reason: string,
+  fields: Record<string, unknown>,
+  message: string,
+  onceKey = reason,
+): void {
+  const reasons = warnedAuthCopies.get(taskVol) ?? new Set<string>();
+  if (reasons.has(onceKey)) return;
+  reasons.add(onceKey);
+  warnedAuthCopies.set(taskVol, reasons);
+  log.warn({ ...fields, taskVol, reason }, message);
+}
+/** Strict provider-update/sign-out audits first exist in commit 1f1064268 (#1058).
+ * Earlier tasks have an unobservable scope-change window; absent rows prove nothing. */
+const LEGACY_AUTH_AUDIT_FLOOR = new Date('2026-11-10T16:04:55Z');
 /** Recorded in {@link SOURCE_MARKER} when the volume was populated with NO source at all —
  *  an api-key provider row, or a CLI the user had not logged into yet.
  *
@@ -480,7 +500,7 @@ async function ensureTaskAuthVolumesUnlocked(
         `Failed to create task auth volume ${taskVol}: ${created.stderr || 'unknown error'}`,
       );
     }
-    warnedUnlabeledCopies.delete(taskVol);
+    warnedAuthCopies.delete(taskVol);
     // The volume this task's rtk seed and MCP config were written into is gone. Their applied
     // identities are in-process and would otherwise make every writer skip, leaving the fresh
     // volume without the tooling the next agent expects — for codex that is the whole
@@ -1270,8 +1290,8 @@ export function shouldSyncAuthBack(
  *  outright. Add a CLI to CLI_CREDENTIAL_FILES, not to USAGE_PROVIDERS, to cover it here.
  *
  *  Best-effort by contract. Every failure is logged and swallowed so a teardown never
- *  fails on it. Teardown waits up to 30 seconds for authentication; a longer conflict
- *  is warned before the task copy is removed, which can lose a rotated credential. */
+ *  fails on it. Teardown waits up to 30 seconds for authentication. Callers must honor
+ *  retainTaskCopy on an unverifiable source or retryable failure before removing copies. */
 export async function syncRefreshedAuthToUserVolumes(
   db: Database,
   taskId: string,
@@ -1347,14 +1367,14 @@ async function legacyAuthSourceUnchanged(
   rows: AuthSyncProvider[],
   current: AuthSyncProvider,
   missingProvider: boolean,
-): Promise<boolean> {
-  if (missingProvider) return false;
+): Promise<string | null> {
   const task = await db.query.tasks.findFirst({
     where: eq(schema.tasks.id, taskId),
     columns: { createdAt: true, userId: true },
   });
   const createdAt = task?.createdAt;
   if (
+    missingProvider ||
     !createdAt ||
     !Number.isFinite(createdAt.getTime()) ||
     task.userId !== current.userId ||
@@ -1366,7 +1386,9 @@ async function legacyAuthSourceUnchanged(
         row.createdAt <= createdAt,
     )
   )
-    return false;
+    return 'legacy_auth_scope_changed';
+
+  if (createdAt < LEGACY_AUTH_AUDIT_FLOOR) return 'legacy_audit_history_unavailable';
 
   const ids = rows.map((row) => row.id);
   const events = await db
@@ -1405,23 +1427,24 @@ async function legacyAuthSourceUnchanged(
         fields.includes('authMode') ||
         fields.includes('isolateAuth')
       )
-        return false;
+        return 'legacy_auth_scope_changed';
     } else {
       // Sign-out's committed launch audit contains the login-set ids. It may precede
       // removal, so refusing is conservative, including a removed/recreated volume.
-      if (event.targetId && ids.includes(event.targetId)) return false;
+      if (event.targetId && ids.includes(event.targetId)) return 'legacy_auth_scope_changed';
       if (Array.isArray(metadata.setIds) && metadata.setIds.some((id) => ids.includes(id)))
-        return false;
+        return 'legacy_auth_scope_changed';
       const clicked = event.targetId
         ? await db.query.cliProviders.findFirst({
             where: eq(schema.cliProviders.id, event.targetId),
           })
         : undefined;
       // A deleted clicked row or malformed history cannot prove an unrelated sign-out.
-      if (!clicked || cliAuthScope(clicked) === cliAuthScope(current)) return false;
+      if (!clicked || cliAuthScope(clicked) === cliAuthScope(current))
+        return 'legacy_auth_scope_changed';
     }
   }
-  return true;
+  return null;
 }
 
 /** Carry ONE provider's in-task credential back to its user volume, when the in-task CLI
@@ -1489,38 +1512,56 @@ export async function syncProviderAuthBack(
         source.authPathIdx,
       );
     const label = await runner.volumeLabel?.(taskVol, AUTH_SOURCE_LABEL);
+    // No source was mounted at preparation, so there is nothing attributable to carry.
+    if (label === NO_SOURCE_SENTINEL) return false;
     const unlabeled = label === null;
+    const sourceRefusal = unlabeled
+      ? null
+      : authSourceLabelRefusal(label ?? undefined, authSourceIdentity(ctx, source.authPathIdx));
+    // An unreadable future contract remains unknown even if the provider also moved.
     let reason =
-      !current || identity(current) !== authSourceIdentity(ctx, source.authPathIdx)
-        ? 'provider_scope_changed'
-        : null;
+      sourceRefusal === 'unsupported_source_version'
+        ? sourceRefusal
+        : !current || identity(current) !== authSourceIdentity(ctx, source.authPathIdx)
+          ? 'provider_scope_changed'
+          : null;
     if (!reason) {
       if (unlabeled && allowUnlabeled) {
         if (new Set(rows.map(identity)).size > 1) reason = 'ambiguous_provider_rows';
-        else if (
-          !(await legacyAuthSourceUnchanged(db, taskId, rows, current!, ledger.missingProvider))
-        )
-          reason = 'legacy_auth_scope_changed';
+        else
+          reason = await legacyAuthSourceUnchanged(
+            db,
+            taskId,
+            rows,
+            current!,
+            ledger.missingProvider,
+          );
       } else {
-        reason = authSourceLabelRefusal(label ?? undefined, identity(current!));
+        reason = unlabeled ? 'unlabeled_source_unverified' : sourceRefusal;
       }
     }
-    if (unlabeled && !warnedUnlabeledCopies.has(taskVol)) {
-      warnedUnlabeledCopies.add(taskVol);
-      log.warn(
-        {
-          taskId,
-          providerId: provider.id,
-          provider: provider.name,
-          reason: reason ?? 'legacy_transition',
-        },
+    if (unlabeled) {
+      if (reason && outcome) outcome.retry = true;
+      warnAuthCopyOnce(
+        taskVol,
+        reason ?? 'legacy_transition',
+        { taskId, providerId: provider.id, provider: provider.name, retained: Boolean(reason) },
         'unlabeled task auth copy; guarded transition checked',
+        'unlabeled',
       );
     }
     if (reason) {
+      if (reason === 'unsupported_source_version' && outcome) outcome.retry = true;
       if (!unlabeled)
-        log.warn(
-          { taskId, providerId: provider.id, provider: provider.name, reason },
+        warnAuthCopyOnce(
+          taskVol,
+          reason,
+          {
+            taskId,
+            providerId: provider.id,
+            provider: provider.name,
+            retained: reason === 'unsupported_source_version',
+          },
           'auth sync-back refused',
         );
       return false;
@@ -1550,6 +1591,24 @@ export async function syncProviderAuthBack(
     if (!copied && outcome) outcome.retry = true;
     return copied;
   } catch (err) {
+    if (err instanceof NonRegularVolumeFileError) {
+      // Structural, not transient: report the leftover and allow terminal disposal.
+      // Never cat a FIFO or follow a credential symlink, and never retry it forever.
+      warnAuthCopyOnce(
+        taskVol,
+        'non_regular_credential_file',
+        {
+          taskId,
+          providerId: provider.id,
+          provider: provider.name,
+          volume: err.volume,
+          relPath: err.relPath,
+          retained: false,
+        },
+        'auth sync-back refused; structural credential leftover eligible for cleanup',
+      );
+      return false;
+    }
     if (outcome) outcome.retry = true;
     log.warn(
       { err, taskId, provider: provider.name, relPath: source.relPath },
@@ -1719,7 +1778,7 @@ export async function cleanupTaskAuthVolumes(
     signal?.throwIfAborted();
     const result = await runner.volumeRemove(taskVol);
     if (result.ok) {
-      warnedUnlabeledCopies.delete(taskVol);
+      warnedAuthCopies.delete(taskVol);
       removed.push(taskVol);
     } else {
       failed.push({ name: taskVol, stderr: result.stderr });

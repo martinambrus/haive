@@ -9,8 +9,10 @@ existing completed, failed or cancelled task's copies, the reaper calls
 ledger and uses the same credential-only parse/mtime/auth-lock guards as task-end and summary
 sync. A task with a live invocation (started, neither ended nor superseded) is skipped
 before sync and checked again before removal. Boot tries each auth lock once; a busy lock or a helper/lookup failure keeps the task's
-copies for the next boot. Ordinary task-end and summary sync still wait up to 30 seconds and
-keep their best-effort teardown contract. No auth lock is awaited while holding a task row.
+copies for the next boot. Ordinary task-end and summary sync still wait up to 30 seconds;
+both honor `retainTaskCopy`, keeping the copies and preparation state on retryable failures
+or unverifiable sources, including a thrown ledger lookup. Unrelated teardown continues.
+No auth lock is awaited while holding a task row.
 Removal and preparation invalidation recheck settlement under the bounded task-row fence used
 by terminal-summary cleanup (see [Worker restarts](worker-restarts.md)). A Retry that won during
 sync keeps the copies. A task whose row is gone has no ledger to sync; its copies are removed.
@@ -22,14 +24,20 @@ version 1, its source user-volume name, auth mode and isolation; a copy with no 
 re-reads the ledger's current provider rows after acquiring the auth lock. A moved row or a source
 label whose parsed structural fields do not match refuses sync before any credential write.
 Key order and extra label fields are ignored. The original unversioned label is the known v0
-shape; explicit unknown versions are refused and logged. A labeled copy can name its source
+shape; explicit unknown versions are refused, retained unsynced and logged once per copy/reason
+in this worker process. The `none` sentinel means nothing to sync and emits no refusal warning.
+A labeled copy can name its source
 among multiple ledger rows of the same CLI with different scopes. Harvest considers each distinct
 target volume and lets this locked label check choose the source.
 
 For a copy from before labels, task-end, summary and non-terminal mid-task harvest use a guarded
 transition. After acquiring the auth lock, require the task's creation time and owner, complete
 invocation-ledger ownership (no null or deleted provider), provider rows created no later than the
-task, and one same-CLI source identity. Refuse a `cli_provider.update` audit at or after task
+task, and one same-CLI source identity. `LEGACY_AUTH_AUDIT_FLOOR` is 2026-11-10 16:04:55 UTC,
+the timestamp of commit `1f1064268` (#1058), which introduced provider-update and sign-out audits.
+Tasks created before that floor refuse with `legacy_audit_history_unavailable`: absent audit rows
+cannot prove the source unchanged during the earlier unobservable window.
+Refuse a `cli_provider.update` audit at or after task
 creation whose structured `metadata.fields` array includes `authMode` or `isolateAuth`, including
 a change away and back; malformed field lists refuse too. PATCH is the only updater of those
 fields. It computes actual changes against the locked row and writes that audit, with
@@ -49,16 +57,36 @@ rebuilds, probe health, image build bookkeeping, boot image reconcile and learne
 must all preserve the credential carry. Ollama provisioning and Claude token/grant writers do
 not move a tracked credential-file volume either.
 
-Boot reaping always skips unlabeled copies, so unattributed terminal leftovers cannot initiate
-credential writes. The transition warning is emitted once per copy in this worker process,
-including across harvest ticks and provider rows; no label is backfilled. Sunset: remove this
+Boot reaping never syncs unlabeled copies and now retains them unsynced. Every unlabeled refusal
+(including the audit floor, ambiguous ledger or changed scope) retains the copy at task end and
+summary cleanup too, since refusal cannot justify losing a possibly newer token. A structured
+warning includes `taskVol`, task/provider ids, the reason and `retained`; it is emitted once per
+unlabeled copy in this worker process, including across harvest ticks and provider rows. No label
+is backfilled. Known labeled source mismatches still permit cleanup. Sunset: remove this
 unlabeled fallback once all pre-label non-terminal task copies have settled or been recreated
-with source labels, after verifying no resumable task still depends on one. A refused source
-sync is safe to discard at boot; retryable failures retain the copy. Credential reads and mtime
-reads distinguish a missing file from a failed or timed-out helper: failures retain the copy,
-while a genuinely missing or unparseable task credential is an ordinary no-copy result. Other
-poller readers retain their best-effort null-on-helper-failure contract. No schema or data
-migration is needed.
+with source labels, after verifying no resumable task still depends on one.
+
+Manual recovery for retained unlabeled copies: use the warning's task and volume ids to identify
+the original login scope from independent operator records; the current provider row and absent
+audits alone are insufficient, especially before the floor. Preserve the volume until that review
+is complete. With all task invocations stopped and the original scope verified, an operator can
+recover the credential to that scope under its auth lock using the same credential-only parse,
+mtime and atomic-copy guards; never dump credential bytes into logs or attach them to a report.
+If the source cannot be proven, sign in afresh to the intended scope and explicitly retire the
+old copy only after confirming it is no longer needed. Do not relabel a legacy copy to bypass
+verification. Unknown-version copies require a compatible worker reader or the same operator
+review before disposal. Worker restarts alone do not resolve either refusal.
+
+Credential reads and mtime reads distinguish a missing file from a failed or timed-out helper:
+transient failures (including Docker exit 125, spawn errors and timeout) retain the copy for a
+later cleanup attempt/boot. Before `cat`, the read helper checks file type: a directory, FIFO or
+symlink (including a dangling link) returns the dedicated non-regular exit code, never credential
+bytes. Sync reports `non_regular_credential_file` once per copy in this worker process, naming
+the offending volume and path with `retained: false`; this is a structural refusal, so terminal
+cleanup disposes of the leftover rather than retrying it on every boot forever. The user volume
+is never modified on that refusal. A genuinely missing or unparseable task credential is an
+ordinary no-copy result. Other poller readers retain their best-effort null-on-helper-failure
+contract, including a non-regular file. No schema or data migration is needed.
 
 `clearTaskAuthPreparationState` forgets applied identities for the selected provider or the
 whole task. It never drops a live preparation lock; `withScopeLock` removes its own tail when
@@ -81,7 +109,9 @@ labels. Reverting only the versioned-label change to the earlier exact-string re
 it refuse version-1 copies: retain a compatible reader until those copies have settled or
 been recreated before that partial rollback. No schema/data rollback is needed. Credentials
 already synced remain in user volumes, and removed task copies cannot be restored by
-reverting code.
+reverting code. Before downgrading past the retention changes, recover or explicitly retire
+retained unlabeled and unknown-version copies as described above; an older reaper can discard
+them unsynced. Structural leftovers already disposed of cannot be recovered by a code rollback.
 
 **Committed mining views are immutable mounts.** `repo/committed-snapshot.ts` owns the bounded
 resolver. `resolveInvocationRepoMount` chooses a snapshot before repository-less scratch,
@@ -1026,8 +1056,8 @@ wait minutes, so a login completed in between must survive it. Two pieces do tha
   may run beside an abandoned container. The provider secret migration's destructive drop phase also waits up
   to 30 s for it; its copy phase, which reruns at every worker boot, tries once and leaves a busy
   provider for the next boot. A task's sync-back waits up to 30 s for it; still held,
-  it warns and the task copy is removed with its volume, so a token the task rotated is lost while
-  a login dialog on the same CLI stays open that long (that login replaces it when it succeeds).
+  it warns and retains the task copy for a later summary/boot cleanup attempt, so a rotated
+  token is not discarded solely because the login dialog remained open.
 
 Undo: revert the change; the column is ignored by the older release
 (`ALTER TABLE cli_providers DROP COLUMN IF EXISTS auth_generation` removes it).

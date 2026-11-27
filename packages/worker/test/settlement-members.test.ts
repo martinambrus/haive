@@ -211,3 +211,11 @@ it.each(['summary', 'terminal', 'ollama'] as const)(
     ]);
   },
 );
+
+it('summary retains auth volumes and preparations when credential reads need retry', async () => {
+  const { db } = taskDb();
+  vi.mocked(syncRefreshedAuthToUserVolumes).mockResolvedValueOnce({ retainTaskCopy: true });
+  await cleanupAuthAfterTerminalSummary(db, TASK);
+  expect(cleanupTaskAuthVolumes).not.toHaveBeenCalled();
+  expect(clearTaskAuthPreparationState).not.toHaveBeenCalled();
+});

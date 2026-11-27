@@ -6,6 +6,7 @@ import {
   readdirSync,
   readFileSync,
   rmSync,
+  symlinkSync,
   utimesSync,
   writeFileSync,
 } from 'node:fs';
@@ -16,6 +17,7 @@ import { schema, type Database } from '@haive/database';
 import { createFakeDb } from '@haive/database/testing';
 import { cliAuthTaskVolumeName, resolveCliAuthUserVolumeName } from '@haive/shared';
 import type { SQL } from 'drizzle-orm';
+import { readVolumeFile } from '../src/usage-window/token-source.js';
 import { harvestInTaskCredentials } from '../src/usage-window/credential-harvest.js';
 import { reapOrphanedAuthVolumes } from '../src/sandbox/auth-volume-reaper.js';
 import {
@@ -78,7 +80,7 @@ function fixture() {
     userId,
     status: 'failed',
     orchestrationEpoch: 1,
-    createdAt: new Date('2026-01-02T00:00:00Z'),
+    createdAt: new Date('2026-11-11T00:00:00Z'),
   });
   fake.insert(schema.users, { id: userId });
   fake.insert(schema.cliProviders, provider);
@@ -132,6 +134,7 @@ function fixture() {
       if (opts.mounts?.length === 2) events.push('copy');
       const result = spawnSync(opts.cmd[0]!, ['-c', script], {
         encoding: 'utf8',
+        timeout: 500,
         env: { PATH: `${root}/bin:/usr/bin:/bin` },
       });
       return {
@@ -146,7 +149,7 @@ function fixture() {
   const reap = () =>
     reapOrphanedAuthVolumes(db, {
       runner,
-      listAuthVolumes: async () => [taskVol],
+      listAuthVolumes: async () => [taskVol].filter((name) => dirs.has(name)),
       removeVolume: async (name) => {
         expect(fake.rowLocked(schema.tasks, taskId)).toBe(true);
         events.push('remove');
@@ -227,11 +230,12 @@ it('a labeled copy names its source among different ledger scopes', async () => 
   await syncRefreshedAuthToUserVolumes(f.db, f.taskId, f.runner);
   expect(f.events).toEqual(['copy']);
 });
-it('boot skips an unrecorded legacy source without writing any user credential', async () => {
+it('boot retains an unrecorded legacy source without writing any user credential', async () => {
   const f = fixture();
   f.labels.clear();
-  expect(await f.reap()).toBe(1);
-  expect(f.events).toEqual(['remove']);
+  expect(await f.reap()).toBe(0);
+  expect(f.events).toEqual([]);
+  expect(f.dirs.has(f.taskVol)).toBe(true);
   f.unchanged();
 });
 it('task-end and summary sync carry back an unlabeled copy with an unchanged provider row', async () => {
@@ -253,7 +257,7 @@ function authEvent(f: ReturnType<typeof fixture>, fields: unknown, targetId = f.
     targetId,
     action: 'cli_provider.update',
     metadata: { fields },
-    createdAt: new Date('2026-01-03T00:00:00Z'),
+    createdAt: new Date('2026-11-12T00:00:00Z'),
   });
 }
 it.each(['authMode', 'isolateAuth'] as const)(
@@ -290,7 +294,7 @@ it.each([
   ['boot reconcile', { sandboxImageTag: null, sandboxImageBuildStatus: 'idle' }],
   [
     'learned model limit',
-    { modelLimits: { model: 'fixture', learnedAt: '2026-01-03T00:00:00Z', maxOutputTokens: 100 } },
+    { modelLimits: { model: 'fixture', learnedAt: '2026-11-12T00:00:00Z', maxOutputTokens: 100 } },
   ],
   ['generation-only login', { authGeneration: randomUUID() }],
   ['ollama provisioning fields', { modelProvisionStatus: 'ready' }],
@@ -299,7 +303,7 @@ it.each([
   f.labels.clear();
   f.fake.patch(schema.cliProviders, f.provider.id, {
     ...updates,
-    updatedAt: new Date('2026-01-03T00:00:00Z'),
+    updatedAt: new Date('2026-11-12T00:00:00Z'),
   });
   authEvent(f, ['rulesContent', 'cliVersion']);
   await syncRefreshedAuthToUserVolumes(f.db, f.taskId, f.runner);
@@ -339,7 +343,7 @@ it.each([null, randomUUID()])(
     f.unchanged();
   },
 );
-it.each([null, new Date('2026-01-04T00:00:00Z')])(
+it.each([null, new Date('2026-11-13T00:00:00Z')])(
   'refuses an unlabeled copy whose provider creation has no safe baseline (%s)',
   async (createdAt) => {
     const f = fixture();
@@ -368,7 +372,7 @@ it('a sign-out through a sibling still blocks an unlabeled copy after volume rec
     targetId: sibling.id,
     action: 'cli_provider.sign_out',
     metadata: { setIds: [sibling.id, f.provider.id], setSize: 2 },
-    createdAt: new Date('2026-01-03T00:00:00Z'),
+    createdAt: new Date('2026-11-12T00:00:00Z'),
   });
   await syncRefreshedAuthToUserVolumes(f.db, f.taskId, f.runner);
   expect(f.events).toEqual([]);
@@ -385,7 +389,7 @@ it('does not treat audit text mentioning an auth field as a structured field cha
     targetId: f.provider.id,
     action: 'cli_provider.secret.set',
     metadata: { source: 'authMode isolateAuth' },
-    createdAt: new Date('2026-01-03T00:00:00Z'),
+    createdAt: new Date('2026-11-12T00:00:00Z'),
   });
   await syncRefreshedAuthToUserVolumes(f.db, f.taskId, f.runner);
   expect(f.events).toEqual(['copy']);
@@ -415,7 +419,7 @@ it('mid-task sync carries an unchanged unlabeled copy under the transition predi
 it('labeled copies still sync after unrelated row updates', async () => {
   const f = fixture();
   f.fake.patch(schema.cliProviders, f.provider.id, {
-    updatedAt: new Date('2026-01-03T00:00:00Z'),
+    updatedAt: new Date('2026-11-12T00:00:00Z'),
   });
   await syncRefreshedAuthToUserVolumes(f.db, f.taskId, f.runner);
   expect(f.events).toEqual(['copy']);
@@ -493,7 +497,7 @@ it.each([
     const run = f.runner.run.bind(f.runner);
     vi.spyOn(f.runner, 'run').mockImplementation(async (opts) => {
       if (
-        opts.cmd[2]?.startsWith(command) &&
+        (command === 'cat' ? opts.cmd[2]?.includes('cat ') : opts.cmd[2]?.startsWith(command)) &&
         opts.mounts?.[0]?.source === (task ? f.taskVol : f.userVol)
       )
         return { exitCode: 1, stdout: '', stderr: '', durationMs: 0, timedOut: false };
@@ -621,9 +625,161 @@ it('a timed-out read never supplies a credential even with successful exit and o
   const run = f.runner.run.bind(f.runner);
   vi.spyOn(f.runner, 'run').mockImplementation(async (opts) => {
     const result = await run(opts);
-    return opts.cmd[2]?.startsWith('cat') ? { ...result, timedOut: true } : result;
+    return opts.cmd[2]?.includes('cat ') ? { ...result, timedOut: true } : result;
   });
   expect(await f.reap()).toBe(0);
   expect(f.dirs.has(f.taskVol)).toBe(true);
   expect(f.events).toEqual([]);
+});
+
+it('pre-audit-floor legacy tasks refuse sync, retain their copy and warn once', async () => {
+  const f = fixture();
+  f.labels.clear();
+  f.fake.patch(schema.tasks, f.taskId, { createdAt: new Date('2026-11-10T16:04:54Z') });
+  await harvest(f);
+  expect(await syncRefreshedAuthToUserVolumes(f.db, f.taskId, f.runner)).toEqual({
+    retainTaskCopy: true,
+  });
+  f.fake.patch(schema.tasks, f.taskId, { status: 'failed' });
+  expect(await f.reap()).toBe(0);
+  expect(f.dirs.has(f.taskVol)).toBe(true);
+  expect(f.events).toEqual([]);
+  f.unchanged();
+  expect(
+    logs.warn.mock.calls.filter(([fields]) => fields.reason === 'legacy_audit_history_unavailable'),
+  ).toHaveLength(1);
+});
+it('a task at the audit floor can carry an unchanged unlabeled source', async () => {
+  const f = fixture();
+  f.labels.clear();
+  f.fake.patch(schema.tasks, f.taskId, { createdAt: new Date('2026-11-10T16:04:55Z') });
+  expect(await syncRefreshedAuthToUserVolumes(f.db, f.taskId, f.runner)).toEqual({
+    retainTaskCopy: false,
+  });
+  expect(f.events).toEqual(['copy']);
+});
+it.each(['scope', 'ambiguous', 'missing timestamp'])(
+  'retains an unlabeled refusal: %s',
+  async (reason) => {
+    const f = fixture();
+    f.labels.clear();
+    if (reason === 'scope') authEvent(f, ['authMode']);
+    if (reason === 'missing timestamp') f.fake.patch(schema.tasks, f.taskId, { createdAt: null });
+    if (reason === 'ambiguous') {
+      const sibling = { ...f.provider, id: randomUUID(), isolateAuth: true };
+      f.fake.insert(schema.cliProviders, sibling);
+      f.fake.insert(schema.cliInvocations, {
+        id: randomUUID(),
+        taskId: f.taskId,
+        cliProviderId: sibling.id,
+      });
+    }
+    expect(await syncRefreshedAuthToUserVolumes(f.db, f.taskId, f.runner)).toEqual({
+      retainTaskCopy: true,
+    });
+    expect(await f.reap()).toBe(0);
+    expect(f.dirs.has(f.taskVol)).toBe(true);
+    f.unchanged();
+  },
+);
+it('boot retains an unknown label version unsynced and logs once per copy', async () => {
+  const f = fixture();
+  f.labels.set(
+    f.taskVol,
+    JSON.stringify({
+      version: 99,
+      userVolume: f.userVol,
+      authMode: 'subscription',
+      isolateAuth: false,
+    }),
+  );
+  expect(await f.reap()).toBe(0);
+  expect(await f.reap()).toBe(0);
+  expect(f.dirs.has(f.taskVol)).toBe(true);
+  expect(f.events).toEqual([]);
+  f.unchanged();
+  expect(
+    logs.warn.mock.calls.filter(([fields]) => fields.reason === 'unsupported_source_version'),
+  ).toHaveLength(1);
+});
+it('a no-source copy is silent across harvest ticks and needs no sync', async () => {
+  const f = fixture();
+  f.labels.set(f.taskVol, 'none');
+  const run = vi.spyOn(f.runner, 'run');
+  await harvest(f);
+  await harvest(f);
+  expect(await syncRefreshedAuthToUserVolumes(f.db, f.taskId, f.runner)).toEqual({
+    retainTaskCopy: false,
+  });
+  expect(run).not.toHaveBeenCalled();
+  expect(logs.warn).not.toHaveBeenCalled();
+});
+it.each(['directory', 'fifo', 'symlink', 'dangling symlink'] as const)(
+  'reports a structural %s credential once and removes the terminal leftover',
+  async (kind) => {
+    const f = fixture();
+    const path = join(f.dirs.get(f.taskVol)!, 'auth.json');
+    rmSync(path);
+    if (kind === 'directory') mkdirSync(path);
+    if (kind === 'fifo') expect(spawnSync('mkfifo', [path]).status).toBe(0);
+    if (kind === 'dangling symlink') symlinkSync(join(f.root, 'absent'), path);
+    if (kind === 'symlink') symlinkSync(join(f.dirs.get(f.userVol)!, 'auth.json'), path);
+    // Poller callers keep the same best-effort null contract.
+    expect(await readVolumeFile(f.taskVol, 'auth.json', f.runner)).toBeNull();
+    // A FIFO must be refused before cat, not retained after a timeout.
+    expect(await syncRefreshedAuthToUserVolumes(f.db, f.taskId, f.runner)).toEqual({
+      retainTaskCopy: false,
+    });
+    expect(await f.reap()).toBe(1);
+    expect(await f.reap()).toBe(0);
+    expect(f.events).toEqual(['remove']);
+    f.unchanged();
+    expect(
+      logs.warn.mock.calls.filter(([fields]) => fields.reason === 'non_regular_credential_file'),
+    ).toHaveLength(1);
+  },
+);
+it.each(['docker exit', 'spawn', 'timeout'] as const)(
+  'retains a transient %s failure and retries successfully',
+  async (failure) => {
+    const f = fixture();
+    const run = f.runner.run;
+    f.runner.run = vi.fn(async () => {
+      if (failure === 'spawn') throw Object.assign(new Error('fixture'), { code: 'EAGAIN' });
+      return {
+        exitCode: failure === 'docker exit' ? 125 : 0,
+        timedOut: failure === 'timeout',
+        stdout: '',
+        stderr: '',
+        durationMs: 0,
+      };
+    });
+    expect(await f.reap()).toBe(0);
+    expect(f.dirs.has(f.taskVol)).toBe(true);
+    f.runner.run = run;
+    expect(await f.reap()).toBe(1);
+    expect(f.events).toEqual(['copy', 'remove']);
+  },
+);
+
+it('boot retains an unknown version even when the provider scope moved under the lock', async () => {
+  const f = fixture();
+  f.labels.set(
+    f.taskVol,
+    JSON.stringify({
+      version: 99,
+      userVolume: f.userVol,
+      authMode: 'subscription',
+      isolateAuth: false,
+    }),
+  );
+  lock.afterAcquire = () => f.fake.patch(schema.cliProviders, f.provider.id, { isolateAuth: true });
+  expect(await f.reap()).toBe(0);
+  expect(f.dirs.has(f.taskVol)).toBe(true);
+  expect(f.events).toEqual([]);
+  f.unchanged();
+  expect(logs.warn).toHaveBeenCalledWith(
+    expect.objectContaining({ reason: 'unsupported_source_version', retained: true }),
+    'auth sync-back refused',
+  );
 });

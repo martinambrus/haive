@@ -660,7 +660,8 @@ export async function cleanupAuthAfterTerminalSummary(db: Database, taskId: stri
     // one bad sync leaked a repo-less task's workspace for good, since this is the LAST thing
     // that runs for that task.
     try {
-      await syncRefreshedAuthToUserVolumes(db, taskId);
+      const sync = await syncRefreshedAuthToUserVolumes(db, taskId);
+      if (sync?.retainTaskCopy) return;
       const volumes = await findTaskAuthVolumes(taskId);
       await withTaskSettlementTransaction(db, async (tx, signal) => {
         await setTaskSettlementTimeout(tx);

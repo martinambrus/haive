@@ -767,8 +767,15 @@ each auth lock once; a busy lock or a failed sync/helper lookup leaves
 those copies for another boot, while unrelated orphans continue. Credential-file and mtime
 helpers report failure separately from file absence, so a failed or timed-out read retains
 the copy rather than treating it as an empty credential. Temp-file sweeping runs inside the
-copy helper, logs and continues on failure, and never gates credential carry. A refused source identity
-(including a legacy copy with no source label) writes nothing and permits removal. A deleted task has no row or invocation ledger left, so its original orphan-removal
+copy helper, logs and continues on failure, and never gates credential carry. Ordinary task-end
+and terminal-summary teardown honor the same `retainTaskCopy` result (or a thrown lookup),
+preserving copies and preparation state without blocking unrelated cleanup. Unlabeled refusals,
+including tasks older than the provider audit floor, and unknown source-label versions retain
+the copy unsynced; known labeled identity mismatches permit removal. A non-regular credential
+file is refused before reading, reported once with a structured reason and permits terminal
+leftover disposal, while transient helper failures keep retrying. See [Sandbox](sandbox.md) for
+the floor, warning fields and manual recovery. A deleted task has no row or invocation ledger
+left, so its original orphan-removal
 path remains. In-flight preparation locks survive cache invalidation and remove themselves
 on settlement; sync-back temporary files and MCP failure diagnostics are owned by their run
 (see [Sandbox](sandbox.md), including the label-reader compatibility required for rollback).

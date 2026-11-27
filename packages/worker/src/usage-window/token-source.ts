@@ -11,6 +11,17 @@ const READ_TIMEOUT_MS = 15_000;
 const WRITE_TIMEOUT_MS = 15_000;
 /** A successfully started read helper found no file. Other non-zero exits are failures. */
 export const VOLUME_FILE_ABSENT_EXIT = 4;
+/** A helper proved the named credential is a directory, FIFO, link or other non-file. */
+export const VOLUME_FILE_NON_REGULAR_EXIT = 5;
+export class NonRegularVolumeFileError extends Error {
+  readonly code = 'AUTH_FILE_NOT_REGULAR';
+  constructor(
+    readonly volume: string,
+    readonly relPath: string,
+  ) {
+    super('auth credential is not a regular file');
+  }
+}
 
 /** Read a decrypted cli_provider_secret by name. Returns null when absent. */
 export async function readProviderSecretToken(
@@ -52,11 +63,15 @@ export async function readVolumeFile(
     cmd: [
       'sh',
       '-c',
-      `cat "/vol/${safeRel}" 2>/dev/null || { [ ! -e "/vol/${safeRel}" ] && exit ${VOLUME_FILE_ABSENT_EXIT}; exit 1; }`,
+      `if [ -L "/vol/${safeRel}" ] || { [ -e "/vol/${safeRel}" ] && [ ! -f "/vol/${safeRel}" ]; }; then exit ${VOLUME_FILE_NON_REGULAR_EXIT}; fi; cat "/vol/${safeRel}" 2>/dev/null || { [ ! -e "/vol/${safeRel}" ] && exit ${VOLUME_FILE_ABSENT_EXIT}; exit 1; }`,
     ],
     mounts: [{ source: vol, target: '/vol', readOnly: true }],
     timeoutMs: READ_TIMEOUT_MS,
   });
+  if (result.exitCode === VOLUME_FILE_NON_REGULAR_EXIT && !result.timedOut) {
+    if (options.throwOnFailure) throw new NonRegularVolumeFileError(vol, relPath);
+    return null;
+  }
   if (result.exitCode === VOLUME_FILE_ABSENT_EXIT && !result.timedOut) return null;
   if (result.exitCode !== 0 || result.timedOut) {
     if (options.throwOnFailure) throw new Error('auth file read helper failed');
