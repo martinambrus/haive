@@ -1247,6 +1247,7 @@ T594 commits `status: 'cloning'` before a rebuild moves the checkout, which hide
 
 1. List each reader of a repository checkout that bypasses readiness admission (file:line), and decide per reader: gate on status, or tolerate the move (held descriptors).
 2. Decide whether an open Terminal or Editor session is closed or warned when a rebuild starts.
+3. From T594 fix-3: older repository job handlers still write `repositories.status`/error by repository id alone (no owning-job check), and an initial scan's own mirror imports after it publishes `ready` stay outside the maintenance drain when no refresh is pending (`.claude/tmp/codex-run/T594-S/fix-3/found-not-fixed.txt`).
 
 ### T778 · Settlement siblings still act on a Retry-revived task
 
