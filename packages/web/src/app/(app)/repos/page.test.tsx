@@ -5,6 +5,9 @@ import { LinkOriginDialog } from '@/components/repos/link-origin-dialog';
 import { buttons, createRenderer, fire, textOf } from '../../../../test/render-tree';
 import type { ActionMenuItem } from '@/components/action-menu';
 
+vi.mock('@/components/dialog', () => ({
+  Dialog: ({ open, children }: { open: boolean; children: ReactNode }) => (open ? children : null),
+}));
 vi.mock('react', async (importOriginal) => ({
   ...(await importOriginal<typeof import('react')>()),
   ...(await import('../../../../test/render-tree')).reactHooks,
@@ -80,6 +83,8 @@ describe('repository upload retry', () => {
     const view = await mounted();
     h.post.mockRejectedValue(new Error(UNAVAILABLE));
     fire.click(buttons(view.tree(), /^retry$/i)[0]!);
+    view.draw();
+    fire.click(buttons(view.tree(), /^continue$/i)[0]!);
     await vi.advanceTimersByTimeAsync(0);
     view.draw();
     expect(h.post).toHaveBeenCalledWith('/repos/repo-1/refresh-tree', {});
@@ -112,6 +117,10 @@ describe('repair-needed repository errors', () => {
     const recovery = buttons(view.tree(), /^rebuild checkout$/i);
     expect(recovery).toHaveLength(1);
     fire.click(recovery[0]!);
+    view.draw();
+    expect(textOf(view.tree())).toContain('running commands');
+    expect(h.post).not.toHaveBeenCalled();
+    fire.click(buttons(view.tree(), /^continue$/i)[0]!);
     await vi.advanceTimersByTimeAsync(0);
     expect(h.post).toHaveBeenCalledWith('/repos/repo-1/recover-checkout', {});
     vi.unstubAllGlobals();
@@ -146,6 +155,8 @@ it.each(['git_https', 'local_path'])(
     const view = await mounted();
     expect(buttons(view.tree(), /^retry$/i)).toHaveLength(0);
     fire.click(buttons(view.tree(), /^rebuild checkout$/i)[0]!);
+    view.draw();
+    fire.click(buttons(view.tree(), /^continue$/i)[0]!);
     await vi.advanceTimersByTimeAsync(0);
     expect(h.post).toHaveBeenCalledWith('/repos/repo-1/recover-checkout', {});
     vi.unstubAllGlobals();

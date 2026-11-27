@@ -368,3 +368,10 @@ predecessor repair retention, intent ordering and lifetime, unanswered reads,
 bounded sweep rotation and API start/stop wiring. The Git signal controls wait
 for a FIFO reader with a nonblocking writer open, keep that writer until cleanup,
 and close it in `finally`; they do not read kernel wait-channel names.
+
+## Warn before checkout replacement (T780 PR3, first prefix)
+
+Retry preparation and Rebuild checkout use the shared Escape-dismissable Dialog before posting.
+It warns that replacement stops running terminal, Editor and runtime commands and retains
+Editor unsaved buffers for review. Check repair remains an in-place check. This warning must
+ship before the worker stop barrier; it changes no session lifecycle on its own.
