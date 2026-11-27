@@ -24,6 +24,12 @@ variant against real git, real timers or a real server.
   file with neither ([CI smokes](ci-smokes.md)). `pnpm test:gated <file>` runs a gated file on your machine
   (Running the gated files locally).
 
+`worker/test/plan-md-index-read.test.ts` keeps one real-Git markdown-only conflict
+absence/refusal case. `failed-read-handback.test.ts` keeps one real-Git case each for strict
+hand-back, fixer-owner refusal with retry, and directory-to-symlink containment. Their exit-code,
+errno and index-entry variants fake Git and filesystem seams completely, including retry mutations;
+those variants neither copy a repository nor launch Git.
+
 ## Limits are injectable
 
 Code that enforces a size, count or time limit takes it as an optional parameter (or option) defaulting to the
