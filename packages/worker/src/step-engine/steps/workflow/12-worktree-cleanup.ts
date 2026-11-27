@@ -18,6 +18,7 @@ import { loadPreviousStepOutput } from '../onboarding/_helpers.js';
 import { buildMergeFixPrompt } from '../../git-merge.js';
 import { gitRun } from '../../../repo/git-exec.js';
 import { OriginUrlError, getOriginUrl, pushBranch, taskRemoteUrl } from '../../../repo/git-push.js';
+import { worktreesHoldingBranch } from '../../../repo/git-workspace.js';
 import { removeWorktreeDir } from '../../../repo/worktree-remove.js';
 import {
   listBranchProjectionEdits,
@@ -77,11 +78,43 @@ interface WorktreeCleanupDetect {
   taskDescription: string;
 }
 
+interface BranchLeftover {
+  branch: string;
+  reason:
+    | 'not-contained-in-squash'
+    | 'unreadable-squash'
+    | 'unreadable-branch'
+    | 'checked-out'
+    | 'delete-refused';
+}
+
+/** Compare-and-delete only commits contained in the feature head the squash actually landed. */
+async function deleteSquashedBranch(
+  repoPath: string,
+  branch: string,
+  mergedFeature: string | null,
+): Promise<BranchLeftover['reason'] | null> {
+  if (!mergedFeature) return 'unreadable-squash';
+  const ref = `refs/heads/${branch}`;
+  const tip = await gitRun(repoPath, ['rev-parse', '-q', '--verify', ref]);
+  if (tip.code === 1) return null; // Already deleted on a prior pass.
+  if (tip.code !== 0) return 'unreadable-branch';
+  const sha = tip.stdout.trim();
+  const contained = await gitRun(repoPath, ['merge-base', '--is-ancestor', sha, mergedFeature]);
+  if (contained.code === 1) return 'not-contained-in-squash';
+  if (contained.code !== 0) return 'unreadable-branch';
+  // update-ref does not enforce branch -D's checkout check, so retain it explicitly.
+  if ((await worktreesHoldingBranch(repoPath, ref)).length) return 'checked-out';
+  const del = await gitRun(repoPath, ['update-ref', '-d', ref, sha]);
+  return del.code === 0 ? null : 'delete-refused';
+}
+
 interface WorktreeCleanupApply {
   action: CleanupAction | 'none';
   removed: boolean;
   merged: boolean;
   branchDeleted: boolean;
+  branchLeftovers?: BranchLeftover[];
   mode: WorktreeCleanupDetect['mode'];
   message: string;
   /** Set on the create_pr path: the opened PR/MR URL, for the step card. */
@@ -157,9 +190,12 @@ export function branchOutcomeParts(o: {
   deleteRequested: boolean;
   branchDeleted: boolean;
   issueBranchesDeleted: number;
+  branchLeftoverReason?: BranchLeftover['reason'];
 }): string[] {
   const parts: string[] = [];
   if (o.branchDeleted) parts.push(`deleted branch ${o.branchName}`);
+  else if (o.branchLeftoverReason)
+    parts.push(`kept branch ${o.branchName} (${o.branchLeftoverReason})`);
   else if (o.action === 'remove_only') parts.push(`kept branch ${o.branchName}`);
   // A requested delete that git refused must not read as a silent success.
   else if (o.deleteRequested && o.branchName)
@@ -670,10 +706,10 @@ export const worktreeCleanupStep: StepDefinition<WorktreeCleanupDetect, Worktree
     // Read its terminal outcome to decide whether the worktree may be removed.
     let merged = false;
     let mergeTarget: string | null = null;
-    // Set when the merge was collapsed into one commit. That commit IS the merge result,
-    // so it proves containment for the branch deletes below — which `git branch -d`
-    // cannot see, the original commits no longer being reachable from the base tip.
+    // A squash hides ancestry from branch -d; its recorded merge's second parent
+    // proves which feature commits landed, even if the live feature branch moved.
     let squashCommitSha: string | null = null;
+    let squashMergeSha: string | undefined;
     let squashSkipReason: string | undefined;
     if (action === 'merge_remove') {
       const row = await ctx.db.query.taskSteps.findFirst({
@@ -684,6 +720,7 @@ export const worktreeCleanupStep: StepDefinition<WorktreeCleanupDetect, Worktree
       merged = st?.merged ?? false;
       mergeTarget = st?.baseBranch || null;
       squashCommitSha = st?.squashCommitSha ?? null;
+      squashMergeSha = st?.squashMergeSha;
       squashSkipReason = st?.squashSkipReason;
       if (!merged) {
         // The merge did not run (e.g. the parent checkout is off the base branch).
@@ -758,17 +795,30 @@ export const worktreeCleanupStep: StepDefinition<WorktreeCleanupDetect, Worktree
       );
     }
 
-    // DAG runs fork one branch per issue off the integration branch, and those survived
-    // the cleanup that deleted the integration branch itself — five dead refs per DAG task
-    // (MEASURED on task de2b313d: all 5 still present, all `--merged HEAD`).
-    //
-    // Reachability is the whole safety mechanism here: an issue that ended
-    // failed_unrecoverable must keep its branch so its work stays recoverable. `git branch
-    // -d` asks that question against HEAD, which a SQUASHED merge answers "no" for every
-    // branch — the original commits are no longer reachable from the base tip — so it
-    // would refuse the lot and leave exactly the dead refs above. Ask the identical
-    // question against the FEATURE branch instead, which still exists at this point;
-    // hence sweeping the issue branches BEFORE deleting it. Never a blanket -D.
+    // The live feature ref can include work added AFTER the squash. Use the recorded
+    // feature parent for both DAG and feature deletion, never the moved live ref.
+    const featureParent =
+      squashCommitSha && squashMergeSha
+        ? await gitRun(ctx.repoPath, [
+            'rev-parse',
+            '-q',
+            '--verify',
+            `${squashMergeSha}^2^{commit}`,
+          ])
+        : null;
+    const mergedFeature = featureParent?.code === 0 ? featureParent.stdout.trim() : null;
+    const branchLeftovers: BranchLeftover[] = [];
+    const deleteBranch = async (branch: string): Promise<boolean> => {
+      if (squashCommitSha) {
+        const reason = await deleteSquashedBranch(ctx.repoPath, branch, mergedFeature);
+        if (reason) branchLeftovers.push({ branch, reason });
+        return reason === null;
+      }
+      const del = await gitRun(ctx.repoPath, ['branch', '-d', branch]);
+      if (del.code !== 0)
+        ctx.logger.warn({ branch, stderr: del.stderr }, 'safe branch delete failed; left in place');
+      return del.code === 0;
+    };
     let issueBranchesDeleted = 0;
     if (action === 'merge_remove' && merged && values.deleteBranch && d.branchName) {
       const issuePrefix = `${d.branchName}--`;
@@ -776,8 +826,7 @@ export const worktreeCleanupStep: StepDefinition<WorktreeCleanupDetect, Worktree
         'branch',
         '--list',
         '--format=%(refname:lstrip=2)',
-        '--merged',
-        d.branchName,
+        ...(squashCommitSha ? [] : ['--merged', `refs/heads/${d.branchName}`]),
         `${issuePrefix}*`,
       ]);
       const issueBranches =
@@ -788,35 +837,30 @@ export const worktreeCleanupStep: StepDefinition<WorktreeCleanupDetect, Worktree
               .filter(Boolean)
           : [];
       for (const branch of issueBranches) {
-        // -D only for branches the --merged filter just proved contained; -d would refuse
-        // them on the squash path even though their work is in the feature branch.
-        const del = await gitRun(ctx.repoPath, ['branch', squashCommitSha ? '-D' : '-d', branch]);
-        if (del.code === 0) issueBranchesDeleted += 1;
-        else
-          ctx.logger.warn(
-            { branch, stderr: del.stderr },
-            'issue branch not deleted (git refused — its work is not merged); left in place',
-          );
+        if (await deleteBranch(branch)) issueBranchesDeleted += 1;
       }
     }
 
-    // Safe branch delete ONLY after a successful merge (git branch -d refuses an
-    // unmerged branch). remove_only never deletes — the branch stays recoverable.
-    // After a squash the same -d refuses this branch too, so delete it by force there:
-    // containment is proven by construction, the squash commit BEING the merge result.
+    // remove_only never deletes the branch; it is the work's remaining recovery path.
     let branchDeleted = false;
     if (action === 'merge_remove' && values.deleteBranch && d.branchName) {
-      const del = await gitRun(ctx.repoPath, [
-        'branch',
-        squashCommitSha ? '-D' : '-d',
-        d.branchName,
-      ]);
-      if (del.code === 0) branchDeleted = true;
-      else
-        ctx.logger.warn(
-          { branch: d.branchName, stderr: del.stderr },
-          'safe branch delete failed; left in place',
-        );
+      branchDeleted = await deleteBranch(d.branchName);
+    }
+    if (branchLeftovers.length) {
+      ctx.logger.warn({ branches: branchLeftovers }, 'branch leftovers kept after squash');
+      await ctx.db.insert(schema.taskEvents).values({
+        taskId: ctx.taskId,
+        eventType: 'worktree.branch_leftovers',
+        payload: {
+          branches: branchLeftovers,
+          squashCommitSha,
+          squashMergeSha: squashMergeSha ?? null,
+        },
+      });
+      await warnStep(
+        ctx,
+        branchLeftovers.map(({ branch, reason }) => `Kept branch ${branch}: ${reason}.`),
+      );
     }
 
     const parts: string[] = [];
@@ -827,6 +871,10 @@ export const worktreeCleanupStep: StepDefinition<WorktreeCleanupDetect, Worktree
           : `merged ${d.branchName} into ${mergeTarget}`,
       );
     if (squashSkipReason) parts.push(squashSkipReason);
+    if (branchLeftovers.length)
+      parts.push(
+        `kept branch leftovers: ${branchLeftovers.map(({ branch }) => branch).join(', ')}`,
+      );
     parts.push(`removed worktree ${d.worktreePath}`);
     parts.push(
       ...branchOutcomeParts({
@@ -835,6 +883,7 @@ export const worktreeCleanupStep: StepDefinition<WorktreeCleanupDetect, Worktree
         deleteRequested: !!values.deleteBranch,
         branchDeleted,
         issueBranchesDeleted,
+        branchLeftoverReason: branchLeftovers.find(({ branch }) => branch === d.branchName)?.reason,
       }),
     );
 
@@ -845,6 +894,7 @@ export const worktreeCleanupStep: StepDefinition<WorktreeCleanupDetect, Worktree
       merged,
       branchDeleted,
       mode: 'worktree',
+      ...(branchLeftovers.length ? { branchLeftovers } : {}),
       message: parts.join('; '),
     };
   },

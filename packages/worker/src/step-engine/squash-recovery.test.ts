@@ -58,29 +58,40 @@ const template = gitTemplate(async (dir) => {
 });
 
 describe('T316 squash recovery', () => {
-  it('member 2: preserves an unrecorded squash and a subsequent personal commit', async () => {
-    const { dir, data } = await template.copy();
-    await git(dir, 'reset', '--soft', data.before);
-    await git(dir, 'commit', '-m', 'squash made before crash');
-    const squash = await git(dir, 'rev-parse', 'HEAD');
-    await writeFile(path.join(dir, 'personal'), 'personal work\n');
-    await git(dir, 'add', '.');
-    await git(dir, 'commit', '-m', 'personal commit after crash');
-    const head = await git(dir, 'rev-parse', 'HEAD');
-    const reflog = await git(dir, 'reflog', '--format=%H %gs');
-    const skipped = vi.fn();
-    expect(
-      await squashMergeCommit(dir, data.before, 'retry', identity, 'feature', skipped),
-    ).toBeNull();
-    expect(skipped).toHaveBeenCalledWith(expect.stringContaining('Squash skipped'));
-    expect(await git(dir, 'rev-parse', 'HEAD')).toBe(head);
-    expect(await git(dir, 'rev-parse', 'HEAD^')).toBe(squash);
-    expect(await git(dir, 'rev-parse', 'HEAD^^')).toBe(data.before);
-    expect(await git(dir, 'show', 'HEAD:feature')).toBe('feature');
-    expect(await git(dir, 'show', 'HEAD:personal')).toBe('personal work');
-    expect(await git(dir, 'status', '--porcelain')).toBe('');
-    expect(await git(dir, 'reflog', '--format=%H %gs')).toBe(reflog);
-  });
+  it.each([false, true])(
+    'member 2: preserves a squash and subsequent personal commit (recorded=%s)',
+    async (recorded) => {
+      const { dir, data } = await template.copy();
+      await git(dir, 'reset', '--soft', data.before);
+      await git(dir, 'commit', '-m', 'squash made before crash');
+      const squash = await git(dir, 'rev-parse', 'HEAD');
+      await writeFile(path.join(dir, 'personal'), 'personal work\n');
+      await git(dir, 'add', '.');
+      await git(dir, 'commit', '-m', 'personal commit after crash');
+      const head = await git(dir, 'rev-parse', 'HEAD');
+      const reflog = await git(dir, 'reflog', '--format=%H %gs');
+      const skipped = vi.fn();
+      expect(
+        await squashMergeCommit(
+          dir,
+          data.before,
+          'retry',
+          identity,
+          'feature',
+          skipped,
+          recorded ? data.merge : undefined,
+        ),
+      ).toBeNull();
+      expect(skipped).toHaveBeenCalledWith(expect.stringContaining('Squash skipped'));
+      expect(await git(dir, 'rev-parse', 'HEAD')).toBe(head);
+      expect(await git(dir, 'rev-parse', 'HEAD^')).toBe(squash);
+      expect(await git(dir, 'rev-parse', 'HEAD^^')).toBe(data.before);
+      expect(await git(dir, 'show', 'HEAD:feature')).toBe('feature');
+      expect(await git(dir, 'show', 'HEAD:personal')).toBe('personal work');
+      expect(await git(dir, 'status', '--porcelain')).toBe('');
+      expect(await git(dir, 'reflog', '--format=%H %gs')).toBe(reflog);
+    },
+  );
 
   it.each(['reset', 'commit'])(
     'member 3: recovers a crash after %s without ORIG_HEAD using the recorded merge',
@@ -142,6 +153,69 @@ describe('T316 squash recovery', () => {
       if (point === 'commit') expect(recovered).toBe(head);
     },
   );
+
+  it.each(['reset', 'commit'])(
+    'member 3 control: rejects a mismatched recorded first parent after %s without moving HEAD',
+    async (point) => {
+      const { dir, data } = await template.copy();
+      // Same merge tree, different base: only the first-parent proof can reject it.
+      const foreignBase = await git(
+        dir,
+        'commit-tree',
+        data.tree,
+        '-p',
+        data.before,
+        '-m',
+        'foreign base',
+      );
+      await git(dir, 'reset', '--soft', foreignBase);
+      if (point === 'commit') await git(dir, 'commit', '--allow-empty', '-m', 'foreign squash');
+      await git(dir, 'update-ref', '-d', 'ORIG_HEAD');
+      const head = await git(dir, 'rev-parse', 'HEAD');
+      const reflog = await git(dir, 'reflog', '--format=%H %gs');
+      await expect(
+        squashMergeCommit(dir, foreignBase, 'unsafe', identity, 'feature', undefined, data.merge),
+      ).rejects.toThrow('merge first parent differs');
+      expect(await git(dir, 'rev-parse', 'HEAD')).toBe(head);
+      expect(await git(dir, 'write-tree')).toBe(data.tree);
+      expect(await git(dir, 'reflog', '--format=%H %gs')).toBe(reflog);
+    },
+  );
+
+  it('member 3 control: skips a stale recorded merge after the feature is remerged', async () => {
+    const { dir, data } = await template.copy();
+    await git(dir, 'switch', 'feature');
+    await writeFile(path.join(dir, 'later'), 'later feature work\n');
+    await git(dir, 'add', '.');
+    await git(dir, 'commit', '-m', 'later feature');
+    await git(dir, 'switch', 'main');
+    await git(dir, 'reset', '--hard', data.before);
+    await git(dir, 'merge', '--no-ff', 'feature', '-m', 'replacement merge');
+    const head = await git(dir, 'rev-parse', 'HEAD');
+    const tree = await git(dir, 'write-tree');
+    const reflog = await git(dir, 'reflog', '--format=%H %gs');
+    const skipped = vi.fn();
+    expect(
+      await squashMergeCommit(dir, data.before, 'unsafe', identity, 'feature', skipped, data.merge),
+    ).toBeNull();
+    expect(skipped).toHaveBeenCalledWith(expect.stringContaining('not the recorded feature merge'));
+    expect(await git(dir, 'rev-parse', 'HEAD')).toBe(head);
+    expect(await git(dir, 'write-tree')).toBe(tree);
+    expect(await git(dir, 'reflog', '--format=%H %gs')).toBe(reflog);
+  });
+
+  it('member 3 control: an unreadable recorded merge names the missing object as the remedy', async () => {
+    const { dir, data } = await template.copy();
+    await git(dir, 'reset', '--soft', data.before);
+    const missing = 'a'.repeat(40);
+    const reflog = await git(dir, 'reflog', '--format=%H %gs');
+    await expect(
+      squashMergeCommit(dir, data.before, 'unsafe', identity, 'feature', undefined, missing),
+    ).rejects.toThrow(`restore the recorded feature merge object ${missing}`);
+    expect(await git(dir, 'rev-parse', 'HEAD')).toBe(data.before);
+    expect(await git(dir, 'write-tree')).toBe(data.tree);
+    expect(await git(dir, 'reflog', '--format=%H %gs')).toBe(reflog);
+  });
 
   it('member 3 control: a legacy reset without ORIG_HEAD has no proof and remains untouched', async () => {
     const { dir, data } = await template.copy();

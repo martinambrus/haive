@@ -140,6 +140,12 @@ describe('T316 member 5 crash window', () => {
     // New invocation has only the durable pre-crash row and the real on-disk Git state.
     const recovered = await run();
     expect(recovered.resolved).toBe(true);
+    // Known limitation filed on the board as T785: replay preserves content once, but
+    // silently keeps unsquashed history, omits merge.landed, and records the wrong undo base.
+    // A T785 fix should change these expectations.
+    expect(fake.rows(schema.taskEvents).filter((row) => row.eventType === 'merge.landed')).toEqual(
+      [],
+    );
     expect(fake.rows(schema.taskSteps)[0]?.mergeResolveState).toMatchObject({
       phase: 'done',
       baseShaBefore: landed,

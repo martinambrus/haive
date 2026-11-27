@@ -117,6 +117,16 @@ left. The following rules keep it that way, each MEASURED on git 2.43 and 2.54:
   top of the merge, a moved base, an empty net diff) it keeps the merge commit and records why
   (`squashSkipReason`, shown by `12-worktree-cleanup`), so a squash never folds in a commit that is
   not the merge's own.
+  Known limitation T785: a crash after the merge lands but before its state save can replay
+  with the landed tip as `baseShaBefore`, silently omit the squash (and push unsquashed history),
+  omit `merge.landed`, and leave the wrong undo base; the replay control pins content exactly once.
+  After a squash, cleanup deletes a feature or DAG issue branch only when its current tip is
+  contained in the recorded merge's second parent, using compare-and-delete against that tip.
+  A moved or unreadable branch, missing recorded evidence, a checkout holder or a refused delete
+  keeps the branch, with structured `branchLeftovers` output, a `worktree.branch_leftovers` event
+  and a step warning. A branch checked out elsewhere is retained; Git has no atomic checkout-and-ref
+  check, so a checkout started after the final holder read can still race deletion. Legacy squash
+  rows without a recorded merge keep their branches. No decision reads message text.
   The pre-push fetch also runs outside a section, into a ref only that pass names
   (`refs/haive/pre-push/<step>/<uuid>`, no `FETCH_HEAD`, no tags); the section then records
   `origin/<base>` from it and counts how far the base is behind, so a pass that lost the claim moves

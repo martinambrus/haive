@@ -1491,24 +1491,24 @@ export async function squashMergeCommit(
     }
   }
   const recoveryMerge = squashMergeSha ?? 'ORIG_HEAD';
-  const origParents = await gitRun(worktreePath, [
+  const recoveryParents = await gitRun(worktreePath, [
     'rev-list',
     '--parents',
     '-n',
     '1',
     recoveryMerge,
   ]);
-  const origCommits = origParents.stdout.trim().split(/\s+/);
+  const recoveryCommits = recoveryParents.stdout.trim().split(/\s+/);
+  // Reset and committed recovery use the first clause; a still-landed recorded merge
+  // uses HEAD below. Merely reading the recorded sha proves neither recovery state.
   const recoveringSquash =
     (headParents.code === 0 &&
       (headCommits[0] === baseShaBefore ||
         (headCommits.length === 2 && headCommits[1] === baseShaBefore)) &&
-      origParents.code === 0 &&
-      origCommits.length === 3 &&
-      origCommits[1] === baseShaBefore) ||
-    (squashMergeSha !== undefined &&
-      ((headParents.code === 0 && headCommits[0] === squashMergeSha) ||
-        (origParents.code === 0 && origCommits[0] === squashMergeSha)));
+      recoveryParents.code === 0 &&
+      recoveryCommits.length === 3 &&
+      recoveryCommits[1] === baseShaBefore) ||
+    (squashMergeSha !== undefined && headParents.code === 0 && headCommits[0] === squashMergeSha);
   if (feature && !recoveringSquash) {
     const contained = await gitRun(worktreePath, [
       'merge-base',
@@ -1541,7 +1541,9 @@ export async function squashMergeCommit(
     onSkipped?.(note);
     return null;
   };
-  const restoreMerge = `restore ORIG_HEAD to the feature merge${squashMergeSha ? ` ${squashMergeSha}` : ''}`;
+  const restoreMerge = squashMergeSha
+    ? `restore the recorded feature merge object ${squashMergeSha}`
+    : 'restore ORIG_HEAD to the feature merge';
   const candidate = resetAlready || committedAlready ? recoveryMerge : 'HEAD';
   const parents = await gitRun(worktreePath, ['rev-list', '--parents', '-n', '1', candidate]);
   const commits = parents.stdout.trim().split(/\s+/);

@@ -38,6 +38,7 @@ import {
 } from '@haive/shared/project-state';
 import { branchOutcomeParts, worktreeCleanupStep } from './12-worktree-cleanup.js';
 import * as gitPush from '../../../repo/git-push.js';
+import * as gitExec from '../../../repo/git-exec.js';
 import {
   haltFailed,
   loadOutstandingMergeGuidance,
@@ -3732,6 +3733,162 @@ describe('12 merge clarification', () => {
     ]);
     expect(await loadOutstandingMergeGuidance(reAsked, 't1')).toBe('');
   });
+});
+
+it('T316 keeps feature and DAG branches advanced after the recorded squash', async () => {
+  const { parent, wt } = await setupWorktree();
+  try {
+    const h = makeDb();
+    const detected = det(wt);
+    const ctx = mkCtx(parent, h.db);
+    const values = { action: 'merge_remove', deleteBranch: true };
+    const outcome = await resolveMergePhase(
+      h.db as never,
+      step,
+      mkCurrent(detected, values),
+      ctx,
+      mkParams(h.db),
+    );
+    expect(outcome.resolved).toBe(true);
+    expect(h.getState()?.squashCommitSha).toBeTruthy();
+    const main = (await git(parent, ['rev-parse', 'main'])).trim();
+    await writeFile(path.join(wt, 'personal.txt'), 'after the squash\n');
+    await git(wt, ['add', 'personal.txt']);
+    await git(wt, ['commit', '-m', 'personal work after squash']);
+    const personal = (await git(wt, ['rev-parse', 'HEAD'])).trim();
+    // This DAG branch is contained in today's feature, but not in the recorded merge.
+    await git(parent, ['branch', 'feature/x--later', personal]);
+    const applied = await worktreeCleanupStep.apply(ctx, applyArgs(detected, values));
+    expect(applied.removed).toBe(true);
+    expect.soft(applied.branchDeleted).toBe(false);
+    expect.soft(await gitCode(parent, ['show-ref', '--verify', 'refs/heads/feature/x'])).toBe(0);
+    expect.soft(await gitCode(parent, ['reflog', 'exists', 'refs/heads/feature/x'])).toBe(0);
+    expect
+      .soft(await gitCode(parent, ['show-ref', '--verify', 'refs/heads/feature/x--later']))
+      .toBe(0);
+    // Includes every surviving ref and reflog: red means the personal commit is unreachable.
+    expect.soft(await git(parent, ['rev-list', '--all', '--reflog'])).toContain(personal);
+    expect(await git(parent, ['rev-parse', 'main'])).toBe(`${main}\n`);
+    expect(applied).toMatchObject({
+      branchLeftovers: [
+        { branch: 'feature/x--later', reason: 'not-contained-in-squash' },
+        { branch: 'feature/x', reason: 'not-contained-in-squash' },
+      ],
+    });
+    expect(h.events).toContainEqual(
+      expect.objectContaining({
+        eventType: 'worktree.branch_leftovers',
+        payload: expect.objectContaining({
+          branches: expect.arrayContaining([
+            { branch: 'feature/x', reason: 'not-contained-in-squash' },
+          ]),
+        }),
+      }),
+    );
+    expect(h.getWarning()).toContain('feature/x');
+  } finally {
+    await rm(parent, { recursive: true, force: true });
+  }
+});
+
+it.each([
+  'advanced-at-delete',
+  'missing-evidence',
+  'checked-out',
+  'unreadable-tip',
+  'missing-object',
+] as const)('T316 retains a squashed branch on %s', async (kind) => {
+  const { parent, wt } = await setupWorktree();
+  let spy: ReturnType<typeof vi.spyOn> | undefined;
+  try {
+    const h = makeDb();
+    const detected = det(wt);
+    const ctx = mkCtx(parent, h.db);
+    const values = { action: 'merge_remove', deleteBranch: true };
+    expect(
+      (
+        await resolveMergePhase(
+          h.db as never,
+          step,
+          mkCurrent(detected, values),
+          ctx,
+          mkParams(h.db),
+        )
+      ).resolved,
+    ).toBe(true);
+    const main = await git(parent, ['rev-parse', 'main']);
+    const originalTip = (await git(parent, ['rev-parse', 'feature/x'])).trim();
+    let expectedTip = originalTip;
+    let reason: string;
+    if (kind === 'missing-evidence' || kind === 'missing-object') {
+      await h.db
+        .update()
+        .set({
+          mergeResolveState: {
+            ...h.getState(),
+            squashMergeSha: kind === 'missing-object' ? 'a'.repeat(40) : undefined,
+          },
+        })
+        .where(null);
+      reason = 'unreadable-squash';
+    } else if (kind === 'checked-out') {
+      await git(parent, [
+        'worktree',
+        'add',
+        '--force',
+        path.join(parent, '.haive/worktrees/holder'),
+        'feature/x',
+      ]);
+      reason = 'checked-out';
+    } else {
+      const real = gitExec.gitRun;
+      if (kind === 'advanced-at-delete') {
+        expectedTip = (
+          await git(parent, [
+            'commit-tree',
+            'feature/x^{tree}',
+            '-p',
+            originalTip,
+            '-m',
+            'concurrent personal commit',
+          ])
+        ).trim();
+        reason = 'delete-refused';
+      } else reason = 'unreadable-branch';
+      spy = vi.spyOn(gitExec, 'gitRun').mockImplementation(async (dir, argv, ...rest) => {
+        if (
+          kind === 'advanced-at-delete' &&
+          argv[0] === 'update-ref' &&
+          argv[1] === '-d' &&
+          argv[2] === 'refs/heads/feature/x'
+        ) {
+          // Deterministic interleaving: move after proof, immediately before compare-and-delete.
+          await git(parent, ['update-ref', 'refs/heads/feature/x', expectedTip]);
+        }
+        if (
+          kind === 'unreadable-tip' &&
+          argv[0] === 'rev-parse' &&
+          argv.at(-1) === 'refs/heads/feature/x'
+        ) {
+          return { code: 128, stdout: '', stderr: 'unreadable' };
+        }
+        return real(dir, argv, ...rest);
+      });
+    }
+    const applied = await worktreeCleanupStep.apply(ctx, applyArgs(detected, values));
+    expect(applied).toMatchObject({
+      removed: true,
+      branchDeleted: false,
+      branchLeftovers: [{ branch: 'feature/x', reason }],
+    });
+    expect((await git(parent, ['rev-parse', 'feature/x'])).trim()).toBe(expectedTip);
+    expect(await gitCode(parent, ['reflog', 'exists', 'refs/heads/feature/x'])).toBe(0);
+    expect(await git(parent, ['rev-list', '--all', '--reflog'])).toContain(expectedTip);
+    expect(await git(parent, ['rev-parse', 'main'])).toBe(main);
+  } finally {
+    spy?.mockRestore();
+    await rm(parent, { recursive: true, force: true });
+  }
 });
 
 describe('12 squash merge (real git)', () => {
