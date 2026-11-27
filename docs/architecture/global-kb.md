@@ -410,6 +410,40 @@ source task and its user, refuses an entry carrying an enforcement approval, and
 active and archived articles alone. A disabled store or another task type does nothing; store
 failures keep the existing best-effort teardown behaviour.
 
+Both callers use the same settlement fence as resource teardown. After reading settings,
+the helper takes the task row FOR NO KEY UPDATE through `withTaskSettlementTransaction`,
+with the 60 s LOCAL transaction timeout, and rechecks its type, user and exact ending status
+(`failed` or `cancelled`). A Retry that committed first leaves the entry alone; a Retry arriving
+during the store write waits before publishing revival. The store call receives the section's
+abort signal, so expiry destroys its pool, and the callback checks the signal immediately before
+the mutation. The store call allows 3 s for connect and 10 s total for connect, schema ensure and
+mutation (`KB_TASK_END_STORE_DEADLINE_MS`): no embedding runs here, so a dead external store
+should release the task row for Retry well before the 60 s transaction backstop. Cancel's fence
+is protective; cancelled tasks cannot be retried. No step/run row, repository lock or CLI auth
+lock is taken while the task is held.
+The global store is a separate database: a mutation already committed there cannot be rolled
+back if the main transaction subsequently fails or expires. As with external resource removal,
+the fence cannot retract an operation already issued. The existing catch still warns and lets
+teardown finish. `global-kb-task-end-db.test.ts`, registered in the CI GATED list and run locally
+with `pnpm test:gated worker/test/global-kb-task-end-db.test.ts`, exercises both Retry orders on
+Postgres and a short injected transaction expiry: the task lock is released, Retry commits,
+and a late store callback cannot mutate the entry. Entry ownership/status filters, best-effort
+failures and sweep recovery remain unit controls.
+
+An interrupted reconcile (store error, deadline or transaction abort) can leave a skeleton or
+enriching entry behind after the teardown's finish marker. The existing five-minute global-KB
+reconcile sweep now scans those entries, closes that store connection, then selects their
+`kb_author` tasks still failed or cancelled and calls the same fenced reconcile. It runs before
+vector classification/backfill, so an unrelated repair failure cannot starve it. The entry is
+the durable record of owed work, independent of finish events or message text; a failed attempt
+leaves it for the next tick. A Retry between selection and repair is rechecked under the task
+lock and keeps its entry. Missing, live or completed tasks and another install's task IDs are
+left alone. A disabled/unreachable store delays repair until it is enabled/reachable again.
+
+Rollback reverts the helper, sweep addition and their controls; keep the pre-existing reconcile
+scheduler for vector repairs. No schema or data rollback is needed. An entry
+already marked failed or deleted in the separate store is not restored by reverting code.
+
 ## Facets
 
 An entry's facets RESTRICT: each dimension it names must overlap the project's values, and a

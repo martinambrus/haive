@@ -1,6 +1,11 @@
 import { and, desc, eq, inArray, isNull, ne, sql } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
 import {
+  setTaskSettlementTimeout,
+  taskWriteTarget,
+  withTaskSettlementTransaction,
+} from '@haive/shared';
+import {
   globalKbEntries,
   globalKbTopicKey,
   resolveGlobalKbSettings,
@@ -735,6 +740,11 @@ export async function clearTaskPromotedDrafts(
   }
 }
 
+// No embedding runs here: 3 s allows remote startup, 10 s covers connect/ensure/write while
+// letting Retry acquire the task row well before the 60 s settlement backstop.
+const KB_TASK_END_STORE_DEADLINE_MS = 10_000;
+const KB_TASK_END_CONNECT_TIMEOUT_SECONDS = 3;
+
 /** When a kb_author enrich task ends without producing a real article, reconcile its
  *  linked global KB entry: a FAILED task marks a `skeleton`/`enriching` entry `failed`
  *  (kept so the user can retry from the KB view); a CANCELLED task deletes those
@@ -756,32 +766,58 @@ export async function reconcileKbAuthorEntryOnTaskEnd(
     if (task?.type !== 'kb_author') return;
     const settings = await resolveGlobalKbSettings();
     if (!settings.enabled) return;
-    await withGlobalKb(db, async ({ db: gdb }) => {
-      const where = and(
-        eq(globalKbEntries.sourceTaskId, taskId),
-        eq(globalKbEntries.userId, task.userId),
-        isNull(globalKbEntries.enforcedHash),
-        inArray(
-          globalKbEntries.status,
-          outcome === 'cancelled' ? ['skeleton', 'enriching', 'failed'] : ['skeleton', 'enriching'],
-        ),
+    await withTaskSettlementTransaction(db, async (tx, signal) => {
+      await setTaskSettlementTimeout(tx);
+      const [settled] = await tx
+        .select({ type: schema.tasks.type, userId: schema.tasks.userId })
+        .from(schema.tasks)
+        .where(and(taskWriteTarget(taskId, { settled: true }), eq(schema.tasks.status, outcome)))
+        .for('no key update');
+      if (settled?.type !== 'kb_author') return;
+      // Retry writes this row last. Keep it held through the separate store's mutation,
+      // without acquiring step/run rows, repository locks or CLI auth locks.
+      await withGlobalKb(
+        db,
+        async ({ db: gdb }) => {
+          const where = and(
+            eq(globalKbEntries.sourceTaskId, taskId),
+            eq(globalKbEntries.userId, settled.userId),
+            isNull(globalKbEntries.enforcedHash),
+            inArray(
+              globalKbEntries.status,
+              outcome === 'cancelled'
+                ? ['skeleton', 'enriching', 'failed']
+                : ['skeleton', 'enriching'],
+            ),
+          );
+          signal.throwIfAborted();
+          if (outcome === 'cancelled') {
+            const removed = await gdb
+              .delete(globalKbEntries)
+              .where(where)
+              .returning({ id: globalKbEntries.id });
+            if (removed.length)
+              log.info(
+                { taskId, removed: removed.length },
+                'kb_author entry removed on task cancel',
+              );
+          } else {
+            const updated = await gdb
+              .update(globalKbEntries)
+              .set({ status: 'failed', updatedAt: new Date() })
+              .where(where)
+              .returning({ id: globalKbEntries.id });
+            if (updated.length)
+              log.info({ taskId, updated: updated.length }, 'kb_author entry marked failed');
+          }
+        },
+        {
+          settings,
+          signal,
+          deadlineMs: KB_TASK_END_STORE_DEADLINE_MS,
+          connectTimeoutSeconds: KB_TASK_END_CONNECT_TIMEOUT_SECONDS,
+        },
       );
-      if (outcome === 'cancelled') {
-        const removed = await gdb
-          .delete(globalKbEntries)
-          .where(where)
-          .returning({ id: globalKbEntries.id });
-        if (removed.length)
-          log.info({ taskId, removed: removed.length }, 'kb_author entry removed on task cancel');
-      } else {
-        const updated = await gdb
-          .update(globalKbEntries)
-          .set({ status: 'failed', updatedAt: new Date() })
-          .where(where)
-          .returning({ id: globalKbEntries.id });
-        if (updated.length)
-          log.info({ taskId, updated: updated.length }, 'kb_author entry marked failed');
-      }
     });
   } catch (err) {
     log.warn({ err, taskId, outcome }, 'kb_author entry reconcile on task end failed (skipped)');
