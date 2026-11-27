@@ -259,7 +259,11 @@ func (l *stackLock) heartbeat() {
 		case <-l.stop:
 			return
 		case <-ticks:
-			if l.beat() == "lost" {
+			result := l.beat()
+			if result != "ok" && l.b.leaseFailed != nil {
+				l.b.leaseFailed()
+			}
+			if result == "lost" {
 				return
 			}
 		}

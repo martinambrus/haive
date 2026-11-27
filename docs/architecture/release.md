@@ -535,8 +535,10 @@ record stays and that next start waits out the stale window before it breaks it.
 way when the deadline passes is not interrupted; the next fence check refuses. The updater's clock is `performance.now()`, the
 bridge's Go's monotonic `time.Now()`, never the record's `startedAt`; a clock that counts a suspended machine only expires early, but the bound cannot see a pause its own clock does not count (a
 paused VM).
-The bridge's heartbeat stops for good at expiry or loss; the operation it guards continues without it, as after a lapse. A remaining race (T765 item 5): the heartbeat reads its own
-record and then overwrites it, so a contender that broke the lock and created its own in between is overwritten; closing it
+The bridge cancels its operation on the first failed heartbeat (or proven loss), terminating its supervised
+command before waiting for the stale deadline. Renewal retries continue during cancellation and command Wait;
+only expiry or loss stops them for good. A frozen bridge still cannot observe its own missed beats.
+A remaining race (T765 item 5): the heartbeat reads its own record and then overwrites it, so a contender that broke the lock and created its own in between is overwritten; closing it
 needs a descriptor-held compare before the truncating open, in both implementations. A result already decided (done or rolled back) is not replaced when the beat notices a loss afterwards; a
 loss during the pruning after a commit stops the pruning and keeps `done` and exit 0. Release removes the file only when it carries the holder's token, is shared by
 every
@@ -601,10 +603,12 @@ for 30 minutes) or a freeze between the proof and the action it guards; between 
 displaced fresh lock the name is briefly
 absent, so the displaced holder's next beat creates it again and a third party creating it first keeps it. A
 holder whose beat cannot be written (a full disk, say) stops refreshing the lock, which then lapses after 60 s;
-the extension's container-identity check still covers that case. A bridge process killed in the middle of Start
-or Stop (the Desktop window closes) can leave its Compose child running while both of its leases lapse, this
-one and the [window lock](#docker-desktop-extension); killed in the middle of Install, it can leave the
-installer running while the window lock lapses. A container started by an updater killed outright (SIGKILL, OOM)
+the bridge cancels a supervised command on the first failed beat. A killed bridge's host command is now
+terminated by OS supervision (see [command supervision](#host-command-supervision)); work the Docker daemon
+already accepted can still complete after the client dies. Killing the client does not undo a partially
+started stack, and an interrupted operation does not authorize automatic cleanup or a retry of an ambiguous
+upgrade: inspect status, logs and the updater journal and retain the existing manual recovery refusals.
+A container started by an updater killed outright (SIGKILL, OOM)
 outlives it; the next updater's child check refuses while it runs, but only for containers labelled by this
 release's updater or later (an older updater's children carry no labels); a child started inside the
 proof-to-action window above runs next to a new holder already past its own check, and is caught only by the
@@ -856,8 +860,8 @@ install stack lock's record, with the same beat, stale rule, break and release (
 contract, and the updater never sees this one. Install needs it because the install directory, and so
 the stack lock, does not exist yet; Start and Stop take the stack lock inside it. A live holder refuses
 a second window with a message that says the lock clears itself, once the contender has seen a beat
-(within about 5 s). A hard termination leaves the file, and the next operation clears it after 60 s
-without a change (up to two minutes when the stack lock was left too); a tomb that cannot be removed stays
+(within about 5 s). A hard termination tears down the supervised command and leaves the file; the next
+operation clears it after 60 s without a change (up to two minutes when the stack lock was left too); a tomb that cannot be removed stays
 beside it, harmless. Normal completion and handled signals release it. Earlier bridges took this name as
 a folder, which has no beat and never lapses: the bridge refuses a folder at once, naming it, and never
 deletes it or waits on it, since a live older operation cannot be told from a dead one. Its message says
@@ -865,11 +869,55 @@ to check this install's containers and delete that folder by hand. An older brid
 file refuses the same way (its `mkdir` finds the name taken), so old and new bridges still exclude each
 other. If an older bridge makes its folder at that name in the instant a stale file is being broken, the
 break renames the folder back; a file created there first keeps the name.
-Keep the tab open during long operations. Processes have a
-30-minute deadline; a timeout or close can leave a completed install or partially
-started stack, so refresh status and inspect logs before retrying. Cancellation kills
-the direct child only; installer grandchildren can outlive it even after lock release. No automatic
-reinstall or deletion is attempted.
+Keep the tab open during long operations. Processes have a 30-minute deadline; a timeout or close can
+leave a completed install or partially started stack, so refresh status and inspect logs before retrying.
+No automatic reinstall or deletion is attempted.
+
+### Host command supervision
+
+Every host command, including Docker queries, Compose and the embedded installer, runs through a private
+`--haive-command-supervisor` mode of the same bridge binary. The mode receives only the command runner's
+filtered environment and preserves working directory, output capture/private logging and exit status.
+It does not decode Desktop requests or invoke any extra shell. The parent holds the only write end of an
+anonymous pipe; the supervisor never passes its read end to the command. Before launching anything, the
+supervisor requires a one-byte admission from its parent. EOF before admission exits without a command.
+
+- **Linux:** the supervised command owns a process group and has `SysProcAttr.Pdeathsig = SIGKILL`.
+  Its creating goroutine holds its OS thread until Wait finishes, because the signal follows the creating
+  thread's lifetime. The supervisor is a child subreaper so it can reap orphaned group members before
+  declaring teardown complete, even when PID 1 does not reap them. It also watches parent-pipe EOF and
+  kills the whole command group on bridge death or cancellation; this covers the Compose plugin and installer descendants that a direct
+  child's parent-death signal alone would miss.
+- **macOS:** the same pipe watcher survives abrupt bridge death, kills the command's process group and
+  waits for the direct child. It needs no Linux-only parent-death signal. On both Unix targets normal
+  launcher exit also kills leftover group members and waits for the group to disappear before supervisor
+  exit. Commands that deliberately detach into another process group are outside this mechanism.
+- **Windows (amd64/arm64):** the parent creates an unnamed, non-inheritable Job Object with
+  `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`, starts the waiting supervisor, assigns it to the job and only then
+  sends admission. Descendants inherit job membership at creation; no breakaway flag is enabled. There
+  is no command execution window before assignment. Closing the parent or terminating its job kills
+  the supervisor and all members. Cancellation calls `TerminateJobObject`; the bridge queries job
+  accounting until no active processes remain, then finishes output draining. An assignment failure
+  (including an incompatible enclosing job) refuses the command without running it. This uses stdlib
+  `syscall` only; no dependency or host tool is added.
+
+Both window and install leases keep beating until supervised command Wait and output draining finish,
+including after context cancellation. Release remains deferred until the operation returns; cancellation
+alone never releases a lease. The first failed heartbeat requests command cancellation while renewal
+retries continue. A hard-killed bridge cannot renew, but its command teardown does not wait for the 60 s
+stale-lease window. A frozen process/VM, an unschedulable kernel task or failed filesystem renewal still
+cannot offer a hard wall-clock guarantee; the existing stale protocol and manual recovery limits remain.
+Daemon-side work already accepted by Docker is independent of host-process supervision.
+
+`supervision_linux_test.go` uses only real sleeping test processes: kill the bridge-side parent, cancel a
+child plus grandchild, and block output draining after cancellation while proving both leases still beat
+and are released after completion. Each control failed on `origin/main` before this change and passes
+with supervision. Additional controls cover missing admission, pre-cancellation, exit status, environment,
+working directory and failed-heartbeat cancellation with continued renewal. The macOS group/pipe and
+Windows ABI/job/admission controls are compiled with `go test -c` and vetted for amd64 and arm64 in the
+pinned Go image; they have **not run natively** here. Native parent-death/group/Job behavior, enclosing
+Windows jobs and real Desktop/Compose acceptance remain owner-session checks; no real stack or volume
+was touched for these controls.
 
 ### Build and validation
 
@@ -995,7 +1043,9 @@ live first-start check below on the owner's native Desktop version.
    disappears while the directory and volumes remain. Reinstalling the extension
    must reattach to this same install rather than reinstall it.
 
-Rollback of this code is a git revert, with no database migration. A leftover
+Rollback of this code is a git revert, with no database migration. Reverting command supervision restores
+its previous orphan-child risk: finish or terminate active host operations before replacing the bridge,
+and inspect status/logs and the updater journal before retrying an interrupted operation. A leftover
 `.haive-stack-lock` in an install directory is inert for the previous code; delete it
 only when no updater container and no extension operation is running. Port values
 selected by Start remain in the install's `.env` after rollback; retain those valid

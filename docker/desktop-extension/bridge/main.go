@@ -65,15 +65,16 @@ type state struct {
 type runner func(context.Context, string, []string, string, io.Writer) (string, error)
 
 type bridge struct {
-	dir       string
-	os        string
-	run       runner
-	health    func(string) bool
-	portInUse func(int) bool
-	rename    func(string, string) error
-	sleep     func(time.Duration)
-	readEnv   func(string) ([]byte, error)
-	lockCfg   lockConfig
+	dir         string
+	os          string
+	run         runner
+	health      func(string) bool
+	portInUse   func(int) bool
+	rename      func(string, string) error
+	sleep       func(time.Duration)
+	readEnv     func(string) ([]byte, error)
+	lockCfg     lockConfig
+	leaseFailed context.CancelFunc
 }
 
 func validateRequest(r request) error {
@@ -714,6 +715,12 @@ func (b bridge) handle(ctx context.Context, r request) (s state, err error) {
 	if r.Action == "status" {
 		return b.inspect(ctx)
 	}
+	// A failed lease renewal cancels supervised commands while there is still
+	// time before stale takeover. Heartbeats themselves outlive cancellation and
+	// stop only when the operation (including command Wait) releases the lease.
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	b.leaseFailed = cancel
 	// Cross-process exclusion also protects against two open Desktop windows.
 	releaseWindow, err := b.takeWindowLock(ctx)
 	if err != nil {
@@ -793,7 +800,7 @@ func (b bridge) handle(ctx context.Context, r request) (s state, err error) {
 }
 
 func runCommand(ctx context.Context, exe string, args []string, dir string, log io.Writer) (string, error) {
-	cmd := exec.CommandContext(ctx, exe, args...)
+	cmd := exec.Command(exe, args...)
 	cmd.Dir = dir
 	// Ambient Haive settings must not override the install's pinned .env, and a
 	// registry token must never reach an unrelated child. Keep Docker context/PATH.
@@ -806,12 +813,12 @@ func runCommand(ctx context.Context, exe string, args []string, dir string, log 
 	}
 	if log != nil {
 		cmd.Stdout, cmd.Stderr = log, log
-		return "", cmd.Run()
+		return "", runSupervised(ctx, cmd)
 	}
 	var out strings.Builder
 	cmd.Stdout = &out
 	// Errors are reported by operation, never with raw third-party output or .env.
-	err := cmd.Run()
+	err := runSupervised(ctx, cmd)
 	return out.String(), err
 }
 

@@ -82,7 +82,8 @@ database, server) against the file's own guard; the admin-URL suites with no dat
 `unrestrictedDatabases` with a reason. Each row runs vitest with `--maxWorkers=2`.
 
 The **desktop-bridge-go** job runs `gofmt -l`, `go vet` for linux, windows and darwin on amd64 and arm64, and
-`go test -p 1 ./...` for `docker/desktop-extension/bridge/`, in the golang image the extension's Dockerfile pins
+`go test -c` for each target plus native Linux `go test -p 1 ./...` for `docker/desktop-extension/bridge/`,
+in the golang image the extension's Dockerfile pins
 (`scripts/test/ci-desktop-bridge.test.mjs` keeps the two equal). It always starts and reports; its checks run only
 when the bridge, its embedded installers, the Dockerfile or the job's own files changed against the base commit.
 
