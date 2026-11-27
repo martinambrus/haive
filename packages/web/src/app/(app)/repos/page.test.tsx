@@ -100,6 +100,70 @@ describe('repository upload retry', () => {
   });
 });
 
+describe('repository retry confirmation ownership', () => {
+  async function pendingRetry(nextRepo = 1) {
+    h.get.mockResolvedValue({ repositories: [repo, { ...repo, id: 'repo-2', name: 'Repo B' }] });
+    let finish!: () => void;
+    h.post.mockImplementationOnce(() => new Promise<void>((resolve) => (finish = resolve)));
+    const view = await mounted();
+    await fire.click(buttons(view.tree(), /^retry$/i)[0]!);
+    view.draw();
+    fire.click(buttons(view.tree(), /^continue$/i)[0]!);
+    view.draw();
+    expect(buttons(view.tree(), /^starting…$/i)[0]!.props.disabled).toBe(true);
+    fire.click(buttons(view.tree(), /^cancel$/i)[0]!);
+    view.draw();
+    await fire.click(buttons(view.tree(), /^retry$/i)[nextRepo]!);
+    view.draw();
+    return { view, finish };
+  }
+
+  it('keeps B enabled and open when dismissed A finishes', async () => {
+    const { view, finish } = await pendingRetry();
+    expect(buttons(view.tree(), /^continue$/i)).toHaveLength(1);
+    expect(buttons(view.tree(), /^continue$/i)[0]!.props.disabled).toBe(false);
+    finish();
+    await vi.advanceTimersByTimeAsync(0);
+    view.draw();
+    expect(buttons(view.tree(), /^continue$/i)).toHaveLength(1);
+    expect(h.post).toHaveBeenCalledTimes(1);
+    fire.click(buttons(view.tree(), /^continue$/i)[0]!);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(h.post).toHaveBeenLastCalledWith('/repos/repo-2/refresh-tree', {});
+  });
+
+  it.each([0, 1])(
+    'does not close a new unsent dialog for repo index %s when A finishes',
+    async (nextRepo) => {
+      const { view, finish } = await pendingRetry(nextRepo);
+      finish();
+      await vi.advanceTimersByTimeAsync(0);
+      view.draw();
+      expect(buttons(view.tree(), /^cancel$/i)).toHaveLength(1);
+      expect(h.post).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  it('does not clear B sending state or close B when A finishes', async () => {
+    const { view, finish } = await pendingRetry();
+    let finishB!: () => void;
+    h.post.mockImplementationOnce(() => new Promise<void>((resolve) => (finishB = resolve)));
+    expect(buttons(view.tree(), /^continue$/i)).toHaveLength(1);
+    fire.click(buttons(view.tree(), /^continue$/i)[0]!);
+    view.draw();
+    finish();
+    await vi.advanceTimersByTimeAsync(0);
+    view.draw();
+    expect(buttons(view.tree(), /^starting…$/i)[0]!.props.disabled).toBe(true);
+    expect(buttons(view.tree(), /^cancel$/i)).toHaveLength(1);
+    finishB();
+    await vi.advanceTimersByTimeAsync(0);
+    view.draw();
+    expect(buttons(view.tree(), /^cancel$/i)).toHaveLength(0);
+    expect(h.post).toHaveBeenCalledTimes(2);
+  });
+});
+
 describe('repair-needed repository errors', () => {
   it('hides Retry and offers recovery by code, regardless of the message', async () => {
     repo.source = 'git_https';

@@ -147,6 +147,11 @@ interface ScopeTreeState {
   savedExclusions: string[];
 }
 
+interface RetryRequest {
+  id: string;
+  recovery: boolean;
+}
+
 export default function ReposPage() {
   usePageTitle('Repositories');
   const [repos, setRepos] = useState<Repository[] | null>(null);
@@ -154,8 +159,9 @@ export default function ReposPage() {
   const [expandedRepoId, setExpandedRepoId] = useState<string | null>(null);
   const [scope, setScope] = useState<ScopeTreeState | null>(null);
   const [scopeLoading, setScopeLoading] = useState(false);
-  const [retryRequest, setRetryRequest] = useState<{ id: string; recovery: boolean } | null>(null);
-  const [retrySending, setRetrySending] = useState(false);
+  const [retryRequest, setRetryRequest] = useState<RetryRequest | null>(null);
+  const [retrySending, setRetrySending] = useState<RetryRequest | null>(null);
+  const sendingRetry = retryRequest !== null && retrySending === retryRequest;
   const [scopeError, setScopeError] = useState<string | null>(null);
 
   async function reload() {
@@ -198,12 +204,13 @@ export default function ReposPage() {
   }
 
   async function confirmRetry() {
-    if (!retryRequest || retrySending) return;
-    const { id, recovery } = retryRequest;
-    setRetrySending(true);
-    await submitRetry(id, recovery);
-    setRetrySending(false);
-    setRetryRequest(null);
+    if (!retryRequest || sendingRetry) return;
+    const request = retryRequest;
+    setRetrySending(request);
+    await submitRetry(request.id, request.recovery);
+    // Dismissal may have opened or confirmed another dialog while this request ran.
+    setRetrySending((current) => (current === request ? null : current));
+    setRetryRequest((current) => (current === request ? null : current));
   }
 
   async function submitRetry(id: string, recovery: boolean) {
@@ -283,8 +290,8 @@ export default function ReposPage() {
             <Button variant="secondary" onClick={() => setRetryRequest(null)}>
               Cancel
             </Button>
-            <Button disabled={retrySending} onClick={() => void confirmRetry()}>
-              {retrySending ? 'Starting…' : 'Continue'}
+            <Button disabled={sendingRetry} onClick={() => void confirmRetry()}>
+              {sendingRetry ? 'Starting…' : 'Continue'}
             </Button>
           </div>
         </div>

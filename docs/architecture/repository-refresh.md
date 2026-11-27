@@ -375,3 +375,11 @@ Retry preparation and Rebuild checkout use the shared Escape-dismissable Dialog 
 It warns that replacement stops running terminal, Editor and runtime commands and retains
 Editor unsaved buffers for review. Check repair remains an in-place check. This warning must
 ship before the worker stop barrier; it changes no session lifecycle on its own.
+
+Each confirmation owns its sending state by request object identity. Dismissing a slow
+request and opening another warning (including one for the same repository) leaves the new
+warning enabled; the earlier completion clears only its own dialog and sending state.
+The shared Dialog panel caps its height at `calc(100dvh - 2rem)` and scrolls vertically so
+Continue remains reachable in a short viewport. Existing callers retain their own inner
+scroll regions and height limits; caller classes can override the shared defaults through
+`tailwind-merge`, including the fixed-position task history panel's responsive height cap.
