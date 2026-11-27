@@ -21,6 +21,7 @@ import { listTaskAuthVolumes } from '../sandbox/auth-volume-reaper.js';
 import { defaultDockerRunner, type DockerRunner } from '../sandbox/docker-runner.js';
 import { GROK_CREDENTIAL_FILE } from './credential-files.js';
 import { readVolumeFile, writeVolumeFile } from './token-source.js';
+import { GROK_REFRESH_FENCE_FILE, grokRefreshFingerprint } from './grok-refresh-fence.js';
 
 const log = logger.child({ module: 'credential-refresh' });
 
@@ -164,8 +165,6 @@ export async function refreshExpiringCliCredentials(
   })) as GrokProviderRow[];
   if (rows.length === 0) return;
 
-  const taskVolumes = await listTaskAuthVolumes();
-
   // One entry per distinct user volume; the rows sharing it all get the same verdict.
   const byVolume = new Map<string, GrokProviderRow[]>();
   for (const row of rows) {
@@ -185,16 +184,19 @@ export async function refreshExpiringCliCredentials(
   for (const [vol, sharing] of byVolume) {
     let release: CliAuthLock | null = null;
     try {
-      if (await taskVolumesHoldProvider(taskVolumes, GROK, vol, db, runner)) {
-        log.debug({ vol }, 'credential refresh yielded: live work may rotate a copy');
-        continue;
-      }
       release = await tryCliAuthLock(db, cliAuthScope(sharing[0]!));
       if (!release) {
         log.debug(
           { providerId: sharing[0]!.id },
           'credential refresh skipped: authentication is busy',
         );
+        continue;
+      }
+      // Admission takes this same lock before adopting or creating a copy. List and
+      // read live state AFTER taking it: an earlier snapshot can miss that admission.
+      const taskVolumes = await listTaskAuthVolumes();
+      if (await taskVolumesHoldProvider(taskVolumes, GROK, vol, db, runner)) {
+        log.debug({ vol }, 'credential refresh yielded: live work may rotate a copy');
         continue;
       }
       await refreshGrokVolume(db, vol, sharing, runner, release.assertHeld);
@@ -220,6 +222,17 @@ async function refreshGrokVolume(
   if (!grokTokenNeedsRefresh(cred.expiresAtMs)) return;
   if (deadRefreshToken.get(vol) === cred.refreshToken) return;
 
+  await assertHeld();
+  if (
+    !(await writeVolumeFile(
+      vol,
+      GROK_REFRESH_FENCE_FILE,
+      grokRefreshFingerprint(cred.refreshToken),
+      runner,
+    ))
+  )
+    return; // Do not spend a token without durable evidence for admission.
+  await assertHeld();
   let fresh;
   try {
     fresh = await refreshGrokToken(cred.refreshToken, cred.clientId);
@@ -281,6 +294,10 @@ async function refreshGrokVolume(
     return;
   }
   deadRefreshToken.delete(vol);
+  // A vendor may keep the same refresh token. Its successful credential write is
+  // durable before clearing the uncertainty fence; a crash here safely refuses Retry.
+  if (fresh.refreshToken === cred.refreshToken)
+    await writeVolumeFile(vol, GROK_REFRESH_FENCE_FILE, 'none', runner);
   log.info(
     { vol, expiresAt: new Date(fresh.expiresAtMs).toISOString() },
     'rotated the stored grok credential',

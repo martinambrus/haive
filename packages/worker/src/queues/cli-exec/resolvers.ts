@@ -1071,6 +1071,8 @@ export async function resolveAuthMounts(
       isolateAuth: provider.isolateAuth,
     },
     taskId,
+    undefined,
+    db,
   );
 
   // RTK seeding: when this task's repo opted into the token-saving proxy,

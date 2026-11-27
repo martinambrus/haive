@@ -771,7 +771,11 @@ copy helper, logs and continues on failure, and never gates credential carry. Or
 and terminal-summary teardown honor the same `retainTaskCopy` result (or a thrown lookup),
 preserving copies and preparation state without blocking unrelated cleanup. Unlabeled refusals,
 including tasks older than the provider audit floor, and unknown source-label versions retain
-the copy unsynced; known labeled identity mismatches permit removal. A non-regular credential
+the copy unsynced; known labeled identity mismatches permit removal except for Grok. Grok
+admission and sync-back retain unverifiable or divergent copy lineage, including a known
+source mismatch, so an admission refusal cannot lose its recovery copy in settlement.
+See [Sandbox](sandbox.md) for its shared refresh/admission lock and `grok_login_required` guidance.
+A non-regular credential
 file is refused before reading, reported once with a structured reason and permits terminal
 leftover disposal, while transient helper failures keep retrying. See [Sandbox](sandbox.md) for
 the floor, warning fields and manual recovery. A deleted task has no row or invocation ledger

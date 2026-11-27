@@ -25,7 +25,9 @@ re-reads the ledger's current provider rows after acquiring the auth lock. A mov
 label whose parsed structural fields do not match refuses sync before any credential write.
 Key order and extra label fields are ignored. The original unversioned label is the known v0
 shape; explicit unknown versions are refused, retained unsynced and logged once per copy/reason
-in this worker process. The `none` sentinel means nothing to sync and emits no refusal warning.
+in this worker process. The `none` sentinel ordinarily means nothing to sync and emits no refusal warning.
+For Grok, a `none` copy that has since gained credential bytes is retained unsynced too,
+including after its ledger provider was deleted; only an empty no-source copy permits disposal.
 A labeled copy can name its source
 among multiple ledger rows of the same CLI with different scopes. Harvest considers each distinct
 target volume and lets this locked label check choose the source.
@@ -35,7 +37,7 @@ auth copies, even when no provider row remains in the ledger. Copies with unreso
 are retained read-only (labeled, unlabeled and unknown-version alike), with one structured
 `unresolved_auth_source` warning per copy in this worker process. A provider deleted while
 sync waits for its auth lock follows the same rule. A surviving sibling on the shared user volume
-does not establish the deleted row's source. Only a `none` label or a provably absent/empty
+does not establish the deleted row's source. Only an empty Grok copy, another CLI's `none` label or a provably absent/empty
 registered credential permits disposal; unparseable bytes and non-regular paths remain unknown.
 An inspection failure retains the copies with `unresolved_auth_source_lookup_failed`.
 
@@ -71,7 +73,8 @@ Boot reaping never syncs unlabeled copies and now retains them unsynced. Every u
 summary cleanup too, since refusal cannot justify losing a possibly newer token. A structured
 warning includes `taskVol`, task/provider ids, the reason and `retained`; it is emitted once per
 unlabeled copy in this worker process, including across harvest ticks and provider rows. No label
-is backfilled. Known labeled source mismatches still permit cleanup. Sunset: remove this
+is backfilled. Known labeled source mismatches still permit cleanup except for Grok, whose
+admission refuses and retains a copy from another scope as described below. Sunset: remove this
 unlabeled fallback once all pre-label non-terminal task copies have settled or been recreated
 with source labels, after verifying no resumable task still depends on one.
 
@@ -99,8 +102,49 @@ known. No hold result is cached: every usage tick re-reads status and source, so
 lookup failure ends on the next successful read showing settlement, or after the copy is
 removed. A persistent lookup outage continues to hold until repaired; no age timeout rotates
 against work whose state cannot be established. The refresher still locks each credential
-scope and rotates each distinct user volume once. Reverting this hold change restores the
-CLI-wide blockage from retained copies; no schema or recovery-volume change is needed.
+scope and rotates each distinct user volume once.
+
+Grok copy admission (`ensureTaskAuthVolumes`, reached by `resolveAuthMounts`) waits up to
+30 seconds for that same `cliAuthScope` session lock. Refresh lists task copies and rechecks
+live task/invocation state only after taking it. An invocation records `started_at` before
+resolving mounts, so after admission releases the lock the live-copy hold protects it through
+CLI execution. Retry can change task state during rotation, but cannot adopt its copy until
+rotation releases the lock. Preparation coalesces by task/CLI/source scope and serializes
+different source scopes for one task/CLI through the existing in-process preparation tail.
+Lock order is preparation tail, then auth session lock; no task/step/run row or transaction
+is held while waiting. Sync-back takes only the auth lock. Refresh's rejected-grant status
+transaction still takes `lockLoginSet` in provider-id order after the auth lock; neither path
+acquires task rows. Image ensure happens before the auth lock. Other users, isolated providers
+and CLIs retain independent scopes.
+
+Under that lock, admission re-reads the provider scope and the Docker-owned source label.
+The existing `.haive-source` credential fingerprint supplies a three-way comparison: if the
+source changed and the copy still equals its baseline, Retry recopies from the source. If both
+changed differently, or lineage cannot be verified (including a missing baseline, unlabeled
+or unknown-version source), admission refuses with stable code `grok_login_required` and
+re-login/recovery guidance. It does not delete or overwrite the copy. A newer in-copy login
+whose source is unchanged continues to be used. A stale copy that Docker still holds cannot
+fall back to continued use. Strict existence/helper failures also refuse admission. The same
+lineage refusal sets sync-back's retention result, so the failed invocation's settlement,
+summary cleanup and boot cannot discard that recovery copy by mtime alone. Recover it under
+the verified original scope's auth lock, or explicitly retire it after signing in afresh;
+re-login alone cannot verify an unknown lineage and never authorizes deleting it.
+
+Before making a Grok grant, refresh atomically writes `.haive-grok-refresh` in the source
+volume with only the SHA-256 of the refresh token it is about to use. Failure to write it
+makes no vendor request. This uncertainty marker survives worker death, a lost response and
+a failed credential write. Admission refuses when the source still holds that token; a new
+login or a successfully persisted rotated token has a different fingerprint. When the vendor
+keeps the same refresh token, refresh clears the marker only after persisting success.
+Sync-back never promotes the marked token from a copy. The marker contains no credential
+bytes and is never logged. A transient request failure can therefore require re-login on an
+immediate Retry; a later successful background refresh also resolves that hold.
+
+Rollback: revert the fix-7 commit to restore the earlier admission/refresh race; do not downgrade
+while a retained copy or an uncertainty marker still needs recovery. Resolve or explicitly retire
+those copies first. Older workers ignore the marker and cannot refuse a consumed token. Reverting
+the earlier live-copy hold change restores CLI-wide blockage from retained copies. Neither change
+needs a schema migration; credential bytes and removed copies are not restored by code rollback.
 
 Sync's task/user volume probes, credential reads and mtime reads use strict volume existence
 checks. Docker inspect's generic failure exit cannot prove absence: strict checks instead use

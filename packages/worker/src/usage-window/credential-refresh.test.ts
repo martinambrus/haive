@@ -34,6 +34,9 @@ import { refreshExpiringCliCredentials } from './credential-refresh.js';
 import { readVolumeFile, writeVolumeFile } from './token-source.js';
 import { listTaskAuthVolumes } from '../sandbox/auth-volume-reaper.js';
 
+const credentialWrites = () =>
+  vi.mocked(writeVolumeFile).mock.calls.filter((call) => call[1] === 'auth.json');
+
 vi.mock('./token-source.js', () => ({ readVolumeFile: vi.fn(), writeVolumeFile: vi.fn() }));
 vi.mock('../sandbox/auth-volume-reaper.js', () => ({ listTaskAuthVolumes: vi.fn() }));
 import { taskVolumesHoldProvider } from './credential-refresh.js';
@@ -143,7 +146,7 @@ describe('Grok refresh suppression and retry', () => {
       await refreshExpiringCliCredentials(db);
       await refreshExpiringCliCredentials(db);
       expect(fetchMock).toHaveBeenCalledTimes(2);
-      expect(writeVolumeFile).not.toHaveBeenCalled();
+      expect(credentialWrites()).toHaveLength(0);
       expect(update).not.toHaveBeenCalled();
       vi.stubGlobal(
         'fetch',
@@ -153,8 +156,8 @@ describe('Grok refresh suppression and retry', () => {
         })),
       );
       await refreshExpiringCliCredentials(db);
-      expect(writeVolumeFile).toHaveBeenCalledTimes(1);
-      expect(JSON.parse(vi.mocked(writeVolumeFile).mock.calls[0]![2])).toMatchObject({
+      expect(credentialWrites()).toHaveLength(1);
+      expect(JSON.parse(credentialWrites()[0]![2])).toMatchObject({
         'issuer::client': {
           key: 'new-access',
           refresh_token: 'new-refresh',
@@ -201,14 +204,14 @@ describe('Grok refresh suppression and retry', () => {
       await vi.advanceTimersByTimeAsync(15_000);
       await pending;
       expect(fetchMock).toHaveBeenCalledTimes(2);
-      expect(writeVolumeFile).toHaveBeenCalledTimes(1);
+      expect(credentialWrites()).toHaveLength(1);
       expect(update).not.toHaveBeenCalled();
       vi.stubGlobal(
         'fetch',
         vi.fn(async () => success),
       );
       await refreshExpiringCliCredentials(db);
-      expect(writeVolumeFile).toHaveBeenCalledTimes(3);
+      expect(credentialWrites()).toHaveLength(3);
     },
   );
 
@@ -225,15 +228,15 @@ describe('Grok refresh suppression and retry', () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
     expect(set).toHaveBeenCalledTimes(1);
     expect(set).toHaveBeenCalledWith(expect.objectContaining({ authStatus: 'unknown' }));
-    expect(writeVolumeFile).not.toHaveBeenCalled();
+    expect(credentialWrites()).toHaveLength(0);
     vi.mocked(readVolumeFile).mockResolvedValue(raw('relogin-refresh'));
     vi.stubGlobal(
       'fetch',
       vi.fn(async () => ({ ok: true, json: async () => ({ access_token: 'new-access' }) })),
     );
     await refreshExpiringCliCredentials(db);
-    expect(writeVolumeFile).toHaveBeenCalledTimes(1);
-    expect(JSON.parse(vi.mocked(writeVolumeFile).mock.calls[0]![2])).toMatchObject({
+    expect(credentialWrites()).toHaveLength(1);
+    expect(JSON.parse(credentialWrites()[0]![2])).toMatchObject({
       'issuer::client': { refresh_token: 'relogin-refresh' },
     });
   });
@@ -255,7 +258,7 @@ it('yields credential refresh to sign-out/login without reading or spending a to
   const rows = await db.query.cliProviders.findMany();
   expect(authLock.acquire).toHaveBeenCalledWith(db, cliAuthScope(rows[0]!));
   expect(readVolumeFile).not.toHaveBeenCalled();
-  expect(writeVolumeFile).not.toHaveBeenCalled();
+  expect(credentialWrites()).toHaveLength(0);
   expect(fetchMock).not.toHaveBeenCalled();
   expect(update).not.toHaveBeenCalled();
   expect(authLock.debug).toHaveBeenCalledWith({ providerId: rows[0]!.id }, expect.any(String));
@@ -332,7 +335,7 @@ describe('task credential copy refresh holds', () => {
       f.volumeLabel.mockRejectedValue(new Error('label unavailable'));
       await refreshExpiringCliCredentials(f.db, f.runner);
       expect(f.fetchMock).toHaveBeenCalledOnce();
-      expect(writeVolumeFile).toHaveBeenCalledOnce();
+      expect(credentialWrites()).toHaveLength(1);
       expect(f.volumeLabel).not.toHaveBeenCalled();
     },
   );
@@ -365,7 +368,7 @@ describe('task credential copy refresh holds', () => {
       f.volumeLabel.mockResolvedValue(f.source(other, scope === 'isolated-provider'));
       await refreshExpiringCliCredentials(f.db, f.runner);
       expect(f.fetchMock).toHaveBeenCalledOnce();
-      expect(writeVolumeFile).toHaveBeenCalledOnce();
+      expect(credentialWrites()).toHaveLength(1);
     },
   );
 
@@ -497,7 +500,7 @@ describe('task credential copy refresh holds', () => {
       expect(readVolumeFile).not.toHaveBeenCalled();
       await refreshExpiringCliCredentials(f.db, f.runner);
       expect(f.fetchMock).toHaveBeenCalledOnce();
-      expect(writeVolumeFile).toHaveBeenCalledOnce();
+      expect(credentialWrites()).toHaveLength(1);
     },
   );
 });

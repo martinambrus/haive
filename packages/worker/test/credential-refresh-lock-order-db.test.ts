@@ -1,10 +1,34 @@
-import { randomBytes } from 'node:crypto';
+import { randomBytes, randomUUID } from 'node:crypto';
 import { eq, inArray, sql } from 'drizzle-orm';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
-import { createDatabase, isLockNotAvailable, schema, type Database } from '@haive/database';
+import {
+  createDatabase,
+  isLockNotAvailable,
+  schema,
+  tryCliAuthLock,
+  type Database,
+} from '@haive/database';
+import { cliAuthTaskVolumeName, resolveCliAuthUserVolumeName } from '@haive/shared';
+import { cliAuthScope } from '@haive/shared/cli-auth-state';
+import { ensureTaskAuthVolumes } from '../src/sandbox/task-auth-volume.js';
 import type { DockerRunner } from '../src/sandbox/docker-runner.js';
 import { refreshExpiringCliCredentials } from '../src/usage-window/credential-refresh.js';
-import { readVolumeFile } from '../src/usage-window/token-source.js';
+import { readVolumeFile, writeVolumeFile } from '../src/usage-window/token-source.js';
+import { GROK_REFRESH_FENCE_FILE } from '../src/usage-window/grok-refresh-fence.js';
+
+const authAttempts = vi.hoisted(() => ({ onBusy: (_scope: string) => {} }));
+vi.mock('@haive/database', async (original) => {
+  const actual = await original<typeof import('@haive/database')>();
+  return {
+    ...actual,
+    tryCliAuthLock: async (db: Database, scope: string) => {
+      const lock = await actual.tryCliAuthLock(db, scope);
+      if (!lock) authAttempts.onBusy(scope);
+      return lock;
+    },
+  };
+});
+vi.mock('../src/sandbox/sandbox-core-image.js', () => ({ ensureSandboxCoreImage: async () => {} }));
 
 vi.mock('../src/usage-window/token-source.js', () => ({
   readVolumeFile: vi.fn(),
@@ -78,6 +102,9 @@ describe.skipIf(!url)(
     });
 
     beforeEach(async () => {
+      vi.mocked(writeVolumeFile).mockReset().mockResolvedValue(true);
+      vi.mocked(readVolumeFile).mockReset();
+      authAttempts.onBusy = () => {};
       await db
         .update(schema.cliProviders)
         .set({ authStatus: 'ok', authMessage: 'authenticated', isolateAuth: false })
@@ -187,6 +214,125 @@ describe.skipIf(!url)(
           expect(row.authStatus).toBe('unknown');
           expect(row.authMessage).toContain('sign-in expired');
         }
+      },
+      TEST_TIMEOUT,
+    );
+
+    it(
+      'adoption waits for the rotating scope, then recopies; a different scope stays free',
+      async () => {
+        const ctx = {
+          userId,
+          providerId: IDS[0],
+          providerName: 'grok' as const,
+          authMode: 'subscription' as const,
+          isolateAuth: false,
+        };
+        const scope = cliAuthScope({ ...ctx, id: ctx.providerId, name: ctx.providerName });
+        const userVol = resolveCliAuthUserVolumeName(ctx, 0);
+        const taskId = randomUUID();
+        const taskVol = cliAuthTaskVolumeName(taskId, 'grok', 0);
+        const volumes = new Set([userVol, taskVol]);
+        let userBytes = JSON.stringify({
+          'issuer::client': {
+            key: randomBytes(16).toString('hex'),
+            refresh_token: randomBytes(16).toString('hex'),
+            oidc_client_id: 'client',
+            expires_at: '2020-01-01T00:00:00Z',
+          },
+        });
+        const initial = userBytes;
+        let taskBytes = initial;
+        let fence: string | null = null;
+        vi.mocked(readVolumeFile).mockImplementation(async (vol, path) =>
+          path === GROK_REFRESH_FENCE_FILE ? fence : vol === userVol ? userBytes : taskBytes,
+        );
+        vi.mocked(writeVolumeFile).mockImplementation(async (_vol, path, bytes) => {
+          if (path === GROK_REFRESH_FENCE_FILE) fence = bytes;
+          else userBytes = bytes;
+          return true;
+        });
+        const runner = {
+          volumeExists: async (vol: string) => volumes.has(vol),
+          volumeLabel: async () =>
+            JSON.stringify({
+              version: 1,
+              userVolume: userVol,
+              authMode: 'subscription',
+              isolateAuth: false,
+            }),
+          volumeRemove: async (vol: string) => {
+            volumes.delete(vol);
+            return { ok: true, stderr: '' };
+          },
+          volumeCreate: async (vol: string) => {
+            volumes.add(vol);
+            return { ok: true, stderr: '' };
+          },
+          run: async (opts: { mounts?: { target: string }[] }) => {
+            let exitCode = 0;
+            if (opts.mounts?.some((mount) => mount.target === '/x'))
+              exitCode = taskBytes === userBytes ? 0 : 2;
+            if (opts.mounts?.some((mount) => mount.target === '/dst')) taskBytes = userBytes;
+            return { exitCode, stdout: '', stderr: '', durationMs: 0, timedOut: false };
+          },
+        } as unknown as DockerRunner;
+        let rotating!: () => void;
+        const entered = new Promise<void>((resolve) => {
+          rotating = resolve;
+        });
+        let finish!: () => void;
+        const finished = new Promise<void>((resolve) => {
+          finish = resolve;
+        });
+        let busy!: () => void;
+        const waiting = new Promise<void>((resolve) => {
+          busy = resolve;
+        });
+        authAttempts.onBusy = (requested) => {
+          if (requested === scope) busy();
+        };
+        vi.stubGlobal(
+          'fetch',
+          vi.fn(async () => {
+            rotating();
+            await finished;
+            return {
+              ok: true,
+              json: async () => ({
+                access_token: randomBytes(16).toString('hex'),
+                refresh_token: randomBytes(16).toString('hex'),
+              }),
+            };
+          }),
+        );
+        const refresh = refreshExpiringCliCredentials(db, runner);
+        await entered;
+        let adopted = false;
+        const adoption = ensureTaskAuthVolumes(ctx, taskId, runner, db).then(() => {
+          adopted = true;
+        });
+        try {
+          await Promise.race([
+            waiting,
+            adoption.then(() => {
+              throw new Error('adopted during rotation');
+            }),
+          ]);
+          expect(adopted).toBe(false);
+          const other = await tryCliAuthLock(
+            peer,
+            cliAuthScope({ ...ctx, id: IDS[1], name: 'grok', isolateAuth: true }),
+          );
+          expect(other).not.toBeNull();
+          await other?.();
+        } finally {
+          finish();
+          await refresh;
+          await adoption;
+        }
+        expect(taskBytes === userBytes).toBe(true);
+        expect(taskBytes === initial).toBe(false);
       },
       TEST_TIMEOUT,
     );

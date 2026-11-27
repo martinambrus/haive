@@ -25,6 +25,11 @@ import {
 } from '../usage-window/token-source.js';
 import { shellQuote } from './shell-quote.js';
 import { waitForCliAuthLock } from './cli-auth-lock.js';
+import { parseGrokAuthFile } from '../cli-adapters/grok-oauth.js';
+import {
+  GROK_REFRESH_FENCE_FILE,
+  grokRefreshFingerprint,
+} from '../usage-window/grok-refresh-fence.js';
 
 export interface ProviderAuthCtx {
   userId: string;
@@ -100,7 +105,8 @@ const HELPER_IMAGE = process.env.SANDBOX_IMAGE ?? SANDBOX_CORE_IMAGE;
 const READY_MARKER = '.haive-ready';
 /** Fingerprint of the USER volume this task's copy was taken from, written into the task
  *  volume at populate time and re-checked on every reuse. Absent on a volume populated before
- *  this existed, which is read as "fresh" — no backfill, same stance as every other marker. */
+ *  this existed, which ordinarily reads as "fresh". Grok's strict lineage check instead
+ *  retains and refuses a credential with no baseline; no marker is backfilled. */
 const SOURCE_MARKER = '.haive-source';
 /** Docker-owned identity: sandbox writers cannot alter a volume label. */
 const AUTH_SOURCE_LABEL = 'haive.auth-source';
@@ -165,12 +171,22 @@ const NO_SOURCE_SENTINEL = 'none';
 /** What the readiness probe concluded. `source_moved` is separated from `not_ready` because
  *  the two are repaired the same way but mean different things, and only one of them is a
  *  fault: a half-built volume versus credentials that have since been refreshed. */
-type VolumeReadiness = 'ready' | 'not_ready' | 'source_moved';
+type VolumeReadiness = 'ready' | 'not_ready' | 'source_moved' | 'recovery_required';
+
+class GrokCopyRecoveryError extends Error {
+  readonly code = 'grok_login_required';
+  constructor() {
+    super(
+      'grok_login_required: Grok credentials cannot be safely reused. Re-run login from the Haive providers page. Any existing task auth copy is retained; recover or explicitly retire it before retrying if its lineage cannot be verified.',
+    );
+  }
+}
 
 /** Exit code from the readiness probe for a volume that IS ready but whose source has moved
  *  on. Distinct from 1 (not ready) because the log lines differ and the distinction is the
  *  whole point: one is a half-built volume, the other is stale credentials. */
 const VOLUME_SOURCE_MOVED_EXIT = 2;
+const VOLUME_RECOVERY_REQUIRED_EXIT = 3;
 
 /** Emit a stable fingerprint of a mounted directory's contents.
  *
@@ -398,9 +414,48 @@ export function ensureTaskAuthVolumes(
   ctx: ProviderAuthCtx,
   taskId: string,
   runner: DockerRunner = defaultDockerRunner,
+  db?: Database,
 ): Promise<void> {
-  return coalesceAuthPreparation(ensureVolumeRuns, `${taskId}:${ctx.providerName}`, () =>
-    ensureTaskAuthVolumesUnlocked(ctx, taskId, runner),
+  const grok = ctx.providerName === 'grok';
+  const scope = cliAuthScope({ ...ctx, name: ctx.providerName, id: ctx.providerId });
+  return coalesceAuthPreparation(ensureVolumeRuns, `${taskId}:${ctx.providerName}:${scope}`, () =>
+    withScopeLock(`${taskId}:${ctx.providerName}:ensure`, async () => {
+      // Heal a missing helper image before any readiness/credential read, outside
+      // the auth lock: building the image can take minutes.
+      await ensureSandboxCoreImage(HELPER_IMAGE, runner);
+      if (!grok) return ensureTaskAuthVolumesUnlocked(ctx, taskId, runner);
+      if (!db) throw new Error('Grok auth preparation requires the authentication lock database');
+      // No task/step/run row or transaction may be held while waiting for this lock.
+      const release = await waitForCliAuthLock(db, scope, 30_000);
+      if (!release)
+        throw new Error('cli_auth_busy: Authentication is busy; retry this invocation.');
+      try {
+        const current = await db.query.cliProviders.findFirst({
+          where: eq(schema.cliProviders.id, ctx.providerId),
+        });
+        if (!current || current.userId !== ctx.userId || cliAuthScope(current) !== scope)
+          throw new GrokCopyRecoveryError();
+        const userVol = userVolumeForCtx(ctx, 0);
+        const fence = await readVolumeFile(userVol, GROK_REFRESH_FENCE_FILE, runner, {
+          throwOnFailure: true,
+        });
+        if (fence && fence !== 'none') {
+          const raw = await readVolumeFile(userVol, 'auth.json', runner, { throwOnFailure: true });
+          const credential = raw ? parseGrokAuthFile(raw) : null;
+          if (
+            !/^[a-f0-9]{64}$/.test(fence) ||
+            !credential ||
+            fence === grokRefreshFingerprint(credential.refreshToken)
+          )
+            throw new GrokCopyRecoveryError();
+        }
+        await release.assertHeld();
+        await ensureTaskAuthVolumesUnlocked(ctx, taskId, runner, true);
+        await release.assertHeld();
+      } finally {
+        await release();
+      }
+    }),
   );
 }
 
@@ -408,13 +463,8 @@ async function ensureTaskAuthVolumesUnlocked(
   ctx: ProviderAuthCtx,
   taskId: string,
   runner: DockerRunner,
+  preserveGrokCopy = false,
 ): Promise<void> {
-  // Before isTaskVolumeReady, not just before the copy helper: that probe reports
-  // readiness as `exitCode === 0` of a container run on HELPER_IMAGE, so a pruned base
-  // reads as "not ready" and the branch below DELETES an already-populated auth volume
-  // before anything fails. Losing credentials to a missing image is not a fair trade.
-  await ensureSandboxCoreImage(HELPER_IMAGE, runner);
-
   const meta = getCliProviderMetadata(ctx.providerName);
   for (let idx = 0; idx < meta.authConfigPaths.length; idx += 1) {
     const userVol = userVolumeForCtx(ctx, idx);
@@ -422,16 +472,30 @@ async function ensureTaskAuthVolumesUnlocked(
     // Resolved BEFORE the probe, because a source that no longer exists must not be compared
     // against: it would fingerprint as empty, read as "moved on", and the recreate below would
     // then populate an EMPTY volume — destroying the only credentials the task still had.
-    const userHasData = await runner.volumeExists(userVol);
+    const userHasData = await runner.volumeExists(userVol, { throwOnFailure: preserveGrokCopy });
     const credRelPath = credentialRelPath(ctx.providerName, idx);
 
-    if (await runner.volumeExists(taskVol)) {
+    if (await runner.volumeExists(taskVol, { throwOnFailure: preserveGrokCopy })) {
+      if (preserveGrokCopy) {
+        const label = await runner.volumeLabel?.(taskVol, AUTH_SOURCE_LABEL);
+        if (authSourceLabelRefusal(label ?? undefined, authSourceIdentity(ctx, idx))) {
+          // A no-source copy may still be empty. Any credential there has unknown
+          // lineage and must be kept, including a possibly newer in-task login.
+          if (
+            label !== NO_SOURCE_SENTINEL ||
+            (await readVolumeFile(taskVol, credRelPath!, runner, { throwOnFailure: true }))
+          )
+            throw new GrokCopyRecoveryError();
+        }
+      }
       const readiness = await isTaskVolumeReady(
         taskVol,
         runner,
         userHasData ? userVol : null,
         credRelPath,
+        preserveGrokCopy,
       );
+      if (readiness === 'recovery_required') throw new GrokCopyRecoveryError();
       if (readiness === 'ready') {
         continue;
       }
@@ -458,6 +522,7 @@ async function ensureTaskAuthVolumesUnlocked(
             runner,
             readiness === 'source_moved' && userHasData ? userVol : null,
             credRelPath,
+            preserveGrokCopy,
           )
         ) {
           continue;
@@ -478,6 +543,7 @@ async function ensureTaskAuthVolumesUnlocked(
         // been using. Failing the invocation would deny the task work AND not refresh
         // anything; the next dispatch after the sibling exits replaces the volume properly.
         if (readiness === 'source_moved') {
+          if (preserveGrokCopy) throw new GrokCopyRecoveryError();
           log.warn(
             { taskVol, userVol, stderr: removed.stderr.slice(-200) },
             'auth source moved but the volume is held by a running invocation; ' +
@@ -584,11 +650,20 @@ async function waitForTaskVolumeReady(
    *  freshness requirement, and still lets a sibling that recreates the volume satisfy it. */
   userVol: string | null,
   credRelPath: string | null,
+  preserveGrokCopy = false,
 ): Promise<boolean> {
   const deadline = Date.now() + VOLUME_READY_MAX_WAIT_MS;
   while (Date.now() < deadline) {
     await new Promise((resolve) => setTimeout(resolve, VOLUME_READY_POLL_MS));
-    if ((await isTaskVolumeReady(taskVol, runner, userVol, credRelPath)) === 'ready') return true;
+    const readiness = await isTaskVolumeReady(
+      taskVol,
+      runner,
+      userVol,
+      credRelPath,
+      preserveGrokCopy,
+    );
+    if (readiness === 'recovery_required') throw new GrokCopyRecoveryError();
+    if (readiness === 'ready') return true;
   }
   return false;
 }
@@ -623,6 +698,7 @@ async function isTaskVolumeReady(
   userVol: string | null,
   /** Which file to compare, from {@link credentialRelPath}; null hashes the whole directory. */
   credRelPath: string | null,
+  preserveGrokCopy = false,
 ): Promise<VolumeReadiness> {
   // Verify both the readiness marker AND that the volume root is owned by the
   // sandbox user (1000). Early versions of ensureTaskAuthVolumes left the mount
@@ -639,6 +715,20 @@ async function isTaskVolumeReady(
     `test -f /x/${READY_MARKER} || exit 1`,
     `[ "$(stat -c %u /x)" = "1000" ] || exit 1`,
   ];
+  if (preserveGrokCopy) {
+    // Three-way lineage: only an unchanged snapshot may be discarded when its
+    // source moved. Different task bytes may be the only newer login. Missing
+    // lineage/readiness cannot justify deleting an existing credential either.
+    checks.unshift(
+      `copy=$(${sourceFingerprintSh('/x', credRelPath)})`,
+      `rec=$(cat /x/${SOURCE_MARKER} 2>/dev/null || echo '')`,
+      `cur=${userVol ? `$(${sourceFingerprintSh('/src', credRelPath)})` : CREDENTIAL_ABSENT}`,
+      `if [ "$copy" != '${CREDENTIAL_ABSENT}' ]; then`,
+      `  [ -n "$rec" ] && [ "$rec" != '${NO_SOURCE_SENTINEL}' ] && test -f /x/${READY_MARKER} && [ "$(stat -c %u /x)" = "1000" ] || exit ${VOLUME_RECOVERY_REQUIRED_EXIT}`,
+      `  if [ "$cur" != '${CREDENTIAL_ABSENT}' ] && [ "$cur" != "$rec" ] && [ "$copy" != "$rec" ] && [ "$copy" != "$cur" ]; then exit ${VOLUME_RECOVERY_REQUIRED_EXIT}; fi`,
+      `elif [ "$cur" != '${CREDENTIAL_ABSENT}' ]; then exit ${VOLUME_SOURCE_MOVED_EXIT}; fi`,
+    );
+  }
   if (userVol) {
     checks.push(
       // A volume populated with no source carries NO_SOURCE_SENTINEL here, which can never
@@ -679,6 +769,11 @@ async function isTaskVolumeReady(
     timeoutMs: 15_000,
   });
   if (result.exitCode === 0) return 'ready';
+  if (
+    preserveGrokCopy &&
+    (result.timedOut || (result.exitCode !== 1 && result.exitCode !== VOLUME_SOURCE_MOVED_EXIT))
+  )
+    return 'recovery_required';
   return result.exitCode === VOLUME_SOURCE_MOVED_EXIT ? 'source_moved' : 'not_ready';
 }
 
@@ -1341,7 +1436,7 @@ async function retainUnresolvedAuthCopy(
   runner: DockerRunner,
   label: string | null | undefined,
 ): Promise<boolean> {
-  if (label === NO_SOURCE_SENTINEL) return false;
+  if (label === NO_SOURCE_SENTINEL && provider !== 'grok') return false;
   const taskVol = cliAuthTaskVolumeName(taskId, provider, idx);
   const relPath = credentialRelPath(provider, idx);
   if (relPath) {
@@ -1357,7 +1452,7 @@ async function retainUnresolvedAuthCopy(
     taskVol,
     'unresolved_auth_source',
     { taskId, provider, retained: true },
-    'keeping task auth copy; source provider no longer resolves',
+    'keeping task auth copy; credential source cannot be verified',
   );
   return true;
 }
@@ -1566,8 +1661,21 @@ export async function syncProviderAuthBack(
         source.authPathIdx,
       );
     const label = await runner.volumeLabel?.(taskVol, AUTH_SOURCE_LABEL);
-    // No source was mounted at preparation, so there is nothing attributable to carry.
-    if (label === NO_SOURCE_SENTINEL) return false;
+    // No source was mounted at preparation. Grok may since have logged in inside
+    // the task; that credential cannot be attributed, but must not be discarded.
+    if (label === NO_SOURCE_SENTINEL) {
+      if (provider.name === 'grok') {
+        const retained = await retainUnresolvedAuthCopy(
+          taskId,
+          provider.name,
+          source.authPathIdx,
+          runner,
+          label,
+        );
+        if (retained && outcome) outcome.retry = true;
+      }
+      return false;
+    }
     if (!current) {
       const retained = await retainUnresolvedAuthCopy(
         taskId,
@@ -1616,7 +1724,8 @@ export async function syncProviderAuthBack(
       );
     }
     if (reason) {
-      if (reason === 'unsupported_source_version' && outcome) outcome.retry = true;
+      const retained = provider.name === 'grok' || reason === 'unsupported_source_version';
+      if (retained && outcome) outcome.retry = true;
       if (!unlabeled)
         warnAuthCopyOnce(
           taskVol,
@@ -1625,7 +1734,7 @@ export async function syncProviderAuthBack(
             taskId,
             providerId: provider.id,
             provider: provider.name,
-            retained: reason === 'unsupported_source_version',
+            retained,
           },
           'auth sync-back refused',
         );
@@ -1634,8 +1743,32 @@ export async function syncProviderAuthBack(
     // A sign-out that won the lock must not be undone by a helper mount recreating it.
     if (!(await runner.volumeExists(userVol, { throwOnFailure: true }))) return false;
     await release.assertHeld();
+    if (provider.name === 'grok' && provider.authMode === 'subscription') {
+      // Admission's refusal must survive the failed invocation's settlement and
+      // subsequent boots. Mtime alone cannot order two different login lineages.
+      if (
+        (await isTaskVolumeReady(taskVol, runner, userVol, source.relPath, true)) ===
+        'recovery_required'
+      ) {
+        if (outcome) outcome.retry = true;
+        warnAuthCopyOnce(
+          taskVol,
+          'grok_copy_lineage_unverified',
+          { taskId, providerId: provider.id, retained: true },
+          'keeping Grok recovery copy; re-run login and recover or retire the copy',
+        );
+        return false;
+      }
+    }
     const taskRaw = await readVolumeFile(taskVol, source.relPath, runner, { throwOnFailure: true });
     if (!taskRaw) return false;
+    if (provider.name === 'grok') {
+      const fence = await readVolumeFile(userVol, GROK_REFRESH_FENCE_FILE, runner, {
+        throwOnFailure: true,
+      });
+      const credential = parseGrokAuthFile(taskRaw);
+      if (credential && fence === grokRefreshFingerprint(credential.refreshToken)) return false;
+    }
     const taskToken = extractToken(source.extract, taskRaw);
     const userRaw = await readVolumeFile(userVol, source.relPath, runner, { throwOnFailure: true });
     const userToken = userRaw ? extractToken(source.extract, userRaw) : null;
