@@ -274,8 +274,9 @@ root claim. Explicit `repair` availability also permits an error checkout for ra
 reads, attachment removal and remote configuration repair. Neither admits cloning.
 `preparation` requires the actual renewing `RootClaimHandle`, verified against its private runtime
 registration, repository ID, preparation kind (`rebuild` or `refresh`) and the live row's owner.
-A boolean, copied object, another repository's handle, expired/replaced claim or released handle grants no permission. This mode is available for
-preparation's private restore; wiring existing preparation/projection callers remains follow-up work.
+A boolean, copied object, another repository's handle, expired/replaced claim or released handle grants no permission. Plan mirror callers now carry this verified handle through `withRootClaim`, including the private
+restore's nested import or writer. Project-state and legacy preparation callers retain their
+existing implementation and remain follow-up work.
 
 `withCheckoutMutation` acquires a distinct `mutation` root claim **before** attachment/domain/row locks,
 checks availability again after acquisition and releases in `finally`. It retains no connection
@@ -303,15 +304,33 @@ remain available. A task whose repository was deleted can remove its attachment 
 without guessing a filesystem root. The raw route's error recheck preserves ordinary missing-file
 and containment errors when the checkout is still ready. Ordinary ready fast-forwards do not hide read-only access.
 
-The remaining independent entries in the T780 analysis are **not yet covered**: plan writer/importer
-and Save/Pull, project-state sync/writer/journal/rules/metadata recovery, initial detection/legacy
+Plan mirror writer/importer/reconciler, refresh, dirty sweep and boot stamping apply the shared
+`projection` policy inside task-key → plan-domain → repository `FOR NO KEY UPDATE` locks.
+The stronger row lock excludes non-key claim/status updates; acquisition uses the existing 250 ms
+late-lock bound; the task key has the existing five-second admission bound, and hold
+diagnostic/outbox writes are bounded separately at 250 ms. Ready with no foreign live root owner is required; owed work alone permits a
+ready scan's import. A hold reads/writes no checkout data, leaves the mirror revision dirty and
+records the fixed `checkout_unavailable` reason, so a later sweep retries. A held initial import
+cannot be turned into deletion of its incoming mirror on that retry.
+
+Explicit plan Save/Pull hold a renewing mutation lease across preparation and the complete
+Git/reconcile/recovery lifetime, acquired before their existing merge/domain/row locks. Nested
+plan operations use that registered owner. The plan push helper accepts only the same verified owner when committing portable state; an
+unrelated claim still refuses. Per-command Git and mirror-writer file checks stop an
+unproven/expired owner before another physical step (set-aside and put-back moves are not checked one by one); projection transaction callbacks drain
+before lease release after driver errors. Task/worktree-holder and open-Git-operation refusals
+are retained. The independent `project-state/save.ts` admission is unchanged. See the
+[plan mirror contract](plan-canvas.md) for the private restore, lock order and retry details.
+
+The remaining independent entries in the T780 analysis are **not yet covered**: independent
+Haive-data Save, project-state sync/writer/journal/rules/metadata recovery, initial detection/legacy
 imports, task file/archive/root resolvers, scope/code previews, onboarding/upgrade/data/snapshot
 status, runtime ensure and DDEV control. They still need the same policy at their admission/locked
 boundaries, with task-key → domain → repository-row order and dirty/outbox obligations retained
 on holds. Interactive mount suspension is described below. Do not infer complete checkout exclusion from the
-new attachment/remote/deletion coverage.
+attachment/remote/deletion and plan-mirror coverage.
 
-Rollback: settle active attachment, remote and plan-delete operations and all preparations, then
+Rollback: settle active attachment, remote, plan-delete, plan Save/Pull and mirror operations and all preparations, then
 revert the API/shared/database code together and rebuild shared/database from that revision. There
 is no schema migration. Preserve relink intents, dirty/outbox rows and every aside/staging sibling.
 Rollback reopens the covered races; it never moves an aside back automatically.
