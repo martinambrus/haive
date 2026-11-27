@@ -22,7 +22,7 @@ export async function acquireRepoRagSyncLock(
     return await acquireRagSyncLock(getRedis(), repositoryId, {
       waitMs: RAG_SYNC_LOCK_WAIT_MS,
       signal: ctx.signal,
-      onWait: (reason) => {
+      onWait: (reason = 'held') => {
         if (announced === reason) return;
         announced = reason;
         void ctx
