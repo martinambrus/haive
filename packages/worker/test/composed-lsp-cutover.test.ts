@@ -26,6 +26,8 @@ vi.mock('../src/queues/cli-exec/worktrees-boundary.js', () => ({
 import * as lspLayer from '../src/sandbox/lsp-layer.js';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { schema, type Database } from '@haive/database';
+import type { CliProviderName } from '@haive/shared';
+import { resolveImageTag } from '../src/sandbox/image-cache.js';
 import { createFakeDb } from '@haive/database/testing';
 import { eq, type SQL } from 'drizzle-orm';
 import { PgDialect } from 'drizzle-orm/pg-core';
@@ -288,7 +290,16 @@ it.each(['pending', 'skipped'] as const)(
     ).toBe(false);
     // A skipped 04 keeps the provider-image fallback (owner-visible decision on T709 (h)):
     // Skip is explicit and readiness stays false, so LSP is never claimed.
-    expect(await launch()).toMatch(/^haive-cli-/);
+    const row = f.f.rows(schema.cliProviders)[0] as typeof schema.cliProviders.$inferSelect;
+    const providerTag = resolveImageTag({
+      name: row.name as CliProviderName,
+      cliVersion: row.cliVersion || null,
+      providerId: row.id,
+      sandboxDockerfileExtra: row.sandboxDockerfileExtra,
+    })?.tag;
+    // The provider image (with the CLI installed), never the bare sandbox core image.
+    expect(providerTag).toBeTruthy();
+    expect(await launch()).toBe(providerTag);
     expect(f.run).not.toHaveBeenCalled();
   },
 );
