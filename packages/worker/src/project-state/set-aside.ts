@@ -37,7 +37,14 @@ import {
   flushPlanMirrorForRepository,
   lockPlanMirror,
 } from '../plan/mirror.js';
-import { readBlob } from '../plan/projection-merge.js';
+import {
+  projectionEntries,
+  projectionHeadBlobs,
+  projectionModeChanges,
+  stagedProjectionBlobs,
+  entryOid,
+  type ProjectionEntries,
+} from './projection-git.js';
 import { syncPlanFromCheckout } from '../plan/sync-checkout.js';
 import { gitRun } from '../repo/git-exec.js';
 import { GitOperationUnreadableError, gitOperationInProgress } from '../repo/git-operation.js';
@@ -231,62 +238,11 @@ async function holds(repoPath: string, rel: string, want: Buffer | null, maxByte
 
 const literal = (rel: string): string => `:(literal)${rel}`;
 
-/** The blob the index holds for `rel`: null when it holds none, 'unmerged' when it holds a conflict. */
-async function stagedOid(repoPath: string, rel: string): Promise<string | null | 'unmerged'> {
-  const res = await gitRun(repoPath, [
-    '--no-optional-locks',
-    'ls-files',
-    '-s',
-    '-z',
-    '--',
-    literal(rel),
-  ]);
-  if (res.code !== 0) throw new Error(`git ls-files failed: ${res.stderr.trim().slice(0, 300)}`);
-  let oid: string | null = null;
-  for (const entry of res.stdout.split('\0')) {
-    const m = /^\d+ ([0-9a-f]+) (\d)\t/.exec(entry);
-    if (!m) continue;
-    if (m[2] !== '0') return 'unmerged';
-    oid = m[1]!;
-  }
-  return oid;
-}
-
-/** Why each path's mode differs from HEAD's, in the index or in the working tree. A blob id does not
- *  carry the mode, so a path HEAD lacks has none to differ from and is left to its bytes. */
-async function modeChanges(
-  repoPath: string,
-  paths: readonly string[],
-): Promise<Map<string, string>> {
-  const changed = new Map<string, string>();
-  if (paths.length === 0) return changed;
-  for (const side of ['index', 'tree'] as const) {
-    const res = await gitRun(repoPath, [
-      '--no-optional-locks',
-      'diff-index',
-      '--raw',
-      '-z',
-      '--no-renames',
-      ...(side === 'index' ? ['--cached'] : []),
-      'HEAD',
-      '--',
-      ...paths.map(literal),
-    ]);
-    if (res.code !== 0)
-      throw new Error(`git diff-index failed: ${res.stderr.trim().slice(0, 300)}`);
-    const fields = res.stdout.split('\0');
-    for (let i = 0; i + 1 < fields.length; i += 2) {
-      const m = /^:(\d+) (\d+) /.exec(fields[i]!);
-      if (!m || m[1] === m[2] || /^0+$/.test(m[2]!)) continue;
-      // A path HEAD lacks is Haive's only as the regular file its writer creates.
-      if (/^0+$/.test(m[1]!) && m[2] === '100644') continue;
-      changed.set(fields[i + 1]!, `${side}:${m[1]}>${m[2]}`);
-    }
-  }
-  // A path neither HEAD nor the index holds shows its type and mode only on disk.
+/** Why a path's mode differs from HEAD, including an untracked executable or link. */
+async function modeChanges(repoPath: string, paths: readonly string[], entries: ProjectionEntries) {
+  const changed = await projectionModeChanges(repoPath, paths);
   for (const path of paths) {
-    if (changed.has(path) || (await headEntry(repoPath, path)) !== null) continue;
-    if ((await indexEntry(repoPath, path)) !== null) continue;
+    if (changed.has(path) || entries.head.has(path) || entries.index.has(path)) continue;
     const entry = await lstatNoFollow(repoPath, path).catch(() => null);
     if (entry === null) continue;
     if (entry.kind !== 'file') changed.set(path, `tree:${entry.kind}`);
@@ -295,27 +251,18 @@ async function modeChanges(
   return changed;
 }
 
-async function headOid(repoPath: string, rel: string): Promise<string | null> {
-  const res = await gitRun(repoPath, ['rev-parse', '--verify', '--quiet', `HEAD:${rel}`]);
-  return res.code === 0 ? res.stdout.trim() : null;
-}
-
-/** Whether what the index holds for `rel` is HEAD's blob or exactly what Haive writes there, so that
- *  returning the path to HEAD discards nothing a person staged. */
-async function stagedIsHaives(
-  repoPath: string,
+function stagedIsHaives(
   rel: string,
-  maxBytes: number,
+  entries: ProjectionEntries,
+  blobs: Map<string, Buffer>,
   haives: (bytes: Buffer | null) => boolean,
-): Promise<boolean> {
-  const staged = await stagedOid(repoPath, rel);
+): boolean {
+  const staged = entries.staged.get(rel) ?? null;
   if (staged === 'unmerged') return false;
-  if (staged === (await headOid(repoPath, rel))) return true;
+  if (staged === entryOid(entries.head.get(rel))) return true;
   if (staged === null) return haives(null);
-  const size = await gitRun(repoPath, ['cat-file', '-s', staged]);
-  if (size.code !== 0 || Number(size.stdout.trim()) > maxBytes) return false;
-  const bytes = await readBlob(repoPath, staged);
-  return bytes !== null && haives(bytes);
+  const bytes = blobs.get(staged);
+  return bytes !== undefined && haives(bytes);
 }
 
 // plan.md repeats a target's title (and an edge's note) once per edge, so it can outgrow the plan.json it renders.
@@ -328,7 +275,12 @@ function projectionCap(rel: string): number {
 }
 
 /** The working-tree bytes, the index blob, any mode change and the owner of `rel` as one string, to tell later whether any moved. */
-async function fingerprint(repoPath: string, rel: string): Promise<string> {
+async function fingerprint(
+  repoPath: string,
+  rel: string,
+  entries: ProjectionEntries,
+  modes: Map<string, string>,
+): Promise<string> {
   const maxBytes = projectionCap(rel);
   let work = 'unreadable';
   try {
@@ -339,8 +291,24 @@ async function fingerprint(repoPath: string, rel: string): Promise<string> {
   }
   const entry = await lstatNoFollow(repoPath, rel).catch(() => null);
   const owner = entry === null ? '' : `${entry.stats.uid}:${entry.stats.gid}`;
-  return `${work}|${await stagedOid(repoPath, rel)}|${(await modeChanges(repoPath, [rel])).get(rel) ?? ''}|${owner}`;
+  return `${work}|${entries.staged.get(rel) ?? null}|${modes.get(rel) ?? ''}|${owner}`;
 }
+
+/** A fresh Git observation at every existing fingerprint fence; never reused across captures. */
+async function fingerprints(
+  repoPath: string,
+  paths: readonly string[],
+): Promise<Map<string, string>> {
+  if (paths.length === 0) return new Map();
+  const entries = await projectionEntries(repoPath);
+  const modes = await modeChanges(repoPath, paths, entries);
+  const prints = new Map<string, string>();
+  for (const path of paths) prints.set(path, await fingerprint(repoPath, path, entries, modes));
+  return prints;
+}
+
+const PROJECTION_TOTAL_BYTES =
+  PROJECT_STATE_LIMITS.maxTotalBytes + PLAN_JSON_MAX_BYTES + PLAN_MD_MAX_BYTES;
 
 /** The first dirty state file that is not what the sync base renders there, or null. The base is the
  *  record the files were last written from or read in as, with a pending conflict at the incoming
@@ -381,7 +349,15 @@ async function stateOffender(
     if (!(err instanceof ProjectStateError)) throw err;
     return paths[0]!;
   }
-  const modes = await modeChanges(repoPath, paths);
+  const entries = await projectionEntries(repoPath);
+  const modes = await modeChanges(repoPath, paths, entries);
+  const blobs = await stagedProjectionBlobs(
+    repoPath,
+    paths,
+    entries,
+    projectionCap,
+    PROJECTION_TOTAL_BYTES,
+  );
   for (const path of paths) {
     const want = expected.get(path.slice(STATE_PREFIX.length));
     const wantBytes = want === undefined ? null : Buffer.from(want, 'utf8');
@@ -389,9 +365,9 @@ async function stateOffender(
     const ok =
       !modes.has(path) &&
       (await holds(repoPath, path, wantBytes, maxBytes)) &&
-      (await stagedIsHaives(repoPath, path, maxBytes, (bytes) =>
+      stagedIsHaives(path, entries, blobs, (bytes) =>
         bytes === null ? wantBytes === null : wantBytes !== null && bytes.equals(wantBytes),
-      ));
+      );
     if (!ok) return path;
   }
   return null;
@@ -405,7 +381,9 @@ async function planOffender(
   repoPath: string,
   paths: readonly string[],
 ): Promise<string | null> {
-  const [moded] = [...(await modeChanges(repoPath, paths)).keys()];
+  if (paths.length === 0) return null;
+  const entries = await projectionEntries(repoPath);
+  const [moded] = [...(await modeChanges(repoPath, paths, entries)).keys()];
   if (moded !== undefined) return moded;
   if (!paths.includes(HAIVE_DATA_FILES.plan)) {
     if (!paths.includes(HAIVE_DATA_FILES.planMarkdown)) return null;
@@ -435,11 +413,15 @@ async function planOffender(
   if (read === null ? stamp !== ABSENT_PLAN_HASH : read.truncated || stamp !== sha256(read.data)) {
     return HAIVE_DATA_FILES.plan;
   }
-  const stagedOk = await stagedIsHaives(
+  const blobs = await stagedProjectionBlobs(
     repoPath,
-    HAIVE_DATA_FILES.plan,
-    PLAN_JSON_MAX_BYTES,
-    (bytes) => (bytes === null ? stamp === ABSENT_PLAN_HASH : stamp === sha256(bytes)),
+    [HAIVE_DATA_FILES.plan],
+    entries,
+    projectionCap,
+    PROJECTION_TOTAL_BYTES,
+  );
+  const stagedOk = stagedIsHaives(HAIVE_DATA_FILES.plan, entries, blobs, (bytes) =>
+    bytes === null ? stamp === ABSENT_PLAN_HASH : stamp === sha256(bytes),
   );
   if (!stagedOk) return HAIVE_DATA_FILES.plan;
   const [held] = await db
@@ -504,18 +486,18 @@ async function judgeAndMark(
   await guard.judgeLock(tx);
   const blocked = await guard.blocked?.(tx);
   if (blocked) return { stopped: blocked };
-  const prints = new Map<string, string>();
-  for (const path of paths) prints.set(path, await fingerprint(repoPath, path));
+  const prints = await fingerprints(repoPath, paths);
   const offender = await guard.offender(tx);
   if (offender) return { stopped: refuse(offender, NOT_HAIVE) };
   const holding = guard.fence ? await guard.fence(tx) : 0;
   await restoreFaults.afterJudgeFence?.();
   if (holding > 0) return { stopped: { outcome: 'held', holding } };
   await guard.mark(tx);
+  const entries = await projectionEntries(repoPath);
   const metadata = await captureProjectionMetadata(
     repoPath,
     paths,
-    async (path) => (await headEntry(repoPath, path)) === null,
+    async (path) => !entries.head.has(path),
   );
   const [pending] = await tx
     .select({ kept: schema.projectStateOutbox.keptMetadata })
@@ -547,8 +529,10 @@ async function restoreJudged(
   if (blocked) return blocked;
   const dirty = await dirtyProjections(repoPath);
   const mine = dirty.paths.filter((path) => guard.owns(path));
-  for (const path of new Set([...mine, ...judged.prints.keys()])) {
-    if (judged.prints.get(path) !== (await fingerprint(repoPath, path))) return { changed: path };
+  for (const [path, print] of await fingerprints(repoPath, [
+    ...new Set([...mine, ...judged.prints.keys()]),
+  ])) {
+    if (judged.prints.get(path) !== print) return { changed: path };
   }
   if (judged.generation !== (await guard.generation(tx)))
     return { changed: [...judged.prints.keys()][0] ?? '' };
@@ -563,22 +547,23 @@ async function restoreJudged(
   if (holding > 0) return { outcome: 'held', holding };
   await restoreFaults.beforeCapture?.();
   const captured: KeptFiles = new Map();
+  const entries = await projectionEntries(repoPath);
   for (const path of mine) {
     const bytes = await keptBytes(repoPath, path);
-    const index = await indexEntry(repoPath, path);
+    const index = entries.index.get(path) ?? null;
     const entry = await lstatNoFollow(repoPath, path).catch(() => null);
     const mode = entry?.kind === 'file' ? Number(entry.stats.mode) & 0o7777 : undefined;
     const owner =
       entry?.kind === 'file' ? { uid: entry.stats.uid, gid: entry.stats.gid } : undefined;
-    const untracked = (await headEntry(repoPath, path)) === null;
+    const untracked = !entries.head.has(path);
     captured.set(path, {
       ...(bytes === undefined ? { index } : { bytes, index, mode, owner, untracked }),
       capturedMetadata: judgedMetadata.get(kept)?.[path],
     });
   }
   // A write landing during the capture would be taken for Haive's: the judged state must still hold.
-  for (const path of mine) {
-    if (judged.prints.get(path) !== (await fingerprint(repoPath, path))) return { changed: path };
+  for (const [path, print] of await fingerprints(repoPath, mine)) {
+    if (judged.prints.get(path) !== print) return { changed: path };
   }
   for (const [path, was] of captured) if (!kept.has(path)) kept.set(path, was);
   await restoreFaults.beforeRestore?.();
@@ -676,14 +661,17 @@ async function restoreFromHead(
   paths: readonly string[],
   kept: KeptFiles,
 ): Promise<string | { path: string; reason: string } | null> {
+  const entries = await projectionEntries(repoPath);
+  const heads = await projectionHeadBlobs(repoPath, paths, entries, PROJECTION_TOTAL_BYTES);
   for (const path of paths) {
     const captured = kept.get(path);
-    const head = await readBlob(repoPath, `HEAD:${path}`);
+    const oid = entryOid(entries.head.get(path));
+    const head = oid === null ? null : heads.get(oid)!;
     if (captured === undefined || captured.bytes === undefined) return path;
     const was = captured.bytes;
     const maxBytes = Math.max(head?.length ?? 0, was?.length ?? 0) + 1;
     if (head !== null && was === null) {
-      const headMode = await headFileMode(repoPath, path);
+      const headMode = entries.head.get(path)?.startsWith('100755') ? 0o755 : 0o644;
       try {
         await writeFileNoFollow(repoPath, path, head, {
           mode: 'create-exclusive',
@@ -717,9 +705,10 @@ async function restoreFromHead(
       );
       if (res !== 'removed') return path;
     }
-    if ((await indexEntry(repoPath, path)) !== captured.index) return path;
-    const headIdx = await headEntry(repoPath, path);
+    const headIdx = entries.head.get(path) ?? null;
+    if ((entries.index.get(path) ?? null) !== captured.index) return path;
     if (headIdx !== captured.index) {
+      if ((await indexEntry(repoPath, path)) !== captured.index) return path;
       const patch = await indexToHeadPatch(repoPath, path);
       if (patch.length === 0) {
         if ((await indexEntry(repoPath, path)) !== captured.index) return path;
@@ -735,6 +724,12 @@ async function restoreFromHead(
       captured.indexPatch ??= patch;
     }
     if (head === null) await pruneEmptyStateDirs(repoPath, path, kept);
+  }
+  // An unchanged entry needs no per-path index swap, but it must still be checked after
+  // the filesystem restores. A concurrent git add is never accepted from the earlier snapshot.
+  const final = await projectionEntries(repoPath);
+  for (const path of paths) {
+    if ((final.index.get(path) ?? null) !== (entries.head.get(path) ?? null)) return path;
   }
   return null;
 }
@@ -1288,11 +1283,19 @@ export async function putBackProjections(
           `${pending.reason}. The set-aside state files were not put back: ${[...kept.keys()].filter((path) => path.startsWith(STATE_PREFIX)).join(', ')}`,
         );
     }
+    const entries = await projectionEntries(repoPath);
+    const heads = await projectionHeadBlobs(
+      repoPath,
+      [...kept.keys()],
+      entries,
+      PROJECTION_TOTAL_BYTES,
+    );
     // Each path is swapped only while it still holds what the restore left (HEAD's blob, or nothing).
     for (const [path, { bytes, index, indexPatch, mode, owner, parents }] of kept) {
-      await putBackIndex(repoPath, path, index, indexPatch);
+      await putBackIndex(repoPath, path, index, indexPatch, entries.head.get(path) ?? null);
       if (bytes === undefined) continue;
-      const head = await readBlob(repoPath, `HEAD:${path}`);
+      const oid = entryOid(entries.head.get(path));
+      const head = oid === null ? null : heads.get(oid)!;
       const maxBytes = Math.max(head?.length ?? 0, bytes?.length ?? 0) + 1;
       if (head === null) {
         if (bytes === null) continue;
@@ -1315,7 +1318,7 @@ export async function putBackProjections(
             throw new Error('set-aside file metadata not restored');
         }
       } else if (bytes === null) {
-        const headMode = await headFileMode(repoPath, path);
+        const headMode = entries.head.get(path)?.startsWith('100755') ? 0o755 : 0o644;
         await removeFileIfNoFollow(
           repoPath,
           path,
@@ -1396,23 +1399,11 @@ export async function recoverAfterMoveFailure(
   return putBackAfterFailure(db, repositoryId, repoPath, kept, err, section);
 }
 
-/** The mode the restore gives a file it recreates from HEAD. */
-async function headFileMode(repoPath: string, path: string): Promise<number> {
-  return (await headEntry(repoPath, path))?.startsWith('100755') ? 0o755 : 0o644;
-}
-
 /** A path's index entry as `mode sha`, or null when nothing is staged there. */
 async function indexEntry(repoPath: string, path: string): Promise<string | null> {
   const res = await gitRun(repoPath, ['ls-files', '-s', '-z', '--', literal(path)]);
   if (res.code !== 0) throw new Error(`git ls-files failed: ${res.stderr.trim().slice(0, 300)}`);
   const m = /^(\d+) ([0-9a-f]+) 0\t/.exec(res.stdout);
-  return m ? `${m[1]} ${m[2]}` : null;
-}
-
-async function headEntry(repoPath: string, path: string): Promise<string | null> {
-  const res = await gitRun(repoPath, ['ls-tree', '-z', 'HEAD', '--', literal(path)]);
-  if (res.code !== 0) return null;
-  const m = /^(\d+) blob ([0-9a-f]+)\t/.exec(res.stdout);
   return m ? `${m[1]} ${m[2]}` : null;
 }
 
@@ -1512,8 +1503,8 @@ async function putBackIndex(
   path: string,
   original: string | null,
   patch: Buffer | undefined,
+  left: string | null,
 ): Promise<void> {
-  const left = await headEntry(repoPath, path);
   if (original === left || (await indexEntry(repoPath, path)) !== left) return;
   // No patch means the restore never swapped this entry, so whatever sits there now is someone else's.
   if (patch === undefined) return;
