@@ -260,7 +260,10 @@ func (l *stackLock) heartbeat() {
 			return
 		case <-ticks:
 			result := l.beat()
-			if result != "ok" && l.b.leaseFailed != nil {
+			l.mu.Lock()
+			unsafe := result == "lost" || (result == "error" && l.cfg.now().Sub(l.lastGood) >= l.cfg.stale/2)
+			l.mu.Unlock()
+			if unsafe && l.b.leaseFailed != nil {
 				l.b.leaseFailed()
 			}
 			if result == "lost" {

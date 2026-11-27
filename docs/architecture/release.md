@@ -535,7 +535,7 @@ record stays and that next start waits out the stale window before it breaks it.
 way when the deadline passes is not interrupted; the next fence check refuses. The updater's clock is `performance.now()`, the
 bridge's Go's monotonic `time.Now()`, never the record's `startedAt`; a clock that counts a suspended machine only expires early, but the bound cannot see a pause its own clock does not count (a
 paused VM).
-The bridge cancels its operation on the first failed heartbeat (or proven loss), terminating its supervised
+The bridge cancels its operation immediately on proven lease loss, or after transient renewal errors persist for half the stale window (30 s), terminating its supervised
 command before waiting for the stale deadline. Renewal retries continue during cancellation and command Wait;
 only expiry or loss stops them for good. A frozen bridge still cannot observe its own missed beats.
 A remaining race (T765 item 5): the heartbeat reads its own record and then overwrites it, so a contender that broke the lock and created its own in between is overwritten; closing it
@@ -603,8 +603,7 @@ for 30 minutes) or a freeze between the proof and the action it guards; between 
 displaced fresh lock the name is briefly
 absent, so the displaced holder's next beat creates it again and a third party creating it first keeps it. A
 holder whose beat cannot be written (a full disk, say) stops refreshing the lock, which then lapses after 60 s;
-the bridge cancels a supervised command on the first failed beat. A killed bridge's host command is now
-terminated by OS supervision (see [command supervision](#host-command-supervision)); work the Docker daemon
+the bridge cancels a supervised command on proven loss or 30 s without a successful renewal. A killed bridge's host command is terminated by OS supervision, subject to the simultaneous-kill limit below (see [command supervision](#host-command-supervision)); work the Docker daemon
 already accepted can still complete after the client dies. Killing the client does not undo a partially
 started stack, and an interrupted operation does not authorize automatic cleanup or a retry of an ambiguous
 upgrade: inspect status, logs and the updater journal and retain the existing manual recovery refusals.
@@ -875,49 +874,96 @@ No automatic reinstall or deletion is attempted.
 
 ### Host command supervision
 
-Every host command, including Docker queries, Compose and the embedded installer, runs through a private
-`--haive-command-supervisor` mode of the same bridge binary. The mode receives only the command runner's
-filtered environment and preserves working directory, output capture/private logging and exit status.
-It does not decode Desktop requests or invoke any extra shell. The parent holds the only write end of an
-anonymous pipe; the supervisor never passes its read end to the command. Before launching anything, the
-supervisor requires a one-byte admission from its parent. EOF before admission exits without a command.
+Host mutations (Compose and the embedded installer) run through a private
+`--haive-command-supervisor` mode of the same bridge binary. Docker queries also use supervision,
+except Windows `status` and the pre-lease `docker info` engine probe, which run without a Job Object:
+they hold no install lease and cannot mutate a stack. The mode receives the command runner's filtered
+environment, working directory and output capture/private logging. Arguments remain separate, without
+an extra shell; `argv[0]` becomes the resolved executable path. `commandSupervisor` refuses command fields
+it cannot preserve (stdin, extra files, process attributes, cancellation hooks, wait delays or a started
+command) instead of silently discarding them.
 
-- **Linux:** the supervised command owns a process group and has `SysProcAttr.Pdeathsig = SIGKILL`.
-  Its creating goroutine holds its OS thread until Wait finishes, because the signal follows the creating
-  thread's lifetime. The supervisor is a child subreaper so it can reap orphaned group members before
-  declaring teardown complete, even when PID 1 does not reap them. It also watches parent-pipe EOF and
-  kills the whole command group on bridge death or cancellation; this covers the Compose plugin and installer descendants that a direct
-  child's parent-death signal alone would miss.
-- **macOS:** the same pipe watcher survives abrupt bridge death, kills the command's process group and
-  waits for the direct child. It needs no Linux-only parent-death signal. On both Unix targets normal
-  launcher exit also kills leftover group members and waits for the group to disappear before supervisor
-  exit. Commands that deliberately detach into another process group are outside this mechanism.
+The parent holds the only write end of an anonymous admission/liveness pipe, which never reaches the
+command. Admission requires both a random per-launch nonce (matching argument and environment, removed
+before the command starts) and a byte from the parent's pipe. Supervisor failures are written to stderr,
+which the installer/Compose path captures in the private operation log.
+
+- **Linux:** the command owns a process group and has `SysProcAttr.Pdeathsig = SIGKILL`. Its creating
+  goroutine holds its OS thread until Wait finishes. The supervisor is named `haive-cmd-guard` through
+  `PR_SET_NAME`, so ordinary `pkill haive-desktop` does not also kill its watcher. Both bridge and
+  supervisor request child-subreaper status to reap orphaned group members; a refusal logs a warning
+  and degrades to ordinary OS reaping instead of refusing every command. Parent-pipe EOF kills the
+  command group, covering Compose/installer grandchildren beyond the direct child's parent-death signal.
+- **macOS:** the pipe watcher survives bridge death and kills the command group; it needs no Linux-only
+  parent-death signal. Orphans are reaped by launchd. On both Unix targets the supervisor reports the
+  command's pgid and completion over a separate close-on-exec status pipe. If it dies by signal or
+  without reporting completion, the surviving bridge kills that group and waits for it to disappear
+  before releasing leases, then reports a distinct uncertain-outcome error with manual recovery advice.
+  Normal launcher exit also kills remaining group members: a shell's background jobs are terminated,
+  even if the launcher exits successfully. Descendants that deliberately detach into another process
+  group remain outside this mechanism. A non-ESRCH group-probe error is logged as a warning and does
+  not turn a successful command into exit 125.
 - **Windows (amd64/arm64):** the parent creates an unnamed, non-inheritable Job Object with
-  `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`, starts the waiting supervisor, assigns it to the job and only then
-  sends admission. Descendants inherit job membership at creation; no breakaway flag is enabled. There
-  is no command execution window before assignment. Closing the parent or terminating its job kills
-  the supervisor and all members. Cancellation calls `TerminateJobObject`; the bridge queries job
-  accounting until no active processes remain, then finishes output draining. An assignment failure
-  (including an incompatible enclosing job) refuses the command without running it. This uses stdlib
-  `syscall` only; no dependency or host tool is added.
+  `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`, starts the waiting supervisor, assigns it and only then admits
+  the command. Descendants inherit membership at creation without breakaway flags. Bridge death closes
+  the sole job handle and kills all members. Cancellation calls `TerminateJobObject`; errors are
+  retained, and job accounting must reach zero active processes before completion. Install/Start/Stop
+  fail closed if assignment fails (including an incompatible enclosing job); the Win32 error is logged
+  and the user sees a supervision-policy refusal, rather than a Docker engine-context diagnosis.
+  This uses stdlib `syscall` only.
 
-Both window and install leases keep beating until supervised command Wait and output draining finish,
-including after context cancellation. Release remains deferred until the operation returns; cancellation
-alone never releases a lease. The first failed heartbeat requests command cancellation while renewal
-retries continue. A hard-killed bridge cannot renew, but its command teardown does not wait for the 60 s
-stale-lease window. A frozen process/VM, an unschedulable kernel task or failed filesystem renewal still
-cannot offer a hard wall-clock guarantee; the existing stale protocol and manual recovery limits remain.
-Daemon-side work already accepted by Docker is independent of host-process supervision.
+Both leases keep beating through command/group teardown and output draining, including after
+cancellation. Proven lease loss cancels immediately; transient heartbeat errors cancel only at
+`now - lastGoodBeat >= stale/2` (30 s). Renewal continues until release, and the user sees lease loss
+as the cancellation cause. Teardown waits use the named 30 s `commandTeardownTimeout` per phase,
+including output draining and group/job polling. If teardown cannot be confirmed within these bounds,
+the operation returns a distinct "Could not confirm the command stopped" error requiring manual host
+inspection before retrying, instead of holding a beating lease forever. Leases are released on that
+exceptional return too; it is not proof that every process stopped. A frozen VM or an unschedulable
+kernel task cannot offer a hard wall-clock guarantee.
 
-`supervision_linux_test.go` uses only real sleeping test processes: kill the bridge-side parent, cancel a
-child plus grandchild, and block output draining after cancellation while proving both leases still beat
-and are released after completion. Each control failed on `origin/main` before this change and passes
-with supervision. Additional controls cover missing admission, pre-cancellation, exit status, environment,
-working directory and failed-heartbeat cancellation with continued renewal. The macOS group/pipe and
-Windows ABI/job/admission controls are compiled with `go test -c` and vetted for amd64 and arm64 in the
-pinned Go image; they have **not run natively** here. Native parent-death/group/Job behavior, enclosing
-Windows jobs and real Desktop/Compose acceptance remain owner-session checks; no real stack or volume
-was touched for these controls.
+**Remaining Unix limit:** simultaneous SIGKILL of bridge and supervisor defeats the pipe watcher and
+bridge-side group sweep on both macOS and Linux. On Linux Pdeathsig kills only the direct command;
+grandchildren can survive. On macOS the whole command can survive. A kill before the pgid report also
+leaves the surviving bridge without a group identity to sweep. Leases then stop beating and may expire
+while survivors still run. Inspect host processes, status/logs and the updater journal before retrying
+an interrupted operation; existing conservative install/start recovery advice remains. OS supervision
+also cannot undo work already accepted by the Docker daemon.
+
+Linux real-process controls use fake sleeping payloads only: bridge death, supervisor-only death,
+whole-group cancellation, a Pdeathsig-only backstop and lease renewal through blocked output draining.
+The supervisor-death control failed before its fix (a grandchild survived and the lease was released);
+removing Pdeathsig makes the independent backstop fail. Shared controls cover nonce admission, refusal
+of unsupported fields, preserved exit/directory/environment, bounded waits, error mapping and heartbeat
+transient/sustained/lost decisions. Windows controls spawn grandchildren, check their process handles
+after cancellation and `TerminateProcess` of a helper bridge, and force a real Win32 assignment failure
+through the production refusal branch. The macOS bridge-kill control uses `kill(pid, 0)` and `ps` to
+observe both command and grandchild. Windows and macOS tests are compiled with `go test -c` and vetted
+for amd64/arm64, but **were not executed** here. No real stacks or volumes were touched.
+
+#### Must verify on real hosts before release
+
+- **Windows 10/11 amd64, and arm64 if shipped, launched by Docker Desktop host exec:** verify job
+  assignment under its enclosing job and Defender/EDR; Status, Install, Start and Stop; a genuine
+  assignment refusal with its Win32 log and truthful UI cause while read-only probes remain usable.
+  Run native `TestWindows*`, shared `TestSupervisor*` and lease controls. During Start, test
+  `taskkill /F` on the bridge and `taskkill /F /IM haive-desktop.exe`; confirm supervisor, docker.exe
+  and Compose plugin exit within seconds and the lease stops beating. Check cancel/timeout reaches
+  zero job members and terminating an empty job succeeds. Exercise installer profile paths with spaces,
+  console-window behavior and Defender latency. With updater polling over the shared lock file, check
+  a transient sharing violation is tolerated, sustained errors cancel at 30 s and proven loss cancels
+  at once. Confirm buffered host exec supplies no supervisor admission stdin.
+- **macOS arm64 and amd64:** run native tests, including bridge-kill and cancel controls; kill the
+  bridge during Start and confirm docker/Compose exit. Kill only the supervisor and check bridge-side
+  group cleanup plus the uncertain-outcome refusal. Check `kill(-pgid, 0)` stops seeing the killed
+  group promptly after launchd reaping; validate timeout/manual recovery behavior. Verify Gatekeeper
+  and quarantine permit re-exec, and Docker credential helpers work in a background process group.
+  Treat simultaneous bridge/supervisor SIGKILL as the remaining limit, not a supported recovery path.
+- **Linux Docker Desktop:** determine whether window close/host-exec timeout kills just the bridge,
+  its process group or its whole tree (the watcher must survive). Confirm the distinct supervisor name,
+  supervisor-only cleanup, subreaper-denied warning/degradation, and real Compose Start/Stop. Check
+  descendants/background jobs and credential helpers under supervision. Native Desktop/Compose and
+  cross-VM lock-file coherence remain unmeasured by container tests.
 
 ### Build and validation
 

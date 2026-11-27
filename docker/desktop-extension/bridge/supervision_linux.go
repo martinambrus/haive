@@ -1,41 +1,50 @@
 package main
 
 import (
+	"fmt"
+	"os"
 	"os/exec"
 	"runtime"
 	"syscall"
 	"time"
+	"unsafe"
 )
 
 func configureChild(cmd *exec.Cmd) func() {
-	// Linux ties Pdeathsig to the creating OS thread, not the Go process. Keep
-	// that thread alive until Wait completes (including cancellation).
 	runtime.LockOSThread()
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true, Pdeathsig: syscall.SIGKILL}
 	return runtime.UnlockOSThread
 }
 
-// Adopt and reap orphaned command descendants. Otherwise a container's PID 1
-// need not reap them, and kill(group, 0) would see their zombies indefinitely.
-func prepareSupervisor() error {
+func prepareBridgeReaper() {
 	const prSetChildSubreaper = 36
 	_, _, err := syscall.Syscall6(syscall.SYS_PRCTL, prSetChildSubreaper, 1, 0, 0, 0, 0)
 	if err != 0 {
-		return err
+		fmt.Fprintln(os.Stderr, "command supervisor warning: subreaper unavailable:", err)
 	}
-	return nil
+}
+func prepareSupervisor() {
+	// Linux comm names are limited to 15 bytes, distinct from haive-desktop so
+	// pkill haive-desktop targets the bridge without killing its EOF watcher.
+	name := [16]byte{}
+	copy(name[:], "haive-cmd-guard")
+	_, _, err := syscall.Syscall6(syscall.SYS_PRCTL, 15, uintptr(unsafe.Pointer(&name[0])), 0, 0, 0, 0)
+	if err != 0 {
+		fmt.Fprintln(os.Stderr, "command supervisor warning: process name:", err)
+	}
+	prepareBridgeReaper()
 }
 
-func waitCommandGroup(group int) error {
+func waitCommandGroup(group int, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
 	for {
-		// The direct child's Wait has completed, so this cannot steal its status.
 		for {
 			pid, err := syscall.Wait4(-group, nil, syscall.WNOHANG, nil)
 			if err == syscall.EINTR {
 				continue
 			}
 			if err != nil && err != syscall.ECHILD {
-				return err
+				return fmt.Errorf("%w: reap command group: %v", errCommandStopUnconfirmed, err)
 			}
 			if pid <= 0 {
 				break
@@ -46,7 +55,11 @@ func waitCommandGroup(group int) error {
 			return nil
 		}
 		if err != nil {
-			return err
+			fmt.Fprintln(os.Stderr, "command supervisor warning: probe command group:", err)
+			return nil
+		}
+		if !time.Now().Before(deadline) {
+			return errCommandStopUnconfirmed
 		}
 		time.Sleep(time.Millisecond)
 	}

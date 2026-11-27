@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os/exec"
 	"syscall"
@@ -64,7 +65,8 @@ func terminateCommandJob(job syscall.Handle) error {
 	return nil
 }
 
-func waitCommandJob(job syscall.Handle) error {
+func waitCommandJob(job syscall.Handle, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
 	// Termination is asynchronous. Keep the handle and install lease until every
 	// job member has exited, not merely until the supervisor has exited.
 	for {
@@ -76,17 +78,32 @@ func waitCommandJob(job syscall.Handle) error {
 		if accounting.ActiveProcesses == 0 {
 			return nil
 		}
+		if !time.Now().Before(deadline) {
+			return errCommandStopUnconfirmed
+		}
 		time.Sleep(10 * time.Millisecond)
 	}
 }
 
+func assignCommandJob(job, process syscall.Handle) error {
+	ok, _, err := assignJobProcess.Call(uintptr(job), uintptr(process))
+	if ok == 0 {
+		return fmt.Errorf("AssignProcessToJobObject: %w", err)
+	}
+	return nil
+}
+
 func runSupervised(ctx context.Context, cmd *exec.Cmd) error {
+	return runSupervisedWithAssign(ctx, cmd, assignCommandJob)
+}
+
+func runSupervisedWithAssign(ctx context.Context, cmd *exec.Cmd, assign func(syscall.Handle, syscall.Handle) error) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
 	job, err := newCommandJob()
 	if err != nil {
-		return err
+		return supervisionFailure(cmd, err)
 	}
 	defer syscall.CloseHandle(job)
 	supervisor, read, write, err := commandSupervisor(cmd)
@@ -99,51 +116,55 @@ func runSupervised(ctx context.Context, cmd *exec.Cmd) error {
 		return err
 	}
 	read.Close()
-	// The supervisor cannot spawn a command before admission. If this bridge dies
-	// before assignment, EOF makes it exit without running anything. Once assigned,
-	// all descendants inherit the job at creation, before executing any code.
+	done := make(chan error, 1)
+	refuse := func(err error) error {
+		write.Close()
+		return errors.Join(supervisionFailure(cmd, err), boundedCommandWait(done, commandTeardownTimeout))
+	}
 	process, err := syscall.OpenProcess(processSetQuota|syscall.PROCESS_TERMINATE|syscall.SYNCHRONIZE, false, uint32(supervisor.Process.Pid))
+	// Keep os.Process's handle until OpenProcess has acquired its own, excluding
+	// PID reuse even if the supervisor crashes before admission.
+	go func() { done <- supervisor.Wait() }()
 	if err != nil {
-		write.Close()
-		supervisor.Wait()
-		return err
+		return refuse(fmt.Errorf("open command supervisor: %w", err))
 	}
-	defer syscall.CloseHandle(process)
-	ok, _, assignErr := assignJobProcess.Call(uintptr(job), uintptr(process))
-	if ok == 0 {
-		write.Close()
-		supervisor.Wait()
-		return fmt.Errorf("assign command job: %w", assignErr)
+	if err := assign(job, process); err != nil {
+		syscall.CloseHandle(process)
+		return refuse(err)
 	}
-	if _, err := write.Write([]byte{1}); err != nil {
-		terminateCommandJob(job)
-		waitCommandJob(job)
-		supervisor.Wait()
-		return err
-	}
-	// Wait for the process handle separately from exec.Wait's pipe draining: a
-	// descendant holding stdout must not prevent job termination on normal exit.
+	// The waiter owns this handle: a bounded return must not close a handle
+	// underneath an outstanding WaitForSingleObject. Closing the job on return
+	// still kills members if termination failed.
 	exited := make(chan error, 1)
-	go func() { _, err := syscall.WaitForSingleObject(process, syscall.INFINITE); exited <- err }()
+	go func() {
+		defer syscall.CloseHandle(process)
+		_, err := syscall.WaitForSingleObject(process, syscall.INFINITE)
+		exited <- err
+	}()
+	// Assignment is complete before admission; every command descendant inherits
+	// the job at creation, and only the bridge owns its kill-on-close handle.
+	if _, err := write.Write([]byte{1}); err != nil {
+		terminateErr := terminateCommandJob(job)
+		groupErr := waitCommandJob(job, commandTeardownTimeout)
+		return errors.Join(err, terminateErr, groupErr, boundedCommandWait(done, commandTeardownTimeout))
+	}
+	// Observe the kernel process handle independently of output draining.
 	var result error
 	select {
 	case result = <-exited:
 	case <-ctx.Done():
-		result = ctx.Err()
-		terminateCommandJob(job)
-		<-exited
+		result = context.Cause(ctx)
 	}
-	if err := terminateCommandJob(job); err != nil && result == nil {
-		result = err
+	terminateErr := terminateCommandJob(job)
+	groupErr := waitCommandJob(job, commandTeardownTimeout)
+	waitErr := boundedCommandWait(done, commandTeardownTimeout)
+	if terminateErr != nil || groupErr != nil || errors.Is(waitErr, errCommandStopUnconfirmed) || errors.Is(waitErr, exec.ErrWaitDelay) {
+		return errors.Join(errCommandStopUnconfirmed, terminateErr, groupErr, waitErr, result)
 	}
-	if err := waitCommandJob(job); err != nil && result == nil {
-		result = err
-	}
-	if err := supervisor.Wait(); result == nil {
-		result = err
-	}
-	return result
+	return errors.Join(result, waitErr)
 }
+
+func finishSupervisor(error) {}
 
 func superviseChild(cmd *exec.Cmd) error {
 	// This process was assigned before admission; CreateProcess inherits that job.

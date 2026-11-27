@@ -708,19 +708,48 @@ func (b bridge) handle(ctx context.Context, r request) (s state, err error) {
 	if err = validateRequest(r); err != nil {
 		return s, err
 	}
+	// Preserve supervision failures through the operation-specific error mapping.
+	var commandFailure error
+	baseRun := b.run
+	b.run = func(callCtx context.Context, exe string, args []string, dir string, log io.Writer) (string, error) {
+		if r.Action == "status" || (exe == "docker" && len(args) > 0 && args[0] == "info") {
+			callCtx = context.WithValue(callCtx, readOnlyProbeKey{}, true)
+		}
+		out, runErr := baseRun(callCtx, exe, args, dir, log)
+		var unavailable *supervisionUnavailable
+		if errors.As(runErr, &unavailable) || errors.Is(runErr, errCommandUncertain) || errors.Is(runErr, errCommandStopUnconfirmed) {
+			commandFailure = runErr
+		}
+		return out, runErr
+	}
+	defer func() {
+		if errors.Is(context.Cause(ctx), errLeaseLost) {
+			if err == nil {
+				err = errLeaseLost
+			} else {
+				err = fmt.Errorf("%w %v", errLeaseLost, err)
+			}
+		}
+		if err != nil && commandFailure != nil && !errors.Is(err, commandFailure) {
+			err = fmt.Errorf("%w %v", commandFailure, err)
+		}
+	}()
 	engine, err := b.run(ctx, "docker", []string{"info", "--format", "{{.ID}}"}, "", nil)
+	if err != nil && commandFailure != nil {
+		return s, commandFailure
+	}
 	if err != nil || strings.TrimSpace(engine) != r.Engine {
 		return s, errors.New("The host Docker CLI must point to the same engine as Docker Desktop. Select its context, then retry.")
 	}
 	if r.Action == "status" {
 		return b.inspect(ctx)
 	}
-	// A failed lease renewal cancels supervised commands while there is still
+	// Proven lease loss or half a stale window without renewal cancels commands while there is still
 	// time before stale takeover. Heartbeats themselves outlive cancellation and
 	// stop only when the operation (including command Wait) releases the lease.
-	ctx, cancel := context.WithCancel(ctx)
-	defer cancel()
-	b.leaseFailed = cancel
+	ctx, cancel := context.WithCancelCause(ctx)
+	defer cancel(nil)
+	b.leaseFailed = func() { cancel(errLeaseLost) }
 	// Cross-process exclusion also protects against two open Desktop windows.
 	releaseWindow, err := b.takeWindowLock(ctx)
 	if err != nil {
@@ -799,6 +828,8 @@ func (b bridge) handle(ctx context.Context, r request) (s state, err error) {
 	return s, err
 }
 
+type readOnlyProbeKey struct{}
+
 func runCommand(ctx context.Context, exe string, args []string, dir string, log io.Writer) (string, error) {
 	cmd := exec.Command(exe, args...)
 	cmd.Dir = dir
@@ -811,14 +842,29 @@ func runCommand(ctx context.Context, exe string, args []string, dir string, log 
 			cmd.Env = append(cmd.Env, e)
 		}
 	}
+	execute := runSupervised
+	// These probes take no install lease and cannot mutate a stack. Windows may
+	// run them without a Job Object even when enclosing-job policy blocks nesting.
+	if runtime.GOOS == "windows" && ctx.Value(readOnlyProbeKey{}) == true {
+		execute = func(ctx context.Context, cmd *exec.Cmd) error {
+			cmd.WaitDelay = commandTeardownTimeout
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			if err := cmd.Start(); err != nil {
+				return err
+			}
+			return waitCommand(ctx, cmd, func() { cmd.Process.Kill() })
+		}
+	}
 	if log != nil {
 		cmd.Stdout, cmd.Stderr = log, log
-		return "", runSupervised(ctx, cmd)
+		return "", execute(ctx, cmd)
 	}
 	var out strings.Builder
 	cmd.Stdout = &out
 	// Errors are reported by operation, never with raw third-party output or .env.
-	err := runSupervised(ctx, cmd)
+	err := execute(ctx, cmd)
 	return out.String(), err
 }
 

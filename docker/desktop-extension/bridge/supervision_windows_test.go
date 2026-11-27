@@ -2,9 +2,11 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
@@ -14,7 +16,6 @@ import (
 )
 
 func TestWindowsJobLayoutAndKillOnClose(t *testing.T) {
-	// Both supported Windows architectures use the Win64 ABI.
 	var limits jobLimits
 	if unsafe.Sizeof(limits) != 144 || unsafe.Offsetof(limits.IO) != 64 || unsafe.Offsetof(limits.LimitFlags) != 16 {
 		t.Fatal("job limit layout does not match Win64")
@@ -34,90 +35,145 @@ func TestWindowsJobLayoutAndKillOnClose(t *testing.T) {
 	if limits.LimitFlags != jobObjectLimitKillOnJobClose {
 		t.Fatalf("unexpected job flags: %x", limits.LimitFlags)
 	}
-	if err := waitCommandJob(job); err != nil {
+	if err := terminateCommandJob(job); err != nil {
+		t.Fatal("terminate empty job:", err)
+	}
+	if err := waitCommandJob(job, time.Second); err != nil {
 		t.Fatal(err)
 	}
 }
 
-func TestWindowsAdmissionFailureStartsNothing(t *testing.T) {
-	// Same EOF path used if OpenProcess/AssignProcessToJobObject fails. A process
-	// that was started before assignment can execute only the waiting supervisor.
+func TestWindowsAssignFailureStartsNothing(t *testing.T) {
 	cmd, marker := supervisorPayload(t)
-	supervisor, read, write, err := commandSupervisor(cmd)
-	if err != nil {
-		t.Fatal(err)
+	var output strings.Builder
+	cmd.Stderr = &output
+	var assignErr error
+	err := runSupervisedWithAssign(context.Background(), cmd, func(job, process syscall.Handle) error {
+		// A real Win32 failure through the production refusal branch, not an EOF simulation.
+		assignErr = assignCommandJob(0, process)
+		return assignErr
+	})
+	var unavailable *supervisionUnavailable
+	if assignErr == nil || !errors.As(err, &unavailable) || !errors.Is(err, assignErr) {
+		t.Fatalf("assign failure lost: %v (%v)", err, assignErr)
 	}
-	defer read.Close()
-	defer write.Close()
-	if err := supervisor.Start(); err != nil {
-		t.Fatal(err)
-	}
-	write.Close()
-	if _, ok := supervisor.Wait().(*exec.ExitError); !ok {
-		t.Fatal("unassigned supervisor did not exit")
+	if !strings.Contains(output.String(), "AssignProcessToJobObject") {
+		t.Fatal("Win32 failure not logged")
 	}
 	if _, err := os.Stat(marker); !os.IsNotExist(err) {
 		t.Fatal("payload escaped before job assignment")
 	}
 }
 
-// Native Windows control, compiled but not executable on the Linux runner.
-func TestWindowsSleepingPayload(t *testing.T) {
-	if os.Getenv("HDE_WINDOWS_SLEEP") != "1" {
+// Native Windows controls: compiled and vetted on Linux, not executed there.
+func TestWindowsSupervisionHelper(t *testing.T) {
+	mode := os.Getenv("HDE_WINDOWS_MODE")
+	if mode == "" {
 		return
 	}
-	fmt.Fprintln(os.Stdout, os.Getpid())
-	time.Sleep(time.Hour)
+	exe, _ := os.Executable()
+	dir := os.Getenv("HDE_WINDOWS_DIR")
+	if mode == "bridge" {
+		cmd := exec.Command(exe, "-test.run=^TestWindowsSupervisionHelper$")
+		cmd.Env = append(os.Environ(), "HDE_WINDOWS_MODE=child")
+		if runSupervised(context.Background(), cmd) != nil {
+			os.Exit(2)
+		}
+	} else {
+		if err := os.WriteFile(filepath.Join(dir, mode), []byte(strconv.Itoa(os.Getpid())), 0600); err != nil {
+			os.Exit(3)
+		}
+		if mode == "child" {
+			child := exec.Command(exe, "-test.run=^TestWindowsSupervisionHelper$")
+			child.Env = append(os.Environ(), "HDE_WINDOWS_MODE=grandchild")
+			if child.Start() != nil {
+				os.Exit(4)
+			}
+		}
+		time.Sleep(time.Hour)
+	}
 	os.Exit(0)
 }
 
-type windowsReadyWriter struct{ ready chan int }
-
-func (w windowsReadyWriter) Write(p []byte) (int, error) {
-	if pid, err := strconv.Atoi(strings.TrimSpace(string(p))); err == nil {
-		select {
-		case w.ready <- pid:
-		default:
-		}
-	}
-	return len(p), nil
-}
-
-func TestWindowsCancelTerminatesJobMember(t *testing.T) {
+func windowsPayload(t *testing.T, mode string) (*exec.Cmd, string) {
+	t.Helper()
 	exe, err := os.Executable()
 	if err != nil {
 		t.Fatal(err)
 	}
+	dir := t.TempDir()
+	cmd := exec.Command(exe, "-test.run=^TestWindowsSupervisionHelper$")
+	cmd.Env = append(os.Environ(), "HDE_WINDOWS_MODE="+mode, "HDE_WINDOWS_DIR="+dir)
+	return cmd, dir
+}
+
+func windowsMembers(t *testing.T, dir string) []syscall.Handle {
+	t.Helper()
+	var members []syscall.Handle
+	for _, name := range []string{"child", "grandchild"} {
+		deadline := time.Now().Add(5 * time.Second)
+		var pid int
+		for pid == 0 {
+			data, _ := os.ReadFile(filepath.Join(dir, name))
+			pid, _ = strconv.Atoi(string(data))
+			if time.Now().After(deadline) {
+				t.Fatalf("%s did not start", name)
+			}
+			time.Sleep(time.Millisecond)
+		}
+		handle, err := syscall.OpenProcess(syscall.SYNCHRONIZE|syscall.PROCESS_TERMINATE, false, uint32(pid))
+		if err != nil {
+			t.Fatal(err)
+		}
+		members = append(members, handle)
+		t.Cleanup(func() { syscall.TerminateProcess(handle, 125); syscall.CloseHandle(handle) })
+	}
+	return members
+}
+func windowsMembersGone(t *testing.T, members []syscall.Handle, timeout uint32) {
+	t.Helper()
+	for _, handle := range members {
+		status, err := syscall.WaitForSingleObject(handle, timeout)
+		if err != nil || status != syscall.WAIT_OBJECT_0 {
+			t.Fatalf("job descendant still running: %d (%v)", status, err)
+		}
+	}
+}
+
+func TestWindowsCancelGroup(t *testing.T) {
+	cmd, dir := windowsPayload(t, "child")
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	cmd := exec.Command(exe, "-test.run=^TestWindowsSleepingPayload$")
-	cmd.Env = append(os.Environ(), "HDE_WINDOWS_SLEEP=1")
-	ready := make(chan int, 1)
-	cmd.Stdout = windowsReadyWriter{ready}
 	done := make(chan error, 1)
 	go func() { done <- runSupervised(ctx, cmd) }()
-	var pid int
-	select {
-	case pid = <-ready:
-	case <-time.After(5 * time.Second):
-		t.Fatal("job member did not start")
-	}
-	process, err := syscall.OpenProcess(syscall.SYNCHRONIZE, false, uint32(pid))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer syscall.CloseHandle(process)
+	members := windowsMembers(t, dir)
 	cancel()
 	select {
 	case err := <-done:
-		if err == nil {
-			t.Fatal("cancelled job succeeded")
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("cancel: %v", err)
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("job did not terminate")
 	}
-	status, err := syscall.WaitForSingleObject(process, 0)
-	if err != nil || status != syscall.WAIT_OBJECT_0 {
-		t.Fatalf("command still active after Wait: %d (%v)", status, err)
+	windowsMembersGone(t, members, 0)
+}
+
+func TestWindowsParentDeath(t *testing.T) {
+	bridge, dir := windowsPayload(t, "bridge")
+	if err := bridge.Start(); err != nil {
+		t.Fatal(err)
 	}
+	t.Cleanup(func() { bridge.Process.Kill(); bridge.Wait() })
+	members := windowsMembers(t, dir)
+	process, err := syscall.OpenProcess(syscall.PROCESS_TERMINATE, false, uint32(bridge.Process.Pid))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer syscall.CloseHandle(process)
+	if err := syscall.TerminateProcess(process, 125); err != nil {
+		t.Fatal(fmt.Errorf("TerminateProcess bridge: %w", err))
+	}
+	bridge.Wait()
+	windowsMembersGone(t, members, 5000)
 }

@@ -3,15 +3,19 @@ package main
 import (
 	"context"
 	"errors"
+	"io"
 	"os"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 )
 
-func TestLeaseFailureCancelsCommandButKeepsBeating(t *testing.T) {
+func TestLeaseFailureThresholdAndContinuedRenewal(t *testing.T) {
 	b := fixture(t)
 	ticks := fakeTicker(&b)
+	var clock atomic.Int64
+	b.lockCfg.now = func() time.Time { return time.Unix(0, clock.Load()) }
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	b.leaseFailed = cancel
@@ -32,18 +36,76 @@ func TestLeaseFailureCancelsCommandButKeepsBeating(t *testing.T) {
 	}
 	defer lease.releaseLock()
 	<-ticks.period
+	// The next unbuffered send proves the preceding beat and decision completed.
+	tick := func() { ticks.ticks <- time.Time{}; ticks.ticks <- time.Time{} }
 	fail.Store(true)
+	clock.Store(int64(5 * time.Second))
+	tick()
+	if ctx.Err() != nil {
+		t.Fatal("one transient failure cancelled the operation")
+	}
+	clock.Store(int64(30*time.Second - time.Nanosecond))
+	tick()
+	if ctx.Err() != nil {
+		t.Fatal("cancelled before half the stale window")
+	}
+	clock.Store(int64(30 * time.Second))
 	ticks.ticks <- time.Time{}
 	select {
 	case <-ctx.Done():
 	case <-time.After(time.Second):
-		t.Fatal("failed beat did not cancel command")
+		t.Fatal("sustained failure did not cancel at stale/2")
 	}
 	fail.Store(false)
-	ticks.ticks <- time.Time{}
-	// Receiving the next tick proves the prior synchronous beat has finished.
-	ticks.ticks <- time.Time{}
+	tick()
 	if writes.Load() < 2 {
-		t.Fatal("context cancellation stopped lease renewal before release")
+		t.Fatal("cancellation stopped renewal before release")
+	}
+}
+
+func TestLeaseLostCancelsImmediately(t *testing.T) {
+	b := fixture(t)
+	ticks := fakeTicker(&b)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	b.leaseFailed = cancel
+	lease, err := b.acquireStackLock(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lease.releaseLock()
+	<-ticks.period
+	if err := os.WriteFile(lease.path, rawRecord("another-holder", "updater", 1), 0644); err != nil {
+		t.Fatal(err)
+	}
+	ticks.ticks <- time.Time{}
+	select {
+	case <-ctx.Done():
+	case <-time.After(time.Second):
+		t.Fatal("proven loss did not cancel immediately")
+	}
+}
+
+func TestLeaseLossCauseSurvivesOperationMapping(t *testing.T) {
+	b := fixture(t)
+	timers := newTimerSet()
+	b.lockCfg.newTicker = timers.newTicker
+	base := b.run
+	b.run = func(ctx context.Context, exe string, args []string, dir string, log io.Writer) (string, error) {
+		if log != nil {
+			if err := os.WriteFile(lockPathOf(b), rawRecord("another-holder", "updater", 1), 0644); err != nil {
+				return "", err
+			}
+			<-timers.created
+			<-timers.created
+			timers.tickAll()
+			<-ctx.Done()
+			return "", ctx.Err()
+		}
+		return base(ctx, exe, args, dir, log)
+	}
+	_, err := b.handle(context.Background(), stopReq())
+	if !errors.Is(err, errLeaseLost) || !strings.Contains(err.Error(), "lease was lost") {
+		t.Fatalf("lease cause hidden: %v", err)
 	}
 }

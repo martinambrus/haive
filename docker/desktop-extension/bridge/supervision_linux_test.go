@@ -33,6 +33,15 @@ func TestSupervisionHelper(t *testing.T) {
 		if err != nil {
 			os.Exit(2)
 		}
+	case "pdeath-parent":
+		child := exec.Command(exe, "-test.run=^TestSupervisionHelper$")
+		child.Env = append(os.Environ(), "HDE_SUPERVISION_MODE=grandchild")
+		unlock := configureChild(child)
+		defer unlock()
+		if child.Start() != nil {
+			os.Exit(4)
+		}
+		child.Wait()
 	case "child":
 		os.WriteFile(filepath.Join(dir, "child"), []byte(strconv.Itoa(os.Getpid())), 0600)
 		grandchild := exec.Command(exe, "-test.run=^TestSupervisionHelper$")
@@ -226,4 +235,76 @@ func TestSupervisionLeaseUntilExit(t *testing.T) {
 			t.Fatalf("lease not released after exit: %s (%v)", path, err)
 		}
 	}
+}
+
+// Kill only the supervisor while the bridge and both leases remain alive.
+func TestSupervisionSupervisorDeath(t *testing.T) {
+	exe, dir := supervisionEnv(t, "child")
+	b := fixture(t)
+	base := b.run
+	b.run = func(ctx context.Context, command string, args []string, cwd string, log io.Writer) (string, error) {
+		if log != nil {
+			return runCommand(ctx, exe, []string{"-test.run=^TestSupervisionHelper$"}, "", log)
+		}
+		return base(ctx, command, args, cwd, log)
+	}
+	done := make(chan error, 1)
+	go func() { _, err := b.handle(context.Background(), stopReq()); done <- err }()
+	pids := supervisionPIDs(t, dir)
+	stat, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pids[0]))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, tail, _ := strings.Cut(string(stat), ") ")
+	supervisor, _ := strconv.Atoi(strings.Fields(tail)[1])
+	if supervisor <= 1 {
+		t.Fatal("invalid supervisor pid")
+	}
+	name, err := os.ReadFile(fmt.Sprintf("/proc/%d/comm", supervisor))
+	if err != nil || strings.TrimSpace(string(name)) != "haive-cmd-guard" {
+		t.Errorf("supervisor name: %q (%v)", name, err)
+	}
+	for _, path := range []string{windowPathOf(b), lockPathOf(b)} {
+		if _, err := os.Stat(path); err != nil {
+			t.Fatal("lease missing before supervisor death", err)
+		}
+	}
+	if err := syscall.Kill(supervisor, syscall.SIGKILL); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-done:
+		for _, pid := range pids {
+			if supervisionAlive(pid) {
+				t.Errorf("lease released while process %d still ran", pid)
+			}
+		}
+		if err == nil || !strings.Contains(err.Error(), "outcome is uncertain") {
+			t.Errorf("missing ambiguous-outcome refusal: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("bridge did not recover supervisor death")
+	}
+	for _, path := range []string{windowPathOf(b), lockPathOf(b)} {
+		if _, err := os.Stat(path); !os.IsNotExist(err) {
+			t.Errorf("lease not released after teardown: %s (%v)", path, err)
+		}
+	}
+}
+
+// Isolate the kernel backstop: no bridge-side group sweep or EOF watcher can help.
+func TestSupervisionPdeathsigBackstop(t *testing.T) {
+	exe, dir := supervisionEnv(t, "pdeath-parent")
+	parent := exec.Command(exe, "-test.run=^TestSupervisionHelper$")
+	if err := parent.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { parent.Process.Kill(); parent.Wait() })
+	path := filepath.Join(dir, "grandchild")
+	var pid int
+	supervisionAwait(t, "direct child ready", func() bool { data, _ := os.ReadFile(path); pid, _ = strconv.Atoi(string(data)); return pid > 0 })
+	t.Cleanup(func() { syscall.Kill(pid, syscall.SIGKILL) })
+	parent.Process.Kill()
+	parent.Wait()
+	supervisionGone(t, []int{pid})
 }
