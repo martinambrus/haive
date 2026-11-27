@@ -239,7 +239,7 @@ export async function ensureOllamaModels(db: Database): Promise<void> {
  *  the backstop there) and for cloud/remote models (nothing loads locally). The
  *  RAG embedding model is freed separately (maybeUnloadTaskEmbedModel). Never
  *  throws — it must not break the terminal transition. */
-export async function unloadTaskOllamaCliModels(db: Database, taskId: string): Promise<boolean> {
+export async function unloadTaskOllamaCliModels(db: Database, taskId: string): Promise<void> {
   try {
     const rows = await db
       .select({ model: schema.cliProviders.model, envVars: schema.cliProviders.envVars })
@@ -255,7 +255,7 @@ export async function unloadTaskOllamaCliModels(db: Database, taskId: string): P
       if (!isInStackOllamaBaseUrl(r.envVars?.ANTHROPIC_BASE_URL)) continue;
       models.add(r.model);
     }
-    if (models.size === 0) return true;
+    if (models.size === 0) return;
     for (const model of models) {
       await withTaskSettlementTransaction(db, async (tx, signal) => {
         await setTaskSettlementTimeout(tx);
@@ -304,9 +304,7 @@ export async function unloadTaskOllamaCliModels(db: Database, taskId: string): P
         }
       });
     }
-    return true;
   } catch (err) {
     log.warn({ err, taskId }, 'unloadTaskOllamaCliModels failed');
-    return false;
   }
 }

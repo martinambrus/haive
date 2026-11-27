@@ -82,7 +82,8 @@ export type EmbedReleaseStatus = 'unloaded' | 'in_use' | 'not_resident' | 'unrea
 
 /** Evict an embedding model from Ollama (keep_alive:0) ONLY when it is both
  *  resident and unused — the single safe-to-evict gate shared by task-cancel,
- *  worker-boot reconciliation and the API release endpoint. Order matters:
+ *  worker-boot reconciliation and the global-KB release endpoint (global-KB model only).
+ *  Order matters:
  *  residency is one cheap HTTP call and the common idle short-circuit, so it runs
  *  before the (multi-query) live-task scan. `alsoInUse` lets a caller fold in its
  *  own external usage signal (e.g. an in-flight global-KB sync job) without

@@ -1173,24 +1173,22 @@ async function settleFailedTask(
  *  Ollama so the GPU is freed — but only when it is still resident AND no other
  *  live task uses the SAME (url, model). The resolve + residency + live-task gate
  *  lives in @haive/shared/rag (shared with the worker-boot reconciler and the API
- *  release endpoint, so all three stay in lockstep on "safe to evict"). Best-effort
+ *  global-KB release endpoint, which targets only the global-KB model). Best-effort
  *  and self-contained: never throws, so it cannot break the terminal transition.
- *  Repo-RAG only; the global-KB model has its own lifecycle and keep_alive
- *  backstop. */
-async function maybeUnloadTaskEmbedModel(db: Database, taskId: string): Promise<boolean> {
+ *  Repo-RAG cleanup has boot reconciliation and the 30-minute keep_alive as backstops;
+ *  the global-KB model has its own lifecycle. */
+async function maybeUnloadTaskEmbedModel(db: Database, taskId: string): Promise<void> {
   try {
     const target = await resolveTaskEmbedTarget(db, taskId);
-    if (!target) return true;
+    if (!target) return;
     const status = await releaseEmbedModelIfUnused(db, {
       url: target.url,
       model: target.model,
       settlingTaskId: taskId,
     });
     logger.info({ taskId, model: target.model, status }, 'ollama embed model release');
-    return true;
   } catch (err) {
     logger.warn({ err, taskId }, 'ollama embed model unload failed');
-    return false;
   }
 }
 
@@ -1344,8 +1342,7 @@ async function cleanupTaskContainers(
   db: Database,
   taskId: string,
   reason: 'completed' | 'failed' | 'cancelled',
-): Promise<boolean> {
-  let settled = true;
+): Promise<void> {
   if (reason === 'cancelled') {
     try {
       const killed = await killSandboxContainersByTaskLabel(taskId);
@@ -1473,7 +1470,6 @@ async function cleanupTaskContainers(
       }
     });
   } catch (err) {
-    settled = false;
     logger.warn({ err, taskId, reason }, 'cleanup-task-auth-volumes failed');
   }
 
@@ -1517,13 +1513,11 @@ async function cleanupTaskContainers(
       });
     }
   } catch (err) {
-    settled = false;
     logger.warn({ err, taskId, reason }, 'cleanup-terminal-sessions failed');
   }
 
   // After the reap, so no live shell can write into the tree between the clean check and removal.
   await releaseTaskWorktree(db, taskId, reason);
-  return settled;
 }
 
 async function cleanupTaskEnvImage(

@@ -103,16 +103,23 @@ it('CLI model cleanup keeps the model when Retry wins after the model lookup', a
   expect(fetch).not.toHaveBeenCalled();
 });
 
-it('summary cleanup removes ended-task volumes while holding the task row', async () => {
+it('summary cleanup holds the task row and forwards a signal aborted after settlement', async () => {
   const { db, fake } = taskDb();
   let locked = false;
-  vi.mocked(cleanupTaskAuthVolumes).mockImplementationOnce(async () => {
-    locked = fake.rowLocked(schema.tasks, TASK);
-    return { removed: ['volume'], failed: [] };
-  });
+  let abortedDuringCleanup: boolean | undefined;
+  vi.mocked(cleanupTaskAuthVolumes).mockImplementationOnce(
+    async (_taskId, _provider, _volumes, signal) => {
+      abortedDuringCleanup = signal?.aborted;
+      locked = fake.rowLocked(schema.tasks, TASK);
+      return { removed: ['volume'], failed: [] };
+    },
+  );
   await cleanupAuthAfterTerminalSummary(db, TASK);
   expect(locked).toBe(true);
   expect(cleanupTaskAuthVolumes).toHaveBeenCalledOnce();
+  expect(cleanupTaskAuthVolumes).toHaveBeenCalledWith(TASK, undefined, [], expect.any(AbortSignal));
+  expect(abortedDuringCleanup).toBe(false);
+  expect(vi.mocked(cleanupTaskAuthVolumes).mock.calls[0]?.[3]?.aborted).toBe(true);
   expect(clearTaskAuthPreparationState).toHaveBeenCalledOnce();
   expect(fake.rowLocked(schema.tasks, TASK)).toBe(false);
 });

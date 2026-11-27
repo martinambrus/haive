@@ -699,8 +699,9 @@ Those markers acknowledge that the teardown pass ran, not that every resource di
 Auth-volume leftovers are retried by the last terminal summary and boot's `reapOrphanedAuthVolumes`;
 stopped helper containers are removed by that boot reaper before the volumes. Shell containers and
 registry keys stay for `TerminalSessionReaper` once disconnected and idle; the next shell ensure
-can recreate an absent shell. Embed models have `reconcileEmbedModelResidency` at boot and the
-explicit release endpoint; CLI models have Ollama's keep_alive expiry. The next model use loads
+can recreate an absent shell. Repo-RAG embed models have `reconcileEmbedModelResidency` at boot
+and their 30-minute keep_alive expiry as backstops. The global-KB release endpoint targets only
+the global-KB model; CLI models have the Ollama daemon's default keep_alive expiry. The next model use loads
 an evicted model again. A wedged volume existence probe still looks like absence and can defer
 cleanup until boot. Cancel still withholds its finish marker when a CLI sandbox remains or its
 listing is unknown, or no-change directory discard fails, since merge-directory safety depends
