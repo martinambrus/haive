@@ -538,7 +538,11 @@ export async function reconcileStrandedCloningRepos(db: Database): Promise<void>
     lt(schema.repositories.rootClaimedAt, claimCutoff),
   );
   const cloning = await db
-    .select({ id: schema.repositories.id })
+    .select({
+      id: schema.repositories.id,
+      status: schema.repositories.status,
+      errorCode: schema.repositories.errorCode,
+    })
     .from(schema.repositories)
     .where(
       and(
@@ -574,7 +578,36 @@ export async function reconcileStrandedCloningRepos(db: Database): Promise<void>
     if (typeof repositoryId === 'string') stillQueued.add(repositoryId);
   }
 
-  const stranded = cloning.filter((row) => !stillQueued.has(row.id)).map((row) => row.id);
+  const strandedRows = cloning.filter((row) => !stillQueued.has(row.id));
+  const healthy = strandedRows
+    .filter((row) => row.status === 'ready' && row.errorCode == null)
+    .map((row) => row.id);
+  if (healthy.length > 0) {
+    // An old worker may have completed the refresh without knowing this marker. A marker
+    // alone cannot diagnose a broken checkout. Recheck health and age in the write too.
+    const cleared = await db
+      .update(schema.repositories)
+      .set({ refreshPending: false, updatedAt: new Date() })
+      .where(
+        and(
+          inArray(schema.repositories.id, healthy),
+          eq(schema.repositories.status, 'ready'),
+          isNull(schema.repositories.errorCode),
+          eq(schema.repositories.refreshPending, true),
+          lt(schema.repositories.updatedAt, cutoff),
+          unclaimed,
+        ),
+      )
+      .returning({ id: schema.repositories.id });
+    if (cleared.length > 0)
+      log.info(
+        { count: cleared.length },
+        'cleared stranded refresh markers on healthy repositories',
+      );
+  }
+  const stranded = strandedRows
+    .filter((row) => row.status !== 'ready' || row.errorCode != null)
+    .map((row) => row.id);
   if (stranded.length === 0) return;
 
   await db

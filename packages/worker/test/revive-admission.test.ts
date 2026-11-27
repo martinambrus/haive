@@ -3,6 +3,7 @@ import { ONE_LIVE_UPGRADE_INDEX, schema, type Database } from '@haive/database';
 import { createFakeDb } from '@haive/database/testing';
 import { configService } from '@haive/shared';
 import { markTaskRunningWithStep } from '../src/queues/task-queue.js';
+import { RevivalBusy } from '../src/queues/_revive-check.js';
 import { autoResumeFailedStep } from '../src/queues/_step-reset.js';
 
 vi.mock('../src/db.js', () => ({
@@ -190,50 +191,57 @@ describe('the worker reviving a failed upgrade runs the reset admission', () => 
 });
 
 describe('the allowance auto-resume of a failed onboarding or upgrade', () => {
-  const claim = { rootClaimedAt: new Date(), rootClaimKind: 'reset', rootClaimOwner: 'x' };
-
   it.each([
-    ['an onboarding beside a live upgrade', { type: 'onboarding', live: 'onboarding_upgrade' }],
-    ['an upgrade beside a live onboarding', { type: 'onboarding_upgrade', live: 'onboarding' }],
-    ['an onboarding beside another live onboarding', { type: 'onboarding', live: 'onboarding' }],
-  ] as const)('refuses %s', async (_n, c) => {
-    const t = setup({ ...admitted(), type: c.type, live: { type: c.live, status: 'running' } });
-    expect(await t.resume()).toBe(false);
-    expect(t.task()).toMatchObject({ status: 'failed', allowanceAutoResumeCount: 0 });
-    expect(t.events().map((e) => e.eventType)).toEqual(['upgrade.revive_refused']);
-  });
-
-  it.each(['onboarding', 'onboarding_upgrade'] as const)(
-    'refuses a failed %s under a held root claim',
-    async (type) => {
-      const t = setup({ ...admitted(), type, repo: claim });
-      expect(await t.resume()).toBe(false);
-      expect(t.task()).toMatchObject({ status: 'failed', allowanceAutoResumeCount: 0 });
-      expect(t.events()[0]).toMatchObject({
-        eventType: 'upgrade.revive_refused',
-        payload: { reason: 'root-claim' },
+    {
+      reason: 'root-claim',
+      world: { ...admitted(), repo: { rootClaimedAt: new Date(), rootClaimKind: 'reset' } },
+    },
+    {
+      reason: 'live-upgrade',
+      world: {
+        ...admitted(),
+        type: 'onboarding',
+        live: { type: 'onboarding_upgrade', status: 'running' },
+      },
+    },
+    {
+      reason: 'live-onboarding',
+      world: { ...admitted(), live: { type: 'onboarding', status: 'running' } },
+    },
+    {
+      reason: 'reset',
+      world: {
+        completedOnboardingAt: new Date(Date.now() - 2 * DAY),
+        resetAt: new Date(Date.now() - DAY),
+      },
+    },
+    { reason: 'none', world: {} },
+    { reason: 'contested', world: { ...admitted(), conflicts: ['project/render.json#framework'] } },
+  ] as { reason: string; world: World }[])(
+    'keeps $reason retryable after the allowance recovers',
+    async ({ reason, world }) => {
+      const since = new Date(Date.now() - DAY);
+      const t = setup({
+        ...world,
+        task: {
+          awaitingAllowanceProviderId: PROVIDER,
+          awaitingProviderReason: 'rate_limit',
+          awaitingProviderSince: since,
+        },
       });
+      await expect(t.resume()).rejects.toMatchObject({ name: 'RevivalBusy', cause: { reason } });
+      expect(t.task()).toMatchObject({
+        status: 'failed',
+        allowanceAutoResumeCount: 0,
+        awaitingAllowanceProviderId: PROVIDER,
+        awaitingProviderSince: since,
+      });
+      expect(t.task().allowanceReplenishedAt ?? null).toBeNull();
+      expect(t.events()).toEqual([]);
     },
   );
 
-  it('refuses an upgrade after a reset', async () => {
-    const t = setup({
-      completedOnboardingAt: new Date(Date.now() - 2 * DAY),
-      resetAt: new Date(Date.now() - DAY),
-    });
-    expect(await t.resume()).toBe(false);
-    expect(t.task()).toMatchObject({ status: 'failed', allowanceAutoResumeCount: 0 });
-    expect(t.events()[0]).toMatchObject({ payload: { reason: 'reset' } });
-  });
-
-  it('refuses an upgrade while a project state conflict is pending', async () => {
-    const t = setup({ ...admitted(), conflicts: ['project/render.json#framework'] });
-    expect(await t.resume()).toBe(false);
-    expect(t.task()).toMatchObject({ status: 'failed', allowanceAutoResumeCount: 0 });
-    expect(t.events()[0]).toMatchObject({ payload: { reason: 'contested' } });
-  });
-
-  it('answers a unique violation of the one-live-upgrade index as a refusal', async () => {
+  it('keeps a one-live-upgrade index refusal retryable', async () => {
     const t = setup(admitted());
     let thrown = false;
     t.fake.hooks.beforeUpdate = async (table) => {
@@ -245,82 +253,10 @@ describe('the allowance auto-resume of a failed onboarding or upgrade', () => {
         });
       }
     };
-    expect(await t.resume()).toBe(false);
+    await expect(t.resume()).rejects.toBeInstanceOf(RevivalBusy);
     expect(t.task().status).toBe('failed');
-    expect(t.events()[0]).toMatchObject({ payload: { reason: 'live-upgrade-index' } });
-  });
-
-  it('tells the person the allowance is back instead, and leaves the poller nothing to retry', async () => {
-    const t = setup({
-      ...admitted(),
-      type: 'onboarding',
-      live: { type: 'onboarding_upgrade', status: 'running' },
-      task: {
-        awaitingAllowanceProviderId: PROVIDER,
-        awaitingProviderReason: 'rate_limit',
-        awaitingProviderSince: new Date(Date.now() - DAY),
-      },
-    });
-    expect(await t.resume()).toBe(false);
-    expect(t.task()).toMatchObject({
-      status: 'failed',
-      awaitingAllowanceProviderId: PROVIDER,
-      awaitingProviderReason: 'rate_limit',
-    });
-    expect(t.task().allowanceReplenishedAt).toBeInstanceOf(Date);
-  });
-
-  it('stamps nothing when the watch changed between the poll and the resume', async () => {
-    const polled = new Date(Date.now() - DAY);
-    const t = setup({
-      ...admitted(),
-      type: 'onboarding',
-      live: { type: 'onboarding_upgrade', status: 'running' },
-      task: {
-        awaitingAllowanceProviderId: PROVIDER,
-        awaitingProviderReason: 'rate_limit',
-        awaitingProviderSince: new Date(),
-      },
-    });
-    expect(await t.resume(polled)).toBe(false);
-    expect(t.task().allowanceReplenishedAt ?? null).toBeNull();
-  });
-
-  it('drops a watch from before its start was recorded, without a notice', async () => {
-    const t = setup({
-      ...admitted(),
-      type: 'onboarding',
-      live: { type: 'onboarding_upgrade', status: 'running' },
-      task: { awaitingAllowanceProviderId: PROVIDER, awaitingProviderReason: 'rate_limit' },
-    });
-    expect(await t.resume()).toBe(false);
-    expect(t.task()).toMatchObject({ status: 'failed', awaitingAllowanceProviderId: null });
-    expect(t.task().allowanceReplenishedAt ?? null).toBeNull();
-  });
-
-  it('leaves a newer watch alone when the task was retried and failed again meanwhile', async () => {
-    const first = new Date(Date.now() - DAY);
-    const t = setup({
-      ...admitted(),
-      type: 'onboarding',
-      live: { type: 'onboarding_upgrade', status: 'running' },
-      task: {
-        awaitingAllowanceProviderId: PROVIDER,
-        awaitingProviderReason: 'rate_limit',
-        awaitingProviderSince: first,
-      },
-    });
-    const transaction = t.fake.db.transaction.bind(t.fake.db);
-    t.fake.db.transaction = (async (fn: never) => {
-      try {
-        return await transaction(fn);
-      } finally {
-        t.fake.patch(schema.tasks, TASK, { awaitingProviderSince: new Date() });
-      }
-    }) as typeof t.fake.db.transaction;
-
-    expect(await t.resume()).toBe(false);
-    expect(t.task().allowanceReplenishedAt ?? null).toBeNull();
+    expect(t.events()).toEqual([]);
+    expect(await t.resume()).toBe(true);
   });
 
   it.each(['onboarding', 'onboarding_upgrade'] as const)(

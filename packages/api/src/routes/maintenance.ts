@@ -114,6 +114,7 @@ async function listBlockingJobs(db: ReturnType<typeof getDb>) {
         id: schema.repositories.id,
         name: schema.repositories.name,
         status: schema.repositories.status,
+        refreshPending: schema.repositories.refreshPending,
         updatedAt: schema.repositories.updatedAt,
         ...jobOwner,
       })
@@ -158,7 +159,11 @@ async function listBlockingJobs(db: ReturnType<typeof getDb>) {
       .limit(BLOCKING_LIST_CAP + 1),
   ]);
   const listed = [
-    ...repositories.map((r) => ({ kind: 'repository' as const, ...r })),
+    ...repositories.map(({ refreshPending, ...r }) => ({
+      kind: 'repository' as const,
+      ...r,
+      status: refreshPending ? 'refreshing' : r.status,
+    })),
     ...bundles.map((r) => ({ kind: 'bundle' as const, ...r })),
     ...providers.map(({ building, provisioning, ...r }) => ({
       kind: 'cli_provider' as const,

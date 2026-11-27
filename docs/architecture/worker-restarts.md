@@ -589,7 +589,11 @@ failure, and `taskQueueOwed` skips it so a retained job holds no stalled redrive
 loses takes back every write before it. While new work is refused it does nothing at all, whatever status it read — no write,
 no job, no attempt spent — and the next poll resumes the task once the state is normal again. When the state cannot be read
 under the fence, or the resume throws anything else, that task stays failed with its watch armed and
-the poll goes on to the next armed task (`checkProviderRecovery`).
+the poll goes on to the next armed task (`checkProviderRecovery`). Revival admission refusals,
+including a root claim, use `RevivalBusy` and retain that watch too: they retry on the existing
+usage-poll cadence (five minutes), without stamping a final allowance notification or spending
+an auto-resume attempt. Live task step Retry, Skip and rerun keep their existing admission;
+failed or dead tasks must pass root-claim admission again.
 A repository delete cancels its open tasks the same way, step rows before task rows, and takes what
 a Retry takes before that: a plain read that the repository is the caller's own (so a caller who
 owns nothing never queues on the key), the repository's task-creation key, then the repository row.
@@ -949,7 +953,8 @@ conflicts) counts as held and is logged at info with that structural reason once
 revival in this worker process, including a maintenance hold; subsequent polls emit no repeated
 hold or aggregate notice. Notices are discarded after resolution or removal. Shutdown cancels
 the timer and prevents an in-flight pass from scheduling another; a revival refused
-because the repository was deleted is permanent and keeps no timer running. A malformed v3 or derived pin is permanent
+because the repository was deleted is permanent and keeps no timer running. The `none` and
+`reset` upgrade refusals are logged once as well, without keeping a retry timer running. A malformed v3 or derived pin is permanent
 too: an epoch-fenced update fails the task, clears the dead marker and records one
 `task.failed` event in the same transaction. The pin is retained unchanged. Remaining runs
 are superseded after that commit under the new failed epoch, without holding a task-row

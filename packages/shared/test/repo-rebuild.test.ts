@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { schema, type Database } from '@haive/database';
 import { createFakeDb } from '@haive/database/testing';
+import { CANCEL_REDRIVE_LOOKBACK_MS } from '../src/cancel-teardown.js';
 import { checkoutWorktreeRefusal } from '../src/repo-rebuild.js';
 
 const checkout = '/repos/checkout';
@@ -36,7 +37,7 @@ describe('checkoutWorktreeRefusal', () => {
     );
   });
 
-  it.each(['completed'])('ignores a %s legacy task', async (status) => {
+  it.each(['completed', 'cancelled'])('ignores a %s legacy task', async (status) => {
     const fake = fixture(status);
     fake.step({ worktreePath: inside });
     expect(await checkoutWorktreeRefusal(fake.db, repositoryId, checkout)).toBeNull();
@@ -80,6 +81,11 @@ describe('T594 C5: cancelled worktree teardown', () => {
     async (legacy) => {
       const fake = fixture('cancelled', legacy ? null : inside);
       if (legacy) fake.step({ worktreePath: inside });
+      fake.insert(schema.taskEvents, {
+        taskId,
+        eventType: 'task.cancelled',
+        createdAt: new Date(),
+      });
       expect(await checkoutWorktreeRefusal(fake.db, repositoryId, checkout)).toContain(
         '1 task has',
       );
@@ -88,6 +94,25 @@ describe('T594 C5: cancelled worktree teardown', () => {
         '1 task has',
       );
       fake.insert(schema.taskEvents, { taskId, eventType: 'task.cancel_finished' });
+      expect(await checkoutWorktreeRefusal(fake.db, repositoryId, checkout)).toBeNull();
+    },
+  );
+});
+
+describe('T594 H1: cancellation re-drive window', () => {
+  it('matches migration 0186’s seven-day re-drive bound', () => {
+    expect(CANCEL_REDRIVE_LOOKBACK_MS).toBe(7 * 24 * 60 * 60 * 1000);
+  });
+  it.each([false, true])(
+    'ignores an expired cancel without a finish event (legacy=%s)',
+    async (legacy) => {
+      const fake = fixture('cancelled', legacy ? null : inside);
+      if (legacy) fake.step({ worktreePath: inside });
+      fake.insert(schema.taskEvents, {
+        taskId,
+        eventType: 'task.cancelled',
+        createdAt: new Date(Date.now() - CANCEL_REDRIVE_LOOKBACK_MS - 1),
+      });
       expect(await checkoutWorktreeRefusal(fake.db, repositoryId, checkout)).toBeNull();
     },
   );

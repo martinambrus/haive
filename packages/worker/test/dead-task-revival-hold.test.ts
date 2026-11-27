@@ -77,6 +77,7 @@ function setup(initialState: string | Error = 'normal') {
     taskEvents: schema.taskEvents,
     taskTypeDefinitions: schema.taskTypeDefinitions,
     projectStateConflicts: schema.projectStateConflicts,
+    onboardingArtifacts: schema.onboardingArtifacts,
   });
   fake.insert(schema.taskTypeDefinitions, {
     slug: TYPE,
@@ -720,4 +721,38 @@ describe('T594 C2: workflow dead revival during rebuild', () => {
       expect(t.task(1).deadAt).toBeNull();
     },
   );
+});
+
+describe('T594 L1: permanent revival diagnostics', () => {
+  it.each(['none', 'reset'])('logs %s once across repeated passes', async (reason) => {
+    const t = setup();
+    const repoId = uuid(8);
+    t.fake.insert(schema.repositories, {
+      id: repoId,
+      userId: USER,
+      name: 'repo',
+      source: 'blank',
+      status: 'ready',
+      onboardingResetAt: reason === 'reset' ? new Date() : null,
+    });
+    t.fake.insert(schema.taskTypeDefinitions, {
+      slug: 'onboarding_upgrade',
+      displayName: 'Upgrade',
+      runListStrategy: 'static',
+      source: 'test',
+    });
+    t.dead(1, { type: 'onboarding_upgrade', repositoryId: repoId });
+    const info = vi.spyOn(logger, 'info').mockImplementation(() => undefined);
+    await reviveDeadTasks(t.db, t.deps);
+    await reviveDeadTasks(t.db, t.deps);
+    const refusals = info.mock.calls.filter(
+      ([fields, message]) =>
+        (fields as { taskId?: string }).taskId === uuid(1) &&
+        message === 'dead task revival refused',
+    );
+    expect(refusals).toHaveLength(1);
+    expect(refusals[0]![0]).toMatchObject({ reason });
+    expect(t.task(1).deadAt).toEqual(DEAD_AT);
+    expect(t.sent).toEqual([]);
+  });
 });

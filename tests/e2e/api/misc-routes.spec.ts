@@ -140,7 +140,9 @@ test.describe('misc routes', () => {
     }
   });
 
-  test('POST /repos/:id/refresh-tree flips status back to cloning', async ({ page }) => {
+  test('POST /repos/:id/refresh-tree queues repository preparation or refresh', async ({
+    page,
+  }) => {
     const sql = getSql();
     let userId = '';
     let fixture: RepoFixture | null = null;

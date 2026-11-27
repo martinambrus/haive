@@ -239,6 +239,7 @@ export async function reviveDeadTask(
   deps: DeadTaskBootDeps,
 ): Promise<ReviveJob['kind'] | 'held' | null> {
   let heldReason = 'new-work';
+  let refusedReason: string | null = null;
   const reviving = db.transaction(async (tx) => {
     if (await newWorkHeldUnderFence(tx)) return 'held' as const;
     try {
@@ -250,8 +251,7 @@ export async function reviveDeadTask(
       if (refusal) {
         const reason = 'refusal' in refusal ? refusal.refusal.reason : refusal.admission.reason;
         heldReason = reason;
-        if (reason === 'no-repository')
-          log.info({ taskId: c.id, reason }, 'dead task revival refused');
+        refusedReason = reason;
         return reason === 'root-claim' ||
           reason === 'live-upgrade' ||
           reason === 'live-onboarding' ||
@@ -341,6 +341,13 @@ export async function reviveDeadTask(
       log.info({ taskId: c.id, reason: heldReason }, 'dead task revival held');
     }
     return 'held';
+  }
+  if (!revived && refusedReason) {
+    if (!notices.has(c.id)) {
+      notices.add(c.id);
+      log.info({ taskId: c.id, reason: refusedReason }, 'dead task revival refused');
+    }
+    return null;
   }
   notices.delete(c.id);
   if (!revived) return null;

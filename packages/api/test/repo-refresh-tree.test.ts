@@ -495,6 +495,11 @@ describe('rebuild admission for task worktrees and repaired sources', () => {
         .update(schema.tasks)
         .set({ status: 'cancelled' })
         .where(eq(schema.tasks.repositoryId, REPO));
+      fake.insert(schema.taskEvents, {
+        taskId: fake.rows(schema.tasks)[0]!.id,
+        eventType: 'task.cancelled',
+        createdAt: new Date(),
+      });
       expect((await recover()).status).toBe(409);
       fake.insert(schema.taskEvents, {
         taskId: fake.rows(schema.tasks)[0]!.id,

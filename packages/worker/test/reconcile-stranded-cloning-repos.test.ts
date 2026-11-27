@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
+import { logger } from '@haive/shared';
 import { schema, type Database } from '@haive/database';
 import { createFakeDb } from '@haive/database/testing';
 
@@ -197,5 +198,39 @@ describe('reconcileStrandedCloningRepos', () => {
     await reconcileStrandedCloningRepos(makeDb(['stranded'], []));
 
     expect(closed).not.toHaveBeenCalled();
+  });
+});
+
+describe('T594 L3: stale healthy refresh marker', () => {
+  it('clears only the marker and logs once when no refresh job remains', async () => {
+    getJobs.mockReset().mockResolvedValue([]);
+    const fake = createFakeDb({ repositories: schema.repositories });
+    fake.insert(schema.repositories, {
+      id: '00000000-0000-4000-8000-0000000000b1',
+      status: 'ready',
+      refreshPending: true,
+      errorCode: null,
+      statusMessage: null,
+      updatedAt: new Date(Date.now() - 10 * 60_000),
+      rootClaimedAt: null,
+    });
+    const info = vi.spyOn(logger, 'info').mockImplementation(() => undefined);
+    try {
+      await reconcileStrandedCloningRepos(fake.db as unknown as Database);
+      await reconcileStrandedCloningRepos(fake.db as unknown as Database);
+      expect(fake.rows(schema.repositories)[0]).toMatchObject({
+        status: 'ready',
+        refreshPending: false,
+        errorCode: null,
+        statusMessage: null,
+      });
+      expect(
+        info.mock.calls.filter(
+          ([, message]) => message === 'cleared stranded refresh markers on healthy repositories',
+        ),
+      ).toHaveLength(1);
+    } finally {
+      info.mockRestore();
+    }
   });
 });

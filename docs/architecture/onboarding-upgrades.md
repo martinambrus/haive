@@ -434,11 +434,12 @@ creation and revival of an onboarding, upgrade or rollback takes (advisory key, 
 answered form and the allowance auto-resume run `checkRevive`, and for an upgrade or rollback
 `upgradeAdmission` (`@haive/shared/onboarding-admission`, which the api re-exports), on the locked
 repository row in the transaction that revives. A worker refusal leaves the task failed and records
-`upgrade.revive_refused` with its reason. A refused auto-resume does not retry each tick. It takes
-the poller's notify path instead: it stamps `allowance_replenished_at` and keeps the provider, so the
-person gets the "allowance is back" notice and decides whether to Retry. The stamp is fenced to the
-refused watch's `awaiting_provider_since`; a watch from before that column, which a later cleared
-one cannot be told from, is dropped without a notice. In the api, `revive-write-ratchet.test.ts`
+`upgrade.revive_refused` with its reason, except for allowance auto-resume: its admission refusals
+throw `RevivalBusy`, leave the watch armed and retry on the existing usage-poll cadence. They
+neither stamp `allowance_replenished_at` nor spend an auto-resume attempt, so a temporary root
+claim cannot turn restored allowance into a final refusal. Live task step Retry, Skip and rerun
+retain their existing admission; failed or dead tasks must pass the root-claim check again.
+In the api, `revive-write-ratchet.test.ts`
 fails any `.update(schema.tasks)` that may set a live status (a computed one included) unless an
 awaited `refuseReviveBesideLive` precedes it on its own path, or it moves only a `created` task. Both
 create routes write the task, its event and its move to `queued` in one transaction, since no sweep

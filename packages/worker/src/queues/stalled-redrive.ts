@@ -18,6 +18,7 @@ import {
 } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
 import {
+  CANCEL_REDRIVE_LOOKBACK_MS,
   logger,
   TASK_JOB_NAMES,
   STOP_SETTLE_EVENTS,
@@ -664,7 +665,7 @@ export const CANCEL_REDRIVE_BATCH = 20;
 export const CANCEL_REDRIVE_MAX = 3;
 const CANCEL_REDRIVEN_EVENT = 'task.cancel_redriven';
 /** The re-drive leaves older cancellations alone: many predate the finish record. */
-export const CANCEL_REDRIVE_LOOKBACK_MS = 7 * 24 * 60 * 60 * 1000;
+export { CANCEL_REDRIVE_LOOKBACK_MS } from '@haive/shared';
 
 /** For `exists`: the events of one type on the task of the outer query. */
 function taskEventsOf(db: Database) {

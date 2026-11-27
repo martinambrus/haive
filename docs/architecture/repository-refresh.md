@@ -21,8 +21,8 @@ clone and restore. Explicit recovery claims as `rebuild` and says "This reposito
 from its source. Wait for that to finish and try again." An ordinary refresh can also rebuild, so
 its `refresh` claim refuses Start and revival too, saying "This repository is being refreshed from
 its source. Try again in a moment." This deliberately extends the creation rule to a deferred
-Start and every revival; a refused Start stays `created`, and a refused revival keeps its failed
-or dead state. No database connection is held across the build. Before the checkout moves, a plan row stamped before migration 0196 takes its plan base from the plan.json still on disk (`seedPlanBaseFromCheckout`); a seed that fails fails the refresh and leaves a usable checkout where it was, since afterwards no Pull could recover that base. A rebuild needs proof that the checkout is unusable at its own top level. Exit 1 of the quiet HEAD
+Start and failed or dead task revival; a refused Start stays `created`, and a refused revival keeps its failed
+or dead state. Step Retry, Skip and rerun on a live task retain their existing admission. No database connection is held across the build. Before the checkout moves, a plan row stamped before migration 0196 takes its plan base from the plan.json still on disk (`seedPlanBaseFromCheckout`); a seed that fails fails the refresh and leaves a usable checkout where it was, since afterwards no Pull could recover that base. A rebuild needs proof that the checkout is unusable at its own top level. Exit 1 of the quiet HEAD
 probe is not proof alone, since a broken branch ref exits 1 too: `provesUnbornHead` needs HEAD to name a branch and a clean, empty enumeration of it; a failed top-level probe needs strict no-follow structural reads proving
 missing or invalid metadata before it can justify a rebuild. A corrupt config, unreadable metadata,
 external git dir or a command that gave no answer is unknown. That path ends in `error`, moves
@@ -63,7 +63,7 @@ user's explicit consent to move the checkout aside although it could not be prov
 only refresh never rebuilds and, whatever fails, keeps the repair code it was admitted with: a
 checkout still unusable says so, a read that never finished stays a retryable failure, and only the
 recovery rebuilds, keeping this install's data. The
-code clears when an ordinary preparation starts or detection succeeds; a recovery keeps it until then, so a refresh sent while the recovery is queued or running stays check only, and a preparation stranded by a stop keeps it too. A recovery job first re-checks the checkout: one that is
+code clears when an ordinary preparation starts or detection succeeds; a recovery keeps it until then, so a second refresh sent while the recovery is queued or running answers 409, and a preparation stranded by a stop keeps it too. A recovery job first re-checks the checkout: one that is
 usable again (held by a task or not) finishes as an ordinary refresh, moves nothing and clears the
 code. Otherwise it takes the ordinary rebuild path (seed, source proof, move aside, build, verify),
 keeps every repository record and this install's settings, KB and plan data. Before the move it
@@ -87,8 +87,10 @@ or `created` one included, since its unpushed commits would move with the tree):
 admission (409), and the worker counts again, together with the holding tasks, under the
 task-creation lock (`lockRepositoryTasksKey`) in the transaction that renames the checkout aside;
 the lock spans only the recount and the rename, never the clone. Cancel the task, or finish it, and
-rebuild. A cancelled task with a worktree keeps that hold until `task.cancel_finished` proves its
-asynchronous teardown ended (or was explicitly abandoned); Cancel alone is insufficient. The
+rebuild. A cancelled task with a worktree keeps that hold only while a `task.cancelled` event falls inside the seven-day
+re-drive window (`CANCEL_REDRIVE_LOOKBACK_MS`, shared with the worker and matching migration 0186),
+unless `task.cancel_finished` proves its asynchronous teardown ended (or was explicitly abandoned).
+Legacy cancels without an event and expired cancels cannot hold a rebuild forever; a recent Cancel alone is insufficient. The
 refusal asks the user to wait for cancellation cleanup before rebuilding. The claim blocks a
 Start or revival after the rename too (the admission rule above).
 
@@ -102,7 +104,9 @@ its Terminal, Plan and task links available; a genuine preparation or recovery s
 maintenance page and updater still count queued and running refresh work, including delayed
 retries, independently of availability. A second admission refuses while it is set. A successful
 handler, final failure or failed enqueue clears it; the ordinary stranded-preparation sweep also
-releases an old marker whose queue has no live job, preserving any repair code. Root claims, holding tasks and
+releases an old marker whose queue has no live job, preserving any repair code. A `ready` row
+without a repair code keeps its status and display copy: the sweep clears only the stale marker
+and logs that release once. The maintenance blocking list labels pending refreshes `refreshing`. Root claims, holding tasks and
 live queue jobs remain temporary route refusals and do not hide Retry. An older list response
 without capability fields keeps the Retry action for compatibility. Repository archives use
 the chunked API: `POST /repos/upload/init`, `PUT /repos/upload/:id/chunk` with `Content-Range: bytes start-end/total`,
@@ -117,7 +121,7 @@ Settle every pending refresh before downgrading the API/worker/updater. Deploy a
 an older updater cannot count a new API's ready refresh. The new updater detects the marker's
 presence before counting so it can drain a source schema that predates 0250. Keep existing `.aside-*` and `.rebuild-*` siblings;
 reverting code never restores or removes them. The recovery staging and repair-code retention
-already shipped in `2c16ca95e` remain unchanged. T594 C2 also resolves T602 item 2.
+already shipped in `2c16ca95e` remain unchanged. T594 C2 also resolves T602 item 2; refusing a second refresh resolves T602 item 5.
 
 ## Remote relink reconciliation
 
