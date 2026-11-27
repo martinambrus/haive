@@ -158,9 +158,12 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     const isOutage =
       res.status === 503 &&
       (body.code === 'config_unavailable' || body.code === 'redis_unavailable');
-    const baseMsg = isOutage
-      ? 'Temporary service outage. Please try again in a moment.'
-      : (body.error ?? `HTTP ${res.status}`);
+    const outcomeUnknown = res.status === 503 && body.code === 'queue_outcome_unknown';
+    const baseMsg = outcomeUnknown
+      ? 'The action may still complete. It is safe to retry.'
+      : isOutage
+        ? 'Temporary service outage. Please try again in a moment.'
+        : (body.error ?? `HTTP ${res.status}`);
     const messaged = (body.issues ?? []).filter((i) => typeof i.message === 'string');
     const issuesMsg =
       messaged.length > 0

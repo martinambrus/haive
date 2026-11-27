@@ -1,7 +1,7 @@
 import { readdirSync, readFileSync } from 'node:fs';
 import { join, relative } from 'node:path';
 import ts from 'typescript';
-import { expect, it } from 'vitest';
+import { beforeAll, expect, it } from 'vitest';
 
 const SRC = join(import.meta.dirname, '../src');
 const WRAPPERS = new Map([
@@ -19,13 +19,21 @@ function sources(dir: string): string[] {
   });
 }
 
-function wrapped(node: ts.Node): boolean {
+function wrapped(node: ts.Node, checker: ts.TypeChecker): boolean {
   for (let current = node; current.parent; current = current.parent) {
     const parent = current.parent;
+    if (!ts.isCallExpression(parent)) continue;
+    const declaration = checker.getResolvedSignature(parent)?.declaration;
+    if (!declaration || !ts.isFunctionDeclaration(declaration) || !declaration.name) continue;
+    const name = declaration.name.text;
+    const owner = declaration.getSourceFile().fileName;
+    const trusted =
+      name === 'addBundleJobOrMarkFailed'
+        ? owner === join(SRC, 'routes/bundles.ts')
+        : owner === join(SRC, 'lib/queue-bounded.ts');
     if (
-      ts.isCallExpression(parent) &&
-      ts.isIdentifier(parent.expression) &&
-      parent.arguments[WRAPPERS.get(parent.expression.text) ?? -1] === current &&
+      trusted &&
+      parent.arguments[WRAPPERS.get(name) ?? -1] === current &&
       (ts.isArrowFunction(current) || ts.isFunctionExpression(current))
     )
       return true;
@@ -33,40 +41,122 @@ function wrapped(node: ts.Node): boolean {
   return false;
 }
 
-it('bounds every API queue add, including modules and libraries (repos.ts is T550’s explicit exclusion)', () => {
-  const files = sources(SRC);
-  const configPath = join(import.meta.dirname, '../tsconfig.json');
-  const config = ts.readConfigFile(configPath, ts.sys.readFile);
-  const parsed = ts.parseJsonConfigFileContent(config.config, ts.sys, join(SRC, '..'));
-  const program = ts.createProgram(files, { ...parsed.options, noEmit: true });
-  const checker = program.getTypeChecker();
+function scan(source: ts.SourceFile, checker: ts.TypeChecker) {
   const unbounded: string[] = [];
   let queues = 0;
-  for (const file of files) {
-    if (relative(SRC, file) === 'routes/repos.ts') continue;
-    const source = program.getSourceFile(file)!;
-    const visit = (node: ts.Node): void => {
-      if (
-        ts.isCallExpression(node) &&
-        ts.isPropertyAccessExpression(node.expression) &&
-        ['add', 'addBulk'].includes(node.expression.name.text)
-      ) {
-        const receiver = checker.getTypeAtLocation(node.expression.expression);
-        if (receiver.getSymbol()?.name === 'Queue') {
-          queues++;
-          if (!wrapped(node)) {
-            const { line } = source.getLineAndCharacterOfPosition(node.getStart(source));
-            unbounded.push(`${relative(SRC, file)}:${line + 1}`);
-          }
-        }
+  const visit = (node: ts.Node): void => {
+    if (
+      ts.isCallExpression(node) &&
+      ts.isPropertyAccessExpression(node.expression) &&
+      ['add', 'addBulk'].includes(node.expression.name.text)
+    ) {
+      const receiver = checker.getTypeAtLocation(node.expression.expression);
+      const declaration = checker.getResolvedSignature(node)?.declaration;
+      const owner = declaration?.parent;
+      // Inherited, optional and mapped receivers retain the BullMQ method declaration.
+      const bullmq =
+        declaration &&
+        owner &&
+        ts.isClassDeclaration(owner) &&
+        ['Queue', 'QueueBase'].includes(owner.name?.text ?? '') &&
+        /\/bullmq\/.*\/classes\/queue(?:-base)?\.d\.ts$/.test(declaration.getSourceFile().fileName);
+      const anyReceiver = (receiver.flags & ts.TypeFlags.Any) !== 0;
+      if (bullmq || anyReceiver) {
+        queues++;
+        // An any receiver cannot prove which implementation is called, even inside a helper.
+        if (anyReceiver || !wrapped(node, checker)) unbounded.push(node.getText(source));
       }
-      ts.forEachChild(node, visit);
-    };
-    visit(source);
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(source);
+  return { queues, unbounded };
+}
+
+// Virtual fixture: typechecked with the same BullMQ and helper declarations as production.
+const FIXTURE = join(SRC, 'queue-add-ratchet-fixture.ts');
+const mutants = [
+  "queue.add('direct', {})",
+  "maybe()?.add('optional', {})",
+  "sub.add('subclass', {})",
+  "pick.add('pick', {})",
+  "wrapper().add('wrapper', {})",
+  "queue.addBulk([{ name: 'bulk', data: {} }])",
+  "maybe()?.addBulk([{ name: 'optional-bulk', data: {} }])",
+  "sub.addBulk([{ name: 'subclass-bulk', data: {} }])",
+  "bulkPick.addBulk([{ name: 'pick-bulk', data: {} }])",
+  "wrapper().addBulk([{ name: 'wrapper-bulk', data: {} }])",
+  "unknownQueue.add('any', {})",
+  'unknownQueue.addBulk([])',
+  "queue.add('spoofed-helper', {})",
+];
+const fixture = `
+import { Queue } from 'bullmq';
+import { boundedAdd as bound, addBestEffort, addOrRefuse } from './lib/queue-bounded.js';
+declare const queue: Queue;
+declare function maybe(): Queue | undefined;
+class SubQueue extends Queue {}
+declare const sub: SubQueue;
+declare const pick: Pick<Queue, 'add'>;
+declare const bulkPick: Pick<Queue, 'addBulk'>;
+declare const unknownQueue: any;
+function wrapper(): Pick<Queue, 'add' | 'addBulk'> { return queue; }
+function boundedAdd<T>(work: () => T): T { return work(); }
+${mutants
+  .slice(0, -1)
+  .map((call) => `${call};`)
+  .join('\n')}
+boundedAdd(() => ${mutants.at(-1)});
+bound(() => queue.add('bounded', {}));
+addBestEffort(() => sub.add('best-effort', {}), 'test');
+addOrRefuse(() => pick.add('refuse', {}), 'test');
+new Set<string>().add('ordinary-add');
+`;
+let program: ts.Program;
+let checker: ts.TypeChecker;
+let files: string[];
+beforeAll(() => {
+  files = sources(SRC);
+  const config = ts.readConfigFile(join(SRC, '../tsconfig.json'), ts.sys.readFile);
+  const parsed = ts.parseJsonConfigFileContent(config.config, ts.sys, join(SRC, '..'));
+  const host = ts.createCompilerHost(parsed.options);
+  const getSourceFile = host.getSourceFile.bind(host);
+  host.getSourceFile = (file, ...args) =>
+    file === FIXTURE
+      ? ts.createSourceFile(file, fixture, ts.ScriptTarget.Latest, true)
+      : getSourceFile(file, ...args);
+  program = ts.createProgram([...files, FIXTURE], { ...parsed.options, noEmit: true }, host);
+  checker = program.getTypeChecker();
+}, 30_000);
+
+it('bounds every API queue add, including modules and libraries', () => {
+  let queues = 0;
+  let reposSites = 0;
+  const unbounded: string[] = [];
+  for (const file of files) {
+    const found = scan(program.getSourceFile(file)!, checker);
+    if (relative(SRC, file) === 'routes/repos.ts') {
+      reposSites += found.unbounded.length;
+      continue;
+    }
+    queues += found.queues;
+    unbounded.push(...found.unbounded.map((call) => `${relative(SRC, file)}: ${call}`));
   }
-  // Prove type resolution actually found BullMQ calls instead of silently accepting an empty scan.
   expect(queues).toBeGreaterThan(40);
   expect(unbounded).toEqual([]);
-  const bundles = readFileSync(join(SRC, 'routes/bundles.ts'), 'utf8');
-  expect(bundles).toMatch(/await (?:boundedAdd|addOrRefuse)\(add/);
-}, 30_000);
+  // T780 owns these exact remaining sites. Remove the exemption when its conversions land.
+  expect(reposSites).toBe(3);
+  expect(readFileSync(join(SRC, 'routes/bundles.ts'), 'utf8')).toMatch(
+    /await (?:boundedAdd|addOrRefuse)\(add/,
+  );
+});
+
+it('resolves the mutant fixture without type errors', () => {
+  expect(program.getSemanticDiagnostics(program.getSourceFile(FIXTURE)!)).toEqual([]);
+});
+it.each(mutants)('catches the unbounded mutant: %s', (mutant) => {
+  expect(scan(program.getSourceFile(FIXTURE)!, checker).unbounded).toContain(mutant);
+});
+it('accepts only real helper declarations, including aliases, and ignores ordinary adds', () => {
+  expect(scan(program.getSourceFile(FIXTURE)!, checker).unbounded).toEqual(mutants);
+});

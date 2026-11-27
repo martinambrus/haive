@@ -314,15 +314,20 @@ rejects on timeout or on the add's own rejection. The add is not cancelled and c
 work must be idempotent or guarded by the worker. `QueueAddTimeoutError` identifies an
 unknown enqueue outcome by class. Sign-out and module teardown keep their committed launch audit
 on that timeout, since the job may still land; a known rejection still removes only that launch's
-audit. Bundle imports keep their existing failure response and compensate the owned syncing row,
+audit. Both timeout responses use 503 `queue_outcome_unknown`: the action may still complete
+and is safe to retry; rejections keep their existing response. The web maps that code to the same
+unknown-outcome guidance. Bundle queue lookups (including replacement job state) share a five-second
+read deadline and answer 503 rather than interpreting a failed lookup as an absent job. Bundle imports keep their existing failure response and compensate the owned syncing row,
 including ZIP replacement rollback. Provider saves attempt image and model jobs independently and
 mark a failed enqueue's still-pending status failed, so a committed provider does not stay building
 or provisioning forever; an already-ready worker result is kept. Runtime access keeps its 202
 pending response, VNC its starting refusal, and plan/data Save and Pull their existing refusal
 contracts. Optional wake-ups (plan/project-state sweeps, module-source outbox, global-KB pending
-embeds and usage polls) are best effort. The API queue-add ratchet resolves BullMQ receiver types
+embeds and usage polls) are best effort. The API queue-add ratchet resolves the called BullMQ method declaration
 across routes, libraries and modules; `routes/repos.ts` remains explicitly excluded for its
-separate enqueue work. `addBestEffort` never throws and returns a boolean:
+separate enqueue work (exactly three sites, pinned until T780 changes them). Optional chaining,
+subclasses, mapped types and queue-returning wrappers are covered; any-typed add receivers fail, and
+bounding helpers are recognized by declaration rather than identifier spelling. `addBestEffort` never throws and returns a boolean:
 use it when committed state already records the work (step actions, cancel, task start, stop-settle).
 
 The api's shared client (`getRedis()`, `api/src/redis.ts`) has the same deadline options as

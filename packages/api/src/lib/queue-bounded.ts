@@ -51,6 +51,13 @@ export async function addBestEffort(
   }
 }
 
+/** A deadline is not evidence that an accepted action was cancelled. */
+export class QueueOutcomeUnknownError extends HttpError {
+  constructor() {
+    super(503, 'The action may still complete. It is safe to retry.', 'queue_outcome_unknown');
+  }
+}
+
 export class QueueUnavailableError extends HttpError {
   constructor() {
     super(503, 'Queue temporarily unavailable, try again shortly', 'queue_unavailable');

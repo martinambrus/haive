@@ -62,18 +62,20 @@ export async function observeCheckoutBranchForReset(
 export async function enqueueCheckoutSync(repositoryId: string, userId: string): Promise<void> {
   try {
     if (!(await configService.getBoolean(CONFIG_KEYS.PROJECT_STATE_SYNC_ENABLED, true))) return;
-    await addBestEffort(
-      () =>
-        getPlanMirrorQueue().add(
-          PLAN_MIRROR_JOB_NAMES.SYNC_CHECKOUT,
-          { repositoryId, userId } satisfies PlanMirrorJobPayload,
-          { jobId: `checkout-sync-${repositoryId}`, removeOnComplete: true, removeOnFail: true },
-        ),
-      'plan/checkout wake-up failed; sweep will retry',
-    );
   } catch (err) {
     logger.warn({ err, repositoryId }, 'checkout sync hint not queued; sweep will retry');
+    return;
   }
+  await addBestEffort(
+    () =>
+      getPlanMirrorQueue().add(
+        PLAN_MIRROR_JOB_NAMES.SYNC_CHECKOUT,
+        { repositoryId, userId } satisfies PlanMirrorJobPayload,
+        { jobId: `checkout-sync-${repositoryId}`, removeOnComplete: true, removeOnFail: true },
+      ),
+    'checkout sync hint not queued; sweep will retry',
+    { repositoryId },
+  );
 }
 
 /** Wake the worker after an API-side plan mutation. The database revision row
@@ -83,26 +85,23 @@ export async function enqueuePlanMirrorRefresh(
   repositoryId: string,
   userId: string,
 ): Promise<void> {
-  try {
-    await addBestEffort(
-      () =>
-        getPlanMirrorQueue().add(
-          PLAN_MIRROR_JOB_NAMES.REFRESH,
-          { repositoryId, userId } satisfies PlanMirrorJobPayload,
-          {
-            // UUIDs contain no colon (BullMQ reserves it in custom ids). While one
-            // refresh is queued/active, later mutations only need to dirty the DB
-            // revision; that job or the scheduled sweep will read the newest state.
-            jobId: `plan-mirror-${repositoryId}`,
-            removeOnComplete: true,
-            removeOnFail: true,
-          },
-        ),
-      'plan/checkout wake-up failed; sweep will retry',
-    );
-  } catch (err) {
-    logger.warn({ err, repositoryId }, 'plan mirror refresh enqueue failed; sweep will retry');
-  }
+  await addBestEffort(
+    () =>
+      getPlanMirrorQueue().add(
+        PLAN_MIRROR_JOB_NAMES.REFRESH,
+        { repositoryId, userId } satisfies PlanMirrorJobPayload,
+        {
+          // UUIDs contain no colon (BullMQ reserves it in custom ids). While one
+          // refresh is queued/active, later mutations only need to dirty the DB
+          // revision; that job or the scheduled sweep will read the newest state.
+          jobId: `plan-mirror-${repositoryId}`,
+          removeOnComplete: true,
+          removeOnFail: true,
+        },
+      ),
+    'plan mirror refresh enqueue failed; sweep will retry',
+    { repositoryId },
+  );
 }
 
 /** Pull is synchronous for the same reason Save is, and for one more: it is the

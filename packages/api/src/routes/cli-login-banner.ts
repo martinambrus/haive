@@ -1591,8 +1591,8 @@ function requestUsagePoll(): void {
   void addBestEffort(
     () =>
       getUsagePollQueue().add('usage-poll-tick', {}, { removeOnComplete: true, removeOnFail: 10 }),
-    'optional provider side effect not queued',
-  ).catch(() => {});
+    'usage poll wake-up failed; repeatable poll will retry',
+  );
 }
 
 async function cleanupSession(session: BannerSession): Promise<void> {

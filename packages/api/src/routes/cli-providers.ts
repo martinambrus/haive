@@ -3,6 +3,7 @@ import {
   addBestEffort,
   addOrRefuse,
   QueueAddTimeoutError,
+  QueueOutcomeUnknownError,
 } from '../lib/queue-bounded.js';
 import { CLI_SIGN_OUT_AUTH_WAIT_MS, CLI_SIGN_OUT_EXPIRED_MESSAGE } from '@haive/shared/constants';
 import { randomUUID } from 'node:crypto';
@@ -529,8 +530,8 @@ const requestUsagePollTick = () =>
   addBestEffort(
     () =>
       getUsagePollQueue().add('usage-poll-tick', {}, { removeOnComplete: true, removeOnFail: 10 }),
-    'optional provider side effect not queued',
-  ).catch(() => {});
+    'usage poll wake-up failed; repeatable poll will retry',
+  );
 
 cliProviderRoutes.post('/', requireNewWorkAllowed, async (c) => {
   const userId = c.get('userId');
@@ -1039,9 +1040,8 @@ cliProviderRoutes.delete('/:id', async (c) => {
           removeOnComplete: true,
           removeOnFail: CLI_POLLABLE_JOB_OPTS.removeOnFail,
         }),
-      'optional provider side effect not queued',
-    ).catch((err: unknown) =>
-      log.warn({ err, providerId: id, imageTag }, 'could not queue the sandbox image removal'),
+      'could not queue the sandbox image removal',
+      { providerId: id, imageTag },
     );
   }
   return c.json({ ok: true });
@@ -1193,7 +1193,7 @@ cliProviderRoutes.post('/:id/sign-out', async (c) => {
     if (err instanceof QueueAddTimeoutError) {
       // The launch may still land. Its committed audit must remain available.
       logAuditEvent(event);
-      throw err;
+      throw new QueueOutcomeUnknownError();
     }
     try {
       await db.delete(schema.auditEvents).where(eq(schema.auditEvents.id, auditId));

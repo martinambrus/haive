@@ -708,6 +708,58 @@ describe('C3: the queue refuses the job', () => {
     },
   );
 
+  it.each(['retry complete', 'replacement lookup', 'replacement state'])(
+    '%s: a hung queue read refuses within the deadline and releases the upload claim',
+    async (site) => {
+      let run: () => Promise<Response>;
+      if (site === 'retry complete') {
+        await stage(SESSION, 'zip bytes');
+        queue.state.refuse = new Error('redis is down');
+        expect((await complete(SESSION)).status).toBe(500);
+        queue.state.refuse = null;
+        run = () => complete(SESSION);
+      } else {
+        await seedZipBundle();
+        await stage(REPLACE, 'new archive', { bundleId: BUNDLE });
+        run = () => post(`/${BUNDLE}/replace/${REPLACE}/complete`);
+      }
+      vi.useFakeTimers();
+      const reading = Promise.withResolvers<void>();
+      const held = Promise.withResolvers<undefined>();
+      const read = () => {
+        reading.resolve();
+        return held.promise;
+      };
+      const getJob = vi
+        .spyOn(queue, 'getJob')
+        .mockImplementation(
+          site === 'replacement state'
+            ? async () => ({ getState: read }) as unknown as FakeJob
+            : read,
+        );
+      const add = vi.spyOn(queue, 'add');
+      let response: Response | undefined;
+      const pending = run().then((res) => {
+        response = res;
+      });
+      try {
+        await reading.promise;
+        await vi.advanceTimersByTimeAsync(5_000);
+        expect(response?.status).toBe(503);
+        expect(add).not.toHaveBeenCalled();
+        expect(
+          fake.rows(schema.customBundleUploads).every((row) => row.status !== 'completing'),
+        ).toBe(true);
+      } finally {
+        held.resolve(undefined);
+        await pending;
+        getJob.mockRestore();
+        add.mockRestore();
+        vi.useRealTimers();
+      }
+    },
+  );
+
   it('lets a zip complete be retried when the queue is back: syncing again, one job', async () => {
     await stage(SESSION, 'zip bytes');
     queue.state.refuse = new Error('redis is down');

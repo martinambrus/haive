@@ -1,4 +1,8 @@
-import { boundedAdd, QueueAddTimeoutError } from '../lib/queue-bounded.js';
+import {
+  boundedAdd,
+  QueueAddTimeoutError,
+  QueueOutcomeUnknownError,
+} from '../lib/queue-bounded.js';
 import { randomUUID } from 'node:crypto';
 import {
   beginModuleDrain,
@@ -438,7 +442,7 @@ export function moduleRoutes(loaded: readonly LoadedApiModule[]): Hono<AppEnv> {
       if (err instanceof QueueAddTimeoutError) {
         // The launch may still land. Its committed audit must remain available.
         logAuditEvent(event);
-        throw err;
+        throw new QueueOutcomeUnknownError();
       }
       try {
         await db.delete(schema.auditEvents).where(eq(schema.auditEvents.id, auditId));

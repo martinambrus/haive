@@ -416,7 +416,11 @@ it('keeps a committed sign-out row after a bounded enqueue timeout without a tra
     await request;
     vi.useRealTimers();
   }
-  expect((await request).status).toBe(500);
+  expect((await request).status).toBe(503);
+  expect(await (await request).json()).toEqual({
+    code: 'queue_outcome_unknown',
+    error: 'The action may still complete. It is safe to retry.',
+  });
   expect(fake.rows(schema.auditEvents)).toHaveLength(1);
   expect(h.auditLog).toHaveBeenCalledOnce();
 });
