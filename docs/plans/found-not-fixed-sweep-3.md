@@ -100,7 +100,8 @@ apiT = `packages/api/src/routes/tasks/index.ts`, steps = `packages/api/src/route
     non-pending downstream at its round); other `waiting_form` rows → `pending` keeping their
     form (FOR UPDATE first); runtime-park rows un-parked, not failed; the status-message cleanup;
     bump `WHERE id AND status='failed'` (none → 409) to `running`, pointed at the target, epoch+1,
-    clearing error, completion, allowance watch and pause; the NOWAIT post-bump sweep; a
+    clearing error, completion, allowance watch and pause; the post-bump sweep with a 250 ms
+    LOCAL lock timeout (503 on a longer hold); a
     `task.retried` event. After commit: kill sandboxes only if a reset row was live, queue an
     ADVANCE at the new epoch. A task that never pointed at a step keeps today's START path.
     `moveTaskToStep` gains options instead of a copy. AGENTS.md "Worker restarts" updated.

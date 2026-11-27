@@ -30,6 +30,7 @@ import type { SQL } from 'drizzle-orm';
 import {
   schema,
   boundedLockWait,
+  LATE_LOCK_WAIT_MS,
   isLockNotAvailable,
   lockStepRows,
   resetDagCurrentLevelForRetry,
@@ -259,7 +260,8 @@ async function sweepRunsOf(
  *  step PLUS its downstream, while the resume mining arm passes the downstream ONLY — there the
  *  clicked step deliberately keeps its detect/form output and its surviving agents' rows.
  *  Extracted so those two can never disagree about what a re-run resets. (The worker's
- *  resetStepAndDownstream is a third, deliberate copy; keep it in sync.)
+ *  resetStepAndDownstream is a third, deliberate copy; keep reset fields and the
+ *  shared late-lock bound in sync. Its 55P03 maps to a worker hold; the API answers 503.)
  *
  *  Callers pass only rows worth resetting — a row already `pending` has nothing to blank.
  *
@@ -300,6 +302,7 @@ export async function resetRowsForRerun(
   now: Date,
   opts: {
     rowsHeld?: boolean;
+    lateLockWaitMs?: number;
     preserveGuards?: boolean;
     executionContract?: unknown;
     /** Rescan after a retained producer even when the initial reset set is empty. */
@@ -327,7 +330,11 @@ export async function resetRowsForRerun(
   // The rows a pass activated meanwhile are held already (`rowsHeld`) and the task row is bumped:
   // their runs get the same bounded wait as a held row, refusing a longer hold.
   if (opts.rowsHeld)
-    await refusingWhenLocked(tx, () => sweepRunsOf(tx, ids, now, { lockFirst: true }));
+    await refusingWhenLocked(
+      tx,
+      () => sweepRunsOf(tx, ids, now, { lockFirst: true }),
+      opts.lateLockWaitMs,
+    );
   else await sweepRunsOf(tx, ids, now);
   // Re-running 06c-dag-execute (or any step whose set includes it) must also clear the wedged
   // DAG level: resetting task_steps alone leaves task_dag_issues failed_unrecoverable, so
@@ -382,7 +389,11 @@ export async function resetRowsForRerun(
   // bound the wait for a busy run rather than wait indefinitely in reverse lock order.
   const extraIds = held.filter((r) => !ids.includes(r.id)).map((r) => r.id);
   if (extraIds.length) {
-    await refusingWhenLocked(tx, () => sweepRunsOf(tx, extraIds, now, { lockFirst: true }));
+    await refusingWhenLocked(
+      tx,
+      () => sweepRunsOf(tx, extraIds, now, { lockFirst: true }),
+      opts.lateLockWaitMs,
+    );
     ids.push(...extraIds);
   }
   for (const r of held) {
@@ -491,15 +502,15 @@ function hasDurableApplyState(row: {
   return row.applyReceipt != null || row.guardState != null || row.stepId === '11g-save-database';
 }
 
-// Below PostgreSQL's default 1s deadlock_timeout: brief status writes can finish,
-// while a cycle rolls this action back before it can kill a Stop or a pass.
-const LATE_LOCK_WAIT_MS = 250;
-
 /** The action already holds step/task rows. Wait out brief benign holds, but roll
  *  back on a longer hold (55P03), since waiting indefinitely can close a cycle. */
-async function refusingWhenLocked<T>(tx: DbHandle, run: () => Promise<T>): Promise<T> {
+export async function refusingWhenLocked<T>(
+  tx: DbHandle,
+  run: () => Promise<T>,
+  timeoutMs = LATE_LOCK_WAIT_MS,
+): Promise<T> {
   try {
-    return await boundedLockWait(tx, run, LATE_LOCK_WAIT_MS);
+    return await boundedLockWait(tx, run, timeoutMs);
   } catch (err) {
     if (isLockNotAvailable(err)) {
       throw new HttpError(503, 'The task changed while this was being applied; try again');

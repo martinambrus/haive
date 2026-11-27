@@ -1086,8 +1086,10 @@ Explicit upstream Retry/rerun clears forward guard decisions and skip receipts
 in the same round, including pending decisions observed after the ordered lock
 batch. Owned skipped members reopen pending with a new rerun generation, alongside
 the ordinary reset. A row whose guard state appeared after the initial read is
-swept with NOWAIT on its runs and agents before it is reset; a busy run rolls the
-transaction back rather than reversing the run/step lock order. Selection follows
+swept with the shared 250 ms bounded wait on its runs and agents before it is reset,
+in both API and worker; a longer hold rolls the transaction back rather than waiting
+indefinitely across the run/step lock order. SQLSTATE 55P03 maps to API 503 or a
+retryable worker hold (see [Worker restarts](worker-restarts.md) for the detector margin). Selection follows
 run_seq with legacy step_index fallback,
 conservatively invalidating all forward decisions rather than reinterpreting
 predicates. Task Retry and the owner step Retry share the API reset helper; worker
@@ -1097,8 +1099,8 @@ its regenerated downstream producers, decisions and owned skips by the same rule
 A degraded done producer's Resume rescans forward from the clicked row under the
 ordered batch even when its initial downstream reset set was empty. Decisions and
 owned skips committed between that read and the lock are reset; the clicked producer's
-saved work and generation remain intact. Extra runs/agents use NOWAIT, and a busy run
-rolls back the entire Resume. Resume preserves guards only on rows whose work it retains
+saved work and generation remain intact. Extra runs/agents use the same 250 ms bound,
+and a hold beyond it rolls back the entire Resume. Resume preserves guards only on rows whose work it retains
 (left-active recovery and the loop arm). Recovery preserves decisions and member generations; guard-owned skips are excluded from recovery resets. Stop,
 BullMQ boot requeue, stalled handoff redrive and dead revival do not erase them.
 The immutable execution contract and run-list pin never change.
@@ -1108,7 +1110,8 @@ inArray(allStepIds + heldStepIds) lock and inArray(id, allStepIds) reset read;
 ordinary API resets keep their existing task-wide lock and caller-ids-only read.
 Neither reset emits a no-op guard_state SET for an ordinary pin. Both reset helpers
 accept an optional executionContract: callers pass their already-loaded immutable
-pin, so ordinary production resets add no statement. Worker orphan reconcile carries
+pin, so passing it adds no projection statement. Every API Retry still sets and
+restores the late-sweep timeout around `rowsActivatedMeanwhile`. Worker orphan reconcile carries
 the pin in its existing joined task/step read. Only when the argument is undefined
 does the worker project the pin before its transaction, or the API project it on
 the supplied transaction handle, respectively. Explicit null and empty contracts
@@ -1116,14 +1119,16 @@ do not trigger a fallback read. START uses its already-loaded pin and adds no
 ordinary full-step SELECT. Only
 guarded tasks widen to same-round rows at or after the target (run_seq, else
 step_index), with explicit owned handoff ids still held as before. The API's
-existing task-wide lock remains necessary for its later bulk writes. No reset
-lock_timeout is added, preserving ordinary behavior; the guard services'
+existing task-wide lock remains necessary for its later bulk writes. Ordinary first
+and second run sweeps retain their wait policy; held late sweeps set and restore the
+shared `LATE_LOCK_WAIT_MS` bound through the database helper. The guard services'
 bounded timeouts remain unchanged.
 
 The API helper returns extra rows with their pre-reset liveness. Retry, task moves,
 fan-out Resume and pending provider changes include these in audit/touched sets
 and post-commit sandbox cleanup. A separate retained Resume reset after the batch
-sweeps runs with NOWAIT, never waiting backward across the run/step lock order.
+sweeps runs with the same 250 ms bound rather than waiting indefinitely across the
+run/step lock order.
 On guarded pins, reofferParkedSteps and settleActiveStepsIn clear guard_state
 alongside every rerun_generation bump: retained form/detection data is not a reusable old-generation
 guard decision. Production callers supply the already-loaded pin, so ordinary

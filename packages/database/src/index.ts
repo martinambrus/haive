@@ -74,6 +74,7 @@ export { tryCliAuthLock, CliAuthLockLostError, type CliAuthLock } from './cli-au
 
 export {
   boundedLockWait,
+  LATE_LOCK_WAIT_MS,
   TASK_START_LOCK_TIMEOUT_MS,
   NEW_WORK_FENCE_LOCK_TIMEOUT_MS,
 } from './repository-task-lock.js';

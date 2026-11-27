@@ -30,6 +30,11 @@ export const TASK_START_LOCK_TIMEOUT_MS = 5_000;
 /** The exclusive maintenance holder only toggles state; it needs no filesystem/git budget. */
 export const NEW_WORK_FENCE_LOCK_TIMEOUT_MS = 1_000;
 
+/** Late reset sweeps already hold step/task rows and may wait backwards across lock tiers.
+ * With the default 1 s deadlock detector this leaves 750 ms for an earlier waiter.
+ * It is a margin, not a guarantee: a peer already waiting 750–1000 ms can detect first. */
+export const LATE_LOCK_WAIT_MS = 250;
+
 /** The shared lock-wait mechanism. A timeout aborts the transaction; callers translate it only
  * after giving up the transaction, and never continue using state read before the wait. */
 export async function boundedLockWait<T>(

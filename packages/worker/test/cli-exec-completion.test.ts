@@ -70,6 +70,7 @@ vi.mock('../src/step-engine/task-ledger.js', async (importOriginal) => ({
   recordLedgerEntry: stubs.recordLedgerEntry,
 }));
 
+import { log } from '../src/queues/cli-exec/_shared.js';
 import { handleCliExecJob } from '../src/queues/cli-exec/handlers.js';
 import { repoGitDataBoundary } from '../src/queues/cli-exec/gitfile-mask.js';
 import { WORKER_REPO_STORAGE_ROOT } from '../src/repo/worktree-git-boundary.js';
@@ -593,6 +594,7 @@ describe('a login failure', () => {
   it.each(['40P01', '08006'])(
     'hands back the original CLI failure when its best-effort hint fails (%s)',
     async (code) => {
+      const warn = vi.spyOn(log, 'warn').mockImplementation(() => undefined);
       const original = new CliLoginRequiredError('log in first', hint);
       const hintError = new DrizzleQueryError(
         'update task_steps set error_hint = $1',
@@ -613,6 +615,12 @@ describe('a login failure', () => {
         'log in first',
       );
       expect(hintWrites(writes)).toEqual([]);
+      expect(warn).toHaveBeenCalledExactlyOnceWith(
+        { err: hintError, invocationId: base.invocationId },
+        'failed to record CLI login hint',
+      );
+      expect((warn.mock.calls[0]![0] as { err: unknown }).err).toBe(hintError);
+      warn.mockRestore();
     },
   );
 
