@@ -654,13 +654,7 @@ export async function saveCore(
       pushed = true;
       seams.onPushed?.(pushedHead);
       failureCode = 'save_failed';
-      await advancePlanBaseFromCommit(
-        planCheckoutDatabase(getDb()),
-        repo.id,
-        repoPath,
-        pushedHead,
-        branch,
-      );
+      await advancePlanBaseFromCommit(getDb(), repo.id, repoPath, pushedHead, branch);
     }
 
     return resultFor(repo.id, files, { committed, commitSha, pushed, branch });
