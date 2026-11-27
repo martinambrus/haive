@@ -286,11 +286,8 @@ it.each(['pending', 'skipped'] as const)(
     expect(
       await hasReadyLspBridge(f.db, ids.task, { providerId: ids.provider, runner: f.runner }),
     ).toBe(false);
-    if (status === 'skipped') {
-      await expect(launch()).rejects.toThrow(/04-verify-environment.*skipped.*Retry 04/);
-      // Retry reopens 04; the bootstrap/AI repair launch can run again.
-      await f.write(schema.taskSteps, ids.bootstrap, { status: 'pending' });
-    }
+    // A skipped 04 keeps the provider-image fallback (owner-visible decision on T709 (h)):
+    // Skip is explicit and readiness stays false, so LSP is never claimed.
     expect(await launch()).toMatch(/^haive-cli-/);
     expect(f.run).not.toHaveBeenCalled();
   },

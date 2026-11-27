@@ -58,7 +58,6 @@ function database(
         })),
       },
       cliProviders: { findFirst: async () => provider },
-      taskSteps: { findFirst: async () => undefined },
       repositories: { findFirst: async () => ({ rtkVersion: '0.42.4' }) },
       toolPackageVersions: {
         findFirst: async () => {

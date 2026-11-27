@@ -9,7 +9,7 @@ import { randomUUID } from 'node:crypto';
 import { mkdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { and, desc, eq } from 'drizzle-orm';
+import { eq } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
 import { logger, DEFAULT_RTK_VERSION, type CliProviderName } from '@haive/shared';
 import {
@@ -174,27 +174,13 @@ export async function resolveSandboxImageComposition(
   const contract = resolveComposedLspInstallContract(deps.lspInstallContractVersion, provider.name);
   const launchEntries =
     contract === 2 && options.verifiedProviderId ? parseImageReferences(task.metadata).entries : [];
-  // Until some provider holds an effective composed image there is nothing to pin.
+  // Until some provider holds an effective composed image there is nothing to pin or refuse.
   // The environment steps that build the first one (and their AI repair) launch on the provider
   // image, as a legacy task does before its environment is built; LSP readiness stays false.
+  // An explicit Skip of 04 keeps that fallback: readiness stays false (only 01b1 sets it).
   // Once any effective reference exists every refusal below applies.
-  if (contract === 2 && options.verifiedProviderId && !launchEntries.some((e) => e.effective)) {
-    const bootstrap = await db.query.taskSteps.findFirst({
-      where: and(
-        eq(schema.taskSteps.taskId, taskId),
-        eq(schema.taskSteps.stepId, '04-verify-environment'),
-      ),
-      columns: { status: true },
-      orderBy: [desc(schema.taskSteps.round)],
-    });
-    // Bootstrap launches/AI repair need the provider image, but an explicit Skip must
-    // not silently extend that fallback into plugin installation and later work.
-    if (bootstrap?.status === 'skipped')
-      throw new ComposedImageNotVerifiedError(
-        '04-verify-environment was skipped without a verified composed image; Retry 04 before launching this provider',
-      );
+  if (contract === 2 && options.verifiedProviderId && !launchEntries.some((e) => e.effective))
     return null;
-  }
   const effective = launchEntries.find(
     (e) => e.providerId === options.verifiedProviderId,
   )?.effective;
