@@ -320,7 +320,13 @@ write that can fail (`markQueuedForStart`, `api/src/lib/task-start.ts`), under t
 task-creation lock, since a queued task holds the checkout and a checkout move holds that lock. The
 api waits at most 5 s for each repository or plan key and row lock it takes there, and 1 s for the
 shared new-work fence (`TASK_START_LOCK_TIMEOUT_MS`, `NEW_WORK_FENCE_LOCK_TIMEOUT_MS`), and otherwise
-answers 409 with nothing created or queued; other `boundedLockWait` callers keep the 30 s default. So a
+answers 409 with nothing created or queued; other `boundedLockWait` callers keep the 30 s default. The
+5 s bound is accepted, not a gap (owner, 2026-11-12): the worker's project-state writer
+(`worker/src/project-state/write.ts` ~:750) holds the same task-creation key across preparation and
+publication, MEASURED 844-2,072 ms at 512 claim files, and the hold grows with the record, so a
+repository near the 4,096-entry claim cap (`shared/src/project-state/limits.ts`; about 10-14 s,
+extrapolated) answers busy to an ordinary start while a write runs. Retrying the start is the remedy;
+no publication protocol shortens the hold. So a
 START that was lost or could not be queued is the sweep's to give, and the route answers as though
 it had been queued. POST /tasks, `spawnPlanTask` (its seed included) and the global-KB enrich each
 insert the task and claim its START in one transaction, taking that lock before the insert, so a
