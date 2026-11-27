@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { act, cleanup, render, screen } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { CliInvocationSummary } from '@/lib/api-client';
 import { StepTerminal } from './StepTerminal';
@@ -17,20 +17,18 @@ beforeEach(() => {
   localStorage.clear();
   h.get.mockReset();
 });
-afterEach(cleanup);
+afterEach(() => {
+  cleanup();
+  vi.useRealTimers();
+});
 
-async function show(
-  agentTitle: string | null,
-  assignedAgentIds: string[] = [],
-  totalCount = 2,
-  mode: CliInvocationSummary['mode'] = 'cli',
-) {
-  const invocation: CliInvocationSummary = {
+function makeInvocation(overrides: Partial<CliInvocationSummary> = {}): CliInvocationSummary {
+  return {
     id: 'run',
-    mode,
+    mode: 'cli',
     runNumber: 2,
-    agentTitle,
-    assignedAgentIds,
+    agentTitle: null,
+    assignedAgentIds: [],
     exitCode: 0,
     durationMs: 1000,
     timeoutMs: null,
@@ -45,7 +43,17 @@ async function show(
     tokenUsage: null,
     apiDurationMs: null,
     effort: null,
+    ...overrides,
   };
+}
+
+async function show(
+  agentTitle: string | null,
+  assignedAgentIds: string[] = [],
+  totalCount = 2,
+  mode: CliInvocationSummary['mode'] = 'cli',
+) {
+  const invocation = makeInvocation({ agentTitle, assignedAgentIds, mode });
   h.get.mockResolvedValue({ invocations: [invocation], totalCount, historyTotal: 1 });
   await act(async () => {
     render(<StepTerminal taskId="task" stepRowId="step" autoExpand statusMessage={null} />);
@@ -110,5 +118,82 @@ describe('step terminal run labels', () => {
     await show('<b>Review</b> **part 3**');
     const label = screen.getByText('<b>Review</b> **part 3**');
     expect(label.querySelector('b, strong')).toBeNull();
+  });
+});
+
+describe('collapsed step terminal live count', () => {
+  beforeEach(() => vi.useFakeTimers());
+
+  async function showRunning() {
+    const running = makeInvocation({ isActive: true, endedAt: null, exitCode: null });
+    h.get.mockResolvedValue({ invocations: [running], totalCount: 1, historyTotal: 0 });
+    let view!: ReturnType<typeof render>;
+    await act(async () => {
+      view = render(
+        <StepTerminal taskId="task" stepRowId="step" autoExpand statusMessage={null} />,
+      );
+    });
+    expect(screen.getByRole('button', { name: /Hide terminal/ }).textContent).toContain(
+      '1 run · 1 live',
+    );
+    return view;
+  }
+
+  function endRun() {
+    h.get.mockResolvedValue({ invocations: [makeInvocation()], totalCount: 1, historyTotal: 1 });
+  }
+
+  async function expectNoPolling() {
+    const calls = h.get.mock.calls.length;
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(6000);
+    });
+    expect(h.get).toHaveBeenCalledTimes(calls);
+  }
+
+  it('drops live from the collapsed header when the step goes idle', async () => {
+    const view = await showRunning();
+    endRun();
+    await act(async () => {
+      view.rerender(
+        <StepTerminal taskId="task" stepRowId="step" autoExpand={false} statusMessage={null} />,
+      );
+    });
+    expect(screen.getByRole('button', { name: /Show terminal/ }).textContent).toContain('1 run');
+    expect(screen.queryByText(/live/)).toBeNull();
+    expect(h.get).toHaveBeenCalledTimes(2);
+    expect(localStorage.getItem('task-ui:task:term:step')).toBeNull();
+    await expectNoPolling();
+  });
+
+  it('refreshes once on manual collapse and again on idle if the run was still active', async () => {
+    const view = await showRunning();
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: /Hide terminal/ }));
+    });
+    expect(h.get).toHaveBeenCalledTimes(2);
+    expect(screen.getByRole('button', { name: /Show terminal/ }).textContent).toContain('1 live');
+    await expectNoPolling();
+
+    endRun();
+    await act(async () => {
+      view.rerender(
+        <StepTerminal taskId="task" stepRowId="step" autoExpand={false} statusMessage={null} />,
+      );
+    });
+    expect(screen.queryByText(/live/)).toBeNull();
+    expect(h.get).toHaveBeenCalledTimes(3);
+    expect(localStorage.getItem('task-ui:task:term:step')).toBe('0');
+    await expectNoPolling();
+  });
+
+  it('does not fetch or poll an idle panel mounted collapsed without loaded runs', async () => {
+    await act(async () => {
+      render(
+        <StepTerminal taskId="task" stepRowId="step" autoExpand={false} statusMessage={null} />,
+      );
+    });
+    expect(h.get).not.toHaveBeenCalled();
+    await expectNoPolling();
   });
 });
