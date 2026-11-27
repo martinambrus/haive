@@ -1222,6 +1222,24 @@ In `martinambrus/haive-module-translator`. The owner's English-to-Slovak run fai
 
 1. Accept a declined form (same stem, up to 2 trailing letters changed on words of 5+ letters) at every keep-term check; a translated name still fails; codes and short words stay exact. Then the owner Retries the step.
 
+### T779 · Multi-call steps show a false "earlier attempts could not be used" banner
+
+status: open · kind: bug · found: session live check e06ad873 2026-11-27 · priority: P2
+
+`attemptCount` counts every non-mining invocation of a step row (`api/src/routes/tasks/_helpers.ts` ~:948), and the task page shows "N earlier attempts produced output this step could not use, so it re-ran automatically" whenever it exceeds 1 with no loop iterations (`web/src/app/(app)/tasks/[id]/page.tsx` ~:4169). A step that makes one successful call per unit (translator `tr-translate`: 12 runs, `tr-review`: 4 runs plus re-reviews, all exit 0) therefore claims 11 or 4 failed attempts. The owner's task ae8fb29c shows the same.
+
+1. Count only runs that were superseded as unusable (a retry of the same call), not distinct planned calls: key on a stable structural signal (for example, a run the step recorded as rejected, or same-call re-dispatch), never on run titles.
+2. Controls: a module step with several successful planned calls shows no banner; a step whose first reply was rejected and re-ran still shows it.
+
+### T780 · Repository readers outside admission during a rebuild
+
+status: open · kind: bug · found: T594 fix-2 (Codex found-not-fixed) 2026-11-27 · priority: P3
+
+T594 commits `status: 'cloning'` before a rebuild moves the checkout, which hides it from archive, Terminal and Editor admission. Path-based file readers that do not go through readiness admission, and sessions already open before the rebuild, are not covered.
+
+1. List each reader of a repository checkout that bypasses readiness admission (file:line), and decide per reader: gate on status, or tolerate the move (held descriptors).
+2. Decide whether an open Terminal or Editor session is closed or warned when a rebuild starts.
+
 ### T778 · Settlement siblings still act on a Retry-revived task
 
 status: open · kind: bug · found: T542 review 2026-11-27 (found-not-fixed) · priority: P3
