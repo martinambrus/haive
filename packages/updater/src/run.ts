@@ -68,6 +68,8 @@ export interface UpgradeContext {
   drainPollMs?: number;
   /** Milliseconds between retries of a maintenance-state write; 3000 when unset. */
   maintenanceWritePauseMs?: number;
+  /** Total milliseconds for the API version/head gate, including requests and bodies. */
+  versionWaitTimeoutMs?: number;
   /** Force past the drain deadline instead of failing. */
   forceDrain: boolean;
   /** Set by phaseDraining when it forced past live work, so phaseMaintenance skips the recount. */
@@ -131,6 +133,10 @@ async function writeImages(ctx: UpgradeContext, images?: ImageOverrides): Promis
   if (images) for (const key of IMAGE_KEYS) await setEnvVar(ctx.envFile, key, images[key]);
 }
 
+/** Three minutes for the newly started API to boot and report its migrated schema after Compose up.
+ *  Image pulls and migrations have already finished; retain the existing startup allowance. */
+export const VERSION_WAIT_TIMEOUT_MS = 180_000;
+
 /** Poll `GET /version` until it reports the expected release, or give up.
  *
  *  `/health` cannot answer this: it returns a fixed `{status, service}` that a container running
@@ -147,10 +153,31 @@ async function awaitVersion(
   let saw: string | undefined;
   let head: string | null | undefined;
   while (Date.now() < deadline) {
+    const controller = new AbortController();
+    let timer: ReturnType<typeof setTimeout> | undefined;
     try {
-      const res = await fetch(`${apiUrl}/version`);
-      if (res.ok) {
-        const body = (await res.json()) as { version?: string; migrationHead?: string | null };
+      // A headers or body read can hang forever. Race both against the remaining TOTAL budget,
+      // and abort the socket too. The race also bounds readers that fail to honour cancellation.
+      const expired = new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(
+          () => {
+            const error = new DOMException('Version verification timed out', 'TimeoutError');
+            controller.abort(error);
+            reject(error);
+          },
+          Math.max(0, deadline - Date.now()),
+        );
+      });
+      const body = await Promise.race([
+        (async () => {
+          const res = await fetch(`${apiUrl}/version`, { signal: controller.signal });
+          return res.ok
+            ? ((await res.json()) as { version?: string; migrationHead?: string | null })
+            : null;
+        })(),
+        expired,
+      ]);
+      if (body) {
         saw = body.version;
         head = body.migrationHead ?? null;
         if (saw === expected && head === expectedHead) return { ok: true, saw, head };
@@ -158,8 +185,11 @@ async function awaitVersion(
     } catch {
       // Not up yet. A container mid-restart refusing a connection is the expected state here, not
       // an error worth reporting on every poll.
+    } finally {
+      clearTimeout(timer);
     }
-    await new Promise((r) => setTimeout(r, 2000));
+    const remaining = deadline - Date.now();
+    if (remaining > 0) await new Promise((r) => setTimeout(r, Math.min(2000, remaining)));
   }
   log('verify-timeout', { expected, expectedHead, saw, head });
   return { ok: false, saw, head };
@@ -269,7 +299,9 @@ async function holdDraining(ctx: UpgradeContext): Promise<MaintenanceState> {
   });
 }
 
-/** Read from the journal, not the context: a restarted updater never ran the draining phase. */
+/** Read from the journal, not the context: a restarted updater never ran the draining phase.
+ *  Read/write failures must escape: the existing running row is the durable recovery record,
+ *  even if the caller's later attempt to append the rollback error also fails. */
 async function restoreMaintenanceState(ctx: UpgradeContext): Promise<void> {
   if (ctx.stateUntouched) {
     ctx.log('maintenance-restore-skipped', {
@@ -446,7 +478,7 @@ export async function phaseVerify(ctx: UpgradeContext): Promise<boolean> {
     ctx.apiUrl,
     ctx.target.version,
     ctx.target.migrationHead,
-    180_000,
+    ctx.versionWaitTimeoutMs ?? VERSION_WAIT_TIMEOUT_MS,
     ctx.log,
   );
   if (result.ok) ctx.log('verified', { version: result.saw, head: result.head });

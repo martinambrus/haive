@@ -259,6 +259,75 @@ describe('race, other direction: the updater lock is exclusive for the whole run
   });
 });
 
+describe('rollback holds survive a second journal failure', () => {
+  it.each(['found-state read', 'state write'])(
+    'exits 6 and resumes the existing running row after a failed %s and error write',
+    async (failure) => {
+      const actual = await vi.importActual<typeof import('./run.js')>('./run.js');
+      vi.mocked(run.rollback).mockImplementation(actual.rollback);
+      vi.mocked(run.resume).mockImplementation(actual.resume);
+      vi.mocked(run.phaseVerify).mockResolvedValue(false);
+      const row: journal.UpgradeRun = {
+        ...liveRun,
+        id: 'new-run',
+        phase: 'verify',
+        status: 'running',
+        error: null,
+      };
+      // The durable row was inserted before any hold; failing to append an error must not retire it.
+      vi.mocked(journal.startRun).mockImplementation(async () => {
+        vi.mocked(journal.findLiveRun).mockImplementation(async () =>
+          row.status === 'running' ? row : null,
+        );
+        return row.id;
+      });
+      vi.mocked(journal.finishRun).mockImplementation(async (_sql, _id, status) => {
+        row.status = status;
+      });
+      Object.assign(h.sql, {
+        reserve: vi.fn(async () =>
+          Object.assign(
+            vi.fn(async () => []),
+            { release: vi.fn() },
+          ),
+        ),
+      });
+      let stored = 'maintenance';
+      h.setConfig.mockImplementation(async (_key, state: string) => {
+        stored = state;
+      });
+      vi.mocked(journal.readFoundState).mockResolvedValue('normal');
+      if (failure === 'found-state read') {
+        vi.mocked(journal.readFoundState).mockRejectedValueOnce(
+          new Error('found-state read failed'),
+        );
+      } else {
+        h.setConfig.mockRejectedValueOnce(new Error('state write failed'));
+      }
+      vi.mocked(journal.recordRunError).mockRejectedValueOnce(new Error('error write failed'));
+      const opts = { stackLock: { ...quick, sleep: idleSleep } };
+
+      expect(await main(opts)).toBe(6);
+      expect(row.status).toBe('running');
+      expect(journal.finishRun).not.toHaveBeenCalled();
+      expect(journal.recordRunError).toHaveBeenCalledWith(
+        h.sql,
+        row.id,
+        expect.stringContaining(`${failure} failed`),
+      );
+      expect(events()).toContain('rollback-failed');
+      expect(stored).toBe('maintenance');
+
+      expect(await main(opts)).toBe(0);
+      expect(run.resume).toHaveBeenCalledWith(expect.objectContaining({ runId: row.id }), 'verify');
+      expect(journal.startRun).toHaveBeenCalledTimes(1);
+      expect(h.setConfig).toHaveBeenLastCalledWith(expect.anything(), 'normal');
+      expect(stored).toBe('normal');
+      expect(row.status).toBe('rolled_back');
+    },
+  );
+});
+
 describe('real recovery under stack lease proofs', () => {
   const opts = { stackLock: { ...quick, sleep: idleSleep } };
   const interrupted = async () => {
