@@ -226,30 +226,66 @@ export const AUTH_FAILED_ERROR_CODE = 'authentication_failed';
 // max_output_tokens already reaches its capability class through the env-var name (that class
 // writes provider limits), unknown is the CLI's own "unclassified", cloud_credential_error is
 // Bedrock/Vertex only.
-const STREAM_ERROR_CODE_CLASS: ReadonlyMap<string, ProviderFatalClass> = new Map<
+// Every auth mapping must choose its guidance here, so extending the map cannot silently
+// select a re-login hint for a code requiring account action.
+type StreamErrorClass =
+  | { fatalClass: 'auth'; authAction: 'login' }
+  | { fatalClass: 'auth'; authAction: 'account'; hint: string }
+  | { fatalClass: Exclude<ProviderFatalClass, 'auth'> };
+
+const STREAM_ERROR_CODE_CLASS: ReadonlyMap<string, StreamErrorClass> = new Map<
   string,
-  ProviderFatalClass
+  StreamErrorClass
 >([
   // auth: the account or org cannot be used until a person acts, so fail fast, never retried or
   // waited out.
-  [AUTH_FAILED_ERROR_CODE, 'auth'],
-  ['oauth_org_not_allowed', 'auth'],
-  ['account_on_hold', 'auth'],
-  ['verification_required', 'auth'],
+  [AUTH_FAILED_ERROR_CODE, { fatalClass: 'auth', authAction: 'login' }],
+  [
+    'oauth_org_not_allowed',
+    {
+      fatalClass: 'auth',
+      authAction: 'account',
+      hint: 'account action is needed: ask your organization administrator to enable access or use an allowed API key',
+    },
+  ],
+  [
+    'account_on_hold',
+    {
+      fatalClass: 'auth',
+      authAction: 'account',
+      hint: 'account action is needed: resolve the account hold with the provider',
+    },
+  ],
+  [
+    'verification_required',
+    {
+      fatalClass: 'auth',
+      authAction: 'account',
+      hint: 'account action is needed: complete the verification requested by the provider',
+    },
+  ],
   // rate_limit: billing_error because the text rules already file credit exhaustion there
   // (BILLING_EXHAUSTED_RE).
-  ['rate_limit', 'rate_limit'],
-  ['billing_error', 'rate_limit'],
+  ['rate_limit', { fatalClass: 'rate_limit' }],
+  ['billing_error', { fatalClass: 'rate_limit' }],
   // server_error: 5xx and 529.
-  ['server_error', 'server_error'],
-  ['overloaded', 'server_error'],
+  ['server_error', { fatalClass: 'server_error' }],
+  ['overloaded', { fatalClass: 'server_error' }],
 ]);
 
 /** The fatal class the CLI's own stream error code names, or null. Exact string compare. */
 export function fatalClassFromStreamErrorCode(
   code: string | null | undefined,
 ): ProviderFatalClass | null {
-  return code == null ? null : (STREAM_ERROR_CODE_CLASS.get(code) ?? null);
+  return code == null ? null : (STREAM_ERROR_CODE_CLASS.get(code)?.fatalClass ?? null);
+}
+
+/** Account-action guidance from the same exact-code map that supplies the fatal class. */
+export function accountActionHintFromStreamErrorCode(
+  code: string | null | undefined,
+): string | null {
+  const entry = code == null ? undefined : STREAM_ERROR_CODE_CLASS.get(code);
+  return entry?.fatalClass === 'auth' && entry.authAction === 'account' ? entry.hint : null;
 }
 
 /** Stable headline per fatal class. Used to BUILD the invocation errorMessage

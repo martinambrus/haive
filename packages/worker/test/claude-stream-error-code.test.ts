@@ -206,11 +206,6 @@ describe('the collector reads the last top-level assistant error code', () => {
     expect(collect(assistant('a', { error: 7 })).getAssistantErrorCode()).toBeNull();
     expect(collect(assistant('a', { error: { code: 'x' } })).getAssistantErrorCode()).toBeNull();
   });
-
-  it('keeps hadAuthFailure true only for authentication_failed', () => {
-    expect(collect(assistant('a', { error: 'authentication_failed' })).hadAuthFailure()).toBe(true);
-    expect(collect(assistant('a', { error: 'account_on_hold' })).hadAuthFailure()).toBe(false);
-  });
 });
 
 function expectClass(
@@ -227,7 +222,7 @@ describe('a run with no result event is classified by the stream error code', ()
   it.each(TEXTED)('%s -> %s (%s)', async (code, cls, text) => {
     const { outcome, message } = await run(withCode(code, text), 1);
     expectClass(outcome, message, cls);
-    if (cls === 'auth') expect(message).toContain('claude /login');
+    if (cls === 'auth') expect(message).toContain('account action');
   });
 
   it('a final mapped code on exit 0 is not classified', async () => {
@@ -248,9 +243,9 @@ describe('a steered run whose later turn fails is classified by the stream error
     expectClass(outcome, message, cls);
   });
 
-  it('authentication_failed in the later turn gives auth and the auth flag', async () => {
+  it('authentication_failed in the later turn gives the auth class', async () => {
     const { outcome, message } = await run(steered(turnOf('authentication_failed', NEUTRAL)), 1);
-    expect(outcome.authFailure).toBe(true);
+    expect(outcome.streamFailureClass).toBe('auth');
     expect(fatalClassFromMessage(message)).toBe('auth');
   });
 
@@ -270,7 +265,6 @@ describe('a steered run whose later turn fails is classified by the stream error
       assistant('x', { error: 'server_error' }) + assistant('fine') + okResult('fine'),
     );
     const { outcome, message } = await run(stdout, 0);
-    expect(outcome.authFailure).toBeUndefined();
     expect(outcome.streamFailureClass).toBeUndefined();
     expect(message).toBe(outcome.errorMessage ?? null);
     expect(fatalClassFromMessage(message)).toBeNull();
@@ -286,7 +280,6 @@ describe('only the last top-level assistant code counts', () => {
         failedResult('something else broke'),
       1,
     );
-    expect(outcome.authFailure).toBeUndefined();
     expect(outcome.streamFailureClass).toBeUndefined();
     expect(fatalClassFromMessage(message)).toBeNull();
   });
@@ -322,7 +315,6 @@ describe('unmapped codes keep the text classifier path', () => {
   it.each(cases)('%s with %j matches the same text without a code', async (code, text) => {
     const coded = await run(withCode(code, text), 1);
     const bare = await run(initLine + assistant(text) + failedResult(text), 1);
-    expect(coded.outcome.authFailure).toBeUndefined();
     expect(coded.outcome.streamFailureClass).toBeUndefined();
     expect(coded.message).toBe(bare.message);
     expect(fatalClassFromMessage(coded.message)).toBe(text === NEUTRAL ? null : 'rate_limit');
@@ -366,5 +358,127 @@ describe('the capability class is read before the stream code', () => {
     expect(outcome.streamFailureClass).toBe('server_error');
     expect(capabilityClassFromMessage(message)).toBe('output_cap_reached');
     expect(fatalClassFromMessage(message)).toBeNull();
+  });
+});
+
+describe('T747 failing-turn controls', () => {
+  it('1 quotes the failing turn instead of the first answer', async () => {
+    const { message } = await run(
+      initLine +
+        assistant('FIRST ANSWER') +
+        okResult('FIRST ANSWER') +
+        assistant('FAILING TURN', { error: 'server_error' }) +
+        failedResult('FAILING TURN'),
+      1,
+    );
+    expect(message).toContain('FAILING TURN');
+    expect(message).not.toContain('FIRST ANSWER');
+  });
+
+  it.each(['rate_limit', 'overloaded'])(
+    '2 ignores a sub-agent %s stamp without a result',
+    async (code) => {
+      const { message } = await run(
+        initLine +
+          assistant(NEUTRAL) +
+          assistant(NEUTRAL, { parent_tool_use_id: 'sub', error: code }),
+        1,
+      );
+      expect(fatalClassFromMessage(message)).toBeNull();
+    },
+  );
+
+  it.each(['rate_limit', 'overloaded'])(
+    '2 ignores a recovered %s stamp without a result',
+    async (code) => {
+      const { message } = await run(
+        initLine + assistant(NEUTRAL, { error: code }) + assistant(NEUTRAL),
+        1,
+      );
+      expect(fatalClassFromMessage(message)).toBeNull();
+    },
+  );
+
+  it('2 excludes tool payloads and earlier answers from the text fallback', async () => {
+    const { message } = await run(
+      initLine +
+        assistant('API Error: 429 Too Many Requests') +
+        okResult('API Error: 429 Too Many Requests') +
+        line({
+          type: 'user',
+          message: { content: [{ type: 'tool_result', content: '401 Unauthorized' }] },
+        }) +
+        assistant(NEUTRAL),
+      1,
+    );
+    expect(fatalClassFromMessage(message)).toBeNull();
+  });
+
+  it('2 discards a previous failed result after the assistant recovers', async () => {
+    const { message } = await run(
+      initLine +
+        assistant('API Error: 429 Too Many Requests', { error: 'rate_limit' }) +
+        failedResult('API Error: 429 Too Many Requests') +
+        assistant(NEUTRAL),
+      1,
+    );
+    expect(fatalClassFromMessage(message)).toBeNull();
+  });
+
+  it('2 ignores a sub-agent text payload without a result', async () => {
+    const { message } = await run(
+      initLine +
+        assistant(NEUTRAL) +
+        assistant('API Error: 429 Too Many Requests', { parent_tool_use_id: 'sub' }),
+      1,
+    );
+    expect(fatalClassFromMessage(message)).toBeNull();
+  });
+
+  it('2 excludes a sub-agent failed result from the text fallback', async () => {
+    const { message } = await run(
+      initLine +
+        assistant(NEUTRAL) +
+        line({
+          type: 'result',
+          parent_tool_use_id: 'sub',
+          subtype: 'error_during_execution',
+          is_error: true,
+          error: 'API Error: 429 Too Many Requests',
+        }),
+      1,
+    );
+    expect(fatalClassFromMessage(message)).toBeNull();
+  });
+
+  it('2 does not carry a previous session code into a later turn with no assistant', async () => {
+    const { message } = await run(
+      initLine + assistant(NEUTRAL, { error: 'rate_limit' }) + failedResult(NEUTRAL) + initLine,
+      1,
+    );
+    expect(fatalClassFromMessage(message)).toBeNull();
+  });
+
+  it('2 keeps a top-level rate-limit rejection as a structural signal', async () => {
+    const { message } = await run(
+      initLine + line({ type: 'rate_limit_event', rate_limit_info: { status: 'rejected' } }),
+      1,
+    );
+    expect(fatalClassFromMessage(message)).toBe('rate_limit');
+  });
+
+  it.each(['account_on_hold', 'oauth_org_not_allowed', 'verification_required'])(
+    '3 gives account-action guidance for %s',
+    async (code) => {
+      const { message } = await run(withCode(code, NEUTRAL), 1);
+      expect(message).toContain('account action');
+      expect(message).not.toContain('claude /login');
+    },
+  );
+
+  it('4 carries auth through one class, without a second flag', async () => {
+    const { outcome } = await run(withCode('authentication_failed', NEUTRAL), 1);
+    expect(outcome.streamFailureClass).toBe('auth');
+    expect(outcome).not.toHaveProperty('authFailure');
   });
 });

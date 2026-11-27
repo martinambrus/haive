@@ -121,6 +121,7 @@ import {
   MODEL_CAPABILITY_HEADLINES,
   PROVIDER_FATAL_HEADLINES,
   fatalClassFromStreamErrorCode,
+  accountActionHintFromStreamErrorCode,
   type ModelCapabilityClass,
   type ProviderFatalClass,
 } from './failure-class.js';
@@ -189,10 +190,11 @@ const TERMINATION_EXIT_CODES: ReadonlySet<number> = new Set([130, 137, 143]);
 /** What the CLI's own stream error code says about the failure; no key when it says nothing. */
 function streamFailureFlags(
   collector: ReturnType<typeof createStreamJsonCollector>,
-): Pick<ExecutionOutcome, 'authFailure' | 'streamFailureClass'> {
-  const streamFailureClass = fatalClassFromStreamErrorCode(collector.getAssistantErrorCode());
+): Pick<ExecutionOutcome, 'streamErrorCode' | 'streamFailureClass'> {
+  const streamErrorCode = collector.getAssistantErrorCode();
+  const streamFailureClass = fatalClassFromStreamErrorCode(streamErrorCode);
   return {
-    ...(collector.hadAuthFailure() ? { authFailure: true } : {}),
+    ...(streamErrorCode !== null ? { streamErrorCode } : {}),
     ...(streamFailureClass ? { streamFailureClass } : {}),
   };
 }
@@ -259,18 +261,17 @@ export function interpretCliFailure(
   // will not recover within this run. Headline them with a stable internal prefix
   // so looping consumers (isFatalProviderFailure → DAG escalation, merge-fix retry)
   // fail the task fast instead of re-dispatching agents against a dead provider.
-  // The CLI's own stream error code (authFailure, streamFailureClass) wins over the text rules.
+  // The CLI's own stream error class wins over the provider-fatal text rules.
   const fatalClass =
-    result.authFailure === true
-      ? 'auth'
-      : (result.streamFailureClass ??
-        classifyProviderFatal(
-          result.exitCode,
-          existing,
-          result.providerErrorScan ?? result.rawOutput,
-        ));
+    result.streamFailureClass ??
+    classifyProviderFatal(result.exitCode, existing, result.providerErrorScan ?? result.rawOutput);
   if (!fatalClass) return existing;
-  return buildProviderFatalMessage(fatalClass, providerName, formatAuthDetail(existing));
+  return buildProviderFatalMessage(
+    fatalClass,
+    providerName,
+    formatAuthDetail(existing),
+    result.streamErrorCode,
+  );
 }
 
 /** Build the headlined model-capability errorMessage. The headline is what drives the
@@ -298,20 +299,24 @@ function buildProviderFatalMessage(
   fatalClass: ProviderFatalClass,
   providerName: string | null,
   detail: string,
+  streamErrorCode?: string,
 ): string {
   if (fatalClass === 'auth') {
     const override = providerName ? PROVIDER_AUTH_HINT_OVERRIDES[providerName] : null;
     const apiKeyName = providerName ? PROVIDER_API_KEY_HINTS[providerName] : null;
     const loginCmd = providerName ? PROVIDER_LOGIN_HINTS[providerName] : null;
-    const hint = override
-      ? `${override}, then retry this step`
-      : apiKeyName
-        ? `check or replace the \`${apiKeyName}\` secret for this provider in Haive settings and then retry this step`
-        : providerName && PROVIDER_HAIVE_LOGIN.has(providerName)
-          ? `log in to ${providerName} from the Haive providers page (Test connection then Log in) and then retry this step`
-          : loginCmd
-            ? `run \`${loginCmd}\` in your terminal and then retry this step`
-            : 're-authenticate your CLI in your terminal and then retry this step';
+    const accountHint = accountActionHintFromStreamErrorCode(streamErrorCode);
+    const hint = accountHint
+      ? `${accountHint}, then retry this step`
+      : override
+        ? `${override}, then retry this step`
+        : apiKeyName
+          ? `check or replace the \`${apiKeyName}\` secret for this provider in Haive settings and then retry this step`
+          : providerName && PROVIDER_HAIVE_LOGIN.has(providerName)
+            ? `log in to ${providerName} from the Haive providers page (Test connection then Log in) and then retry this step`
+            : loginCmd
+              ? `run \`${loginCmd}\` in your terminal and then retry this step`
+              : 're-authenticate your CLI in your terminal and then retry this step';
     return `${PROVIDER_FATAL_HEADLINES.auth} — ${hint}.${detail}`;
   }
   const hint =
@@ -1232,6 +1237,10 @@ export async function executeCliSpec(
   // to the plain path below, byte-for-byte legacy behavior (usage null).
 
   const streamResult = collector.getResult();
+  const streamFailureScan =
+    `${collector.getFailureText()}\n${collector.getNoResultReason() ?? ''}\n${result.stderr ?? ''}`.slice(
+      -4000,
+    );
   if (collector.isStreamJson() && streamResult !== null) {
     const malformedLines = collector.getMalformedLineCount();
     const assistantText = collector.getAssistantText();
@@ -1284,7 +1293,7 @@ export async function executeCliSpec(
     const cliError = formatCliErrorMessage(
       result.exitCode,
       result.stderr,
-      streamResult,
+      collector.getFailureText(),
       result.error,
     );
     if (!cliError && failedMcp.length > 0) {
@@ -1310,6 +1319,7 @@ export async function executeCliSpec(
       apiDurationMs: collector.getApiDurationMs(),
       toolUsage: collector.getToolUsage(),
       ...persisted,
+      providerErrorScan: streamFailureScan,
       ...streamFailureFlags(collector),
     };
   }
@@ -1321,13 +1331,12 @@ export async function executeCliSpec(
     // NDJSON: it becomes the Clean tab's replay source (raw_output ->
     // staticCleanOutput) and would render as raw protocol, ballooning Clean to MBs.
     // The full raw stream stays in streamLog (the Raw tab). Falls back to
-    // result.stdout only when no prose streamed at all — preserving prior behavior
-    // and the provider-fatal rawOutput tail scan for that case.
+    // result.stdout only when no prose streamed at all. Classification uses the scoped
+    // failure text below, never this raw protocol fallback.
     const partialProse = proseForClean(collector.getAssistantText(), result.stdout);
     // A run-level `is_error` result carries the binary's own error text ("API Error:
-    // The response stopped arriving."), which is strictly better than what
-    // formatCliErrorMessage would produce here: with stderr empty it falls back to
-    // the stdout tail, and for a stream-json CLI that is 2000 chars of raw NDJSON.
+    // The response stopped arriving."), along with its terminal reason or result subtype.
+    // Prefer that structured diagnosis over the generic tail formatter.
     // Still below result.error, so a Haive-inflicted kill keeps its headline (the
     // timeout ladder reads it).
     const apiErrorReason = collector.hadResultError() ? reason : null;
@@ -1338,7 +1347,12 @@ export async function executeCliSpec(
       errorMessage:
         result.error ??
         apiErrorReason ??
-        formatCliErrorMessage(result.exitCode, result.stderr, result.stdout, undefined) ??
+        formatCliErrorMessage(
+          result.exitCode,
+          result.stderr,
+          collector.getFailureText(),
+          undefined,
+        ) ??
         reason,
       // Tokens were burned even without a result event (e.g. error_max_turns).
       tokenUsage: collector.getTokenUsage(),
@@ -1355,7 +1369,7 @@ export async function executeCliSpec(
       // Same stance as compaction: a run that died mid-stream still used what it used.
       toolUsage: collector.getToolUsage(),
       ...persisted,
-      providerErrorScan,
+      providerErrorScan: streamFailureScan,
       ...streamFailureFlags(collector),
     };
   }
