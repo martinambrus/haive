@@ -82,6 +82,7 @@ export async function startFake(): Promise<Fake> {
           sock.write(`$${body.length}\r\n${body}\r\n`);
         } else if (name === 'EVAL') sock.write('*2\r\n:1\r\n:1\r\n');
         else if (name === 'HGETALL') sock.write('*0\r\n');
+        else if (name === 'INCR' || name === 'EXPIRE') sock.write(':1\r\n');
         else if (name === 'GET') sock.write('$-1\r\n');
         else if (name === 'PING') sock.write('+PONG\r\n');
         else if (name === 'HSET' && args[1] === 'wrongkey')

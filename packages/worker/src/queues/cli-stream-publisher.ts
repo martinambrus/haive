@@ -1,5 +1,5 @@
 import { logger } from '@haive/shared';
-import { getRedis } from '../redis.js';
+import { getPatientRedis, getRedis } from '../redis.js';
 
 const log = logger.child({ module: 'cli-stream-publisher' });
 
@@ -221,7 +221,8 @@ export async function publishCliExit(
 ): Promise<void> {
   if (!invocationId) return;
   try {
-    const r = getRedis();
+    // The API reader closes on this frame, so retain it through a transient outage.
+    const r = getPatientRedis();
     await r.xadd(streamKey(invocationId), '*', 'stream', 'exit', 'code', String(code ?? -1));
     await r.expire(streamKey(invocationId), STREAM_TTL_SECONDS);
   } catch (err) {

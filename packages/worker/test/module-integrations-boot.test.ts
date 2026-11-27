@@ -5,7 +5,10 @@ import type { StepDefinition } from '../src/step-engine/step-definition.js';
 
 const h = vi.hoisted(() => ({ deactivated: new Set<string>() }));
 
-vi.mock('../src/redis.js', () => ({ getRedis: () => ({ set: async () => 'OK' }) }));
+vi.mock('../src/redis.js', () => ({
+  getRedis: () => ({ set: async () => 'OK' }),
+  getPatientRedis: () => ({ set: async () => 'OK' }),
+}));
 vi.mock('../src/step-engine/task-type-seed.js', () => ({
   syncTaskTypeDefinitions: async () => ({}),
 }));

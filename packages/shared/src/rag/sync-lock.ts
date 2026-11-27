@@ -8,7 +8,7 @@ const log = logger.child({ module: 'rag-sync-lock' });
 const LOCK_TTL_MS = 120_000;
 const HEARTBEAT_MS = 30_000;
 const POLL_MS = 5_000;
-/** The worker's shared Redis client queues commands forever while Redis is stalled; no lock command waits longer. */
+/** Bounds lock commands even when the supplied client has no command deadline. */
 const COMMAND_TIMEOUT_MS = 5_000;
 
 const REFRESH_SCRIPT = `
@@ -193,7 +193,11 @@ export async function acquireRagSyncLock(
     try {
       got = await attempt(redis, repositoryId, options, signal);
     } catch (err) {
-      if (!(err instanceof RagSyncLockCommandTimeoutError)) throw err;
+      if (
+        !(err instanceof RagSyncLockCommandTimeoutError) &&
+        (err as { code?: unknown } | null)?.code !== 'redis_unavailable'
+      )
+        throw err;
       log.warn({ err, repositoryId }, 'RAG sync lock attempt got no answer; retrying');
     }
     if (got) return got;

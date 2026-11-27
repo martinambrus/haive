@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import type { Redis } from 'ioredis';
 import type { Database } from '@haive/database';
 import { getRedis } from '../../redis.js';
 import { log } from './_shared.js';
@@ -133,10 +134,20 @@ export async function reserveAgentSlot(field: string, cap: number): Promise<Agen
 
 async function attempt(
   deps: AgentLeaseDeps,
+  retryUnavailable = false,
 ): Promise<{ lease: AgentLease } | { busy: number; cap: number }> {
   const cap = await deps.agentCap();
   const id = randomUUID();
-  const got = await reserve(`lease:${id}`, cap);
+  let got: Awaited<ReturnType<typeof reserve>>;
+  try {
+    got = await reserve(`lease:${id}`, cap);
+  } catch (err) {
+    if (!retryUnavailable || (err as { code?: unknown } | null)?.code !== 'redis_unavailable')
+      throw err;
+    log.warn({ err }, 'agent lease attempt got no answer; retrying');
+    // The count is unknown. Keep polling without claiming a slot or running the command.
+    return { busy: cap, cap };
+  }
   if ('slot' in got) return { lease: { id, release: () => got.slot.release() } };
   return { busy: got.live, cap };
 }
@@ -159,7 +170,7 @@ export async function acquireAgentLease(
   const startedAt = Date.now();
   for (;;) {
     if (signal?.aborted) throw new AgentLeaseAbortedError();
-    const got = await attempt(deps);
+    const got = await attempt(deps, true);
     if ('lease' in got) return got.lease;
     if (Date.now() - startedAt >= waitMs) throw new AgentLeaseTimeoutError(waitMs);
     onWait?.(got.busy, got.cap);
@@ -177,9 +188,9 @@ export async function acquireAgentLease(
 
 /** Wipe every lease. Called on worker boot, where every sandbox the previous process started is
  *  reaped, so a lease left behind describes a run that no longer exists. */
-export async function clearAgentLeases(): Promise<void> {
+export async function clearAgentLeases(redis?: Redis): Promise<void> {
   try {
-    await getRedis().del(LEASE_KEY);
+    await (redis ?? getRedis()).del(LEASE_KEY);
   } catch (err) {
     log.warn({ err }, 'clearing agent leases on boot failed');
   }

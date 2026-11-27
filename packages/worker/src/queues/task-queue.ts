@@ -1520,7 +1520,8 @@ async function cleanupTaskContainers(
       });
     }
   } catch (err) {
-    logger.warn({ err, taskId, reason }, 'cleanup-terminal-sessions failed');
+    logger.warn({ err, taskId, reason }, 'cleanup-terminal-sessions failed; keeping worktree');
+    return;
   }
 
   // After the reap, so no live shell can write into the tree between the clean check and removal.

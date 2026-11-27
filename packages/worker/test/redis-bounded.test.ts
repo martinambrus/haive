@@ -29,6 +29,15 @@ function track<T>(work: Promise<T>) {
   );
   return state;
 }
+async function recover(): Promise<void> {
+  fake!.mute = false;
+  const closed = once(client.getRedis(), 'close');
+  fake!.dropAll();
+  await closed;
+  const recovered = ready();
+  await vi.advanceTimersByTimeAsync(50);
+  await recovered;
+}
 async function stalled<T>(work: Promise<T>, command: string) {
   const state = track(work);
   await fake!.nextCommand(command);
@@ -178,13 +187,21 @@ describe('consequential gates against a silent store', () => {
     expect(job.moveToDelayed).not.toHaveBeenCalled();
   });
 
-  it('refuses a step command instead of waiting inside its lease attempt forever', async () => {
-    const state = await stalled(
-      acquireAgentLease({ db: {} as Database, agentCap: async () => 2 }, { waitMs: 50 }),
-      'EVAL',
+  it('keeps a step command waiting through an outage, then takes a lease', async () => {
+    const waiting = acquireAgentLease(
+      { db: {} as Database, agentCap: async () => 2 },
+      { waitMs: 500, pollMs: 10 },
     );
-    expect(state.error).toBeInstanceOf(client.RedisUnavailableError);
-    expect(state.error).toMatchObject({ code: 'redis_unavailable' });
+    const state = track(waiting);
+    await fake!.nextCommand('EVAL');
+    await vi.advanceTimersByTimeAsync(DEADLINE);
+    expect(state.settled).toBe(false);
+    await recover();
+    await vi.advanceTimersByTimeAsync(10);
+    await waiting;
+    expect(state.error).toBeUndefined();
+    expect(state.value).toBeDefined();
+    await state.value?.release();
   });
 
   it('releases a processor after a lost HDEL answer, leaving expiry as backstop', async () => {
@@ -205,17 +222,31 @@ describe('consequential gates against a silent store', () => {
       getJobs: async () => [{ id: '1', timestamp: 1, moveToWait }],
     };
     const state = await stalled(
-      requeueOrphanedActiveJobs(queue as never, () => true),
+      requeueOrphanedActiveJobs(
+        queue as never,
+        () => true,
+        (key) => client.getRedis().incr(key),
+      ),
       'INCR',
     );
     expect(state.value).toBe(0);
     expect(moveToWait).not.toHaveBeenCalled();
   });
 
-  it('keeps a RAG writer closed on a typed command failure', async () => {
-    const ctx = { emitProgress: vi.fn() } as unknown as StepContext;
-    const state = await stalled(acquireRepoRagSyncLock(ctx, 'repo'), 'SET');
-    expect(state.error).toBeInstanceOf(client.RedisUnavailableError);
-    expect(state.error).toMatchObject({ code: 'redis_unavailable' });
+  it('keeps a RAG writer waiting through a typed command failure, then acquires', async () => {
+    const ctx = { emitProgress: vi.fn(async () => undefined) } as unknown as StepContext;
+    const waiting = acquireRepoRagSyncLock(ctx, 'repo');
+    const state = track(waiting);
+    await fake!.nextCommand('SET');
+    await vi.advanceTimersByTimeAsync(DEADLINE);
+    expect(state.settled).toBe(false);
+    expect(ctx.emitProgress).toHaveBeenCalledOnce();
+    await recover();
+    // Stop at the next SET, before advancing its command deadline ahead of socket I/O.
+    await vi.advanceTimersByTimeAsync(5_000 - 50);
+    await waiting;
+    expect(state.error).toBeUndefined();
+    expect(state.value).toBeDefined();
+    await state.value?.release();
   });
 });

@@ -91,7 +91,7 @@ export function getRedis(): Redis {
   return redisInstance;
 }
 
-/** Blocking readers and subscribers: waits out outages, with no command deadline. */
+/** Boot bookkeeping, socket-lifetime work and CLI exit frames: waits out outages, with no command deadline. */
 export function getPatientRedis(): Redis {
   if (!patientRedisInstance) throw new Error('Patient Redis not initialized');
   return patientRedisInstance;

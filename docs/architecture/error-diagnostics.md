@@ -381,26 +381,43 @@ issued during connect, reconnect or a LOADING ready check rejects without queuei
 whose answer timed out may still have landed; it is never automatically replayed on reconnect.
 Connection warnings are throttled to one per ten seconds.
 
-This changes how long a gate waits, preserving its existing error policy. INVOKE lane
-reservation fails open without a slot; a step-command lease attempt propagates the typed
-failure before running the command. Agent-slot release stops its heartbeat and finishes after
-a failed HDEL, relying on the existing two-minute field expiry; heartbeats themselves are
-bounded too. Runtime reservation/surcharge accounting keeps its documented live-runners-only
-fallback and a cold boot's reservation check can reach that fallback instead of hanging before
-its own admission timer starts. An unreadable boot requeue counter moves no job. These decisions
-use error structure or their existing catch-all policy, never message wording. The RAG lock
-already has a separate five-second command bound: its acquire path still refuses writes on
-failure, now receiving the worker's typed rejection sooner.
+This changes how long a gate waits while retaining its documented outage policy. INVOKE lane
+reservation fails open without a slot. Step-command leases treat `code: redis_unavailable` as
+not acquired and keep polling under their existing ten-minute wait and abort signal; one-shot
+lease and slot attempts still propagate the failure. Agent-slot release stops its heartbeat and
+finishes after a failed HDEL, relying on the existing two-minute field expiry. Runtime
+reservation/surcharge accounting keeps its live-runners-only fallback. A cold boot's own
+reservation check distinguishes unknown from absent: an unreadable HEXISTS refuses the boot
+with the original error before joining the local queue. Guessing absent can queue behind the
+task's own reservation; guessing held can admit capacity that was never reserved. Retry can
+read it again. These decisions use error structure, never message wording. The RAG lock's
+polling acquire treats both its own five-second command timeout and `code: redis_unavailable`
+as not acquired, retaining the two-hour worker wait and abort signal; one-shot acquire still
+throws. A timed-out SET's compensating release can also fail on the finite client, leaving the
+key to its existing 120-second TTL.
 
-`getPatientRedis()` keeps the old options for socket-lifetime work: terminal output and registry
-bookkeeping, and the dedicated mid-run steer subscriber duplicated from it. A finite client's
-`duplicate()` throws so a subscriber or future blocking reader cannot inherit its deadline.
-There are no worker BLPOP/XREAD BLOCK consumers today. The terminal manager's independently
-constructed subscriber already uses patient factory defaults. All three singleton clients share
-the existing one-second shutdown backstop. BullMQ factories, queue connections, blocking reads
-and defer retry behavior are unchanged. In particular this does not bound a BullMQ-owned
-`moveToDelayed` during a transport outage, nor change the documented fail-open policies to
-strict admission. Rollback restores the old worker client and its two consumer injections
+`getPatientRedis()` keeps the old options for boot and socket-lifetime work: the bootstrap
+version SET, initial module report, boot reservation/lease/surcharge clears, boot-requeue
+counter, terminal output and registry bookkeeping, and the dedicated mid-run steer subscriber
+duplicated from it. Each boot command waits for its own client's ready check, independently of
+ConfigService's connection, so a LOADING store cannot silently skip the clears or counter or
+abort the module report. Shared clear helpers accept a client and retain the finite default
+for other callers. Later module report changes still use the finite client and retry only on
+the next change. The CLI exit frame and its TTL use the patient client too: an open API stream
+reader closes on that frame and otherwise keeps reading even after the invocation ended.
+Other best-effort stream frames, cache/hint writes and the soft-timeout wind-down publish stay
+finite and can be dropped during an outage. A failed task-end terminal reap logs and skips
+worktree removal for that teardown; the next teardown can retry it. The cancel-only task-label
+sweep may already have removed task shells, but is best effort, and completion does not run it.
+
+A finite client's `duplicate()` throws so a subscriber or future blocking reader cannot inherit
+its deadline. There are no worker BLPOP/XREAD BLOCK consumers today. The terminal manager's
+independently constructed subscriber already uses patient factory defaults. All three singleton
+clients share the existing one-second shutdown backstop. BullMQ factories, queue connections,
+blocking reads and defer retry behavior are unchanged. In particular this does not bound a
+BullMQ-owned `moveToDelayed` during a transport outage, nor change the documented fail-open
+policies to strict admission. The 2000 ms worker deadline is inherited from the API, not a
+measured worker latency budget. Rollback restores the worker client and its consumer injections
 together; no schema or persisted-data rollback is needed.
 
 `/admin/health` reports `redis: 'up' | 'down'` from a bounded `ping()` and is in the maintenance

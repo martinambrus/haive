@@ -135,10 +135,10 @@ async function main(): Promise<void> {
   // Drop runtime slot reservations left by the previous process. The reap above removed every
   // runtime runner, so a reservation from before this boot can only describe a boot that no
   // longer exists — leaving it would hold a slot out of the pool until its 45-min expiry.
-  await clearRuntimeReservations();
-  await clearAgentLeases();
+  await clearRuntimeReservations(getPatientRedis());
+  await clearAgentLeases(getPatientRedis());
   // Same reasoning for the browser-desktop surcharges: every runner they described is gone.
-  await clearBrowserSurcharges();
+  await clearBrowserSurcharges(getPatientRedis());
   // Before this process starts a worker, whose connection would read as the owner of every active job.
   await requeueOrphanedActiveJobs(getTaskQueue(), () => true);
   await requeueOrphanedActiveJobs(getCliExecQueue(), cliExecJobRequeuedAtBoot);

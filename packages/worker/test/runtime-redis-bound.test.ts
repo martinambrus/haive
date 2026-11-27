@@ -61,29 +61,32 @@ describe('runtime capacity keeps its documented soft-state outage policy', () =>
     expect(busy).toBe(0);
   });
 
-  it('settles the reservation check and pump before handing a cold boot its release', async () => {
-    const reservation = vi.spyOn(getRedis(), 'hexists');
-    let release: (() => void) | undefined;
-    void acquireRuntimeSlot('task', 'app').then((value) => {
-      release = value;
-    });
-    await fake.nextCommand('HEXISTS');
-    let checked = false;
-    void reservation.mock.results[0]!.value.then(
-      () => {
-        checked = true;
+  it('refuses a cold boot when its reservation check is unreadable', async () => {
+    let settled = false;
+    let failure: unknown;
+    void acquireRuntimeSlot('task', 'app').then(
+      (release) => {
+        settled = true;
+        release();
       },
-      () => {
-        checked = true;
+      (error) => {
+        settled = true;
+        failure = error;
       },
     );
-    const occupancy = fake.nextCommand('HGETALL');
+    await fake.nextCommand('HEXISTS');
     await vi.advanceTimersByTimeAsync(DEADLINE);
-    expect(checked).toBe(true);
-    await occupancy;
-    // The browser and reservation reads are independent and both get their own deadline.
-    await vi.advanceTimersByTimeAsync(DEADLINE);
-    expect(release).toBeTypeOf('function');
-    release!();
+    expect(settled).toBe(true);
+    expect(failure).toMatchObject({ code: 'redis_unavailable' });
+    expect(fake.commands.some((c) => c[0]!.toUpperCase() === 'HGETALL')).toBe(false);
   });
+});
+
+it('refuses an unknown reservation before a readable occupancy can queue on its own slot', async () => {
+  fake.mute = false;
+  const error = Object.assign(new Error('lost HEXISTS reply'), { code: 'redis_unavailable' });
+  vi.spyOn(getRedis(), 'hexists').mockRejectedValueOnce(error);
+  const occupancy = vi.spyOn(getRedis(), 'hgetall');
+  await expect(acquireRuntimeSlot('reserved-task', 'app')).rejects.toBe(error);
+  expect(occupancy).not.toHaveBeenCalled();
 });

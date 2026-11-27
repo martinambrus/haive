@@ -1,3 +1,4 @@
+import type { Redis } from 'ioredis';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import {
@@ -314,12 +315,12 @@ async function reserveRuntimeSlot(taskId: string, weightMb: number): Promise<voi
   }
 }
 
-/** Whether this task holds a reservation right now. */
-async function hasReservation(taskId: string): Promise<boolean> {
+/** Unknown is not absence: a boot must not queue behind its own task-level reservation. */
+async function hasReservation(taskId: string): Promise<{ held: boolean } | { error: unknown }> {
   try {
-    return (await getRedis().hexists(RESERVE_KEY, taskId)) === 1;
-  } catch {
-    return false;
+    return { held: (await getRedis().hexists(RESERVE_KEY, taskId)) === 1 };
+  } catch (error) {
+    return { error };
   }
 }
 
@@ -335,9 +336,9 @@ export async function releaseRuntimeReservation(taskId: string): Promise<void> {
 
 /** Wipe every reservation. Called on worker boot, where the boot reaper removes all runtime
  *  runners — so any reservation left by the previous process is stale by definition. */
-export async function clearRuntimeReservations(): Promise<void> {
+export async function clearRuntimeReservations(redis?: Redis): Promise<void> {
   try {
-    await getRedis().del(RESERVE_KEY);
+    await (redis ?? getRedis()).del(RESERVE_KEY);
   } catch (err) {
     log.warn({ err }, 'clearing runtime reservations on boot failed');
   }
@@ -393,9 +394,9 @@ export async function markBrowserDesktopDown(container: string): Promise<void> {
 
 /** Wipe every surcharge. Called on worker boot beside clearRuntimeReservations, where the boot
  *  reaper removes all runtime runners — so every entry is stale by definition. */
-export async function clearBrowserSurcharges(): Promise<void> {
+export async function clearBrowserSurcharges(redis?: Redis): Promise<void> {
   try {
-    await getRedis().del(BROWSER_KEY);
+    await (redis ?? getRedis()).del(BROWSER_KEY);
   } catch (err) {
     log.warn({ err }, 'clearing browser surcharges on boot failed');
   }
@@ -937,7 +938,12 @@ export async function acquireRuntimeSlot(
   // is done: by then the container exists and counts on its own, or the boot failed and the
   // capacity is genuinely free. inFlight is deliberately NOT incremented — the reservation is
   // the count.
-  if (await hasReservation(taskId)) {
+  const reservation = await hasReservation(taskId);
+  if ('error' in reservation) {
+    log.warn({ err: reservation.error, taskId }, 'runtime reservation unknown; refusing cold boot');
+    throw reservation.error;
+  }
+  if (reservation.held) {
     let released = false;
     return () => {
       if (released) return;

@@ -11,8 +11,8 @@ import {
   type RuntimeAdmissionInput,
 } from './runtime-admission.js';
 
-// docker ps answers nothing and Redis is not initialised: the gate sees an idle host and every
-// Redis side effect is a soft failure, so only the config reads steer these tests.
+// docker ps answers nothing and HEXISTS confirms absence; other Redis accounting is unavailable.
+// The gate sees an idle host, so only the config reads steer these tests.
 vi.mock('node:child_process', () => ({
   execFile: (...args: unknown[]) => {
     const cb = args[args.length - 1] as (err: null, out: { stdout: string }) => void;
@@ -20,9 +20,7 @@ vi.mock('node:child_process', () => ({
   },
 }));
 vi.mock('../redis.js', () => ({
-  getRedis: vi.fn(() => {
-    throw new Error('Redis not initialized');
-  }),
+  getRedis: vi.fn(() => ({ hexists: async () => 0 })),
 }));
 
 /** A 16 GB host: budget 11469 MB, ddev 4096 MB, app 2048 MB. */

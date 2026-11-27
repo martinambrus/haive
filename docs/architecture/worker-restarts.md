@@ -25,6 +25,11 @@ starting. The boot data migrations are part of the retried `bootstrap()`, except
 repairs, which start after `haive-worker ready` and retry in their own loop (see
 [Global knowledge base](global-kb.md)). Any error other than the typed outage still exits 1.
 
+The worker's own boot bookkeeping uses its patient Redis client, independently of the
+configuration connection's ready check: runtime version and initial module report writes,
+reservation/agent-lease/browser-surcharge clears, and the boot-requeue counter all wait through
+LOADING or reconnect. Steady-state commands keep their finite deadline.
+
 **Boot hands a dead worker's active jobs back before it starts its own.** BullMQ keeps a job
 `active` under its lock when its worker dies, and the task and cli-exec locks are 30 minutes, so
 such a job used to run only once that lock expired. `requeueOrphanedActiveJobs`

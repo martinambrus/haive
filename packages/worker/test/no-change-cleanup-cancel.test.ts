@@ -8,6 +8,7 @@ import { processTaskJob, setContainerCleanupRunner } from '../src/queues/task-qu
 
 const h = vi.hoisted(() => ({
   calls: [] as string[],
+  reapError: null as Error | null,
   seen: (name: string, _taskId?: string) => {
     h.calls.push(name);
   },
@@ -88,6 +89,7 @@ vi.mock('../src/sandbox/terminal-session-reaper.js', async (importOriginal) => (
   ...(await importOriginal<object>()),
   reapAllSessionsForTask: async (_redis: unknown, _docker: unknown, taskId: string) => {
     h.seen('reapAllSessionsForTask', taskId);
+    if (h.reapError) throw h.reapError;
     return 0;
   },
 }));
@@ -145,6 +147,7 @@ vi.mock('../src/step-engine/steps/_global-kb-promote.js', async (importOriginal)
 const job = { name: TASK_JOB_NAMES.CANCEL, data: { taskId: 'task', userId: 'user' } } as Job;
 beforeEach(() => {
   h.calls = [];
+  h.reapError = null;
   h.sandboxes = [];
   h.journal = [{ payload: { version: 999 } }];
   const builder = {
@@ -231,4 +234,18 @@ it('does not read a task without a cleanup journal', async () => {
   const read = vi.spyOn(h.db.query.tasks, 'findFirst');
   await discardNoChangeCleanupDirectories(h.db, 'task');
   expect(read).not.toHaveBeenCalled();
+});
+
+it('retains the worktree on a failed terminal reap, then removes it on the next teardown', async () => {
+  h.journal = [];
+  h.reapError = Object.assign(new Error('store unavailable'), { code: 'redis_unavailable' });
+  await processTaskJob(job);
+  expect(h.calls).toContain('reapAllSessionsForTask');
+  expect(h.calls).not.toContain('removeTaskWorktree');
+  h.reapError = null;
+  h.calls = [];
+  await processTaskJob(job);
+  expect(h.calls.indexOf('removeTaskWorktree')).toBeGreaterThan(
+    h.calls.indexOf('reapAllSessionsForTask'),
+  );
 });
