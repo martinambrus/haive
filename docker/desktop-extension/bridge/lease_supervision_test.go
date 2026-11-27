@@ -109,3 +109,53 @@ func TestLeaseLossCauseSurvivesOperationMapping(t *testing.T) {
 		t.Fatalf("lease cause hidden: %v", err)
 	}
 }
+
+func TestLeaseBlockedIOStillCancels(t *testing.T) {
+	b := fixture(t)
+	ticks := fakeTicker(&b)
+	safety := make(chan time.Time)
+	safetyReady := make(chan struct{})
+	b.lockCfg.newSafetyTicker = func(time.Duration) (<-chan time.Time, func()) {
+		close(safetyReady)
+		return safety, func() {}
+	}
+	var clock atomic.Int64
+	b.lockCfg.now = func() time.Time { return time.Unix(0, clock.Load()) }
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	b.leaseFailed = cancel
+	blocked, unblock := make(chan struct{}), make(chan struct{})
+	var fail atomic.Bool
+	write := b.lockCfg.resolved().write
+	b.lockCfg.write = func(f *os.File, data []byte) error {
+		if fail.Load() {
+			close(blocked)
+			<-unblock
+		}
+		return write(f, data)
+	}
+	lease, err := b.acquireStackLock(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lease.releaseLock()
+	defer close(unblock)
+	<-ticks.period
+	<-safetyReady
+	fail.Store(true)
+	ticks.ticks <- time.Time{}
+	<-blocked
+	clock.Store(int64(30*time.Second - time.Nanosecond))
+	safety <- time.Time{}
+	safety <- time.Time{} // Previous check completed independently of the blocked I/O.
+	if ctx.Err() != nil {
+		t.Fatal("cancelled before stale/2")
+	}
+	clock.Store(int64(30 * time.Second))
+	safety <- time.Time{}
+	select {
+	case <-ctx.Done():
+	case <-time.After(time.Second):
+		t.Fatal("blocked beat suppressed stale/2 cancellation")
+	}
+}

@@ -710,8 +710,12 @@ func (b bridge) handle(ctx context.Context, r request) (s state, err error) {
 	}
 	// Preserve supervision failures through the operation-specific error mapping.
 	var commandFailure error
+	windowHeld := false
 	baseRun := b.run
 	b.run = func(callCtx context.Context, exe string, args []string, dir string, log io.Writer) (string, error) {
+		if commandFailure != nil {
+			return "", commandFailure
+		}
 		if r.Action == "status" || (exe == "docker" && len(args) > 0 && args[0] == "info") {
 			callCtx = context.WithValue(callCtx, readOnlyProbeKey{}, true)
 		}
@@ -719,6 +723,11 @@ func (b bridge) handle(ctx context.Context, r request) (s state, err error) {
 		var unavailable *supervisionUnavailable
 		if errors.As(runErr, &unavailable) || errors.Is(runErr, errCommandUncertain) || errors.Is(runErr, errCommandStopUnconfirmed) {
 			commandFailure = runErr
+			if windowHeld && r.Action != "status" && (errors.Is(runErr, errCommandUncertain) || errors.Is(runErr, errCommandStopUnconfirmed)) {
+				if markerErr := b.markUnconfirmed(r.Action, runErr); markerErr != nil {
+					commandFailure = errors.Join(runErr, fmt.Errorf("Cannot persist the unconfirmed marker at %s: %w", b.unconfirmedPath(), markerErr))
+				}
+			}
 		}
 		return out, runErr
 	}
@@ -733,6 +742,14 @@ func (b bridge) handle(ctx context.Context, r request) (s state, err error) {
 		if err != nil && commandFailure != nil && !errors.Is(err, commandFailure) {
 			err = fmt.Errorf("%w %v", commandFailure, err)
 		}
+		if r.Action == "status" {
+			if markerErr := b.checkUnconfirmed(false); markerErr != nil {
+				s.Error = markerErr.Error()
+				if err != nil {
+					err = errors.Join(err, markerErr)
+				}
+			}
+		}
 	}()
 	engine, err := b.run(ctx, "docker", []string{"info", "--format", "{{.ID}}"}, "", nil)
 	if err != nil && commandFailure != nil {
@@ -743,6 +760,9 @@ func (b bridge) handle(ctx context.Context, r request) (s state, err error) {
 	}
 	if r.Action == "status" {
 		return b.inspect(ctx)
+	}
+	if err := b.checkUnconfirmed(true); err != nil {
+		return s, err
 	}
 	// Proven lease loss or half a stale window without renewal cancels commands while there is still
 	// time before stale takeover. Heartbeats themselves outlive cancellation and
@@ -756,6 +776,10 @@ func (b bridge) handle(ctx context.Context, r request) (s state, err error) {
 		return s, err
 	}
 	defer releaseWindow()
+	windowHeld = true
+	if err := b.checkUnconfirmed(true); err != nil {
+		return s, err
+	}
 	// Refuse before any installer, Compose call or .env port rewrite.
 	if err := b.checkUpgrade(ctx); err != nil {
 		return s, err
@@ -793,6 +817,9 @@ func (b bridge) handle(ctx context.Context, r request) (s state, err error) {
 		return s, err
 	}
 	defer release()
+	if err := b.checkUnconfirmed(true); err != nil {
+		return s, err
+	}
 	notice := ""
 	action := []string{"stop"} // Keep containers, network and every data volume.
 	if r.Action == "start" {
@@ -815,6 +842,9 @@ func (b bridge) handle(ctx context.Context, r request) (s state, err error) {
 		return s, err
 	}
 	if _, err = b.run(ctx, "docker", args, b.dir, log); err != nil {
+		if commandFailure != nil {
+			return s, commandFailure
+		}
 		if r.Action == "start" {
 			// Preserve whatever Compose can report, even after up --wait failed.
 			s, _ = b.inspect(ctx)

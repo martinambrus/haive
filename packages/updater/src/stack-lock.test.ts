@@ -1208,3 +1208,24 @@ describe('own torn-record deadline', () => {
     await lock.release();
   });
 });
+
+describe('unconfirmed host command refusal', () => {
+  it.each(['{}', 'malformed'])(
+    'refuses marker %s before creating a stack lock',
+    async (contents) => {
+      await writeFile(join(dir, '.haive-extension-unconfirmed'), contents);
+      await expect(acquireStackLock(dir, base)).rejects.toMatchObject({
+        refusal: 'extension-command-unconfirmed',
+      });
+      await expect(stat(path)).rejects.toMatchObject({ code: 'ENOENT' });
+    },
+  );
+});
+
+it('refuses a non-regular unconfirmed marker with the stable refusal code', async () => {
+  await mkdir(join(dir, '.haive-extension-unconfirmed'));
+  await expect(acquireStackLock(dir, base)).rejects.toMatchObject({
+    refusal: 'extension-command-unconfirmed',
+  });
+  await expect(stat(path)).rejects.toMatchObject({ code: 'ENOENT' });
+});

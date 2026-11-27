@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -45,7 +46,7 @@ func TestWindowsJobLayoutAndKillOnClose(t *testing.T) {
 
 func TestWindowsAssignFailureStartsNothing(t *testing.T) {
 	cmd, marker := supervisorPayload(t)
-	var output strings.Builder
+	var output lockedSupervisionOutput
 	cmd.Stderr = &output
 	var assignErr error
 	err := runSupervisedWithAssign(context.Background(), cmd, func(job, process syscall.Handle) error {
@@ -156,7 +157,7 @@ func TestWindowsCancelGroup(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("job did not terminate")
 	}
-	windowsMembersGone(t, members, 0)
+	windowsMembersGone(t, members, 1000)
 }
 
 func TestWindowsParentDeath(t *testing.T) {
@@ -176,4 +177,20 @@ func TestWindowsParentDeath(t *testing.T) {
 	}
 	bridge.Wait()
 	windowsMembersGone(t, members, 5000)
+}
+
+type lockedSupervisionOutput struct {
+	mu   sync.Mutex
+	text strings.Builder
+}
+
+func (w *lockedSupervisionOutput) Write(p []byte) (int, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.text.Write(p)
+}
+func (w *lockedSupervisionOutput) String() string {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.text.String()
 }

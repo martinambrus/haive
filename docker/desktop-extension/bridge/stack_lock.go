@@ -49,6 +49,7 @@ type lockConfig struct {
 	write             func(*os.File, []byte) error
 	openOverwrite     func(string) (*os.File, error)
 	newTicker         func(time.Duration) (<-chan time.Time, func())
+	newSafetyTicker   func(time.Duration) (<-chan time.Time, func())
 }
 
 type lockRecord struct {
@@ -163,6 +164,7 @@ type stackLock struct {
 	lost           bool
 	ownWriteFailed bool
 	lastGood       time.Time
+	renewalMu      sync.Mutex
 	released       bool
 
 	stop    chan struct{}
@@ -179,7 +181,7 @@ func (l *stackLock) isLost() bool {
 // Only a failed truncating overwrite can explain our own empty or partial record.
 // That exception ends at the same stale deadline a contender uses to break the lease.
 func (l *stackLock) proofExpired() bool {
-	if l.cfg.now().Sub(l.lastGood) >= l.cfg.stale {
+	if l.cfg.now().Sub(l.lastRenewal()) >= l.cfg.stale {
 		l.lost = true
 	}
 	return l.lost
@@ -212,7 +214,7 @@ func (l *stackLock) beat() string {
 			return l.beatFailed()
 		}
 		l.ownWriteFailed = false
-		l.lastGood = started
+		l.renewed(started)
 		return "ok"
 	}
 	if err != nil {
@@ -239,12 +241,46 @@ func (l *stackLock) beat() string {
 		return l.beatFailed()
 	}
 	l.ownWriteFailed = false
-	l.lastGood = started
+	l.renewed(started)
 	return "ok"
+}
+
+func (l *stackLock) lastRenewal() time.Time {
+	l.renewalMu.Lock()
+	defer l.renewalMu.Unlock()
+	return l.lastGood
+}
+func (l *stackLock) renewed(at time.Time) {
+	l.renewalMu.Lock()
+	defer l.renewalMu.Unlock()
+	l.lastGood = at
+}
+
+func (l *stackLock) watchRenewal() {
+	newTicker := l.cfg.newSafetyTicker
+	if newTicker == nil {
+		newTicker = func(period time.Duration) (<-chan time.Time, func()) {
+			ticker := time.NewTicker(period)
+			return ticker.C, ticker.Stop
+		}
+	}
+	ticks, stop := newTicker(min(l.cfg.beat, l.cfg.stale/2))
+	defer stop()
+	for {
+		select {
+		case <-l.stop:
+			return
+		case <-ticks:
+			if l.b.leaseFailed != nil && l.cfg.now().Sub(l.lastRenewal()) >= l.cfg.stale/2 {
+				l.b.leaseFailed()
+			}
+		}
+	}
 }
 
 func (l *stackLock) heartbeat() {
 	defer close(l.done)
+	go l.watchRenewal()
 	newTicker := l.cfg.newTicker
 	if newTicker == nil {
 		newTicker = func(period time.Duration) (<-chan time.Time, func()) {
@@ -261,7 +297,7 @@ func (l *stackLock) heartbeat() {
 		case <-ticks:
 			result := l.beat()
 			l.mu.Lock()
-			unsafe := result == "lost" || (result == "error" && l.cfg.now().Sub(l.lastGood) >= l.cfg.stale/2)
+			unsafe := result == "lost" || (result == "error" && l.cfg.now().Sub(l.lastRenewal()) >= l.cfg.stale/2)
 			l.mu.Unlock()
 			if unsafe && l.b.leaseFailed != nil {
 				l.b.leaseFailed()

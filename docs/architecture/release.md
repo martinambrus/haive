@@ -537,7 +537,9 @@ bridge's Go's monotonic `time.Now()`, never the record's `startedAt`; a clock th
 paused VM).
 The bridge cancels its operation immediately on proven lease loss, or after transient renewal errors persist for half the stale window (30 s), terminating its supervised
 command before waiting for the stale deadline. Renewal retries continue during cancellation and command Wait;
-only expiry or loss stops them for good. A frozen bridge still cannot observe its own missed beats.
+only expiry or loss stops them for good. An independent timer checks the last successful renewal even
+while a heartbeat is blocked in file I/O; its clock uses a separate mutex from that I/O. A frozen
+bridge still cannot observe its own missed beats.
 A remaining race (T765 item 5): the heartbeat reads its own record and then overwrites it, so a contender that broke the lock and created its own in between is overwritten; closing it
 needs a descriptor-held compare before the truncating open, in both implementations. A result already decided (done or rolled back) is not replaced when the beat notices a loss afterwards; a
 loss during the pruning after a commit stops the pruning and keeps `done` and exit 0. Release removes the file only when it carries the holder's token, is shared by
@@ -890,7 +892,8 @@ which the installer/Compose path captures in the private operation log.
 
 - **Linux:** the command owns a process group and has `SysProcAttr.Pdeathsig = SIGKILL`. Its creating
   goroutine holds its OS thread until Wait finishes. The supervisor is named `haive-cmd-guard` through
-  `PR_SET_NAME`, so ordinary `pkill haive-desktop` does not also kill its watcher. Both bridge and
+  `PR_SET_NAME`, so `pkill haive-desktop` without `-f` does not also kill its watcher.
+  `pkill -f haive-desktop` can match and kill both. Both bridge and
   supervisor request child-subreaper status to reap orphaned group members; a refusal logs a warning
   and degrades to ordinary OS reaping instead of refusing every command. Parent-pipe EOF kills the
   command group, covering Compose/installer grandchildren beyond the direct child's parent-death signal.
@@ -901,8 +904,11 @@ which the installer/Compose path captures in the private operation log.
   before releasing leases, then reports a distinct uncertain-outcome error with manual recovery advice.
   Normal launcher exit also kills remaining group members: a shell's background jobs are terminated,
   even if the launcher exits successfully. Descendants that deliberately detach into another process
-  group remain outside this mechanism. A non-ESRCH group-probe error is logged as a warning and does
-  not turn a successful command into exit 125.
+  group remain outside this mechanism. Only ESRCH proves an empty group during cancellation or a
+  supervisor-death sweep: EPERM retains an unconfirmed-stop refusal. After a successful command only,
+  a non-ESRCH probe error is logged as a warning instead of turning success into exit 125.
+  The bridge consumes the pgid report before status EOF and signals it immediately on cancellation,
+  including if the supervisor is stalled; a valid completion record skips the redundant bridge-side kill.
 - **Windows (amd64/arm64):** the parent creates an unnamed, non-inheritable Job Object with
   `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`, starts the waiting supervisor, assigns it and only then admits
   the command. Descendants inherit membership at creation without breakaway flags. Bridge death closes
@@ -918,9 +924,51 @@ cancellation. Proven lease loss cancels immediately; transient heartbeat errors 
 as the cancellation cause. Teardown waits use the named 30 s `commandTeardownTimeout` per phase,
 including output draining and group/job polling. If teardown cannot be confirmed within these bounds,
 the operation returns a distinct "Could not confirm the command stopped" error requiring manual host
-inspection before retrying, instead of holding a beating lease forever. Leases are released on that
-exceptional return too; it is not proof that every process stopped. A frozen VM or an unschedulable
-kernel task cannot offer a hard wall-clock guarantee.
+inspection before retrying. Before releasing either held lease, that error and the supervisor-death
+uncertain-outcome path atomically write `<install>/.haive-extension-unconfirmed` (0600 on Unix,
+profile ACL on Windows). Its JSON contains only `os`, `pgid` (0 when unknown), `operation` and UTC
+`time`; it contains no command arguments, environment or secrets. A failed early Install creates a
+partial install directory to keep this marker inside the updater's mount. The bridge reports a marker
+write failure explicitly; persistence still depends on a writable, functioning host filesystem.
+Both leases may then release, but every Install/Start/Stop refuses while the marker exists and keeps
+the operation log intact. Status remains read-only and reports the refusal, without clearing it.
+A mutating Unix bridge request clears a same-OS marker itself only when `kill(-pgid, 0)` returns
+ESRCH; a live or reused pgid, EPERM, an unknown pgid or malformed marker keeps refusing. The updater
+checks the same filename before taking its stack lease (and again before returning it) and refuses with
+stable code `extension-command-unconfirmed`; it cannot probe a host pgid from its Linux container.
+Deploy the updated bridge and target updater together for this protection; older versions ignore the marker.
+A frozen VM or an unschedulable kernel task cannot offer a hard wall-clock guarantee.
+
+Manual recovery for a marker that cannot clear itself:
+
+1. Preserve `<install>.extension.log` and read `<install>/.haive-extension-unconfirmed`. Refresh
+   extension Status, inspect this install's Docker Desktop containers and check the updater journal.
+   Stop any still-running updater and let its work finish or follow the existing interrupted-upgrade
+   recovery procedure before enabling another mutation. Preserve `.env` and all data volumes.
+2. **Linux:** use `cat "$HOME/haive_desktop/.haive-extension-unconfirmed"` and
+   `ps -eo pid,ppid,pgid,stat,args`. Find every member of the recorded pgid and this operation's
+   detached descendants. If the group still exists and belongs to this command, terminate it with
+   `kill -KILL -- -<pgid>`; verify it is absent in `ps` (and `kill -0 -- -<pgid>` reports no such process).
+   Never signal a reused group belonging to something else. Once no command/supervisor/descendant
+   from this operation remains, remove only the marker with
+   `rm -- "$HOME/haive_desktop/.haive-extension-unconfirmed"`, or let the bridge clear an ESRCH pgid.
+3. **macOS:** use `cat "$HOME/haive_desktop/.haive-extension-unconfirmed"` and
+   `ps -axo pid,ppid,pgid,stat,command`. Identify the group and detached descendants as above;
+   for a group verified to belong to this operation, use `kill -KILL -- -<pgid>` and wait until it
+   disappears from `ps` (launchd may need time to reap it). Only after all of this operation's
+   processes are gone, use `rm -- "$HOME/haive_desktop/.haive-extension-unconfirmed"`, or retry
+   for automatic ESRCH clearance. Unknown/reused pgids require process inspection, not a blind kill.
+4. **Windows (PowerShell):** run
+   `Get-Content -LiteralPath "$env:USERPROFILE\haive_desktop\.haive-extension-unconfirmed"` and
+   `Get-CimInstance Win32_Process | Select-Object ProcessId,ParentProcessId,Name,CommandLine`.
+   Privately identify this bridge/supervisor, docker.exe, Compose plugin, installer and descendants
+   using the recorded operation/time and install path (command lines may contain private data).
+   After checking each PID belongs to this operation, use `taskkill /F /T /PID <pid>` if needed;
+   repeat the process listing and confirm all those processes exited. Windows has no pgid probe for
+   this marker. Then run
+   `Remove-Item -LiteralPath "$env:USERPROFILE\haive_desktop\.haive-extension-unconfirmed"`.
+5. Refresh Status and resume recovery of any interrupted install/upgrade before retrying normal work.
+   Deleting the marker acknowledges the inspection; it neither stops processes nor undoes daemon work.
 
 **Remaining Unix limit:** simultaneous SIGKILL of bridge and supervisor defeats the pipe watcher and
 bridge-side group sweep on both macOS and Linux. On Linux Pdeathsig kills only the direct command;
@@ -1091,7 +1139,9 @@ live first-start check below on the owner's native Desktop version.
 
 Rollback of this code is a git revert, with no database migration. Reverting command supervision restores
 its previous orphan-child risk: finish or terminate active host operations before replacing the bridge,
-and inspect status/logs and the updater journal before retrying an interrupted operation. A leftover
+and inspect status/logs and the updater journal before retrying an interrupted operation. The
+`.haive-extension-unconfirmed` marker is inert for older code; resolve its command using the OS-specific
+manual steps above before reverting, then remove only that marker. A leftover
 `.haive-stack-lock` in an install directory is inert for the previous code; delete it
 only when no updater container and no extension operation is running. Port values
 selected by Start remain in the install's `.env` after rollback; retain those valid

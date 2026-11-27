@@ -308,3 +308,42 @@ func TestSupervisionPdeathsigBackstop(t *testing.T) {
 	parent.Wait()
 	supervisionGone(t, []int{pid})
 }
+
+func TestSupervisionCancelBeforeStatusEOF(t *testing.T) {
+	exe, dir := supervisionEnv(t, "child")
+	cmd := exec.Command(exe, "-test.run=^TestSupervisionHelper$")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- runSupervised(ctx, cmd) }()
+	pids := supervisionPIDs(t, dir)
+	stat, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pids[0]))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, tail, _ := strings.Cut(string(stat), ") ")
+	supervisor, _ := strconv.Atoi(strings.Fields(tail)[1])
+	if supervisor <= 1 {
+		t.Fatal("invalid supervisor")
+	}
+	if err := syscall.Kill(supervisor, syscall.SIGSTOP); err != nil {
+		t.Fatal(err)
+	}
+	defer syscall.Kill(supervisor, syscall.SIGCONT)
+	cancel()
+	// The stopped supervisor keeps status open. Group signalling must not await EOF
+	// or the production 30 s teardown timer.
+	supervisionGone(t, pids)
+	if err := syscall.Kill(supervisor, 0); err != nil {
+		t.Fatalf("supervisor must still hold status open: %v", err)
+	}
+	syscall.Kill(supervisor, syscall.SIGCONT)
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("cancel succeeded")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("cancel did not finish")
+	}
+}

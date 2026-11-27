@@ -6,7 +6,6 @@ import (
 	"os/exec"
 	"runtime"
 	"syscall"
-	"time"
 	"unsafe"
 )
 
@@ -35,32 +34,17 @@ func prepareSupervisor() {
 	prepareBridgeReaper()
 }
 
-func waitCommandGroup(group int, timeout time.Duration) error {
-	deadline := time.Now().Add(timeout)
+func reapCommandGroup(group int) error {
 	for {
-		for {
-			pid, err := syscall.Wait4(-group, nil, syscall.WNOHANG, nil)
-			if err == syscall.EINTR {
-				continue
-			}
-			if err != nil && err != syscall.ECHILD {
-				return fmt.Errorf("%w: reap command group: %v", errCommandStopUnconfirmed, err)
-			}
-			if pid <= 0 {
-				break
-			}
+		pid, err := syscall.Wait4(-group, nil, syscall.WNOHANG, nil)
+		if err == syscall.EINTR {
+			continue
 		}
-		err := syscall.Kill(-group, 0)
-		if err == syscall.ESRCH {
+		if err != nil && err != syscall.ECHILD {
+			return fmt.Errorf("%w: reap command group: %v", errCommandStopUnconfirmed, err)
+		}
+		if pid <= 0 {
 			return nil
 		}
-		if err != nil {
-			fmt.Fprintln(os.Stderr, "command supervisor warning: probe command group:", err)
-			return nil
-		}
-		if !time.Now().Before(deadline) {
-			return errCommandStopUnconfirmed
-		}
-		time.Sleep(time.Millisecond)
 	}
 }

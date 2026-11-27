@@ -10,6 +10,8 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"strconv"
+	"strings"
 	"syscall"
 	"time"
 )
@@ -42,6 +44,9 @@ type commandStatus struct {
 }
 
 func readCommandStatus(r io.Reader) commandStatus {
+	return readCommandStatusReporting(r, func(int) {})
+}
+func readCommandStatusReporting(r io.Reader, report func(int)) commandStatus {
 	var status commandStatus
 	scanner := bufio.NewScanner(r)
 	for scanner.Scan() {
@@ -52,11 +57,12 @@ func readCommandStatus(r io.Reader) commandStatus {
 		case "unconfirmed":
 			status.unconfirmed = true
 		default:
-			var group int
-			if _, err := fmt.Sscanf(line, "group %d", &group); err != nil || group <= 1 || status.group != 0 {
+			group, err := strconv.Atoi(strings.TrimPrefix(line, "group "))
+			if !strings.HasPrefix(line, "group ") || err != nil || group <= 1 || status.group != 0 {
 				status.err = errors.New("invalid supervisor status")
 			} else {
 				status.group = group
+				report(group)
 			}
 		}
 	}
@@ -67,6 +73,15 @@ func readCommandStatus(r io.Reader) commandStatus {
 }
 
 func runSupervised(ctx context.Context, cmd *exec.Cmd) error {
+	return runSupervisedWithTimeout(ctx, cmd, commandTeardownTimeout)
+}
+func runSupervisedWithTimeout(ctx context.Context, cmd *exec.Cmd, teardown time.Duration) (result error) {
+	group := 0
+	defer func() {
+		if errors.Is(result, errCommandStopUnconfirmed) || errors.Is(result, errCommandUncertain) {
+			result = &commandOutcome{result, group}
+		}
+	}()
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -94,41 +109,62 @@ func runSupervised(ctx context.Context, cmd *exec.Cmd) error {
 	done := make(chan error, 1)
 	go func() { done <- supervisor.Wait() }()
 	reported := make(chan commandStatus, 1)
-	go func() { reported <- readCommandStatus(statusRead) }()
+	groups := make(chan int, 1)
+	go func() { reported <- readCommandStatusReporting(statusRead, func(g int) { groups <- g }) }()
 	if _, err := write.Write([]byte{1}); err != nil {
 		write.Close()
 		supervisor.Process.Kill()
 		return errors.Join(err, boundedCommandWait(done, commandTeardownTimeout))
 	}
 	var status commandStatus
-	var cancelled bool
-	select {
-	case status = <-reported:
-	case <-ctx.Done():
-		cancelled = true
-		write.Close()
-		timer := time.NewTimer(commandTeardownTimeout)
-		defer timer.Stop()
+	var cancelled, killed bool
+	cancelDone := ctx.Done()
+	var timeout <-chan time.Time
+	timer := time.NewTimer(teardown)
+	timer.Stop()
+	defer timer.Stop()
+	signalGroup := func() {
+		if group > 1 {
+			syscall.Kill(-group, syscall.SIGKILL)
+		}
+	}
+collect:
+	for {
 		select {
+		case group = <-groups:
+			// Publication is independent of EOF, including a stalled supervisor.
+			if cancelled {
+				signalGroup()
+			}
 		case status = <-reported:
-		case <-timer.C:
+			if status.group > 1 {
+				group = status.group
+			}
+			break collect
+		case <-cancelDone:
+			cancelled = true
+			cancelDone = nil
+			write.Close()
+			signalGroup()
+			timer.Reset(teardown)
+			timeout = timer.C
+		case <-timeout:
+			signalGroup()
 			supervisor.Process.Kill()
-			// Killing closes its status descriptor; collect the group for our sweep.
-			select {
-			case status = <-reported:
-			case <-time.After(commandTeardownTimeout):
+			if killed {
 				return errCommandStopUnconfirmed
 			}
+			killed = true
+			timer.Reset(teardown)
 		}
 	}
 	// EOF is independent of stdout draining, so grandchildren cannot hide the
 	// supervisor's death by retaining output descriptors.
-	var groupErr error
-	if status.group > 1 {
-		syscall.Kill(-status.group, syscall.SIGKILL)
-		groupErr = waitCommandGroup(status.group, commandTeardownTimeout)
-	}
-	waitErr := boundedCommandWait(done, commandTeardownTimeout)
+	groupErr := sweepCommandGroup(status, func(group int) error {
+		syscall.Kill(-group, syscall.SIGKILL)
+		return waitCommandGroup(group, teardown)
+	})
+	waitErr := boundedCommandWait(done, teardown)
 	if groupErr != nil || status.unconfirmed || errors.Is(waitErr, errCommandStopUnconfirmed) || errors.Is(waitErr, exec.ErrWaitDelay) {
 		return errors.Join(errCommandStopUnconfirmed, groupErr, waitErr)
 	}
@@ -164,5 +200,48 @@ func superviseChild(cmd *exec.Cmd) error {
 	}
 	err := waitCommand(ctx, cmd, kill)
 	kill()
-	return errors.Join(err, waitCommandGroup(cmd.Process.Pid, commandTeardownTimeout), reportErr)
+	groupErr := waitCommandGroup(cmd.Process.Pid, commandTeardownTimeout)
+	var probeErr *commandGroupProbeError
+	// A permission/probe failure is a warning only after a successful command.
+	// Cancel and supervisor-death sweeps always require ESRCH.
+	if err == nil && ctx.Err() == nil && reportErr == nil && errors.As(groupErr, &probeErr) {
+		fmt.Fprintln(os.Stderr, "command supervisor warning: probe command group:", probeErr.cause)
+		groupErr = nil
+	}
+	return errors.Join(err, groupErr, reportErr)
+}
+
+type commandGroupProbeError struct{ cause error }
+
+func (e *commandGroupProbeError) Error() string { return e.cause.Error() }
+func (e *commandGroupProbeError) Unwrap() error { return e.cause }
+
+func waitCommandGroup(group int, timeout time.Duration) error {
+	return waitCommandGroupWithProbe(group, timeout, func(group int) error { return syscall.Kill(-group, 0) })
+}
+func waitCommandGroupWithProbe(group int, timeout time.Duration, probe func(int) error) error {
+	deadline := time.Now().Add(timeout)
+	for {
+		if err := reapCommandGroup(group); err != nil {
+			return err
+		}
+		err := probe(group)
+		if err == syscall.ESRCH {
+			return nil
+		}
+		if err != nil {
+			return errors.Join(errCommandStopUnconfirmed, &commandGroupProbeError{err})
+		}
+		if !time.Now().Before(deadline) {
+			return errCommandStopUnconfirmed
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+func sweepCommandGroup(status commandStatus, sweep func(int) error) error {
+	if status.group <= 1 || (status.complete && status.err == nil && !status.unconfirmed) {
+		return nil
+	}
+	return sweep(status.group)
 }
