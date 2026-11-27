@@ -27,8 +27,8 @@ describe.each([
   { path: '/repos', router: repoIdeAccessRoutes, repository: true },
 ])('$path interactive-status handler', ({ path, router, repository }) => {
   const app = new Hono<AppEnv>().route(path, router);
-  app.onError((error, c) => {
-    if (error instanceof HttpError) return c.json({ error: error.code }, error.status);
+  app.onError((error) => {
+    if (error instanceof HttpError) return new Response(null, { status: error.status });
     throw error;
   });
 
