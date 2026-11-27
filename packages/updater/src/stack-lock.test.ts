@@ -1210,16 +1210,41 @@ describe('own torn-record deadline', () => {
 });
 
 describe('unconfirmed host command refusal', () => {
-  it.each(['{}', 'malformed'])(
-    'refuses marker %s before creating a stack lock',
-    async (contents) => {
-      await writeFile(join(dir, '.haive-extension-unconfirmed'), contents);
-      await expect(acquireStackLock(dir, base)).rejects.toMatchObject({
-        refusal: 'extension-command-unconfirmed',
-      });
-      await expect(stat(path)).rejects.toMatchObject({ code: 'ENOENT' });
-    },
-  );
+  it.each([
+    '{}',
+    'malformed',
+    '{"os":"linux","pgid":2147483647,"operation":"stop","time":"2026-11-27T00:00:00Z"}',
+  ])('refuses marker %s before creating a stack lock', async (contents) => {
+    await writeFile(join(dir, '.haive-extension-unconfirmed'), contents);
+    await expect(acquireStackLock(dir, base)).rejects.toMatchObject({
+      refusal: 'extension-command-unconfirmed',
+    });
+    // Even a host pgid that is gone cannot be cleared from the updater's
+    // process namespace. Repeated attempts must preserve the evidence.
+    expect(await readFile(join(dir, '.haive-extension-unconfirmed'), 'utf8')).toBe(contents);
+    await expect(acquireStackLock(dir, base)).rejects.toMatchObject({
+      refusal: 'extension-command-unconfirmed',
+    });
+    expect(await readFile(join(dir, '.haive-extension-unconfirmed'), 'utf8')).toBe(contents);
+    await expect(stat(path)).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
+  it('preserves a marker that appears while creating its stack lock', async () => {
+    const marker = join(dir, '.haive-extension-unconfirmed');
+    const contents = '{"os":"linux","pgid":2147483647,"operation":"stop"}';
+    const create = install.InstallDirectory.prototype.createExclusive;
+    vi.spyOn(install.InstallDirectory.prototype, 'createExclusive').mockImplementationOnce(
+      async function (this: install.InstallDirectory, ...args) {
+        await create.call(this, ...args);
+        await writeFile(marker, contents);
+      },
+    );
+    await expect(acquireStackLock(dir, base)).rejects.toMatchObject({
+      refusal: 'extension-command-unconfirmed',
+    });
+    expect(await readFile(marker, 'utf8')).toBe(contents);
+    await expect(stat(path)).rejects.toMatchObject({ code: 'ENOENT' });
+  });
 });
 
 it('refuses a non-regular unconfirmed marker with the stable refusal code', async () => {
@@ -1228,4 +1253,5 @@ it('refuses a non-regular unconfirmed marker with the stable refusal code', asyn
     refusal: 'extension-command-unconfirmed',
   });
   await expect(stat(path)).rejects.toMatchObject({ code: 'ENOENT' });
+  expect((await stat(join(dir, '.haive-extension-unconfirmed'))).isDirectory()).toBe(true);
 });

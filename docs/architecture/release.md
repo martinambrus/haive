@@ -932,10 +932,14 @@ partial install directory to keep this marker inside the updater's mount. The br
 write failure explicitly; persistence still depends on a writable, functioning host filesystem.
 Both leases may then release, but every Install/Start/Stop refuses while the marker exists and keeps
 the operation log intact. Status remains read-only and reports the refusal, without clearing it.
-A mutating Unix bridge request clears a same-OS marker itself only when `kill(-pgid, 0)` returns
-ESRCH; a live or reused pgid, EPERM, an unknown pgid or malformed marker keeps refusing. The updater
-checks the same filename before taking its stack lease (and again before returning it) and refuses with
-stable code `extension-command-unconfirmed`; it cannot probe a host pgid from its Linux container.
+A mutating Unix bridge request clears a same-OS marker itself only while holding the window lease
+and only when `kill(-pgid, 0)` returns ESRCH. The pre-lease check may refuse or proceed to that lease,
+but never removes a marker. Immediately before removal under the lease, the bridge re-reads and
+compares the complete record with the one probed; a changed record refuses, even with the same pgid.
+A live or reused pgid, EPERM, an unknown pgid or malformed marker keeps refusing. The updater never
+clears this marker. It checks the same filename before taking its stack lease (and again before
+returning it) and refuses with stable code `extension-command-unconfirmed`; it cannot probe a host pgid
+from its Linux container.
 Deploy the updated bridge and target updater together for this protection; older versions ignore the marker.
 A frozen VM or an unschedulable kernel task cannot offer a hard wall-clock guarantee.
 

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -65,19 +66,39 @@ func (b bridge) markUnconfirmed(action string, cause error) error {
 	return syncMarkerDirectory(b.dir)
 }
 
-// Status reports without clearing. Only a mutating Unix request can prove ESRCH
-// and clear a same-OS pgid; malformed/unknown markers always refuse.
-func (b bridge) checkUnconfirmed(clear bool) error {
+type unconfirmedCheck int
+
+const (
+	reportUnconfirmed unconfirmedCheck = iota // Status always reports an existing marker.
+	probeUnconfirmed                          // Before the lease: refuse or proceed, never remove.
+	clearUnconfirmed                          // Caller must hold the window lease.
+)
+
+// Only a mutating Unix request holding the window lease may clear a same-OS
+// ESRCH marker. Pre-lease probes never remove it; malformed/unknown records refuse.
+func (b bridge) checkUnconfirmed(mode unconfirmedCheck) error {
 	path := b.unconfirmedPath()
 	data, err := readLockFile(path, stackLockMaxBytes)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil
 	}
-	if clear && err == nil {
+	groupGone := b.groupGone
+	if groupGone == nil {
+		groupGone = commandGroupGone
+	}
+	if mode != reportUnconfirmed && err == nil {
 		var record unconfirmedRecord
-		if json.Unmarshal(data, &record) == nil && record.OS == b.os && commandGroupGone(record.PGID) {
-			if err := os.Remove(path); err == nil || errors.Is(err, os.ErrNotExist) {
+		if json.Unmarshal(data, &record) == nil && record.OS == b.os && groupGone(record.PGID) {
+			if mode == probeUnconfirmed {
 				return nil
+			}
+			// The probe describes these bytes only. A newer operation's marker
+			// must survive even if it records the same (possibly reused) pgid.
+			current, err := readLockFile(path, stackLockMaxBytes)
+			if err == nil && bytes.Equal(current, data) {
+				if err := os.Remove(path); err == nil || errors.Is(err, os.ErrNotExist) {
+					return nil
+				}
 			}
 		}
 	}

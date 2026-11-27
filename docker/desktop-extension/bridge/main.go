@@ -73,6 +73,7 @@ type bridge struct {
 	rename      func(string, string) error
 	sleep       func(time.Duration)
 	readEnv     func(string) ([]byte, error)
+	groupGone   func(int) bool
 	lockCfg     lockConfig
 	leaseFailed context.CancelFunc
 }
@@ -743,7 +744,7 @@ func (b bridge) handle(ctx context.Context, r request) (s state, err error) {
 			err = fmt.Errorf("%w %v", commandFailure, err)
 		}
 		if r.Action == "status" {
-			if markerErr := b.checkUnconfirmed(false); markerErr != nil {
+			if markerErr := b.checkUnconfirmed(reportUnconfirmed); markerErr != nil {
 				s.Error = markerErr.Error()
 				if err != nil {
 					err = errors.Join(err, markerErr)
@@ -761,7 +762,7 @@ func (b bridge) handle(ctx context.Context, r request) (s state, err error) {
 	if r.Action == "status" {
 		return b.inspect(ctx)
 	}
-	if err := b.checkUnconfirmed(true); err != nil {
+	if err := b.checkUnconfirmed(probeUnconfirmed); err != nil {
 		return s, err
 	}
 	// Proven lease loss or half a stale window without renewal cancels commands while there is still
@@ -777,7 +778,7 @@ func (b bridge) handle(ctx context.Context, r request) (s state, err error) {
 	}
 	defer releaseWindow()
 	windowHeld = true
-	if err := b.checkUnconfirmed(true); err != nil {
+	if err := b.checkUnconfirmed(clearUnconfirmed); err != nil {
 		return s, err
 	}
 	// Refuse before any installer, Compose call or .env port rewrite.
@@ -817,7 +818,7 @@ func (b bridge) handle(ctx context.Context, r request) (s state, err error) {
 		return s, err
 	}
 	defer release()
-	if err := b.checkUnconfirmed(true); err != nil {
+	if err := b.checkUnconfirmed(clearUnconfirmed); err != nil {
 		return s, err
 	}
 	notice := ""

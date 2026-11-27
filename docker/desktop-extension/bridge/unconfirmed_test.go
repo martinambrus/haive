@@ -2,13 +2,139 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 )
+
+func TestUnconfirmedPreLeaseProbeKeepsMarker(t *testing.T) {
+	b := fixture(t)
+	b.groupGone = func(int) bool { return true }
+	if err := b.markUnconfirmed("old", &commandOutcome{errCommandStopUnconfirmed, 100}); err != nil {
+		t.Fatal(err)
+	}
+	original, err := os.ReadFile(b.unconfirmedPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	write := b.lockCfg.resolved().write
+	b.lockCfg.write = func(f *os.File, data []byte) error {
+		var record lockRecord
+		if err := json.Unmarshal(data, &record); err != nil {
+			return err
+		}
+		if f.Name() == windowPathOf(b) && record.Seq == 1 {
+			current, err := os.ReadFile(b.unconfirmedPath())
+			if err != nil || string(current) != string(original) {
+				t.Error("pre-lease probe changed the marker before window acquisition")
+			}
+		}
+		return write(f, data)
+	}
+	if _, err := b.handle(context.Background(), stopReq()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(b.unconfirmedPath()); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("protected check did not clear the old marker", err)
+	}
+}
+
+func TestUnconfirmedInterleavedRequestsKeepNewMarker(t *testing.T) {
+	b := fixture(t)
+	const oldGroup, newGroup = 100, 200
+	b.groupGone = func(group int) bool { return group == oldGroup }
+	if err := b.markUnconfirmed("old", &commandOutcome{errCommandStopUnconfirmed, oldGroup}); err != nil {
+		t.Fatal(err)
+	}
+	base := b.run
+	mutations := 0
+	b.run = func(ctx context.Context, exe string, args []string, dir string, log io.Writer) (string, error) {
+		if log != nil {
+			mutations++
+			return "", &commandOutcome{errCommandStopUnconfirmed, newGroup}
+		}
+		return base(ctx, exe, args, dir, log)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	probed, resume := make(chan struct{}), make(chan struct{})
+	a := b
+	var once sync.Once
+	a.groupGone = func(group int) bool {
+		if group == oldGroup {
+			once.Do(func() {
+				close(probed)
+				select {
+				case <-resume:
+				case <-ctx.Done():
+				}
+			})
+		}
+		return group == oldGroup
+	}
+	done := make(chan error, 1)
+	go func() { _, err := a.handle(ctx, stopReq()); done <- err }()
+	select {
+	case <-probed:
+	case <-ctx.Done():
+		t.Fatal("request A did not probe the old marker")
+	}
+	// B clears the old record under its lease, runs the fake command, persists
+	// a new unconfirmed group and releases both leases before A resumes.
+	_, bErr := b.handle(ctx, stopReq())
+	newMarker, readErr := os.ReadFile(b.unconfirmedPath())
+	close(resume)
+	aErr := <-done
+	if !errors.Is(bErr, errCommandStopUnconfirmed) || readErr != nil {
+		t.Fatalf("request B did not persist its refusal: %v (%v)", bErr, readErr)
+	}
+	if !errors.Is(aErr, errUnconfirmed) || mutations != 1 {
+		t.Errorf("request A passed the new refusal: %v, mutations=%d", aErr, mutations)
+	}
+	after, err := os.ReadFile(b.unconfirmedPath())
+	if err != nil || string(after) != string(newMarker) {
+		t.Fatalf("request A replaced or removed request B's marker: %s (%v)", after, err)
+	}
+}
+
+func TestUnconfirmedClearRechecksProbedRecord(t *testing.T) {
+	b := fixture(t)
+	if err := b.markUnconfirmed("old", &commandOutcome{errCommandStopUnconfirmed, 100}); err != nil {
+		t.Fatal(err)
+	}
+	release, err := b.takeWindowLock(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer release()
+	var replacement []byte
+	b.groupGone = func(int) bool {
+		// Even the same pgid can belong to a newer operation: compare the
+		// complete record after the probe, immediately before removing it.
+		if err := b.markUnconfirmed("new", &commandOutcome{errCommandStopUnconfirmed, 100}); err != nil {
+			t.Fatal(err)
+		}
+		var err error
+		replacement, err = os.ReadFile(b.unconfirmedPath())
+		if err != nil {
+			t.Fatal(err)
+		}
+		return true
+	}
+	if err := b.checkUnconfirmed(clearUnconfirmed); !errors.Is(err, errUnconfirmed) {
+		t.Errorf("changed record was not refused: %v", err)
+	}
+	after, err := os.ReadFile(b.unconfirmedPath())
+	if err != nil || string(after) != string(replacement) {
+		t.Fatalf("stale probe removed the replacement record: %s (%v)", after, err)
+	}
+}
 
 func TestUnconfirmedMarkerBeforeLeaseRelease(t *testing.T) {
 	for _, failure := range []error{errCommandStopUnconfirmed, errCommandUncertain} {

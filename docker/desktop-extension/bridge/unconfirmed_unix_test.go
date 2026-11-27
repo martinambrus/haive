@@ -32,7 +32,7 @@ func TestUnconfirmedMarkerESRCH(t *testing.T) {
 	if info.Mode().Perm() != 0600 {
 		t.Fatalf("marker mode: %v", info.Mode())
 	}
-	if err := b.checkUnconfirmed(true); err == nil {
+	if err := b.checkUnconfirmed(probeUnconfirmed); err == nil {
 		t.Fatal("live/reused pgid cleared marker")
 	}
 	syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
@@ -40,7 +40,7 @@ func TestUnconfirmedMarkerESRCH(t *testing.T) {
 	if err := waitCommandGroup(cmd.Process.Pid, time.Second); err != nil {
 		t.Fatal("group not reaped", err)
 	}
-	if err := b.checkUnconfirmed(false); err == nil {
+	if err := b.checkUnconfirmed(reportUnconfirmed); err == nil {
 		t.Fatal("status cleared marker")
 	}
 	if _, err := b.handle(context.Background(), stopReq()); err != nil {
