@@ -136,3 +136,10 @@ admission tokens (`refresh-checkout-holders-db.test.ts`), with promise barriers 
 root-claim acquisition and post-ready import; no timed sleeps. That gated file also calls the
 actual maintenance list and updater count while the initial import is held. Its cross-package
 imports are test-only; the worker runtime imports neither API nor updater code.
+
+`refresh-rebuild-retries.test.ts` runs the real repo worker on its own Redis database.
+Its fixture admits a pending UUID before enqueueing that exact `jobId`, and uses the shared
+fake database predicate evaluator for owner-qualified reads and updates, including `returning()`.
+`repo-completion-retry.test.ts` keeps the queue processor real and models checkout replacement
+at the handler seam: a failed completion clear must retain ready, preserve edits made between
+attempts and resume imports without calling the destructive handler again.

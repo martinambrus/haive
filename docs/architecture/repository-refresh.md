@@ -124,6 +124,12 @@ final failure clear both marker columns only for their owner; retryable failure 
 through backoff. A same-owner redelivery of an initial-only copy, init, clone or extract job
 whose structural status is already `ready` resumes the mirror imports and marker clear without
 repeating detection or replacing the checkout. Its detection result and caveat copy remain intact.
+Completion-marker cleanup runs outside the handler-error catch: if that write alone fails,
+the ready result stays ready and the same-owner retry resumes imports and cleanup. It must
+never write `error` for a cleanup-only failure, since that would send an initial-only retry
+back through checkout replacement and delete edits made during backoff. If cleanup exhausts
+its retries, the ready row keeps its pending marker until the stranded-preparation sweep
+releases it under the existing queue/claim/age checks.
 Enqueue failure cleanup also compares the admission ID, so a lost/late
 acknowledgement cannot overwrite a completed job or a newer admission.
 

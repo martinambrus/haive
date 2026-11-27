@@ -82,7 +82,6 @@ export function startRepoWorker(repoStorageRoot: string): Worker {
           } else {
             throw new Error(`Unknown repo job: ${job.name}`);
           }
-          await clearRefreshPending();
         } catch (err) {
           if (err instanceof ObsoleteRepoJobError) {
             logger.warn(
@@ -124,6 +123,10 @@ export function startRepoWorker(repoStorageRoot: string): Worker {
             await clearRefreshPending();
           throw err;
         }
+        // Completion cleanup is separate from handler failure. Keep the ready result
+        // if this write fails so an owned retry resumes imports instead of rebuilding
+        // a checkout that may already contain user edits or task worktrees.
+        await clearRefreshPending();
       }),
     ),
     {
