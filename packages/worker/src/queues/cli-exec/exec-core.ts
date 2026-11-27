@@ -76,7 +76,7 @@ import { createCleanTranscriptBuffer } from './clean-transcript-buffer.js';
 import { createSteerEcho } from './steer-echo.js';
 import { createSteerForwarder, type SteerForwarder } from './steer-forwarder.js';
 import { createSteerTracker } from './steer-tracker.js';
-import { getRedis } from '../../redis.js';
+import { getPatientRedis, getRedis } from '../../redis.js';
 import type { Redis } from 'ioredis';
 import {
   createStepStatusUpdater,
@@ -862,7 +862,7 @@ export async function executeCliSpec(
     // A subscriber connection is mode-locked — duplicate the shared client
     // rather than reuse it (Hole E). Subscribe BEFORE the spawner starts so an
     // instantly-published steer isn't missed.
-    const sub: Redis = getRedis().duplicate();
+    const sub: Redis = getPatientRedis().duplicate();
     // The forwarder records each written steer; the boundary callback (fed to
     // the collector below) reports them consumed when Claude drains the queue.
     const tracker = createSteerTracker();

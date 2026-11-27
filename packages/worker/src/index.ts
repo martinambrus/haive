@@ -7,7 +7,7 @@ import { bootstrap } from './bootstrap.js';
 import { startBackgroundDataMigrations } from './data-migrations.js';
 import { initBuildStamp } from './build-stamp.js';
 import { getDb } from './db.js';
-import { getRedis } from './redis.js';
+import { getPatientRedis, getRedis } from './redis.js';
 import { scheduleBundleGitSyncTick, startBundleWorker } from './queues/bundle-queue.js';
 import {
   scheduleGlobalKbPurge,
@@ -253,7 +253,7 @@ async function main(): Promise<void> {
   // Terminal subsystem: session manager subscribes to terminal:request and
   // owns per-WS PTY exec. Reaper sweeps every 30s for refcount==0 entries
   // older than the grace window. Both are no-ops until an open arrives.
-  const terminalManager = new TerminalSessionManager({ db: getDb(), redis: getRedis() });
+  const terminalManager = new TerminalSessionManager({ db: getDb(), redis: getPatientRedis() });
   await terminalManager.start();
   const terminalReaper = new TerminalSessionReaper({ redis: getRedis() });
   terminalReaper.start();

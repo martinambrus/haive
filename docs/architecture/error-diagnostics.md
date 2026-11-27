@@ -369,8 +369,39 @@ through. A timed-out write may still have landed, and a command issued while the
 reconnects rejects at once. Request paths use `getRedis()`. Socket-lifetime and boot work (editor and
 shell refcounts, their boot resets, subscribers, the CLI stream's `XREAD BLOCK` reader, a shell
 socket's publisher) uses `getPatientRedis()`, which keeps the old unbounded options, and duplicates from
-it: `getRedis().duplicate()` throws. `getBullRedis()`, the worker and the `createRedisConnection`
-defaults are unchanged.
+it: `getRedis().duplicate()` throws. `getBullRedis()` and the `createRedisConnection` defaults are unchanged.
+
+The worker's shared finite-command client (`worker/src/redis.ts`, `getRedis()`) now uses
+`REDIS_COMMAND_TIMEOUT_MS` (2000 ms, injectable through `initRedis`'s `commandTimeoutMs`),
+`enableOfflineQueue: false`, `autoResendUnfulfilledCommands: false` and the same capped retry
+strategy. A transport failure or command deadline rejects with the worker's
+`RedisUnavailableError` (`code: redis_unavailable`, original `cause`); a server `ReplyError`
+passes through by identity. Pipelines retain typed errors in their result tuples. A command
+issued during connect, reconnect or a LOADING ready check rejects without queueing. A write
+whose answer timed out may still have landed; it is never automatically replayed on reconnect.
+Connection warnings are throttled to one per ten seconds.
+
+This changes how long a gate waits, preserving its existing error policy. INVOKE lane
+reservation fails open without a slot; a step-command lease attempt propagates the typed
+failure before running the command. Agent-slot release stops its heartbeat and finishes after
+a failed HDEL, relying on the existing two-minute field expiry; heartbeats themselves are
+bounded too. Runtime reservation/surcharge accounting keeps its documented live-runners-only
+fallback and a cold boot's reservation check can reach that fallback instead of hanging before
+its own admission timer starts. An unreadable boot requeue counter moves no job. These decisions
+use error structure or their existing catch-all policy, never message wording. The RAG lock
+already has a separate five-second command bound: its acquire path still refuses writes on
+failure, now receiving the worker's typed rejection sooner.
+
+`getPatientRedis()` keeps the old options for socket-lifetime work: terminal output and registry
+bookkeeping, and the dedicated mid-run steer subscriber duplicated from it. A finite client's
+`duplicate()` throws so a subscriber or future blocking reader cannot inherit its deadline.
+There are no worker BLPOP/XREAD BLOCK consumers today. The terminal manager's independently
+constructed subscriber already uses patient factory defaults. All three singleton clients share
+the existing one-second shutdown backstop. BullMQ factories, queue connections, blocking reads
+and defer retry behavior are unchanged. In particular this does not bound a BullMQ-owned
+`moveToDelayed` during a transport outage, nor change the documented fail-open policies to
+strict admission. Rollback restores the old worker client and its two consumer injections
+together; no schema or persisted-data rollback is needed.
 
 `/admin/health` reports `redis: 'up' | 'down'` from a bounded `ping()` and is in the maintenance
 gate's ALWAYS_OPEN by exact path (`/^\/admin\/health$/`), still behind `requireAuth` and
