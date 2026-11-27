@@ -4,9 +4,9 @@ import {
   requireCheckoutAccess,
   withCheckoutMutation,
 } from '@haive/shared/checkout-access';
-import type { RootClaimHandle } from '@haive/database';
+import type { DbTx, RootClaimHandle } from '@haive/database';
 import { randomUUID } from 'node:crypto';
-import { and, asc, eq, gt, isNotNull } from 'drizzle-orm';
+import { and, asc, eq, gt, isNotNull, sql } from 'drizzle-orm';
 import { schema, withSettledTransaction } from '@haive/database';
 import { linkRepoRemoteRequestSchema, logger } from '@haive/shared';
 import { redactEditableGitUrl } from '@haive/shared/schemas';
@@ -25,6 +25,21 @@ export const REMOTE_SKIP_LOG_INTERVAL_MS = 300_000;
 // keep the sweep from repairing and clearing an intent a later write then contradicts.
 const relinkWriters = new Map<string, number>();
 
+/** Always before a repository row. No task/domain key is acquired while holding this key. */
+export async function lockRemoteRelink(tx: DbTx, id: string, skipLocked = false): Promise<boolean> {
+  return boundedLockWait(tx, async () => {
+    const key = `remote-relink:${id}`;
+    if (skipLocked) {
+      const [row] = await tx.execute<{ taken: boolean }>(
+        sql`select pg_try_advisory_xact_lock(hashtextextended(${key}, 0)) as taken`,
+      );
+      return row!.taken;
+    }
+    await tx.execute(sql`select pg_advisory_xact_lock(hashtextextended(${key}, 0))`);
+    return true;
+  });
+}
+
 /** Fences the sweep off a repository until the returned call; a relink holds it across its Git. */
 export function beginRelinkWriter(id: string): () => void {
   relinkWriters.set(id, (relinkWriters.get(id) ?? 0) + 1);
@@ -42,6 +57,7 @@ export function beginRelinkWriter(id: string): () => void {
 export async function markRemoteIntent(id: string, userId: string) {
   return withFreshDatabase((db) =>
     db.transaction(async (tx) => {
+      await lockRemoteRelink(tx, id);
       const [repo] = await boundedLockWait(tx, () =>
         tx
           .select()
@@ -123,12 +139,13 @@ export async function reconcileRemote(
   const run = async (checkoutOwner: RootClaimHandle) =>
     withFreshDatabase(async (db) => {
       return withSettledTransaction(db, async (tx) => {
+        if (!(await lockRemoteRelink(tx, id, skipLocked))) return 'locked' as const;
         const [repo] = await boundedLockWait(tx, () =>
           tx
             .select()
             .from(schema.repositories)
             .where(and(eq(schema.repositories.id, id), eq(schema.repositories.userId, userId)))
-            .for('no key update', skipLocked ? { skipLocked: true } : undefined),
+            .for('key share', skipLocked ? { skipLocked: true } : undefined),
         );
         // SKIP LOCKED cannot distinguish a held row from a delete. An ordinary MVCC
         // read does not wait for its writer, and avoids calling a vanished row locked.
@@ -198,7 +215,22 @@ export async function reconcileRemote(
               throw new Error(`Could not reconcile remote URL: ${gitFailureText(updated)}`);
           }
         }
-        await clearRemoteIntent(id, repo.remoteRelinkIntent, tx);
+        const [current] = await boundedLockWait(tx, () =>
+          tx
+            .select()
+            .from(schema.repositories)
+            .where(eq(schema.repositories.id, id))
+            .for('no key update'),
+        );
+        if (
+          !current ||
+          current.remoteRelinkIntent !== repo.remoteRelinkIntent ||
+          current.remoteUrl !== repo.remoteUrl ||
+          current.storagePath !== repo.storagePath ||
+          current.localPath !== repo.localPath
+        )
+          throw new HttpError(409, 'Repository remote changed during reconciliation; retry');
+        await clearRemoteIntent(id, current.remoteRelinkIntent!, tx);
         logger.info({ repositoryId: id }, 'reconciled repository remote to the database');
       });
     });

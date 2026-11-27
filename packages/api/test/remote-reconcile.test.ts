@@ -1,5 +1,6 @@
 import { randomBytes } from 'node:crypto';
 import { eq } from 'drizzle-orm';
+import { PgDialect } from 'drizzle-orm/pg-core';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 const h = vi.hoisted(() => ({
   db: undefined as unknown,
@@ -44,7 +45,25 @@ beforeEach(() => {
     remoteRelinkIntent: '00000000-0000-4000-8000-000000000003',
   });
   h.db = fake.db;
-  h.fresh.mockImplementation((run: (db: unknown) => Promise<unknown>) => run(fake.db));
+  h.fresh.mockImplementation((run: (db: unknown) => Promise<unknown>) =>
+    run({
+      ...fake.db,
+      transaction: (work: (tx: unknown) => Promise<unknown>) =>
+        fake.db.transaction(async (tx) =>
+          work(
+            new Proxy(tx, {
+              get(target, prop) {
+                if (prop !== 'execute') return Reflect.get(target, prop);
+                return (query: any) =>
+                  new PgDialect().sqlToQuery(query).sql.includes('pg_try_advisory_xact_lock')
+                    ? Promise.resolve([{ taken: true }])
+                    : target.execute(query);
+              },
+            }),
+          ),
+        ),
+    }),
+  );
   h.git.mockImplementation(async (_root, args: string[]) => ({
     ok: !args.includes('add'),
     exitedClean: !args.includes('add'),
@@ -236,7 +255,7 @@ it.each(['fenced', 'locked'] as const)(
         },
       });
       const tx = {
-        execute: async () => [],
+        execute: async () => [{ taken: true }],
         select: () => read,
         query: { repositories: { findFirst: async () => ({ id }) } },
       };

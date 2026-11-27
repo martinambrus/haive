@@ -134,6 +134,7 @@ import {
   reconcileRemote,
   isRemoteConnectionError,
   beginRelinkWriter,
+  lockRemoteRelink,
 } from '../lib/remote-reconcile.js';
 import { insertAuditEvent, logAuditEvent, type AuditEvent } from '../lib/audit.js';
 import { summarizeScopeChange } from '@haive/shared/audit';
@@ -1047,9 +1048,13 @@ repoRoutes.patch('/:id/exclusions', async (c) => {
 
   let event: AuditEvent | undefined;
   const updated = await db.transaction(async (tx) => {
-    // A relink holds this row through its git work: give up with 409 busy rather than queue behind it.
+    // Serialize settings writers without conflicting with relink's KEY SHARE hold.
     const [stored] = await boundedLockWait(tx, () =>
-      tx.select().from(schema.repositories).where(eq(schema.repositories.id, id)).for('update'),
+      tx
+        .select()
+        .from(schema.repositories)
+        .where(eq(schema.repositories.id, id))
+        .for('no key update'),
     );
     if (!stored) throw new HttpError(404, 'Repository not found');
     const { addedCount, removedCount } = summarizeScopeChange(
@@ -2839,6 +2844,7 @@ repoRoutes.post('/:id/remote', remoteCheckoutAccess, async (c) => {
   let intentWritten = true;
   let clearIntent = false;
   let gitStarted = false;
+  let rowChanged = false;
   const settleOwnIntent = () => {
     if (intent.created) {
       // Clear after rollback, outside the transaction that holds the repository row.
@@ -2873,15 +2879,14 @@ repoRoutes.post('/:id/remote', remoteCheckoutAccess, async (c) => {
     }
     // Without a successful undo, a signalled first write may already have
     // changed Git. Leave the intent so reconciliation can settle that outcome.
-    if (intentWritten && restored && lockHeld) {
+    if (intentWritten && restored && lockHeld && !rowChanged) {
       settleOwnIntent();
     }
     throw err;
   };
-  // Git follows the committed row: lock the repository row first (a wait past the
-  // repository lock bound answers 409 busy, before any Git write), insert its
-  // audit, change Git, then write the column. Callback-visible failures restore
-  // Git while that row is still locked, before a queued relink can snapshot it.
+  // The relink key serializes Git writers; KEY SHARE keeps deletion out without
+  // pinning ordinary row writers. Upgrade only for the final compare-and-set.
+  // Callback-visible failures restore Git before releasing the relink key.
   // A connection error has an unknown outcome: reconcile on a fresh connection.
   // The durable intent also survives process death between the Git write and COMMIT.
   // Other COMMIT failures may restore after the lock is released: a concurrent
@@ -2897,12 +2902,13 @@ repoRoutes.post('/:id/remote', remoteCheckoutAccess, async (c) => {
         settle = resolve;
       });
       try {
+        await lockRemoteRelink(tx, id);
         const [stored] = await boundedLockWait(tx, () =>
           tx
             .select()
             .from(schema.repositories)
             .where(and(eq(schema.repositories.id, id), eq(schema.repositories.userId, userId)))
-            .for('no key update'),
+            .for('key share'),
         );
         if (!stored) throw new HttpError(404, 'Repository not found');
         // The sweep may have settled the autocommitted intent before we took this lock.
@@ -3014,6 +3020,36 @@ repoRoutes.post('/:id/remote', remoteCheckoutAccess, async (c) => {
             }
           }
 
+          const [current] = await boundedLockWait(tx, () =>
+            tx
+              .select()
+              .from(schema.repositories)
+              .where(and(eq(schema.repositories.id, id), eq(schema.repositories.userId, userId)))
+              .for('no key update'),
+          );
+          // Compare only what this request will replace. Omitted credentials/branch
+          // belong to concurrent writers; never write the old snapshot back.
+          if (
+            !current ||
+            current.remoteRelinkIntent !== intent.token ||
+            current.remoteUrl !== stored.remoteUrl ||
+            current.storagePath !== stored.storagePath ||
+            current.localPath !== stored.localPath ||
+            (body.credentialsId !== undefined &&
+              current.credentialsSecretId !== stored.credentialsSecretId) ||
+            (body.branch && current.branch !== stored.branch)
+          ) {
+            // The old Git snapshot may no longer match the newly committed remote.
+            // Retain repair intent even when restoring that snapshot succeeds.
+            rowChanged = true;
+            throw new HttpError(409, 'Repository remote settings changed; retry the request');
+          }
+          await requireFittingCredential(
+            tx,
+            body.credentialsId === undefined ? current.credentialsSecretId : body.credentialsId,
+          );
+          // The compared patch fields also prove the pre-Git audit's fields and
+          // credentialsChanged/branchChanged still describe the final locked row.
           await tx
             .update(schema.repositories)
             .set({

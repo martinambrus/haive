@@ -841,7 +841,7 @@ export const upgradeApplyStep: StepDefinition<UpgradePlanOutput, UpgradeApplyOut
             .select({ renderContext: schema.repositories.renderContext })
             .from(schema.repositories)
             .where(eq(schema.repositories.id, plan.repositoryId))
-            .for('update');
+            .for('no key update');
           await tx.execute(sql`select set_config('lock_timeout', ${previousWait!.value}, true)`);
           await refuseReleasedCheckout(tx, ctx.taskId, plan.repositoryId);
           await refuseMovedColumn(tx, plan.repositoryId, plannedColumns(plan));

@@ -1044,13 +1044,13 @@ toolingUpgradeRoutes.patch('/:id/tooling', async (c) => {
     };
     assertRagLockHeld(lock);
     await db.transaction(async (tx) => {
-      // A relink holds this row through its git work: give up with 409 busy rather than queue behind it.
+      // Serialize settings writers without conflicting with relink's KEY SHARE hold.
       const [stored] = await boundedLockWait(tx, () =>
         tx
           .select()
           .from(schema.repositories)
           .where(eq(schema.repositories.id, repositoryId))
-          .for('update'),
+          .for('no key update'),
       );
       if (!stored) throw new HttpError(404, 'Repository not found');
       if (typeof body.rtkEnabled === 'boolean' && stored.rtkEnabled !== body.rtkEnabled)
@@ -1096,7 +1096,7 @@ toolingUpgradeRoutes.patch('/:id/tooling', async (c) => {
       } catch (err) {
         if (!(err instanceof HttpError && err.status === 409 && err.message === REPOSITORY_BUSY))
           throw err;
-        // The save already committed: keep its answer. If a relink holds the row,
+        // The save already committed: keep its answer. If a conflicting row writer holds the row,
         // the flag stays cleared until the next sync rather than waiting without a bound.
         logger.warn({ repositoryId }, 'retry degraded flag restore deferred by repository lock');
       }
@@ -1147,7 +1147,7 @@ toolingUpgradeRoutes.post('/:id/cli-targets/remove', async (c) => {
             eq(schema.repositories.userId, c.get('userId')),
           ),
         )
-        .for('update');
+        .for('no key update');
     });
     if (!repo) throw new HttpError(404, 'Repository not found');
     if (isRootClaimLive(repo.claimedAt))

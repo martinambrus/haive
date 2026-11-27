@@ -44,6 +44,37 @@ function insideWrappedTake(node: ts.Node): boolean {
   return false;
 }
 
+/** Follow the receiver chain only; repository subqueries in WHERE are not the locked table. */
+function directRepositoryTake(call: ts.CallExpression): boolean {
+  const mode = call.arguments[0];
+  if (calleeName(call) !== 'for' || !mode || !ts.isStringLiteral(mode)) return false;
+  if (!['update', 'no key update'].includes(mode.text)) return false;
+  let receiver: ts.Expression = call.expression;
+  while (true) {
+    if (
+      ts.isParenthesizedExpression(receiver) ||
+      ts.isNonNullExpression(receiver) ||
+      ts.isAsExpression(receiver)
+    ) {
+      receiver = receiver.expression;
+    } else if (ts.isPropertyAccessExpression(receiver)) {
+      receiver = receiver.expression;
+    } else if (ts.isCallExpression(receiver)) {
+      if (calleeName(receiver) === 'from') {
+        const table = receiver.arguments[0];
+        return (
+          !!table &&
+          ts.isPropertyAccessExpression(table) &&
+          ts.isIdentifier(table.expression) &&
+          table.expression.text === 'schema' &&
+          table.name.text === 'repositories'
+        );
+      }
+      receiver = receiver.expression;
+    } else return false;
+  }
+}
+
 /** `file:line` of every lock-taking call that is not inside the function passed as the second argument of `boundedLockWait`. */
 export function unwrappedLockCalls(file: string, text: string): string[] {
   const source = ts.createSourceFile(file, text, ts.ScriptTarget.Latest, true);
@@ -51,7 +82,10 @@ export function unwrappedLockCalls(file: string, text: string): string[] {
   const visit = (n: ts.Node): void => {
     if (ts.isCallExpression(n)) {
       const name = calleeName(n);
-      if (name !== null && LOCKING.has(name) && !insideWrappedTake(n)) {
+      if (
+        ((name !== null && LOCKING.has(name)) || directRepositoryTake(n)) &&
+        !insideWrappedTake(n)
+      ) {
         const { line } = source.getLineAndCharacterOfPosition(n.getStart(source));
         found.push(`${file}:${line + 1}`);
       }
@@ -63,6 +97,34 @@ export function unwrappedLockCalls(file: string, text: string): string[] {
 }
 
 describe('the repository lock is only taken through boundedLockWait', () => {
+  it.each(['update', 'no key update'])(
+    'flags direct repository FOR %s selects, including chained and multiline calls',
+    (mode) => {
+      const take = `tx.select().from(schema.repositories)\n  .where(eq(schema.repositories.id, id)).limit(1).for('${mode}')`;
+      expect(unwrappedLockCalls('direct.ts', take)).toEqual(['direct.ts:1']);
+      expect(unwrappedLockCalls('wrapped.ts', `boundedLockWait(tx, async () => ${take})`)).toEqual(
+        [],
+      );
+      expect(unwrappedLockCalls('wrong.ts', `boundedLockWait(() => ${take}, tx)`)).toEqual([
+        'wrong.ts:1',
+      ]);
+      expect(
+        unwrappedLockCalls('other.ts', `tx.select().from(schema.tasks).for('${mode}')`),
+      ).toEqual([]);
+    },
+  );
+
+  it('allows compatible KEY SHARE takes and does not confuse a subquery with the selected table', () => {
+    expect(
+      unwrappedLockCalls('share.ts', `tx.select().from(schema.repositories).for('key share')`),
+    ).toEqual([]);
+    expect(
+      unwrappedLockCalls(
+        'subquery.ts',
+        `tx.select().from(schema.tasks).where(exists(tx.select().from(schema.repositories))).for('update')`,
+      ),
+    ).toEqual([]);
+  });
   it('flags an unwrapped call and accepts a wrapped one', () => {
     const unwrapped = `async function f(tx) {\n  await lockRepositoryTasksKey(tx, id);\n}`;
     expect(unwrappedLockCalls('a.ts', unwrapped)).toEqual(['a.ts:2']);

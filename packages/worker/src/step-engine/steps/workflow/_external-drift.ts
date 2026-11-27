@@ -372,7 +372,7 @@ export async function stampExternalWatermark(
       })
       .from(schema.repositories)
       .where(eq(schema.repositories.id, repositoryId))
-      .for('update');
+      .for('no key update');
     if (!repo) throw new Error('repository disappeared before its review watermark update');
     const previous = kind === 'kb' ? repo.kbSyncedCommit : repo.planSyncedCommit;
     if (previous === sha) return;

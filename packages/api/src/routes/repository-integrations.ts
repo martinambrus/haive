@@ -71,7 +71,7 @@ repositoryIntegrationRoutes.put('/:id/integrations', async (c) => {
         .select({ restricted: schema.repositories.integrationsRestricted })
         .from(schema.repositories)
         .where(eq(schema.repositories.id, repositoryId))
-        .for('update');
+        .for('no key update');
     });
     if (!stored) throw new HttpError(404, 'Repository not found');
     const current = new Set(
