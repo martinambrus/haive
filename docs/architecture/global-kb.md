@@ -195,6 +195,33 @@ enrich task refuses to re-enrich an enforced entry, since a retry would demote i
 `kb_author` type again inside its task transaction, so a type disabled after the first check is
 still refused and the skeleton entry it wrote is removed.
 
+## Ollama settings and interactive checks
+
+The Global KB Ollama URL is private transport input. Config GET and PUT replies replace its
+entire userinfo with `***` for every role, including administrators; an unparseable stored URL
+is shown as `(invalid URL)`. Config audit rows and their post-commit log lines use the same
+redaction for both `from` and `to`, including partial saves. The admin audit viewer redacts
+these same fields in historical rows at read time; the append-only stored rows are unchanged.
+The administrator's replacement field starts blank, masks typed input and clears after a
+successful save. Blank input or an echoed redaction keeps the currently stored URL, including
+when another save changed it after the form loaded. Selecting the internal service explicitly
+sends its concrete URL. An admin Test receiving the displayed redaction resolves the current
+stored URL; non-admin Test continues to ignore request-typed targets.
+
+The unreachable Test result displays only the redacted URL. Embedding failures return fixed
+repair guidance, never transport messages or Ollama error bodies, which may echo credentials.
+The probe makes no audit row and logs no endpoint or raw error. `probeGlobalKbEmbedding` bounds
+the embedding request and body to `GLOBAL_KB_EMBED_PROBE_TIMEOUT_MS` (8 seconds, injectable),
+after the existing five-second reachability check. It passes the interactive budget explicitly
+instead of inheriting the 240-second ingest budget, aborts the transport at expiry and settles
+even if a transport ignores cancellation. Expiry returns `{ok: false, code:
+'ollama_probe_timeout', retryable: true, message}`. Request cancellation and normal completion
+clear the deadline. A cold model can need a second Test after it finishes loading.
+
+Rollback reverts the API, form and controls together; no schema or stored URL changes are
+required. A revert restores the credential-disclosing replies/audits and the ingest-sized
+probe wait. Credentials already disclosed before this fix cannot be recalled by reverting.
+
 ## House rules in prompts
 
 **Haive, never the model, decides which enforced rules a dispatch is shown.** A dispatch is opted in

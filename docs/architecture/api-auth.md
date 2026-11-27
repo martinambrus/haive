@@ -286,6 +286,13 @@ parses, because curl dials the raw text: `http://public.example\@10.0.0.5/` read
 WHATWG and connects to 10.0.0.5. That rule applies to every caller, administrators included, and also refuses
 IDN and percent-encoded hosts (write the punycode form).
 
+The pre-spawn controls fake the git runner and resolver for fetch, `pushBranch` and
+ls-remote. They pin fail-closed URL/config rereads (throws, unsafe or missing origin, changed
+push URLs), changed insteadOf output, and the order: config scan after resolution, then the
+fetch/push URL reads, then spawn with transport pins. One real-Git insteadOf control verifies
+that a rewrite added during resolution changes `get-url` and refuses transport. These controls
+preserve the remaining check-to-spawn window described above; they add no network isolation.
+
 **The private-endpoint allowlist.** An administrator lists the private, loopback or link-local endpoints the
 install may dial: `config:security:privateEndpointAllowlist`, `GET`/`PUT /admin/config/private-endpoint-allowlist`
 (an audit row `config.private_endpoint_allowlist` per change), a card on the admin data tab. The key has no

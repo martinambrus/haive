@@ -525,6 +525,7 @@ export default function GlobalKbPage() {
     archiveRetentionDays: 30,
     connectionString: '',
   });
+  const [ollamaUrlDraft, setOllamaUrlDraft] = useState('');
   const [cfgSet, setCfgSet] = useState(false);
   const [canEnforce, setCanEnforce] = useState(false);
   const [instanceNamespace, setInstanceNamespace] = useState<string | null>(null);
@@ -566,6 +567,7 @@ export default function GlobalKbPage() {
         connectionString: '',
       }));
       loadedConfig.current = savedConfig({ ...cc, ollamaMode: deriveOllamaMode(cc.ollamaUrl) });
+      setOllamaUrlDraft('');
       setCfgSet(cc.connectionStringSet);
       setCanEnforce(cc.canEnforce === true);
       setInstanceNamespace(cc.namespace);
@@ -578,7 +580,11 @@ export default function GlobalKbPage() {
 
   // Internal mode has no URL field; collapse the mode back to a concrete URL
   // (mirrors onboarding 04's apply) for both save and the Ollama test.
-  const effectiveOllamaUrl = savedConfig(cfg).ollamaUrl;
+  const effectiveConfig = savedConfig({
+    ...cfg,
+    ollamaUrl: ollamaUrlDraft.trim() || cfg.ollamaUrl,
+  });
+  const effectiveOllamaUrl = effectiveConfig.ollamaUrl;
   // The database test is admin-only, so for anyone else the database is simply not checked.
   const connOk = cfg.enabled && (!canEnforce || dbTest.ok === true) && ollamaTest.ok === true;
   // Null until the first-load check resolves; keeps the collapsed header from
@@ -641,7 +647,7 @@ export default function GlobalKbPage() {
       setCfgMsg('Archive retention must be a whole number from 0 to 3650 days.');
       return;
     }
-    const current = savedConfig(cfg);
+    const current = effectiveConfig;
     const payload: Record<string, unknown> = loadedConfig.current
       ? changedFields(loadedConfig.current, current)
       : current;
@@ -1732,6 +1738,7 @@ export default function GlobalKbPage() {
                   disabled={!canEnforce}
                   onChange={(e) => {
                     const ollamaMode = e.target.value as 'internal' | 'external';
+                    setOllamaUrlDraft('');
                     setCfg((p) => ({
                       ...p,
                       ollamaMode,
@@ -1755,10 +1762,16 @@ export default function GlobalKbPage() {
                   <Input
                     id="cfg-ollama"
                     disabled={!canEnforce}
-                    value={cfg.ollamaUrl}
-                    onChange={(e) => setCfg({ ...cfg, ollamaUrl: e.target.value })}
-                    placeholder={DEFAULT_EXTERNAL_OLLAMA_URL}
+                    type="password"
+                    autoComplete="new-password"
+                    value={ollamaUrlDraft}
+                    onChange={(e) => setOllamaUrlDraft(e.target.value)}
+                    placeholder={cfg.ollamaUrl || DEFAULT_EXTERNAL_OLLAMA_URL}
+                    aria-describedby="cfg-ollama-keep"
                   />
+                  <span id="cfg-ollama-keep" className="text-xs text-neutral-500">
+                    Leave blank to keep the saved URL.
+                  </span>
                 </div>
               )}
               <div className="flex flex-col gap-1.5">

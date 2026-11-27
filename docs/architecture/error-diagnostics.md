@@ -453,3 +453,9 @@ The worker model provisioner is outside this user-set endpoint scope: `provision
 settles an external daemon to `idle` before fetching, and its tags, pull and create calls always
 target `IN_STACK_OLLAMA_URL`. Loopback oversized-response fixtures confirm that external provider
 URLs trigger no request; bounding the fixed in-stack reads remains separate work.
+
+Global KB Ollama Test failures use fixed guidance instead of embedding transport/error-body
+text, since either can echo a credential-bearing URL or its password alone. Config response
+and audit URL copy redact all userinfo for every role; the private stored value is used only
+for the dial. The interactive embedding deadline returns `ollama_probe_timeout` with
+`retryable: true`; it does not log the raw transport failure. See [Global knowledge base](global-kb.md).

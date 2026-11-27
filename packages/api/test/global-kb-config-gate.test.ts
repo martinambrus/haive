@@ -4,6 +4,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const h = vi.hoisted(() => ({
   role: 'admin',
+  rawConfig: new Map<string, string>(),
+  probe: vi.fn(),
+  embed: vi.fn(),
   flags: new Map<string, boolean>(),
   settings: {} as Record<string, unknown>,
   events: [] as string[],
@@ -108,7 +111,9 @@ vi.mock('@haive/shared', async (importOriginal) => {
           : Reflect.get(target, prop, receiver),
     }),
     configService: {
-      getFresh: async (key: string) => (h.flags.has(key) ? String(h.flags.get(key)) : null),
+      getEncryptionKey: async () => actual.generateEncryptionKey(),
+      getFresh: async (key: string) =>
+        h.rawConfig.get(key) ?? (h.flags.has(key) ? String(h.flags.get(key)) : null),
       getBoolean: async (key: string, fallback: boolean) => h.flags.get(key) ?? fallback,
       set: h.set,
     },
@@ -141,6 +146,12 @@ vi.mock('@haive/shared/global-kb', async (importOriginal) => ({
   withGlobalKb: async () => {
     throw new Error('the dims check must not ensure the schema');
   },
+}));
+
+vi.mock('@haive/shared/rag', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@haive/shared/rag')>()),
+  probeOllama: h.probe,
+  ollamaEmbed: h.embed,
 }));
 
 import { Hono } from 'hono';
@@ -280,6 +291,9 @@ const auditDb = () => {
 const actions = () => h.audits.map(({ row }) => (row as { action: string }).action);
 
 beforeEach(() => {
+  h.rawConfig.clear();
+  h.probe.mockReset().mockResolvedValue(true);
+  h.embed.mockReset().mockResolvedValue([[1, 2]]);
   h.set.mockClear();
   h.setSecret.mockClear();
   h.deleteSecret.mockClear();
@@ -491,12 +505,11 @@ describe('PUT /global-kb/config by a regular user', () => {
     expect(h.set).not.toHaveBeenCalled();
   });
 
-  it('refuses a blank Ollama URL while a custom one is saved, as it would switch to the bundled server', async () => {
-    h.settings = { ...h.settings, ollamaUrl: 'http://ollama-box.lan:11434' };
+  it('keeps a custom saved Ollama URL when the write-only field is blank', async () => {
+    h.role = 'user';
+    h.settings = { ...SAVED, ollamaUrl: 'http://ollama-box.lan:11434' };
     const res = await put({ ollamaUrl: '' });
-
-    expect(res.status).toBe(403);
-    expect(((await res.json()) as { error: string }).error).toContain('ollamaUrl');
+    expect(res.status).toBe(200);
     expect(h.set).not.toHaveBeenCalled();
   });
 
@@ -1498,4 +1511,138 @@ it('keeps the probe connection allowance at 30 s inside its 8 s overall deadline
     connectionString: 'postgres://u:p@kb.example/kb',
   });
   expect(h.checks.at(-1)).toMatchObject({ connectTimeoutSeconds: 30, deadlineMs: 8000 });
+});
+
+describe('Ollama URL credentials and interactive probe', () => {
+  const secret = randomBytes(24).toString('hex');
+  const login = randomBytes(12).toString('hex');
+  const target = `http://${login}:${secret}@embed.example:11434`;
+  const safeTarget = 'http://***@embed.example:11434/';
+  const probe = async () =>
+    send('POST', '/global-kb/test-ollama', {
+      ollamaUrl: target,
+      model: 'embed',
+      dimensions: 2,
+    });
+  const noCredentials = (value: unknown) => {
+    const text = JSON.stringify(value);
+    expect(text.includes(secret)).toBe(false);
+    expect(text.includes(login)).toBe(false);
+  };
+
+  it.each(['admin', 'user'])('redacts GET and PUT replies for %s', async (role) => {
+    h.role = role;
+    h.settings = { ...SAVED, ollamaUrl: target };
+    const get = await send('GET', '/global-kb/config');
+    const body = (await get.json()) as { ollamaUrl: string };
+    noCredentials(body);
+    expect(body.ollamaUrl).toBe(safeTarget);
+    const saved = await put({ digestEnabled: false });
+    expect(saved.status).toBe(200);
+    noCredentials(await saved.json());
+  });
+
+  it.each(['admin', 'user'])('keeps the stored URL when %s echoes its redaction', async (role) => {
+    h.role = role;
+    h.settings = { ...SAVED, ollamaUrl: target };
+    const res = await put({ ollamaUrl: safeTarget, digestEnabled: false });
+    expect(res.status).toBe(200);
+    expect(written().some(([key]) => key === CONFIG_KEYS.GLOBAL_KB_OLLAMA_URL)).toBe(false);
+    expect(h.settings.ollamaUrl).toBe(target);
+  });
+
+  it('redacts historical config audit responses without rewriting the stored row', async () => {
+    const metadata = { from: { ollamaUrl: target }, to: { ollamaUrl: target }, partial: true };
+    const results: unknown[][] = [
+      [
+        {
+          id: randomUUID(),
+          actorUserId: randomUUID(),
+          actorEmailEncrypted: null,
+          action: 'config.global_kb',
+          targetType: 'system',
+          targetId: null,
+          metadata,
+          createdAt: new Date(),
+        },
+      ],
+      [{ count: 1 }],
+      [],
+      [],
+    ];
+    const select = () => {
+      const rows = results.shift() ?? [];
+      const query = {
+        from: () => query,
+        leftJoin: () => query,
+        where: () => query,
+        orderBy: () => query,
+        limit: () => query,
+        offset: () => query,
+        then: (resolve: (value: unknown[]) => unknown) => Promise.resolve(rows).then(resolve),
+      };
+      return query;
+    };
+    h.db = { select, selectDistinct: select };
+    const response = await send('GET', '/admin/audit');
+    expect(response.status).toBe(200);
+    noCredentials(await response.json());
+    expect(metadata.from.ollamaUrl).toBe(target);
+  });
+
+  it('redacts both sides of audit rows and their log lines', async () => {
+    h.rawConfig.set(CONFIG_KEYS.GLOBAL_KB_OLLAMA_URL, target);
+    const res = await put({ ollamaUrl: target });
+    expect(res.status).toBe(200);
+    expect(written()).toContainEqual([CONFIG_KEYS.GLOBAL_KB_OLLAMA_URL, target]);
+    expect(h.audits).toHaveLength(1);
+    noCredentials(h.audits.map(({ row }) => row));
+    noCredentials(h.auditLog.info.mock.calls);
+  });
+
+  it.each(['admin', 'user'])('redacts the unreachable Test result for %s', async (role) => {
+    h.role = role;
+    h.settings = { ...SAVED, ollamaUrl: target };
+    h.probe.mockResolvedValue(false);
+    noCredentials(await (await probe()).json());
+    expect(h.probe.mock.calls[0]?.[0]).toBe(target);
+  });
+
+  it.each(['admin', 'user'])(
+    'omits echoed URL credentials in model errors for %s',
+    async (role) => {
+      h.role = role;
+      h.settings = { ...SAVED, ollamaUrl: target };
+      h.embed.mockRejectedValue(new Error(`transport refused ${target}; credential ${secret}`));
+      noCredentials(await (await probe()).json());
+    },
+  );
+
+  it('tests the saved credential URL when an admin sends the displayed redaction', async () => {
+    h.settings = { ...SAVED, ollamaUrl: target };
+    const res = await send('POST', '/global-kb/test-ollama', {
+      ollamaUrl: safeTarget,
+      model: 'embed',
+      dimensions: 2,
+    });
+    expect(res.status).toBe(200);
+    expect(h.probe.mock.calls[0]?.[0]).toBe(target);
+  });
+
+  it('answers a stalled non-admin embed with a coded retryable timeout after 8 seconds', async () => {
+    vi.useFakeTimers();
+    h.role = 'user';
+    h.embed.mockImplementation(() => new Promise(() => {}));
+    let answer: unknown;
+    const pending = probe().then(async (res) => {
+      answer = await res.json();
+    });
+    await vi.advanceTimersByTimeAsync(7_999);
+    expect(answer).toBeUndefined();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(answer).toMatchObject({ ok: false, code: 'ollama_probe_timeout', retryable: true });
+    await pending;
+    expect(h.embed.mock.calls[0]?.[3]).toMatchObject({ timeoutMs: 8_000 });
+    expect(vi.getTimerCount()).toBe(0);
+  });
 });
