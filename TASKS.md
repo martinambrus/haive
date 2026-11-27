@@ -1222,6 +1222,12 @@ In `martinambrus/haive-module-translator`. The owner's English-to-Slovak run fai
 
 1. Accept a declined form (same stem, up to 2 trailing letters changed on words of 5+ letters) at every keep-term check; a translated name still fails; codes and short words stay exact. Then the owner Retries the step.
 
+### T786 · FNF[plan-delete-cycle-lows] · plan writer wait and mirror hold lows after T483
+
+status: open · kind: fix · found: T483 review 2 (#1385) 2026-11-27 · priority: P4
+
+All minor; none loses a write. 1. The 5 s ordinary wait is the default of `applyPlanPatch`'s repository lock option, so a future claim-holding caller that omits it silently reopens a deadlock window of up to 5 s; make the bound a required argument or default to 250 ms. 2. `00b-plan-clarify.ts`'s second `applyAgentPatch` call (the answers fold) is not pinned to 250 ms by a unit test (the test checks only `calls[0]`). 3. The mirror watcher path is untested, and `admitWatchedRepository` waits unbounded before the new 250 ms bound, so that bound is unreachable there; the flush still raises a raw `busy`. 4. A held reconcile records a dirty mark and `last_error` through `recordPlanReconcileFailure`, whose copy reads like a failure. 5. Each concurrent plan edit can pin one pool connection (pool `max: 10`) for up to 5 s during a long admission hold; bounded. 6. The 1 s admission control relies on a 4 s margin, and the 5000 value is pinned only by a unit test.
+
 ### T785 · FNF[merge-crash-replay] · a crash between a clean merge landing and its state save replays without the squash, the landed event or the right undo point
 
 status: open · kind: fix · found: T316 review 1 (member 5, parked under the T316 fence) 2026-11-27 · priority: P3
@@ -2825,7 +2831,7 @@ Executable verification scope: Reproduce consequential reachable lock cycles bef
 
 ### T483 · FNF[plan-delete-cycle] · update-only plan writers can still deadlock with a repository delete
 
-status: open · kind: fix · policy: covered by accepted bounded-wait/consistency rules · priority: P2
+status: done 2026-11-27, merged #1385 (bd1cfe8de, libs): both cycles reproduced (40P01) and fixed; every plan patch takes the repository row FOR KEY SHARE first (ordinary patches 5 s, claim-holding folds and answers 250 ms), 55P03 coded `busy`, a deleted repository `repository_gone`; the mirror maps both to held/no-op; the T459 fold note fixed; review lows filed as T786 · kind: fix · policy: covered by accepted bounded-wait/consistency rules · priority: P2
 From the T459 review (2026-10-31). PRE-EXISTING, minor to consequential. Cross-reference T270 and T318 item 5.
 
 Since T459 a plan patch that may insert takes the repository row FOR KEY SHARE first, but an update-only patch takes no repository lock (T484 has since moved project-state holds to FOR NO KEY UPDATE, compatible with KEY SHARE), so it can still deadlock with a repository delete at the fresh-baseline cascade order, or when two node updates run opposite to the delete's scan; the same shape is in `answerPlanQuestion` (worker plan/answer.ts ~:48-132), `markPlanCodeLinksStaleForPaths` (worker plan/code-link-staleness.ts), the mirror reconcile and flush (plan/mirror.ts ~:1498, ~:1710) and the set-aside marks (set-aside.ts ~:607, ~:830, ~:933). Also: a Retry or revival of an onboarding or onboarding_upgrade task holds the repository row FOR UPDATE for its whole transaction (`repository-task-lock.ts` ~:31-49) and then deletes agent rows, while 10_8-plan-build's `applyAgentPatchOnce` (`_plan-prompt.ts` ~:330-359) holds a mining row and asks for the repository KEY SHARE (T459 moved that edge earlier). Options: the delete removes the plan rows itself, mirror row last; lock the mirror row first (serialises patches); or accept the 40P01 on a delete.
