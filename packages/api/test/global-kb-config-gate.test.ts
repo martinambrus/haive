@@ -480,6 +480,16 @@ describe('PUT /global-kb/config by a regular user', () => {
 
   it.each([
     ['a blank Ollama URL, the default', {}, { ollamaUrl: '' }],
+    [
+      'a displayed ordinary origin with its stored root slash omitted',
+      { ollamaUrl: 'http://embed.example:11434/' },
+      { ollamaUrl: 'http://embed.example:11434' },
+    ],
+    [
+      'a displayed ordinary origin with normalized case',
+      { ollamaUrl: 'HTTP://EMBED.EXAMPLE:11434' },
+      { ollamaUrl: 'http://embed.example:11434' },
+    ],
     ['the default Ollama URL padded', {}, { ollamaUrl: '  http://ollama:11434  ' }],
     ['a blank embed model, the default', {}, { embedModel: '' }],
     ['the default embed model padded', {}, { embedModel: ' qwen3-embedding:4b ' }],

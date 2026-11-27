@@ -563,6 +563,8 @@ async function putConfig(c: Context<AppEnv>) {
       connectionString: (given !== '' && given !== saved.connectionString) || clearing,
       ollamaUrl:
         d.ollamaUrl !== undefined &&
+        // GET canonicalizes ordinary origins too (case, default port, root slash).
+        d.ollamaUrl.trim() !== displayOllamaUrl(saved.ollamaUrl) &&
         orDefault(d.ollamaUrl, IN_STACK_OLLAMA_URL) !==
           orDefault(saved.ollamaUrl, IN_STACK_OLLAMA_URL),
       embedModel:

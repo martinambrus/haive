@@ -207,6 +207,8 @@ these same fields in historical rows at read time; the append-only stored rows a
 The administrator's replacement field starts blank, masks typed input and clears after a
 successful save. Blank input keeps the currently stored URL. An echoed redaction keeps it only when its
 visible scheme, host and port match the stored destination, even after another save changes hidden parts.
+An ordinary origin returned by GET is accepted as unchanged for non-admin saves after URL case,
+default-port and root-slash normalization too.
 A PUT or admin Test with a redaction naming another destination is refused with fixed 400 guidance:
 “Type the whole URL to change the server.” Selecting the internal service or restoring the bundled
 server explicitly sends its concrete URL. An admin Test receiving a matching displayed redaction
