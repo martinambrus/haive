@@ -1,4 +1,5 @@
 import { sql, type SQL } from 'drizzle-orm';
+import { canonicalUuid } from '@haive/database';
 
 /** First in every transaction that opens a repository's merge conversation, uses its scratch worktree
  *  outside one (a Save/Pull integration), or discards it, so no two of those interleave. */
@@ -7,6 +8,6 @@ export async function lockPlanMerge(
   repositoryId: string,
 ): Promise<void> {
   await tx.execute(
-    sql`select pg_advisory_xact_lock(hashtextextended(${`plan-merge:${repositoryId}`}, 0))`,
+    sql`select pg_advisory_xact_lock(hashtextextended(${`plan-merge:${canonicalUuid(repositoryId)}`}, 0))`,
   );
 }

@@ -1,11 +1,12 @@
 import { sql } from 'drizzle-orm';
-import { isLockNotAvailable } from '@haive/database';
+import { canonicalUuid, isLockNotAvailable } from '@haive/database';
 import type { PlanPatchTx } from './apply-patch.js';
 import { PlanPatchError } from './errors.js';
 
 export const PLAN_PATCH_LOCK_TIMEOUT_MS = 1_000;
 
-const planPatchLockKey = (repositoryId: string): string => `plan-patch:${repositoryId}`;
+const planPatchLockKey = (repositoryId: string): string =>
+  `plan-patch:${canonicalUuid(repositoryId)}`;
 
 /**
  * Before any ancestry read or row lock: moving a subtree must exclude a child insert
