@@ -143,7 +143,9 @@ gate 3 at or after the cycle's first round completed (done or skipped) before th
 or once the pick's own row, reset by a Retry after the pick, completed a new pass (generation
 above the cycle's, done or skipped) at a round below the current one. Until then Retry, Resume
 and boot re-entry keep an unanswered form parked; re-entry after the owner's answer (Resume,
-takeover, a duplicate advance) uses that answer and does not park again. A Retry of the gate
+takeover, a duplicate advance) uses that answer and does not park again. A task Retry that
+re-offers parks while an accepted answer awaits worker pickup retains its closed wait, saved
+values and attested generation, so it applies once without another decision. A Retry of the gate
 itself resets its answer and generation, so it asks again. A Retry of the pick's own row, or of a
 step above it in the pick's round, pulls the task back below the cycle's round and bumps that
 row's generation, yet the cycle stays open: the re-run gate 3 parks, since the cycle's edits are

@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { Database } from '@haive/database';
 import type { StepDefinition } from '../src/step-engine/step-definition.js';
 import type { ResolvedTaskContext } from '../src/queues/run-list.js';
@@ -247,4 +247,69 @@ it('a module validation data binding cannot replace the physical recheck snapsho
   expect(before).toContain('loop_back');
   expect(before).not.toContain('recheck_requested');
   expect(FIX_LOOP_TARGET_STEP_ID).toBe('07-phase-2-implement');
+});
+
+describe('queue snapshot cancellation', () => {
+  afterEach(() => {
+    vi.useRealTimers();
+    h.snapshot.mockReset();
+  });
+  it.each(['cancelled', 'failed', 'new epoch'])(
+    'stops reading after %s while the queue handoff reads a snapshot',
+    async (stop) => {
+      vi.useFakeTimers();
+      const { TaskCancelledError } = await import('@haive/shared/step');
+      let status = 'running';
+      let epoch = 3;
+      const db = {
+        query: {
+          tasks: { findFirst: vi.fn(async () => ({ status, orchestrationEpoch: epoch })) },
+          taskSteps: {
+            findFirst: async () => ({ output: { validationSnapshot: { a: 'before' } } }),
+          },
+        },
+      } as unknown as Database;
+      const steps = [
+        step(VALIDATE),
+        { ...step('editor'), editsCodeOrTests: true },
+        step('10-gate-3-commit'),
+      ];
+      let entered!: () => void;
+      const started = new Promise<void>((resolve) => {
+        entered = resolve;
+      });
+      let release!: () => void;
+      const heldRead = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      let checked = false;
+      h.snapshot.mockImplementationOnce(async (snapshotCtx: { throwIfCancelled?: () => void }) => {
+        entered();
+        await heldRead;
+        checked = true;
+        snapshotCtx.throwIfCancelled?.();
+        return { a: 'after' };
+      });
+      const running = validationSuccessor(
+        db,
+        { ...ctx, orchestrationEpoch: 3 },
+        'editor',
+        0,
+        steps,
+        {},
+      );
+      const result = running.then(
+        (value) => value,
+        (err: unknown) => err,
+      );
+      await started;
+      if (stop === 'new epoch') epoch++;
+      else status = stop;
+      await vi.advanceTimersByTimeAsync(2_000);
+      release();
+      expect(await result).toBeInstanceOf(TaskCancelledError);
+      expect(checked).toBe(true);
+      expect(vi.getTimerCount()).toBe(0);
+    },
+  );
 });

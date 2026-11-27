@@ -628,7 +628,10 @@ has no row yet. Runtime recheck bounds and return-address handling remain unchan
 
 The snapshot read honours Cancel: it calls the step's `throwIfCancelled` before each attempt and
 each file and rethrows `TaskCancelledError` rather than reading it as an unknown snapshot. The
-queue-level recheck passes no step context, so its read has no cancel source.
+queue-level recheck owns a task-status/epoch poll for the duration of its snapshot read (2 seconds,
+like the step runner): Cancel, Stop and an overtaking Retry abort at the next per-file/attempt
+check. The poll is released on success or failure and also covers insight handoffs. Git's initial
+changed-file read and a single in-flight file read remain bounded but uninterruptible.
 
 Insight rounds write no `fix_loop.started` and do not consume `maxFixRounds`. A blocking
 check inside an insight round still enters the ordinary implementation fix loop and spends
@@ -683,6 +686,10 @@ every latched gate. No `gate2_approved` is recorded, since nothing failed. The r
 the cycle (workflow-commits says what ends one: a Retry of the pick's row does not); outside a cycle
 gate 2 keeps honouring its presets, deferred findings or not. Configured checks on either side still
 run.
+Approval of that QA-kept gate 2 advances to the following gate 3 without writing a
+`gate2_approved` check event; the cycle event still forces gate 3 to park for its own owner answer.
+The latest completed QA row is ordered by round, then `run_seq`, then `created_at`, descending
+(the latter two defend ties; the normal table has a unique task/step/round index).
 Gate 3 regenerates its diff, message and form. Earlier commit/message approval is not
 reused, and empty selection retains the existing staging and commit path.
 
