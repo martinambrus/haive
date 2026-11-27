@@ -1204,7 +1204,7 @@ C3. Accept with no next step still writes the findings in a separate statement a
 
 ### T767 · Translator: books of any size with one glossary and one style
 
-status: open; PR1 (batch storage mode, quota wait, migration 0011) merged module #21 559205f and deployed 2026-11-26; PR2-PR4 next
+status: open; PR1 (batch storage mode, quota wait, migration 0011) merged module #21 559205f and deployed 2026-11-26; PR2 (batched scheduling, bounded indexed lookups, cached accounting reconciled by invocation identity after restore, migration 0015) merged module #27 f9d6d84 and deployed 2026-11-27 09:54Z; PR3 (volumes) and PR4 (term catalog) next
 
 In `martinambrus/haive-module-translator`. Owner (2026-11-26): "the translator module should be able to translate book of any size, so if we have to update it to do it in parts because of a possible big size, that's fine as well, we just need to keep the vocabulary and terms and the such intact between them".
 
