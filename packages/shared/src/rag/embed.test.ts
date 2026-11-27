@@ -27,7 +27,7 @@ import {
 function mockPs(body: unknown, ok = true) {
   vi.stubGlobal(
     'fetch',
-    vi.fn(async () => ({ ok, json: async () => body })) as unknown as typeof fetch,
+    vi.fn(async () => Response.json(body, { status: ok ? 200 : 500 })),
   );
 }
 
@@ -49,7 +49,7 @@ function mockEmbed(vector: number[] | null) {
     'fetch',
     vi.fn(async () => {
       if (vector === null) throw new Error('connection refused');
-      return { ok: true, json: async () => ({ embeddings: [vector] }) };
+      return Response.json({ embeddings: [vector] });
     }) as unknown as typeof fetch,
   );
   return timeouts;

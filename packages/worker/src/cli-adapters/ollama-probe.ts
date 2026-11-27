@@ -116,7 +116,10 @@ export async function probeOllamaEndpoint(opts: {
     };
   }
 
-  if (resp.ok) return { ok: true };
+  if (resp.ok) {
+    await resp.body?.cancel().catch(() => {});
+    return { ok: true };
+  }
   let body = '';
   try {
     const answer = await readBounded(resp, PROBE_BODY_MAX_BYTES);

@@ -423,3 +423,27 @@ connection timeout and authentication codes, with a fixed generic fallback for o
 parser, TLS, filesystem and server errors. Never return a raw driver message here, even
 when no query parameters were bound: an ENOENT message previously exposed a file-existence
 oracle. `safeErrorMessage` keeps its existing contract for other callers.
+
+## User-supplied endpoint bodies
+
+The tooling API's Ollama `/api/tags` and `/api/show` reads and shared RAG residency JSON reads
+use `readForgeJson` (`@haive/shared/forge`), with its 8 MiB default bound. `ollamaEmbed` passes
+`OLLAMA_EMBED_MAX_BYTES` (32 MiB), leaving headroom for 64 inputs × 8192 dimensions even when a
+user-configured proxy emits float64 decimals.
+The reader cancels the stream beyond that bound and throws fixed text without the response body;
+invalid JSON also produces fixed text rather than a parser excerpt. `ollamaEmbed` error reads use
+`readBounded` with `OLLAMA_ERROR_MAX_BYTES` (64 KiB): both short and oversized errors keep at most
+the first 200 characters read; an oversized one also appends the size refusal. Timeouts still
+cover the request and body read.
+
+When these helpers, tooling routes, or user-set Ollama/OpenRouter compatibility probes need only
+the status, they cancel the unread body before returning. Cancellation failure is best effort and
+does not change the status verdict. Tests lower the existing bounded-reader seam to 128 bytes
+(256 for the embed error prefix) and stream a few hundred bytes from a throwaway loopback server;
+held-open replies must also release the upstream socket without waiting for the request's abort
+timer. Fixed-vendor bodies and helper deduplication are separate work.
+
+The worker model provisioner is outside this user-set endpoint scope: `provisionOllamaProvider`
+settles an external daemon to `idle` before fetching, and its tags, pull and create calls always
+target `IN_STACK_OLLAMA_URL`. Loopback oversized-response fixtures confirm that external provider
+URLs trigger no request; bounding the fixed in-stack reads remains separate work.
