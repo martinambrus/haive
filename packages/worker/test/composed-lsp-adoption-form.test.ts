@@ -8,6 +8,7 @@ import {
   ONBOARDING_TOOLING_SCHEMA_VERSION,
 } from '@haive/shared';
 import { createFakeDb } from '@haive/database/testing';
+import { checkTaskComposedLspProvider } from '@haive/shared/composed-lsp-provider-lock';
 import {
   declareDepsStep,
   type DeclareDepsDetect,
@@ -61,7 +62,8 @@ interface Scenario {
   providers?: typeof PROVIDERS;
   runList?: string[];
   linked?: boolean;
-  repoLsp?: string[];
+  repoLsp?: string[] | null;
+  onboardingLsp?: string[];
 }
 
 function makeCtx(s: Scenario = {}): StepContext {
@@ -80,6 +82,7 @@ function makeCtx(s: Scenario = {}): StepContext {
   fake.insert(schema.tasks, {
     id: TASK,
     userId: USER,
+    cliProviderId: s.defaultProvider ?? CLAUDE,
     repositoryId: REPO,
     type: 'custom-lsp',
     status: 'running',
@@ -91,13 +94,16 @@ function makeCtx(s: Scenario = {}): StepContext {
   // Valid onboarding mirrors keep detect off the joined task_steps fallback the fake cannot run.
   fake.insert(schema.repositories, {
     id: REPO,
-    lspServers: s.repoLsp ?? ['intelephense-extended'],
+    lspServers: s.repoLsp === undefined ? ['intelephense-extended'] : s.repoLsp,
     onboardingEnvironment: {
       schemaVersion: ONBOARDING_ENVIRONMENT_SCHEMA_VERSION,
       envDetectData: {},
       confirmedValues: {},
     },
-    onboardingTooling: { schemaVersion: ONBOARDING_TOOLING_SCHEMA_VERSION, tooling: {} },
+    onboardingTooling: {
+      schemaVersion: ONBOARDING_TOOLING_SCHEMA_VERSION,
+      tooling: { lspLanguages: s.onboardingLsp ?? [] },
+    },
   });
   for (const p of s.providers ?? PROVIDERS)
     fake.insert(schema.cliProviders, { userId: USER, ...p });
@@ -118,6 +124,7 @@ function makeCtx(s: Scenario = {}): StepContext {
     repoPath,
     db: fake.db as unknown as Database,
     logger: { info: vi.fn(), warn: vi.fn(), debug: vi.fn() },
+    emitProgress: vi.fn(),
   } as unknown as StepContext;
 }
 
@@ -125,13 +132,15 @@ const adoptable = (detected: unknown) =>
   (detected as { composedLspAdoptable?: boolean }).composedLspAdoptable;
 
 describe('detect composedLspAdoptable', () => {
-  it.each([{ keys: [] }, { keys: ['vtsls'] }, { keys: ['intelephense-extended', 'pyright'] }])(
-    'does not offer adoption for effective selection %j',
-    async ({ keys }) => {
-      const detected = await declareDepsStep.detect!(makeCtx({ repoLsp: keys }));
-      expect(adoptable(detected)).not.toBe(true);
-    },
-  );
+  it.each([
+    { keys: [] },
+    { keys: ['vtsls'] },
+    { keys: ['intelephense-extended', 'pyright'] },
+    { keys: ['intelephense-extended', 'vtsls'] },
+  ])('does not offer adoption for effective selection %j', async ({ keys }) => {
+    const detected = await declareDepsStep.detect!(makeCtx({ repoLsp: keys }));
+    expect(adoptable(detected)).not.toBe(true);
+  });
 
   it('C1 is true for an eligible new environment', async () => {
     const detected = await declareDepsStep.detect!(makeCtx());
@@ -182,6 +191,94 @@ const fieldIds = (detected: DeclareDepsDetect) =>
   declareDepsStep.form!({} as never, detected)!.fields.map((f) => f.id);
 
 describe('form keepLegacyLspInstall checkbox', () => {
+  it.each([
+    {
+      label: 'mixed suggestion edited to PHP',
+      onboardingLsp: ['php', 'typescript'],
+      lspServers: ['intelephense-extended'],
+      keepLegacyLspInstall: true,
+    },
+    {
+      label: 'empty suggestion edited to PHP',
+      onboardingLsp: [],
+      lspServers: ['intelephense-extended'],
+      keepLegacyLspInstall: true,
+    },
+    {
+      label: 'unchanged mixed suggestion with opt-out unchecked',
+      onboardingLsp: ['php', 'typescript'],
+      lspServers: ['intelephense-extended', 'vtsls'],
+      keepLegacyLspInstall: false,
+    },
+  ])(
+    'offers the opt-out and stays legacy for $label',
+    async ({ onboardingLsp, lspServers, keepLegacyLspInstall }) => {
+      const ctx = makeCtx({ repoLsp: null, onboardingLsp });
+      const detected = await declareDepsStep.detect!(ctx);
+      const form = declareDepsStep.form!(ctx, detected)!;
+      expect(form.fields).toContainEqual(
+        expect.objectContaining({ id: 'keepLegacyLspInstall', type: 'checkbox', default: false }),
+      );
+      expect(detected.suggestedLsp).toEqual(
+        onboardingLsp.length ? ['intelephense-extended', 'vtsls'] : [],
+      );
+      // A human can remove the incompatible server (or add PHP) and keep other CLIs usable.
+      await declareDepsStep.apply(ctx, {
+        detected,
+        formValues: {
+          runtimes: ['php'],
+          phpVersion: '8.3',
+          containerTool: 'none',
+          databaseKind: 'none',
+          databaseVersion: '',
+          lspServers,
+          keepLegacyLspInstall,
+          browserTesting: false,
+        },
+        iteration: 0,
+        previousIterations: [],
+      });
+      const template = await ctx.db.query.envTemplates.findFirst();
+      expect(template?.declaredDeps).toMatchObject({ lspServers });
+      expect(template?.declaredDeps).not.toHaveProperty('lspInstallContractVersion');
+      expect((await ctx.db.query.tasks.findFirst())?.envTemplateId).toBe(template?.id);
+      expect(
+        await checkTaskComposedLspProvider(ctx.db, {
+          taskId: TASK,
+          userId: USER,
+          providerId: CODEX,
+        }),
+      ).toBeNull();
+    },
+  );
+
+  it('keeps the PHP-only editable suggestion adoptable with the opt-out unchecked', async () => {
+    const ctx = makeCtx({ repoLsp: null, onboardingLsp: ['php'] });
+    const detected = await declareDepsStep.detect!(ctx);
+    expect(declareDepsStep.form!(ctx, detected)!.fields).toContainEqual(
+      expect.objectContaining({ id: 'keepLegacyLspInstall', default: false }),
+    );
+    await declareDepsStep.apply(ctx, {
+      detected,
+      formValues: {
+        runtimes: ['php'],
+        phpVersion: '8.3',
+        containerTool: 'none',
+        databaseKind: 'none',
+        databaseVersion: '',
+        lspServers: ['intelephense-extended'],
+        keepLegacyLspInstall: false,
+        browserTesting: false,
+      },
+      iteration: 0,
+      previousIterations: [],
+    });
+    expect((await ctx.db.query.envTemplates.findFirst())?.declaredDeps).toHaveProperty(
+      'lspInstallContractVersion',
+      2,
+    );
+  });
+
   it('C2 is offered, unchecked, right after the legacy fields when adoptable', () => {
     const legacy = fieldIds(baseDetect());
     const ids = fieldIds(baseDetect({ composedLspAdoptable: true }));

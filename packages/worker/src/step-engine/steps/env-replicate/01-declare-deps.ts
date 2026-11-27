@@ -620,12 +620,15 @@ export const declareDepsStep: StepDefinition<DeclareDepsDetect, DeclareDepsApply
           .where(eq(schema.repositories.id, repositoryId))
           .limit(1)
       : [];
-    const effectiveLsp = repoLspRow[0]?.lspServers ?? result.suggestedLsp;
+    const repoLspServers = repoLspRow[0]?.lspServers;
+    const effectiveLsp = repoLspServers ?? result.suggestedLsp;
     if (
       COMPOSED_LSP_NEW_ENVIRONMENT_ADOPTION &&
       cliSupportsLsp &&
       existingTpl === null &&
-      isComposedLspSelection(effectiveLsp) &&
+      // Without a repository override the editable picker can turn any suggestion into a
+      // PHP-only selection. Offer the opt-out before that submit can enable adoption.
+      (repoLspServers == null || isComposedLspSelection(effectiveLsp)) &&
       (
         await composedLspAdoptable(ctx.db, {
           taskId: ctx.taskId,
@@ -777,7 +780,7 @@ export const declareDepsStep: StepDefinition<DeclareDepsDetect, DeclareDepsApply
               id: 'keepLegacyLspInstall',
               label: 'Install language servers in the environment image',
               description:
-                'By default the selected language servers are installed in a separate image layer that Haive verifies after the environment is built, and only Claude Code can run it. Ticking this installs them in the environment image instead, which keeps other CLIs usable. It applies when this task first declares its environment and cannot be changed afterwards.',
+                'A selection containing only supported PHP language servers uses a separate image layer by default; Haive verifies it after the environment is built, and only Claude Code can run it. Tick this to install them in the environment image and keep other CLIs usable. Other selections already use the environment image. This choice applies when this task first declares its environment and cannot be changed afterwards.',
               default: false,
             },
           ]

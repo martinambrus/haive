@@ -1363,7 +1363,12 @@ one reads nothing further:
   run list. The set is a superset of what resolution can pick, so a doubtful case stays legacy.
 
 The form shows `keepLegacyLspInstall` ("Install language servers in the environment image") only
-when detect finds the task adoptable for the effective dependency selection, including a repository override (an empty selection included). Reused prior-task form values drop the field
+when detect finds the task's run list and providers adoptable and either there is no repository
+selection override or that override supports adoption. Without an override the editable picker can
+make any suggestion adoptable, so mixed and empty suggestions must offer the opt-out too. The copy
+explains that separate installation applies only to supported PHP-only selections; apply still
+decides eligibility from the submitted selection. A fixed incompatible or empty repository override
+keeps the opt-out hidden, since picker edits cannot enable adoption. Reused prior-task form values drop the field
 (`reconcileStaleDeps`), so each task derives its own default and an opt-out is never inherited;
 Auto-continue therefore adopts. An environment that is not adopted writes no contract key, so its
 template hash and image tag are those of the legacy path. Once the cheap checks pass, step 01 logs
