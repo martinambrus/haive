@@ -3,7 +3,7 @@ import { safeErrorMessage } from '@haive/shared/logger';
 import { assertUserPostgresDsn, userPostgresErrorMessage } from '@haive/shared/egress';
 import { Hono } from 'hono';
 import { streamSSE } from 'hono/streaming';
-import { ollamaEmbed } from '@haive/shared/rag';
+import { OllamaProbeTimeoutError, probeGlobalKbEmbedding } from '../lib/global-kb-embed-probe.js';
 import {
   INVALID_BODY_CODE,
   INVALID_BODY_MESSAGE,
@@ -117,12 +117,19 @@ tooling.post('/test-ollama', async (c) => {
     let dims: number | null = null;
     let dimsMatch: boolean | null = null;
     let dimsError: string | undefined;
+    let probeTimedOut = false;
     if (modelFound && body.model && typeof body.dimensions === 'number') {
       try {
-        const [vec] = await ollamaEmbed(url, body.model, ['healthcheck'], { fetchFn });
+        const [vec] = await probeGlobalKbEmbedding(url, body.model, {
+          fetchFn,
+          signal: c.req.raw.signal,
+        });
         dims = vec?.length ?? 0;
         dimsMatch = dims === body.dimensions;
       } catch (err) {
+        if (err instanceof OllamaProbeTimeoutError) {
+          probeTimedOut = true;
+        }
         dimsError = safeErrorMessage(err);
       }
     }
@@ -137,6 +144,7 @@ tooling.post('/test-ollama', async (c) => {
       dimsMatch,
       expectedDims: typeof body.dimensions === 'number' ? body.dimensions : null,
       dimsError,
+      ...(probeTimedOut ? { code: 'ollama_probe_timeout', retryable: true } : {}),
     });
   } catch (err) {
     return c.json({

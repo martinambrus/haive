@@ -1,7 +1,14 @@
+import { OllamaProbeTimeoutError, probeGlobalKbEmbedding } from '../lib/global-kb-embed-probe.js';
+import {
+  displayOllamaUrl,
+  isOllamaUrlRedaction,
+  isValidOllamaUrl,
+  ollamaUrlRedactionMatches,
+  ollamaUrlHiddenPartsChanged,
+} from '@haive/shared/ollama-url';
 import { GlobalKbConfigOutcomeUnknownError } from '../lib/global-kb-config-outcome.js';
 import { globalKbCallOptions } from '@haive/shared/global-kb';
 import { addBestEffort } from '../lib/queue-bounded.js';
-import { safeErrorMessage } from '@haive/shared/logger';
 import { assertUserPostgresDsn, userPostgresErrorMessage } from '@haive/shared/egress';
 import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
@@ -62,12 +69,7 @@ import {
   type GlobalKbStatus,
   type HouseRuleRow,
 } from '@haive/shared/global-kb';
-import {
-  FACET_FILTER_DIMENSIONS,
-  ollamaEmbed,
-  probeOllama,
-  releaseEmbedModelIfUnused,
-} from '@haive/shared/rag';
+import { FACET_FILTER_DIMENSIONS, probeOllama, releaseEmbedModelIfUnused } from '@haive/shared/rag';
 import { loadUsableProvider } from '../lib/step-cli-choice.js';
 import { getDb } from '../db.js';
 import { insertAuditEvent, logAuditEvent, type AuditEvent } from '../lib/audit.js';
@@ -300,7 +302,7 @@ async function configResponse(
     digestEnabled: s.digestEnabled,
     mode: s.mode,
     namespace: s.namespace,
-    ollamaUrl: s.ollamaUrl ?? '',
+    ollamaUrl: displayOllamaUrl(s.ollamaUrl),
     embedModel: s.embedModel ?? '',
     embedDimensions: s.embeddingDimensions,
     archiveRetentionDays: s.archiveRetentionDays,
@@ -524,13 +526,35 @@ async function putConfig(c: Context<AppEnv>) {
   const isAdmin = c.get('userRole') === 'admin';
   const actorUserId = c.get('userId');
   const saved = await resolveGlobalKbSettings();
+  // Blank keeps the stored URL. A redaction keeps it only at the same visible destination.
+  if (d.ollamaUrl !== undefined) {
+    d.ollamaUrl = d.ollamaUrl.trim();
+    if (!d.ollamaUrl) delete d.ollamaUrl;
+    else if (isOllamaUrlRedaction(d.ollamaUrl)) {
+      if (!ollamaUrlRedactionMatches(d.ollamaUrl, saved.ollamaUrl || IN_STACK_OLLAMA_URL)) {
+        throw new HttpError(
+          400,
+          'Type the whole URL to change the server.',
+          'ollama_url_redaction_changed',
+        );
+      }
+      delete d.ollamaUrl;
+    } else if (!isValidOllamaUrl(d.ollamaUrl)) {
+      throw new HttpError(
+        400,
+        'Ollama URL must be a valid HTTP or HTTPS URL.',
+        'invalid_ollama_url',
+      );
+    }
+  }
   const given = d.connectionString?.trim() ?? '';
   const clearing = d.clearConnectionString === true;
   // The page sends every field on every save, so only a CHANGED value needs admin rights.
   // An unchanged DSN is not written, so it cannot undo a concurrent admin change,
   // but it must still pass DSN validation below.
   if (!isAdmin) {
-    // The resolver turns a blank URL or model into its default, and the page sends either form.
+    // Blank Ollama URL keeps the stored value; restore the bundled server by entering its URL.
+    // A blank model still resolves to its default.
     const orDefault = (value: string | null | undefined, fallback: string) =>
       value?.trim() || fallback;
     const changed = Object.entries({
@@ -540,6 +564,8 @@ async function putConfig(c: Context<AppEnv>) {
       connectionString: (given !== '' && given !== saved.connectionString) || clearing,
       ollamaUrl:
         d.ollamaUrl !== undefined &&
+        // GET canonicalizes ordinary origins too (case, default port, root slash).
+        d.ollamaUrl.trim() !== displayOllamaUrl(saved.ollamaUrl) &&
         orDefault(d.ollamaUrl, IN_STACK_OLLAMA_URL) !==
           orDefault(saved.ollamaUrl, IN_STACK_OLLAMA_URL),
       embedModel:
@@ -644,14 +670,24 @@ async function putConfig(c: Context<AppEnv>) {
     if (fields.every(([, , value]) => value === undefined)) return;
     // Past the cache; serializeConfigSave let the previous save finish, so this is what it left.
     const stored = await Promise.all(fields.map(([, key]) => configService.getFresh(key)));
+    const auditValue = (i: number, value: string | null | undefined) =>
+      fields[i]![0] === 'ollamaUrl' && value != null ? displayOllamaUrl(value) : value;
     const event = (indexes: number[], extra?: { partial: true }): AuditEvent => ({
       actorUserId,
       action: 'config.global_kb',
       targetType: 'system',
       metadata: {
-        from: Object.fromEntries(indexes.map((i) => [fields[i]![0], stored[i]])),
-        to: Object.fromEntries(indexes.map((i) => [fields[i]![0], fields[i]![2] ?? stored[i]])),
+        from: Object.fromEntries(indexes.map((i) => [fields[i]![0], auditValue(i, stored[i])])),
+        to: Object.fromEntries(
+          indexes.map((i) => [fields[i]![0], auditValue(i, fields[i]![2] ?? stored[i])]),
+        ),
         connectionStringChanged: storesString,
+        ollamaUrlHiddenChanged: indexes.some(
+          (i) =>
+            fields[i]![0] === 'ollamaUrl' &&
+            fields[i]![2] !== undefined &&
+            ollamaUrlHiddenPartsChanged(stored[i] ?? null, fields[i]![2]!),
+        ),
         ...extra,
       },
     });
@@ -715,6 +751,18 @@ globalKbRoutes.post('/test-ollama', async (c) => {
     const parsed = testOllamaSchema.safeParse(await c.req.json().catch(() => null));
     if (!parsed.success) throw new HttpError(400, 'invalid test request', 'invalid_body');
     input = parsed.data;
+    input.ollamaUrl = input.ollamaUrl.trim();
+    if (isOllamaUrlRedaction(input.ollamaUrl)) {
+      const saved = await resolveGlobalKbSettings();
+      if (!ollamaUrlRedactionMatches(input.ollamaUrl, saved.ollamaUrl || IN_STACK_OLLAMA_URL)) {
+        throw new HttpError(
+          400,
+          'Type the whole URL to change the server.',
+          'ollama_url_redaction_changed',
+        );
+      }
+      input.ollamaUrl = saved.ollamaUrl || IN_STACK_OLLAMA_URL;
+    }
   } else {
     const saved = await resolveGlobalKbSettings();
     if (!saved.ollamaUrl || !saved.embedModel) {
@@ -732,10 +780,13 @@ globalKbRoutes.post('/test-ollama', async (c) => {
   const { ollamaUrl, model, dimensions } = input;
   const { fetchFn } = await probeEgressFor(c);
   if (!(await probeOllama(ollamaUrl, fetchFn))) {
-    return c.json({ ok: false, message: `Ollama unreachable at ${ollamaUrl}` });
+    return c.json({ ok: false, message: `Ollama unreachable at ${displayOllamaUrl(ollamaUrl)}` });
   }
   try {
-    const [vec] = await ollamaEmbed(ollamaUrl, model, ['healthcheck'], { fetchFn });
+    const [vec] = await probeGlobalKbEmbedding(ollamaUrl, model, {
+      fetchFn,
+      signal: c.req.raw.signal,
+    });
     const dims = vec?.length ?? 0;
     const dimsMatch = dims === dimensions;
     return c.json({
@@ -745,9 +796,17 @@ globalKbRoutes.post('/test-ollama', async (c) => {
         : `Reachable, but ${model} returns ${dims} dims (config expects ${dimensions})`,
     });
   } catch (err) {
+    if (err instanceof OllamaProbeTimeoutError) {
+      return c.json({
+        ok: false,
+        code: 'ollama_probe_timeout',
+        retryable: true,
+        message: err.message,
+      });
+    }
     return c.json({
       ok: false,
-      message: `Reachable, but model "${model}" failed: ${safeErrorMessage(err)}`,
+      message: 'Embedding probe failed; check the model and Ollama configuration',
     });
   }
 });

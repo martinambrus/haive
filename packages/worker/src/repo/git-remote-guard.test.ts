@@ -478,7 +478,7 @@ it.each(['http', 'remote'])(
     ]);
   },
 );
-it.each(['origin-url', 'http-proxy', 'second-push-url'])(
+it.each(['origin-url', 'http-proxy', 'second-push-url', 'insteadOf'])(
   'refuses a guarded fetch when %s changes during resolution',
   async (kind) => {
     const work = `${root}/resolution-race-${kind}`;
@@ -491,11 +491,13 @@ it.each(['origin-url', 'http-proxy', 'second-push-url'])(
     seams.isBlocked.mockReturnValue(false);
     seams.resolve.mockImplementationOnce(async () => {
       const change =
-        kind === 'origin-url'
-          ? ['remote.origin.url', url]
-          : kind === 'http-proxy'
-            ? [`http.${target}.proxy`, url]
-            : ['--add', 'remote.origin.pushurl', url];
+        kind === 'insteadOf'
+          ? [`url.${url}.insteadOf`, target]
+          : kind === 'origin-url'
+            ? ['remote.origin.url', url]
+            : kind === 'http-proxy'
+              ? [`http.${target}.proxy`, url]
+              : ['--add', 'remote.origin.pushurl', url];
       await exec('/usr/bin/git', ['-C', work, 'config', ...change]);
       return [{ address: '127.0.0.1', family: 4 }];
     });
@@ -509,6 +511,13 @@ it.each(['origin-url', 'http-proxy', 'second-push-url'])(
       { timeout: 2000 },
     );
     expect.soft(result.code).toBe(128);
+    if (kind === 'insteadOf') {
+      expect
+        .soft(result.stderr.trim())
+        .toBe(
+          "The repository's remote or git transport config changed while Haive was checking it. Retry the operation.",
+        );
+    }
     expect.soft(run.mock.calls.some(([, args]) => args.includes('fetch'))).toBe(false);
     expect.soft((await stats()).requests).toBe(before.requests);
     expect(seams.resolve).toHaveBeenCalledTimes(1);

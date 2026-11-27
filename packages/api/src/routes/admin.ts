@@ -1,3 +1,4 @@
+import { displayGlobalKbAuditMetadata } from '@haive/shared/ollama-url';
 import { randomBytes } from 'node:crypto';
 import { z } from 'zod';
 import { Hono } from 'hono';
@@ -276,7 +277,7 @@ adminRoutes.get('/audit', async (c) => {
       action: r.action,
       targetType: r.targetType,
       targetId: r.targetId,
-      metadata: r.metadata,
+      metadata: displayGlobalKbAuditMetadata(r.action, r.metadata),
       createdAt: r.createdAt.toISOString(),
     };
   });

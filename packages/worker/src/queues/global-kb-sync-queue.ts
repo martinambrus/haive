@@ -1,3 +1,4 @@
+import { displayOllamaUrl } from '@haive/shared/ollama-url';
 import { globalKbCallOptions } from '@haive/shared/global-kb';
 import { safeProcessor } from './safe-processor.js';
 import { createHash } from 'node:crypto';
@@ -512,7 +513,10 @@ async function embedderMatchesStore(
   const { ollamaUrl, embedModel } = settings;
   if (!ollamaUrl || !embedModel) return false;
   if (!(await probeOllama(ollamaUrl))) {
-    log.warn({ ollamaUrl }, 'global KB re-embed skipped: the embedder does not answer');
+    log.warn(
+      { ollamaUrl: displayOllamaUrl(ollamaUrl) },
+      'global KB re-embed skipped: the embedder does not answer',
+    );
     return false;
   }
   try {

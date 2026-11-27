@@ -114,6 +114,11 @@ script that dials a target typed on its command line passes `fetchFn: fetch` (`r
 `rag-eval.ts`) or `trustedTarget: true` (`rag-eval.ts`, the pg drop smoke).
 `backfill-task-embeddings.ts` initialises the config store so it can read the list.
 
+The population form's Ollama status shows the repository owner's own tooling URL, including
+a gateway path prefix, as do its detect state and step 04's URL field. This is not the
+Global KB setting. Global KB URL display redaction applies to its API responses/audit rows
+and the sync queue's unreachable-embedder warning (see [Global knowledge base](global-kb.md)).
+
 **What a failure does depends on WHEN the step runs.** `10-rag-populate` FAILS — "the index
 is populated" is its whole contract and a human is watching onboarding. `02-pre-rag-sync`
 and `11c-rag-reindex` leave the chunks UNINDEXED and carry on: 02 runs at the start of every

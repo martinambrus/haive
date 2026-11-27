@@ -1,3 +1,4 @@
+import { randomBytes } from 'node:crypto';
 import { TaskActionNotice } from '@/components/task-action-notice';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { isValidElement, type ComponentProps, type ReactElement, type ReactNode } from 'react';
@@ -807,4 +808,25 @@ describe('entry management controls', () => {
       expect(api.delete).not.toHaveBeenCalled();
     },
   );
+});
+
+describe('the write-only Ollama URL replacement', () => {
+  it('starts blank, keeps the stored target on unrelated saves and sends a typed replacement once', async () => {
+    const redacted = 'http://***@embed.example:11434/';
+    const view = await mount({ ollamaUrl: redacted });
+    expect(view.field('cfg-ollama').props.value).toBe('');
+    expect(view.field('cfg-ollama').props).toMatchObject({
+      type: 'password',
+      placeholder: redacted,
+    });
+    view.choose('cfg-namespace', 'other');
+    await view.press('Save connection');
+    expect(configPuts()).toEqual([[CONFIG_PATH, { namespace: 'other' }]]);
+    api.put.mockClear();
+    const replacement = `http://user:${randomBytes(24).toString('hex')}@new.example:11434`;
+    view.choose('cfg-ollama', replacement);
+    await view.press('Save connection');
+    expect(configPuts()).toEqual([[CONFIG_PATH, { ollamaUrl: replacement }]]);
+    expect(view.field('cfg-ollama').props.value).toBe('');
+  });
 });
