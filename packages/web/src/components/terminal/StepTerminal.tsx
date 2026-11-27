@@ -177,6 +177,14 @@ export function StepTerminal({ taskId, stepRowId, autoExpand, statusMessage }: S
     void reload();
   }, [expanded, reload]);
 
+  // Collapsing stops the poll below, so refresh a possibly stale live count once.
+  // Also refresh when an already-collapsed step goes idle. Depend on the boolean,
+  // not the list, so a response that is still active cannot become a fetch loop.
+  const hasActiveInvocations = invocations?.some((i) => i.isActive) ?? false;
+  useEffect(() => {
+    if (!expanded && hasActiveInvocations) void reload();
+  }, [expanded, autoExpand, hasActiveInvocations, reload]);
+
   // Light polling so a fresh invocation row appears without manual refresh.
   // Poll while the STEP is active (autoExpand), not merely while a known
   // invocation is active. A multi-CLI step (e.g. 07b validate → implement-fix)
