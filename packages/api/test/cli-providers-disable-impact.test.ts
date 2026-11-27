@@ -388,6 +388,35 @@ describe('provider disable impact', () => {
     expect(await response.json()).toEqual({ taskCount: 1, stepCount: 2 });
   });
 
+  it('counts final composed verification once per in-flight workflow and excludes its done row', async () => {
+    const final = '01b1-verify-composed-lsp';
+    for (const [stepId, dispatchesStepCli, providerSensitive, stepIndex] of [
+      ['00-triage', false, false, 0],
+      [final, false, true, 1.21],
+      ['07-phase-2-implement', true, false, 7],
+    ] as const)
+      fake.insert(schema.stepCatalog, {
+        stepId,
+        title: stepId,
+        workflowType: 'workflow',
+        stepIndex,
+        dispatchesStepCli,
+        providerSensitive,
+        composable: false,
+      });
+    const ids = [0, 1].map(() =>
+      task({ type: 'workflow', currentStepId: '00-triage', runListSnapshot: null }),
+    );
+    expect(await (await read()).json()).toEqual({ taskCount: 2, stepCount: 4 });
+    fake.insert(schema.taskSteps, {
+      taskId: ids[0],
+      stepId: final,
+      round: 0,
+      status: 'done',
+    });
+    expect(await (await read()).json()).toEqual({ taskCount: 2, stepCount: 3 });
+  });
+
   it('hides impact for a provider owned by somebody else', async () => {
     h.userId = randomUUID();
     expect((await read()).status).toBe(404);

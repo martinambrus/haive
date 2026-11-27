@@ -68,7 +68,10 @@ vi.mock('../src/repo/worktree-git-boundary.js', async (original) => ({
   ...(await original<typeof import('../src/repo/worktree-git-boundary.js')>()),
   resolveInvocationWorkerTree: async () => '/repo',
 }));
-vi.mock('../src/sandbox/sandbox-core-image.js', () => ({ ensureSandboxCoreImage: async () => {} }));
+vi.mock('../src/sandbox/sandbox-core-image.js', async (original) => ({
+  ...(await original<object>()),
+  ensureSandboxCoreImage: async () => {},
+}));
 const ids = {
   task: '11111111-1111-4111-8111-111111111111',
   env: '22222222-2222-4222-8222-222222222222',
@@ -272,6 +275,43 @@ beforeEach(() => {
   vi.clearAllMocks();
   phpFiles.read.mockImplementation(async () => ({ data: Buffer.from('{}'), truncated: false }));
 });
+
+it.each(['pending', 'skipped'] as const)(
+  'without a retained image, bootstrap %s controls launch without claiming readiness',
+  async (status) => {
+    const f = fixture();
+    await f.write(schema.taskSteps, ids.bootstrap, { status });
+    const launch = () =>
+      resolveSandboxImageTag(f.db, ids.task, f.f.rows(schema.cliProviders)[0] as never, f.runner);
+    expect(
+      await hasReadyLspBridge(f.db, ids.task, { providerId: ids.provider, runner: f.runner }),
+    ).toBe(false);
+    if (status === 'skipped') {
+      await expect(launch()).rejects.toThrow(/04-verify-environment.*skipped.*Retry 04/);
+      // Retry reopens 04; the bootstrap/AI repair launch can run again.
+      await f.write(schema.taskSteps, ids.bootstrap, { status: 'pending' });
+    }
+    expect(await launch()).toMatch(/^haive-cli-/);
+    expect(f.run).not.toHaveBeenCalled();
+  },
+);
+
+it('an unready Go plugin gets language-neutral recovery guidance', async () => {
+  const f = fixture();
+  await f.write(schema.taskSteps, ids.plugin, { output: { skipped: true } });
+  const step = createVerifyComposedLspStep(f.runner);
+  const detected = await step.detect!(f.ctx);
+  const result = await step.apply(f.ctx, {
+    detected,
+    formValues: {},
+    iteration: 0,
+    previousIterations: [],
+  });
+  expect(result.bridgeReady).toBe(false);
+  expect(result.guidance).toMatch(/plugin.*Retry 01b/);
+  expect(result.guidance).not.toContain('PHP');
+});
+
 describe('composed LSP identity and readiness', () => {
   it('requires only matching composed evidence, and pins its immutable image at execution', async () => {
     const f = fixture();

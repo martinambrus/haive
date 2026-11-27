@@ -1319,7 +1319,8 @@ the row id and rerun generation, and one entry matching the current provider, pl
 identity and the retained effective reference. 04 evidence is never a fallback. Missing, pending,
 failed, skipped, reset, malformed or unsupported final evidence is unready. An unready plugin
 result, such as a skipped or missing PHP plugin, still completes the checks with `bridgeReady`
-false and guidance to upgrade the plugin files and Retry 01b; nothing retries automatically.
+false and guidance to install or repair the selected language-server plugins, upgrade any missing
+local plugin files and Retry 01b; this guidance applies to every language, and nothing retries automatically.
 
 `composedLspRunListEligible` (`@haive/shared/run-list`) accepts a run list only when 04, worktree
 setup, 01b and the final step each occur once, in that order. `taskSupportsComposedLspFinal`
@@ -1458,7 +1459,7 @@ with a named reason (the user's saved pick is the one exception, below), and wit
 choice floats only inside the set, so no capability gap falls through to another CLI. A prior or
 verifying reference does not count. Before the first
 build makes any reference effective, the set is the lock's verified providers, so the environment
-steps that build the image, and their AI repair, can run; LSP readiness stays false until then. A launch follows the same rule: until some provider holds an effective reference the task's CLI launch uses the provider sandbox image, as a legacy task does before its environment is built; once one exists, a changed input, a vanished image, an unverified provider or a changed provider is refused. Work is refused, never moved to another CLI (a saved pick, below, is skipped and said so), and LSP is never dropped silently.
+steps that build the image, and their AI repair, can run; LSP readiness stays false until then. A launch follows the same rule: until some provider holds an effective reference the task's CLI launch uses the provider sandbox image, as a legacy task does before its environment is built. If the latest 04 row is skipped with no effective reference, launch refuses with `ComposedImageNotVerifiedError` naming `04-verify-environment` and directing Retry 04. This fails closed rather than silently extending bootstrap fallback into later work; Retry reopens 04 and permits bootstrap repair again. Only a matching completed 01b1 can establish readiness, even after that repair. Once an effective reference exists, a changed input, a vanished image, an unverified provider or a changed provider is refused. Work is refused, never moved to another CLI (a saved pick, below, is skipped and said so), and LSP is never dropped silently. Undo restores the pre-reference provider fallback; no schema, data or image rollback is needed.
 
 A saved pick is skipped, not refused. The one preferred provider the dispatcher does not refuse is
 the user's saved user-wide choice (`user_step_cli_preferences` and `user_step_cli_role_preferences`,
