@@ -73,7 +73,14 @@ vi.mock('@haive/shared/global-kb', async (importOriginal) => ({
   }),
   withGlobalKb: async (_db: unknown, fn: (ctx: unknown) => Promise<unknown>) =>
     fn({
-      db: { select: () => ({ from: () => ({ where: async () => h.pending }) }) },
+      db: {
+        select: (fields: Record<string, unknown>) => ({
+          from: () => ({
+            // This fixture owns active vector entries, never unfinished author entries.
+            where: async () => ('taskId' in fields ? [] : h.pending),
+          }),
+        }),
+      },
       conn: {
         pg: {
           unsafe: async (text: string, params: unknown[] = []) => {

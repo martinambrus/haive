@@ -723,7 +723,11 @@ refuses to initiate a settlement at a newer task epoch.
 The kb-author sibling (`reconcileKbAuthorEntryOnTaskEnd`, shared by failed settlement and
 Cancel) now takes that same bounded task-row fence through its separate-store mutation,
 rechecking the exact ending status and forwarding the section signal to the store call.
-A Retry that already revived the task keeps its enriching entry. See
+A 3 s connect timeout and 10 s store deadline release this row well before the 60 s backstop
+when the external store is down. A Retry that already revived the task keeps its enriching entry.
+The five-minute global-KB reconcile sweep repeats this fenced reconcile for skeleton/enriching
+entries of failed or cancelled author tasks, independently of teardown finish markers; boot
+recovery alone does not repair them. See
 [Author task failure and cancellation](global-kb.md#author-task-failure-and-cancellation)
 for the cross-database commit limitation and the real-Postgres controls for both lock orders.
 

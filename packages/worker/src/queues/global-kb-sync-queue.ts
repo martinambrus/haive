@@ -1,7 +1,8 @@
 import { safeProcessor } from './safe-processor.js';
 import { createHash } from 'node:crypto';
 import { Queue, Worker, type Job } from 'bullmq';
-import { and, eq, isNull, lt } from 'drizzle-orm';
+import { and, eq, inArray, isNull, lt } from 'drizzle-orm';
+import { schema } from '@haive/database';
 import {
   GLOBAL_KB_JOB_NAMES,
   QUEUE_NAMES,
@@ -32,6 +33,7 @@ import {
   slugifyHeading,
 } from '../step-engine/steps/onboarding/_rag-chunkers.js';
 import { pruneJobSchedulers } from './job-scheduler-prune.js';
+import { reconcileKbAuthorEntryOnTaskEnd } from '../step-engine/steps/_global-kb-promote.js';
 
 const log = logger.child({ module: 'global-kb-sync' });
 
@@ -508,6 +510,36 @@ async function embedderMatchesStore(settings: {
   return false;
 }
 
+/** Retry best-effort terminal settlement independently of Stop/Cancel finish markers.
+ * Close the store scan before taking any task row; the helper rechecks status under its fence. */
+async function reconcileUnfinishedKbAuthorEntries(): Promise<void> {
+  const db = getDb();
+  const unfinished = await withGlobalKb(db, ({ db: gdb }) =>
+    gdb
+      .select({ taskId: globalKbEntries.sourceTaskId })
+      .from(globalKbEntries)
+      .where(inArray(globalKbEntries.status, ['skeleton', 'enriching'])),
+  );
+  const ids = [
+    ...new Set(unfinished.map((e) => e.taskId).filter((id): id is string => id !== null)),
+  ];
+  if (ids.length === 0) return;
+  const tasks = await db
+    .select({ id: schema.tasks.id, status: schema.tasks.status })
+    .from(schema.tasks)
+    .where(
+      and(
+        inArray(schema.tasks.id, ids),
+        eq(schema.tasks.type, 'kb_author'),
+        inArray(schema.tasks.status, ['failed', 'cancelled']),
+      ),
+    );
+  for (const task of tasks) {
+    if (task.status === 'failed' || task.status === 'cancelled')
+      await reconcileKbAuthorEntryOnTaskEnd(db, task.id, task.status, log);
+  }
+}
+
 /** Re-queue the sync of every ACTIVE entry still `pending` with no job to embed it.
  *
  *  Writers commit `embed_status = 'pending'` and enqueue only afterwards, outside the transaction,
@@ -520,6 +552,7 @@ async function embedderMatchesStore(settings: {
 export async function reconcilePendingGlobalKbSyncs(): Promise<void> {
   const settings = await resolveGlobalKbSettings();
   if (!settings.enabled) return;
+  await reconcileUnfinishedKbAuthorEntries();
   // A store enabled or reachable only after boot still gets its pre-provenance vectors classified.
   await classifyGlobalKbVectorProvenance(getDb());
   await retryOwedGlobalIdentifierBackfill(getDb());

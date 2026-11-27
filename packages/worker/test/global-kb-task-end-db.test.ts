@@ -10,22 +10,41 @@ const url = process.env.WORKER_KB_SETTLEMENT_TEST_URL;
 if (url && !new URL(url).pathname.startsWith('/worker_kb_settlement_test'))
   throw new Error('Use a dedicated worker_kb_settlement_test database');
 
-// Only store discovery is replaced. Both the task fence and KB mutation use real Postgres,
-// on separate pools, as they do when the KB is hosted in a different database.
+// Store discovery is replaced and the settlement deadline can be shortened. The task fence
+// and KB mutation use real Postgres on separate pools, as with a separately hosted KB.
 const h = vi.hoisted(() => ({
   gdb: undefined as unknown as GlobalKbDb,
   settings: undefined as (() => Promise<void>) | undefined,
   store: undefined as (() => Promise<void>) | undefined,
+  timeoutMs: undefined as number | undefined,
+  signal: undefined as AbortSignal | undefined,
+  work: undefined as Promise<void> | undefined,
 }));
+vi.mock('@haive/shared', async (original) => {
+  const shared = await original<typeof import('@haive/shared')>();
+  return {
+    ...shared,
+    setTaskSettlementTimeout: (tx: Parameters<typeof shared.setTaskSettlementTimeout>[0]) =>
+      shared.setTaskSettlementTimeout(tx, h.timeoutMs),
+  };
+});
 vi.mock('@haive/shared/global-kb', async (original) => ({
   ...(await original<object>()),
   resolveGlobalKbSettings: async () => {
     await h.settings?.();
     return { enabled: true };
   },
-  withGlobalKb: async (_db: unknown, fn: (ctx: { db: GlobalKbDb }) => Promise<void>) => {
-    await h.store?.();
-    return fn({ db: h.gdb });
+  withGlobalKb: (
+    _db: unknown,
+    fn: (ctx: { db: GlobalKbDb }) => Promise<void>,
+    opts?: { signal?: AbortSignal },
+  ) => {
+    h.signal = opts?.signal;
+    h.work = (async () => {
+      await h.store?.();
+      return fn({ db: h.gdb });
+    })();
+    return h.work;
   },
 }));
 import { reconcileKbAuthorEntryOnTaskEnd } from '../src/step-engine/steps/_global-kb-promote.js';
@@ -74,6 +93,9 @@ describe.skipIf(!url)('kb_author settlement versus Retry, on Postgres', () => {
   beforeEach(async () => {
     h.settings = undefined;
     h.store = undefined;
+    h.timeoutMs = undefined;
+    h.signal = undefined;
+    h.work = undefined;
     vi.clearAllMocks();
     const [task] = await db
       .insert(schema.tasks)
@@ -152,5 +174,38 @@ describe.skipIf(!url)('kb_author settlement versus Retry, on Postgres', () => {
       'running',
     );
     expect(log.warn).not.toHaveBeenCalled();
+  });
+
+  it('releases the task lock on timeout and refuses a late store mutation after Retry', async () => {
+    const entered = barrier();
+    const resume = barrier();
+    // This is a server-side connection expiry, so it needs a real short deadline.
+    // Store discovery deliberately ignores the abort to exercise the mutation's own guard.
+    h.timeoutMs = 100;
+    h.store = async () => {
+      entered.release();
+      await resume.wait;
+    };
+    const settling = reconcile();
+    try {
+      await entered.wait;
+      await settling;
+      expect(log.warn).toHaveBeenCalledOnce();
+      expect(h.signal?.aborted).toBe(true);
+      // A separate pool can update only after PostgreSQL released the task row lock.
+      await retry.begin(async (tx) => {
+        await tx`set local lock_timeout = '1s'`;
+        await tx`update tasks set status = 'running', orchestration_epoch = orchestration_epoch + 1
+          where id = ${taskId}`;
+      });
+    } finally {
+      resume.release();
+      await settling;
+      await h.work?.catch(() => {});
+    }
+    expect(await entryStatus()).toBe('enriching');
+    expect((await db.query.tasks.findFirst({ where: eq(schema.tasks.id, taskId) }))?.status).toBe(
+      'running',
+    );
   });
 });

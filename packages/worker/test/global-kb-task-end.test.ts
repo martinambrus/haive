@@ -7,22 +7,37 @@ import { globalKbEntries, type GlobalKbStatus } from '@haive/shared/global-kb';
 const h = vi.hoisted(() => ({
   gdb: undefined as unknown,
   enabled: true,
-  store: undefined as ((signal?: AbortSignal) => void) | undefined,
+  settings: undefined as (() => void) | undefined,
+  store: undefined as
+    | ((
+        signal?: AbortSignal,
+        opts?: { deadlineMs?: number; connectTimeoutSeconds?: number },
+      ) => void)
+    | undefined,
+}));
+vi.mock('../src/db.js', () => ({ getDb: () => h.gdb }));
+vi.mock('../src/global-kb-vector-provenance.js', () => ({
+  classifyGlobalKbVectorProvenance: async () => {},
 }));
 vi.mock('@haive/shared/global-kb', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@haive/shared/global-kb')>()),
-  resolveGlobalKbSettings: async () => ({ enabled: h.enabled }),
+  resolveGlobalKbSettings: async () => {
+    h.settings?.();
+    return { enabled: h.enabled };
+  },
+  retryOwedGlobalIdentifierBackfill: async () => {},
   withGlobalKb: async (
     _db: unknown,
     fn: (ctx: unknown) => Promise<unknown>,
-    opts?: { signal?: AbortSignal },
+    opts?: { signal?: AbortSignal; deadlineMs?: number; connectTimeoutSeconds?: number },
   ) => {
-    h.store?.(opts?.signal);
+    h.store?.(opts?.signal, opts);
     return fn({ db: h.gdb });
   },
 }));
 
 import { reconcileKbAuthorEntryOnTaskEnd } from '../src/step-engine/steps/_global-kb-promote.js';
+import { reconcilePendingGlobalKbSyncs } from '../src/queues/global-kb-sync-queue.js';
 
 const log = { warn: vi.fn(), info: vi.fn() };
 
@@ -56,6 +71,7 @@ function setup(status: GlobalKbStatus, type = 'kb_author') {
 beforeEach(() => {
   h.enabled = true;
   h.store = undefined;
+  h.settings = undefined;
   log.warn.mockReset();
   log.info.mockReset();
 });
@@ -102,6 +118,57 @@ describe('kb_author entry reconciliation on task end', () => {
     expect(state.stored()).toMatchObject([state.entry]);
     expect(log.warn).toHaveBeenCalledOnce();
     expect(state.fake.rowLocked(schema.tasks, state.taskId)).toBe(false);
+  });
+
+  it('bounds store connect and ensure well before the task fence expires', async () => {
+    const state = setup('enriching');
+    let options: unknown;
+    h.store = (_signal, opts) => {
+      options = opts;
+    };
+    await state.reconcile('failed');
+    expect(options).toMatchObject({ deadlineMs: 10_000, connectTimeoutSeconds: 3 });
+    expect(state.stored()).toMatchObject([{ status: 'failed' }]);
+    expect(log.warn).not.toHaveBeenCalled();
+  });
+
+  it.each(['skeleton', 'enriching'] as const)(
+    'repairs a terminal task’s %s entry on the scheduled sweep after a store error',
+    async (status) => {
+      const state = setup(status);
+      h.store = () => {
+        throw new Error('store unavailable');
+      };
+      await state.reconcile('failed');
+      expect(state.stored()).toMatchObject([state.entry]);
+      h.store = undefined;
+      await reconcilePendingGlobalKbSyncs();
+      expect(state.stored()).toMatchObject([{ status: 'failed' }]);
+    },
+  );
+
+  it.each(['running', 'completed', 'cancelled'])(
+    'rechecks %s task state when the sweep repairs an unfinished entry',
+    async (status) => {
+      const state = setup('enriching');
+      state.fake.patch(schema.tasks, state.taskId, { status });
+      await reconcilePendingGlobalKbSyncs();
+      expect(state.stored()).toMatchObject(status === 'cancelled' ? [] : [state.entry]);
+    },
+  );
+
+  it('keeps an entry when Retry commits after the sweep selected its failed task', async () => {
+    const state = setup('enriching');
+    let reads = 0;
+    h.settings = () => {
+      // First is the sweep's enabled check; second is the selected task's reconcile,
+      // before taking its row lock. The reconcile must recheck the revived status.
+      if (++reads === 2) state.fake.patch(schema.tasks, state.taskId, { status: 'running' });
+    };
+    await reconcilePendingGlobalKbSyncs();
+    expect(reads).toBe(2);
+    expect(state.stored()).toMatchObject([state.entry]);
+    expect(log.warn).not.toHaveBeenCalled();
   });
 
   it('keeps the entry failed after Stop settlement, then deletes it on Cancel', async () => {
