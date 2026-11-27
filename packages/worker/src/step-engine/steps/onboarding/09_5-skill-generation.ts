@@ -18,6 +18,7 @@ import {
 import { workspaceAnchor } from '../../../repo/worktree-paths.js';
 import { extractFencedJsonObjects, parseJsonLoose } from '../_fenced-json.js';
 import { yamlScalar } from '../_yaml-scalar.js';
+import { markdownTableCell } from './_markdown-table-cell.js';
 import { jsonrepair } from 'jsonrepair';
 import type { KbFileSummary } from './09-qa.js';
 import { buildSkillContractBlocks } from './_skill-prompt.js';
@@ -776,14 +777,7 @@ export function skillsReadmeMarkdown(
     '|-------|---------|',
   ];
   for (const r of rows) {
-    // Backslashes escape first: escaping only `|` turns an input `\|` into
-    // `\\|`, which Markdown reads as an escaped backslash followed by a live
-    // cell separator, splitting the row.
-    const desc = r.description
-      .replace(/\\/g, '\\\\')
-      .replace(/\|/g, '\\|')
-      .replace(/\s+/g, ' ')
-      .trim();
+    const desc = markdownTableCell(r.description);
     lines.push(`| [${r.id}](./${r.id}/SKILL.md) | ${desc} |`);
   }
   lines.push('');

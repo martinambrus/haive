@@ -40,6 +40,7 @@ import { mcpSettingsFileContent } from '../../../sandbox/mcp-config.js';
 import { readAgentRulesOverrideRaw } from '../../_agent-rules-override.js';
 import { FALLBACK_AGENT_TARGET } from '../../_render-targets.js';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
+import { markdownTableCell } from './_markdown-table-cell.js';
 import {
   type AgentSpec,
   type AgentRenderTarget,
@@ -314,15 +315,7 @@ export function agentsIndexMarkdown(agents: AgentSpec[], ext: 'md' | 'toml' = 'm
     '|-------|-------------|',
   ];
   for (const a of sorted) {
-    // Backslashes escape first: escaping only `|` turns an input `\|` into
-    // `\\|`, which Markdown reads as an escaped backslash followed by a live
-    // cell separator, splitting the row.
-    const desc = a.description
-      .replace(/[\u0000-\u001F\u007F-\u009F\u2028\u2029]/g, ' ')
-      .replace(/\\/g, '\\\\')
-      .replace(/\|/g, '\\|')
-      .replace(/\s+/g, ' ')
-      .trim();
+    const desc = markdownTableCell(a.description);
     lines.push(`| [${a.id}](${a.id}.${ext}) | ${desc} |`);
   }
   lines.push('');

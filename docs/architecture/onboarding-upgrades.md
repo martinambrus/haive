@@ -51,9 +51,10 @@ resolves its context from its snapshots, as 01 does, and keeps its set when none
 **An item `REFERENCE_CONTEXT` renders empty carries its own `referenceCtx`.** A hash of nothing
 never changes, so the banner could never see such an item's body change: the three PHP LSP plugin
 files and the two RTK settings files, gated on PHP LSP and on RTK, hashed `sha256('')` from the day
-they shipped. Each now renders in a context that selects it. `agents-index` stays empty on purpose,
-since its body is per repository and the upgrade plan compares it per repository. Rows recorded while
-an item hashed empty still carry that hash, so `syncTemplateManifestCache` converges them in the
+they shipped. Each now renders in a context that selects it. `agents-index` still hashes an empty
+reference render: the plan and upgrade-status compare its schema version and template content hash,
+not its per-repository rendered bytes, so an index renderer change alone offers no upgrade.
+Rows recorded while an item hashed empty still carry that hash, so `syncTemplateManifestCache` converges them in the
 transaction that moves the cache (`convergeReferenceHashes`): a row whose written hash is today's
 body takes the new hash and reads as current, and one holding an older body keeps the empty one, so
 the banner offers the newer.
@@ -68,14 +69,27 @@ the banner offers the newer.
 
 Out of scope of onboarding-upgrades: `.claude/skills/` and agents written from LLM discovery (06_5) without a bundle source, `.haive-data/knowledge_base/`, `.claude/mcp_settings.json`, `.claude/onboarding-review.md`. **Skills and agents installed from custom bundles are tracked and upgradable** (each bundle item lands as an `onboarding_artifacts` row with `templateId = "custom.<bundleId>.<itemId>"`; the `bundle_resync` step before `01-upgrade-plan` refreshes git bundles and the upgrade-plan/apply path treats `custom.*` rows the same as Haive templates). LLM-generated skills and KB content are refreshed by the `/workflow` code-change phase. Project knowledge lives under `.haive-data/` — `knowledge_base/` and `learnings/` — not under a vendor dir, because Haive is model-agnostic; the canonical paths are `KB_DIR`/`LEARNINGS_DIR` in `packages/shared/src/knowledge-paths.ts`, and `stripManagedKnowledgeGlobs` makes them impossible to scope-exclude from the folder pickers (06_7/09_7, the api exclusions endpoint, and the repos-page editor). `mcp_settings.json` is user-owned — created on first onboarding, never rewritten.
 
-The agents index collapses C0, DEL, C1 and Unicode line separators to spaces in description
-cells, then escapes backslashes before pipes and collapses whitespace. This is an index body
-change, not an agent-file renderer change: its per-repository render comparison handles the new
-bytes without a schema bump. Sharing the unchanged TOML agent encoder with MCP config likewise
-leaves `AGENT_RENDERER_VERSION` and the recorded agent corpus hash unchanged. Generated skill
-frontmatter uses the shared scalar for every description length (see [Skills per CLI](skills-per-cli.md));
-it does not change an agent file or a template's required fields or paths, so it needs no agent
-renderer or template schema bump.
+The agents index and skills README share `markdownTableCell`, which collapses C0, DEL, C1 and
+Unicode line separators to spaces in description cells, then escapes backslashes before pipes
+and collapses whitespace. Generated skill frontmatter uses the shared scalar for every description
+length (see [Skills per CLI](skills-per-cli.md)). These changes make no agent renderer or template
+schema bump. Sharing the unchanged TOML agent encoder with MCP config likewise leaves
+`AGENT_RENDERER_VERSION` and the recorded agent corpus hash unchanged.
+
+Existing installs keep their old agents index and long/multi-line skill-description bytes:
+`agents-index` has the constant empty-reference hash, and custom-bundle skills use their IR hash,
+which does not change when the skill renderer changes. No upgrade or banner is offered solely
+for these renderer changes. Re-onboarding or the next legitimate re-render picks up the new form;
+generated skills are refreshed by generation/repair/sync, and a custom skill's changed IR hash
+can offer its next update. There is no per-repository rendered-byte comparison that refreshes the
+agents index automatically.
+
+On a legacy repository with no artifact rows, an old folded-form bundle skill differs from the
+current render even if nobody edited it. The first upgrade plan therefore treats it as a conflict,
+and a backfill baseline records the old bytes as `userModified` rather than claiming them as Haive's.
+This conservative backfill behavior is retained: without a recorded baseline the old format alone
+cannot prove ownership. Normal installs judge edits against the row's recorded `writtenHash`,
+so a renderer change alone does not turn their existing bytes into a user edit.
 
 ## LSP installation metadata is separate from artifact versions
 

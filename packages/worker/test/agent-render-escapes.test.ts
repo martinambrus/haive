@@ -27,6 +27,7 @@ const BASE: AgentSpec = {
   antiPatterns: [],
 };
 const frontmatter = (md: string) => md.split('\n---\n')[0]!.slice(4);
+const python = spawnSync('python3', ['-I', '-c', 'import tomllib'], { timeout: 5000 });
 const pythonToml = (documents: string[]) => {
   const run = spawnSync(
     'python3',
@@ -41,7 +42,7 @@ const pythonToml = (documents: string[]) => {
   return JSON.parse(run.stdout) as Record<string, unknown>[];
 };
 
-describe('T740.3 multiline TOML quote delimiters', () => {
+describe.skipIf(python.status !== 0)('T740.3 multiline TOML quote delimiters', () => {
   it('reads closing runs of three, four and five quotes like tomllib', () => {
     const documents = [3, 4, 5].map(
       (n) => `developer_instructions = """body${'"'.repeat(n)}\nname = "after"\n`,
@@ -88,20 +89,23 @@ describe('T740.4 lenient escapes and TOML continuations', () => {
     }
   });
 
-  it('trims only unescaped line-ending backslashes and TOML whitespace', () => {
-    const documents = [
-      'developer_instructions = """\nfirst \\\n\n \tsecond\\ \t\r\n  third\\\n  """',
-      'developer_instructions = """first\\\\\n  second"""',
-      'developer_instructions = """first\\\\\\\n  second"""',
-      'developer_instructions = """first\\\n  \u00a0second"""',
-      String.raw`developer_instructions = """first\n  second"""`,
-    ];
-    const expected = pythonToml(documents);
-    documents.forEach((doc, i) => expect(parseFlatToml(doc)).toEqual(expected[i]));
-  });
+  it.skipIf(python.status !== 0)(
+    'trims only unescaped line-ending backslashes and TOML whitespace',
+    () => {
+      const documents = [
+        'developer_instructions = """\nfirst \\\n\n \tsecond\\ \t\r\n  third\\\n  """',
+        'developer_instructions = """first\\\\\n  second"""',
+        'developer_instructions = """first\\\\\\\n  second"""',
+        'developer_instructions = """first\\\n  \u00a0second"""',
+        String.raw`developer_instructions = """first\n  second"""`,
+      ];
+      const expected = pythonToml(documents);
+      documents.forEach((doc, i) => expect(parseFlatToml(doc)).toEqual(expected[i]));
+    },
+  );
 });
 
-describe('T740.5 MCP TOML encoding', () => {
+describe.skipIf(python.status !== 0)('T740.5 MCP TOML encoding', () => {
   it.each([
     'line one\nline two',
     Array.from({ length: 128 }, (_, n) => String.fromCharCode(n)).join('') + 'Prüft 😀',
@@ -198,14 +202,17 @@ describe('T740.7 agents index cells', () => {
 
 describe('T740.8 names have independent serializer controls', () => {
   const names = ['yes', 'a: b', 'a\nline\u0001\u007f\u0085\u2028\uFFFF', 'a"\\b'];
-  it('round-trips varied names and a fixed description through TOML', () => {
-    const docs = names.map((id) =>
-      buildAgentFileForTarget({ ...BASE, id }, { dir: '.codex/agents', format: 'toml' }),
-    );
-    const parsed = pythonToml(docs);
-    expect(parsed.map((d) => d.name)).toEqual(names);
-    expect(parsed.map((d) => d.description)).toEqual(names.map(() => BASE.description));
-  });
+  it.skipIf(python.status !== 0)(
+    'round-trips varied names and a fixed description through TOML',
+    () => {
+      const docs = names.map((id) =>
+        buildAgentFileForTarget({ ...BASE, id }, { dir: '.codex/agents', format: 'toml' }),
+      );
+      const parsed = pythonToml(docs);
+      expect(parsed.map((d) => d.name)).toEqual(names);
+      expect(parsed.map((d) => d.description)).toEqual(names.map(() => BASE.description));
+    },
+  );
   it('round-trips varied names and a fixed description through each YAML serializer', () => {
     for (const dir of ['.claude/agents', '.gemini/agents']) {
       for (const id of names) {
