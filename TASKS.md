@@ -1222,6 +1222,12 @@ In `martinambrus/haive-module-translator`. The owner's English-to-Slovak run fai
 
 1. Accept a declined form (same stem, up to 2 trailing letters changed on words of 5+ letters) at every keep-term check; a translated name still fails; codes and short words stay exact. Then the owner Retries the step.
 
+### T785 · FNF[merge-crash-replay] · a crash between a clean merge landing and its state save replays without the squash, the landed event or the right undo point
+
+status: open · kind: fix · found: T316 review 1 (member 5, parked under the T316 fence) 2026-11-27 · priority: P3
+
+PRE-EXISTING. In step 12 (`merge-resolver.ts` ~:1422-1465), a worker crash after git lands a clean merge and before the resolver saves its state replays to the same HEAD, tree and reflog (nothing lost or double-applied), but: (1) the squash the user ticked is omitted with no skip reason, and the unsquashed history is pushed when push is on; (2) no `merge.landed` event is written, since `landed-merge.ts` ~:30 sees the tip equal to `baseShaBefore`; (3) `baseShaBefore` becomes the merge commit itself, so the documented undo point is wrong. The T316 member-5 control pins today's unsquashed outcome. Fix direction: persist the pre-merge base before the merge runs (or derive it from the merge's first parent on replay) and let the replay finish the squash and the landed event; red control first.
+
 ### T784 · FNF[clarify-advance-epoch] · the clarification reply queues an advance with no epoch, like submit
 
 status: open · kind: fix · found: T515 review 1 (found-not-fixed) 2026-11-27 · priority: P4
