@@ -157,6 +157,10 @@ function makeMockDb(state: MockState): Database {
             }
             return [row];
           },
+          onConflictDoNothing: async () => {
+            if (!state.inserts.some((entry) => entry.table === tableName && entry.row.id === v.id))
+              state.inserts.push({ table: tableName, row: v });
+          },
           onConflictDoUpdate: async (_opts: unknown) => {
             state.inserts.push({ table: tableName, row: v });
           },

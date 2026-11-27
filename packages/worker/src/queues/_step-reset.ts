@@ -247,7 +247,7 @@ export async function resetStepAndDownstream(
             iterationCount: 0,
             mergeResolveState: ZERO_MERGE_RETRIES,
             statusMessage: null,
-            // Describes attempts superseded above, and attemptCount (which gates the "re-ran
+            // Describes attempts superseded above, and rejectedReplyCount (which gates the "re-ran
             // automatically" card) goes back to 0 with them — so the note has to go too, or it
             // explains runs the card no longer admits to. Keep in sync with the API retry site.
             warningMessage: null,

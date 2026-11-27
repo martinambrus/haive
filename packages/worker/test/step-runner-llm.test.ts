@@ -106,6 +106,7 @@ interface MockState {
 }
 
 interface MockDbOptions {
+  rejectReplyEvent?: boolean;
   refuseUpdate?: (
     table: string,
     values: Record<string, unknown>,
@@ -219,6 +220,10 @@ function makeMockDb(state: MockState, opts: MockDbOptions = {}, inTransaction = 
             return [row];
           },
           onConflictDoNothing: async () => {
+            if (v.eventType === 'step.reply_rejected') {
+              expect(inTransaction).toBe(true);
+              if (opts.rejectReplyEvent) throw new Error('rejection event unavailable');
+            }
             if (!state.inserts.some((entry) => entry.table === tableName && entry.row.id === v.id))
               state.inserts.push({ table: tableName, row: v });
           },
@@ -493,6 +498,9 @@ describe('step run titles through the real runner', () => {
     const { state, result, prompt, enqueue, params } = await dispatch(mode, runTitle);
     expect(result.status).toBe('waiting_cli');
     expect(enqueue).toHaveBeenCalledTimes(1);
+    expect(
+      state.inserts.filter((entry) => entry.row.eventType === 'step.reply_rejected'),
+    ).toHaveLength(['apply-retry', 'reroll', 'truncation'].includes(mode) ? 1 : 0);
     expect(state.cliInvocationRow?.agentTitle).toBe('Review, part 3 of 12');
     expect(runTitle).toHaveBeenCalledTimes(1);
     expect(runTitle).toHaveBeenCalledWith(prompt.mock.calls[0]?.[0]);
@@ -541,6 +549,46 @@ describe('step run titles through the real runner', () => {
 });
 
 describe('attempt-scoped retry warnings', () => {
+  it('rolls consumption back when the rejection event cannot be recorded', async () => {
+    const state = freshState();
+    Object.assign(state.taskStepRow, { status: 'waiting_cli', detectOutput: { ok: true } });
+    state.cliInvocationRow = {
+      id: 'run-1',
+      taskStepId: 'ts-1',
+      endedAt: new Date(),
+      consumedAt: null,
+      exitCode: 0,
+      errorMessage: null,
+      parsedOutput: {},
+      rawOutput: '{}',
+      mode: 'llm',
+    };
+    state.cliInvocationHistory = [{ ...state.cliInvocationRow }];
+    const step = baseStep();
+    step.llm!.retry = { maxAttempts: 3 };
+    step.apply = async () => {
+      throw new Error('shape rejected');
+    };
+    const enqueue = vi.fn();
+    const result = await advanceStep({
+      db: makeMockDb(state, { rejectReplyEvent: true }),
+      taskId: 'task-1',
+      userId: 'user-1',
+      repoPath: '/tmp',
+      workspacePath: '/tmp',
+      cliProviderId: 'prov-1',
+      stepDef: step,
+      providers: [makeProvider()],
+      deps: { enqueueCliInvocation: enqueue },
+    });
+    expect(result.status).toBe('failed');
+    expect(state.cliInvocationRow?.consumedAt).toBeNull();
+    expect(
+      state.inserts.filter((entry) => entry.row.eventType === 'step.reply_rejected'),
+    ).toHaveLength(0);
+    expect(enqueue).not.toHaveBeenCalled();
+  });
+
   it.each(['apply', 'pre-form', 'truncation'] as const)(
     'keeps the fallback and merge notes when %s retries, without repeating the retry note',
     async (mode) => {
@@ -591,12 +639,29 @@ describe('attempt-scoped retry warnings', () => {
           deps: { enqueueCliInvocation: vi.fn() },
         });
       expect((await run()).status).toBe('waiting_cli');
+      expect(
+        state.inserts.filter((entry) => entry.row.eventType === 'step.reply_rejected'),
+      ).toEqual([
+        {
+          table: 'task_events',
+          row: {
+            id: 'run-1',
+            taskId: 'task-1',
+            taskStepId: 'ts-1',
+            eventType: 'step.reply_rejected',
+            payload: { version: 1, invocationId: 'run-1' },
+          },
+        },
+      ]);
       const warning = String(state.taskStepRow.warningMessage);
       expect(warning).toContain(`${earlier} Attempt 1 of 3 was rejected:`);
       // Replaying the same completion is the same note, not another attempt.
       state.cliInvocationRow = { ...invocation };
       expect((await run()).status).toBe('waiting_cli');
       expect(state.taskStepRow.warningMessage).toBe(warning);
+      expect(
+        state.inserts.filter((entry) => entry.row.eventType === 'step.reply_rejected'),
+      ).toHaveLength(1);
       // The next completed invocation is a distinct retry inside this same step attempt.
       const second = { ...invocation, id: 'run-2' };
       state.cliInvocationRow = { ...second };

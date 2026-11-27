@@ -416,7 +416,7 @@ export async function resetRowsForRerun(
         iterationCount: 0,
         mergeResolveState: ZERO_MERGE_RETRIES,
         statusMessage: null,
-        // Describes attempts this reset is superseding above, and attemptCount (which gates
+        // Describes attempts this reset is superseding above, and rejectedReplyCount (which gates
         // the "re-ran automatically" card) goes back to 0 with them — so the note has to go
         // too, or it explains runs the card no longer admits to.
         warningMessage: null,

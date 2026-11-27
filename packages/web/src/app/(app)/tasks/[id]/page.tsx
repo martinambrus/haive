@@ -76,6 +76,7 @@ import { isAfterFrontier, isBeforeFrontier, type StepOrderKey } from '@/lib/step
 import {
   deadBanner,
   failureBanner,
+  rejectedReplyBanner,
   isTaskDead,
   modelIdentityBanner,
   moduleStopBanner,
@@ -3709,6 +3710,7 @@ function StepCardImpl({
   // A locked pause takes the same neutral copy: the stored per-task line tells the viewer to resume it.
   const park = parkBanner(step, { taskEnded, paused: globalPaused || pauseLocked, dead: taskDead });
   const failure = failureBanner(step, { taskStatus });
+  const rejectedReply = rejectedReplyBanner(step);
   // The live browser/VNC needs a running task runtime; once the task is completed or
   // cancelled that runtime is torn down (cleanup/teardown), so hide the browser
   // panels entirely instead of letting them reconnect to nothing (WebSocket 1006
@@ -4166,14 +4168,9 @@ function StepCardImpl({
         </div>
       )}
 
-      {step.attemptCount > 1 && step.iterationCount === 0 && (
+      {rejectedReply && (
         <div className="rounded-md border border-amber-900/60 bg-amber-950/30 px-3 py-2 text-xs text-amber-300">
-          {/* Count only. attemptCount carries no reason, and the guessed example this used to
-              name ("unparseable model JSON") was wrong whenever a valid JSON body was rejected
-              by a shape rule — the common case. The reason arrives as warningMessage above. */}
-          {step.attemptCount - 1 === 1
-            ? 'The first attempt produced output this step could not use, so it re-ran automatically. The latest run is shown below.'
-            : `${step.attemptCount - 1} earlier attempts produced output this step could not use, so it re-ran automatically. The latest run is shown below.`}
+          {rejectedReply.text}
         </div>
       )}
 
