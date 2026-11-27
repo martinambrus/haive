@@ -1009,6 +1009,27 @@ Undo: revert the code change. No schema or data rollback is needed. The output f
 `worker/test/fixtures/version-token-baseline.json` records origin/main's renderer bytes for
 representative valid pins, so unchanged versions keep their Dockerfile bodies and image hashes.
 
+### Stored tooling pin audit (T562)
+
+The earlier unchecked-pin finding is superseded by commit `7164a86ca` (#1246).
+Controls on main (`8749f9e46`) bypass the Tooling PATCH by seeding repository,
+environment-dependency and cached-feed rows directly. Shell substitutions, Dockerfile
+newlines, extra arguments, `file:`, `git+https:`, URL and npm-alias specs do not reach
+the Chrome MCP config, dependency copy/reuse, RTK composition or pinnable LSP recipes.
+Chrome's shared MCP surface refuses before npm-cache warming; config rendering checks
+again. RTK composition checks repository pins, cache-head/latest fallbacks and retained
+composition inputs at the runtime-tools renderer. The upgrade route checks both cached
+head and cached latest before writing; a candidate without a numeric version prefix is
+skipped by `isNewer` first. Its pinnable siblings are Intelephense (both keys), vtsls,
+Pyright, gopls and Solargraph; rust-analyzer and jdtls install no stored version pin.
+
+These controls require no Docker or live stores. No executable bypass reproduced, so
+T562 changes tests and documentation only: it does not narrow the documented safe-token
+policy to exact semver, replace a refused explicit pin with a default, or rewrite data.
+Token acceptance still does not prove that the named release exists. Repository pin
+columns default to NULL; boot does not seed them. The core Dockerfile's RTK ARG comes
+from the shipped default/operator build environment, never a repository pin.
+
 ## Optional composed LSP recipes
 
 `ComposeInput.lspInstallContractVersion` selects the installation owner. Absent/1 ignores
