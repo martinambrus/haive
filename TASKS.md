@@ -3019,7 +3019,7 @@ Execution fence 2026-11-01: Start with a named current caller that mistakes a re
 
 ### T511 · FNF[bounded-vendor-bodies] · vendor and user-supplied endpoint bodies are read whole before they are cut or parsed (+4)
 
-status: open · gate: bounded verification · user decision: recheck risk-bearing members, 2026-11-01 · priority: P2
+status: fenced scope done 2026-11-27, merged #1382 (febfbcc4c, libs; user-supplied endpoint bodies: Ollama tags/show 8 MiB, embed 32 MiB, error bodies 64 KiB with a 200-char excerpt, unread streams cancelled; 21 loopback controls red on main). Deferred by the fence: fixed-vendor hosts, helper dedup, wording; parked: OpenRouter mid-body 400 read (reproduced only below the bound); not reproduced: `ollama-provision.ts` (fixed in-stack URL only) · gate: bounded verification · user decision: recheck risk-bearing members, 2026-11-01 · priority: P2
 From the T365 fix round 1 (2026-10-31), verified against cx-365. PRE-EXISTING, memory only (no secret path). See also T496 (vendor-call deadlines).
 
 1. User-supplied Ollama URLs: api routes/tooling.ts ~:89 and ~:191 (`resp.json()` of `/api/tags`, `/api/show`, bounded in time only); shared rag/embed.ts ~:108 (`resp.text()` then a cut), ~:111, ~:179, ~:210 (`resp.json()`); worker cli-adapters/ollama-probe.ts ~:107 (`resp.text()` of the error body).
