@@ -71,7 +71,7 @@ beforeEach(() => {
     'fetch',
     vi.fn(async () => {
       if (h.embed.fail) throw new Error('connection refused');
-      return { ok: true, json: async () => ({ embeddings: [h.embed.vector] }) };
+      return Response.json({ embeddings: [h.embed.vector] });
     }),
   );
 });

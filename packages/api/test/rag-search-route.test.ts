@@ -397,7 +397,7 @@ beforeEach(() => {
       h.events.push(isGlobal ? 'embed:global' : 'embed:local');
       if (embed.delayMs) await new Promise((resolve) => setTimeout(resolve, embed.delayMs));
       if (embed.fail) throw new Error('connection refused');
-      return { ok: true, json: async () => ({ embeddings: [embed.vector] }) };
+      return Response.json({ embeddings: [embed.vector] });
     }),
   );
 });

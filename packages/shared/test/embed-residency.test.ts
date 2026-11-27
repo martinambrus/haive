@@ -24,15 +24,12 @@ function stubFetch(opts: { resident?: string[]; psThrows?: boolean }) {
       const u = String(input);
       if (u.endsWith('/api/ps')) {
         if (opts.psThrows) throw new Error('connection refused');
-        return {
-          ok: true,
-          json: async () => ({ models: (opts.resident ?? []).map((name) => ({ name })) }),
-        } as unknown as Response;
+        return Response.json({ models: (opts.resident ?? []).map((name) => ({ name })) });
       }
       if (u.endsWith('/api/embed')) {
         calls.unloadSignal = init?.signal ?? null;
         calls.unload += 1;
-        return { ok: true, json: async () => ({}) } as unknown as Response;
+        return Response.json({});
       }
       throw new Error(`unexpected fetch ${u}`);
     }),
@@ -70,10 +67,9 @@ describe('listResidentOllamaModels', () => {
   it('returns deduped model identifiers from /api/ps', async () => {
     vi.stubGlobal(
       'fetch',
-      vi.fn(async () => ({
-        ok: true,
-        json: async () => ({ models: [{ name: MODEL, model: MODEL }, { name: 'other:1b' }] }),
-      })) as unknown as typeof fetch,
+      vi.fn(async () =>
+        Response.json({ models: [{ name: MODEL, model: MODEL }, { name: 'other:1b' }] }),
+      ),
     );
     expect(await listResidentOllamaModels(URL)).toEqual([MODEL, 'other:1b']);
   });
@@ -89,7 +85,10 @@ describe('listResidentOllamaModels', () => {
   });
 
   it('returns null on a non-ok response', async () => {
-    vi.stubGlobal('fetch', vi.fn(async () => ({ ok: false })) as unknown as typeof fetch);
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response(null, { status: 500 })),
+    );
     expect(await listResidentOllamaModels(URL)).toBeNull();
   });
 });

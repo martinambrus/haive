@@ -1,4 +1,4 @@
-import { readForgeErrorExcerpt } from '@haive/shared/forge';
+import { readForgeErrorExcerpt, readForgeJson } from '@haive/shared/forge';
 import { safeErrorMessage } from '@haive/shared/logger';
 import { assertUserPostgresDsn, userPostgresErrorMessage } from '@haive/shared/egress';
 import { Hono } from 'hono';
@@ -90,13 +90,14 @@ tooling.post('/test-ollama', async (c) => {
       signal: AbortSignal.timeout(CONNECT_TIMEOUT_MS),
     });
     if (!resp.ok) {
+      await resp.body?.cancel().catch(() => {});
       return c.json({
         ok: false,
         reachable: false,
         error: `Ollama returned HTTP ${resp.status}`,
       });
     }
-    const data = (await resp.json()) as { models?: { name: string }[] };
+    const data = (await readForgeJson(resp)) as { models?: { name: string }[] };
     const models = (data.models ?? []).map((m) => m.name);
 
     // Check if requested model exists
@@ -180,6 +181,7 @@ tooling.post('/ollama-model-capabilities', async (c) => {
       signal: AbortSignal.timeout(CONNECT_TIMEOUT_MS),
     });
     if (resp.status === 404) {
+      await resp.body?.cancel().catch(() => {});
       return c.json({
         ok: true,
         reachable: true,
@@ -189,6 +191,7 @@ tooling.post('/ollama-model-capabilities', async (c) => {
       });
     }
     if (!resp.ok) {
+      await resp.body?.cancel().catch(() => {});
       return c.json({
         ok: true,
         reachable: true,
@@ -198,7 +201,7 @@ tooling.post('/ollama-model-capabilities', async (c) => {
         error: `Ollama returned HTTP ${resp.status}`,
       });
     }
-    const data = (await resp.json()) as { capabilities?: string[] };
+    const data = (await readForgeJson(resp)) as { capabilities?: string[] };
     const capabilities = Array.isArray(data.capabilities) ? data.capabilities : [];
     return c.json({
       ok: true,
