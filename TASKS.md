@@ -1222,6 +1222,12 @@ In `martinambrus/haive-module-translator`. The owner's English-to-Slovak run fai
 
 1. Accept a declined form (same stem, up to 2 trailing letters changed on words of 5+ letters) at every keep-term check; a translated name still fails; codes and short words stay exact. Then the owner Retries the step.
 
+### T783 · worktree-alias-sweep-db assumes one tick finishes inside the 100 ms batch budget
+
+status: open · kind: test-flake · found: PR #1372 CI run 45991584063 (shard 1) 2026-11-27 · priority: P3
+
+`worker/test/worktree-alias-sweep-db.test.ts` "durably resumes discovery after worker replacement" (~:77-79) failed with `expected null to be an instance of Date` on a PR that touches no alias code; main's last 6 CI runs are green. The sweeper ends a tick when wall-clock time passes `maxBatchMs` (default `WORKTREE_ALIAS_BATCH_MS = 100`, `repo/worktree-alias-background.ts` ~:314), and the DB tests set `maxSteps` only, so a slow runner ends the resumed tick before completion. Same shape at ~:221 (M2 done-with-skips, one tick then a completion assert) and, weaker, ~:169 (up to 5 ticks). Fix: inject `maxBatchMs` in every DB test that asserts completion after a bounded number of ticks (the pattern T781 used); keep one test that proves the time budget ends a tick. Test only.
+
 ### T782 · FNF[settle-members-lows] · settlement fence leftovers after T542
 
 status: open · kind: fix · found: T542 reviews 2 and 3 (found-not-fixed) 2026-11-27 · priority: P4
