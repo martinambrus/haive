@@ -457,7 +457,8 @@ export async function resolveHaiveProjectionConflicts(
       plan = parsePayload(Buffer.from(res.stdout, 'latin1'));
     } else {
       // cat-file uses the same failure status for a missing index entry and an unreadable
-      // object. Only a successful, empty listing proves there is no plan to render.
+      // object. Require a successful listing, and inspect the exact entry's mode:
+      // a directory's children and a gitlink are not a plan blob.
       const listing = await gitRun(worktreePath, [
         'ls-files',
         '--stage',
@@ -465,7 +466,16 @@ export async function resolveHaiveProjectionConflicts(
         '--',
         literal(jsonPath),
       ]);
-      if (listing.code !== 0 || listing.stdout !== '' || listing.stderr !== '') {
+      const entries = listing.stdout
+        .split('\0')
+        .filter(Boolean)
+        .map((entry) => /^(\d{6}) [0-9a-f]+ [0-3]\t([\s\S]+)$/.exec(entry));
+      const unreadablePlan = entries.some(
+        (entry) =>
+          entry === null ||
+          (entry[2] === jsonPath && entry[1] !== '040000' && entry[1] !== '160000'),
+      );
+      if (listing.code !== 0 || unreadablePlan || listing.stderr !== '') {
         throw Object.assign(
           new Error(
             `the indexed plan.json could not be read (cat-file exit ${res.code}, ls-files exit ${listing.code})`,

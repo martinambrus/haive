@@ -263,6 +263,9 @@ async function handBackWritten(
       seen.add(rel);
       const entry = await lstatNoFollow(plan.anchor, rel, { strict: true }).catch(
         (err: unknown) => {
+          // A refused path (for example beneath a symlink after a directory type change)
+          // contains no file we may hand back. Other read failures remain unknown.
+          if (isPathContainmentError(err)) return null;
           failure ??= err;
           kept.push(rel);
           return null;

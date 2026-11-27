@@ -1,6 +1,7 @@
-import { readFile, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, rename, symlink, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { afterEach, expect, it, vi } from 'vitest';
+import { chownNoFollow, lstatNoFollow } from '@haive/shared/fs-safe';
 import { gitTemplate } from './support/git-template.js';
 import { git } from './support/projection-fixture.js';
 import {
@@ -97,4 +98,32 @@ it('a positively deleted path needs no hand-back', async () => {
   vi.spyOn(process, 'getuid').mockReturnValue(0);
   await git(dir, ['rm', '-f', '--', 'conflict']);
   await expect(handBackAfterMove(dir, before, true)).resolves.toBeUndefined();
+});
+
+it('a directory replaced by a symlink needs no hand-back through the link', async () => {
+  const { dir } = await template.copy();
+  vi.spyOn(process, 'getuid').mockReturnValue(0);
+  await mkdir(join(dir, 'directory'));
+  await writeFile(join(dir, 'directory/file'), 'keep owner\n');
+  await git(dir, ['add', '--', 'directory']);
+  await git(dir, ['commit', '-qm', 'directory before the move']);
+  const before = (await git(dir, ['rev-parse', 'HEAD'])).trim();
+  await git(dir, ['checkout', '-qb', 'handback-move']);
+  await writeFile(join(dir, 'directory/file'), 'after merge\n');
+  await git(dir, ['commit', '-qam', 'rewrite file']);
+  await git(dir, ['checkout', '-q', 'main']);
+  await git(dir, ['merge', '--no-ff', '--no-edit', 'handback-move']);
+  const owner = (await lstatNoFollow(dir, 'directory/file', { strict: true }))!.stats;
+  await rename(join(dir, 'directory'), join(dir, 'retained'));
+  await symlink('retained', join(dir, 'directory'));
+  expect((await git(dir, ['diff', '--name-only', before])).split('\n')).toContain('directory/file');
+  await expect(lstatNoFollow(dir, 'directory/file', { strict: true })).rejects.toMatchObject({
+    code: 'EPATHCONTAINMENT',
+  });
+  vi.mocked(chownNoFollow).mockClear();
+  await expect(handBackAfterMove(dir, before, true)).resolves.toBeUndefined();
+  expect(chownNoFollow).not.toHaveBeenCalled();
+  const retained = (await lstatNoFollow(dir, 'retained/file', { strict: true }))!.stats;
+  expect([retained.uid, retained.gid]).toEqual([owner.uid, owner.gid]);
+  expect(await readFile(join(dir, 'retained/file'), 'utf8')).toBe('after merge\n');
 });

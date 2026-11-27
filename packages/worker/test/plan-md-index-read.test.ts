@@ -84,3 +84,23 @@ it('a missing index blob is already refused by the conflict listing', async () =
   expect(await readFile(join(dir, md))).toEqual(bytes);
   expect(await git(dir, ['ls-files', '-s', '-z'])).toBe(index);
 });
+
+it.each(['directory', 'gitlink'])('an indexed %s is not a plan.json blob', async (kind) => {
+  const { dir } = await template.copy();
+  await git(dir, ['rm', '-f', '--', json]);
+  if (kind === 'directory') {
+    await mkdir(join(dir, json));
+    await writeFile(join(dir, json, 'child'), 'not a plan\n');
+    await git(dir, ['add', '--', json]);
+  } else {
+    const head = (await git(dir, ['rev-parse', 'HEAD'])).trim();
+    await git(dir, ['update-index', '--add', '--cacheinfo', `160000,${head},${json}`]);
+  }
+  const index = await git(dir, ['ls-files', '-s', '-z', '--', `:(literal)${json}`]);
+  expect(index).toContain(kind === 'directory' ? `${json}/child\0` : `\t${json}\0`);
+  const result = await resolveHaiveProjectionConflicts(dir);
+  expect(result.resolved).toContain(md);
+  expect(result.warnings[0]).toContain('took the incoming side');
+  expect(await readFile(join(dir, md), 'utf8')).toBe('incoming\n');
+  expect(await git(dir, ['ls-files', '-s', '-z', '--', `:(literal)${json}`])).toBe(index);
+});

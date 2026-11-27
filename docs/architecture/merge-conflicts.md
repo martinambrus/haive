@@ -204,7 +204,10 @@ left. The following rules keep it that way, each MEASURED on git 2.43 and 2.54:
   identity (whoever owns the tree, since a tree the sandbox reaches through its mode bits is accepted
   as it stands), one `diff --name-only -z` per call, and the index is refreshed since a chown moves ctime and
   `merge --abort` refuses stat data that moved; a name that is not UTF-8 stays the worker's and is
-  logged. Each hand-back stat is strict: a proven missing path needs no ownership change, but
+  logged. Each hand-back stat is strict: a proven missing path or an fs-safe containment refusal
+  (`isPathContainmentError`, stable code `EPATHCONTAINMENT`) needs no ownership change. In
+  particular, a directory replaced by a symlink leaves no file beneath it Haive may hand back;
+  nothing is chowned through the link. Every other stat failure (including EACCES) remains unknown:
   an unreadable path is recorded as a failed hand-back. Strict callers (projection put-back and merge Undo) throw `MERGE_HAND_BACK_FAILED` and remain retryable; ordinary callers warn. A successful
   retry hands back the same changed paths. The fixer relocation reads the directory owner strictly
   before any move or restore and throws `MERGE_OWNER_UNREADABLE` on failure or disappearance,
