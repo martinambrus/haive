@@ -333,11 +333,11 @@ export async function autoResumeFailedStep(
     round: number;
     providerId: string | null;
     via: string;
-    /** The polled watch's episode. Admission holds never consume or stamp it. */
+    /** The polled watch's `awaiting_provider_since`: the episode a refusal may stamp. */
     watchSince: Date | null;
   },
 ): Promise<boolean> {
-  const { taskId, stepId, round, providerId, via } = args;
+  const { taskId, stepId, round, providerId, via, watchSince } = args;
   const stepRows = await db
     .select({ id: schema.taskSteps.id })
     .from(schema.taskSteps)
@@ -500,9 +500,48 @@ export async function autoResumeFailedStep(
           ? { reason: 'live-upgrade-index' }
           : null;
     if (!refusal) throw err;
-    // Admission can clear after the provider recovers. Keep the watch armed and let the
-    // usage poller's existing busy/backoff path retry; no notification marks it final.
-    throw new RevivalBusy(refusal);
+    // A repository root claim (refresh or rebuild) clears by itself: keep the watch armed and
+    // let the usage poller's busy/backoff path retry. Every other refusal stays final, as before.
+    if (refusal.reason === 'root-claim') throw new RevivalBusy(refusal);
+    await refuseAutoResume(db, taskId, stepId, refusal, watchSince);
   }
   return flipped;
+}
+
+/** A refused auto-resume leaves the task failed and records why. It then falls back to the
+ *  poller's notify path: the recovery stamp tells the person the allowance is back, and takes the
+ *  task out of the armed set so the poller does not try again every tick. */
+async function refuseAutoResume(
+  db: Database,
+  taskId: string,
+  stepId: string,
+  { reason, otherTaskId }: ReviveRefused,
+  watchSince: Date | null,
+): Promise<void> {
+  await db.insert(schema.taskEvents).values({
+    taskId,
+    taskStepId: null,
+    eventType: 'upgrade.revive_refused',
+    payload: { stepId, reason, ...(otherTaskId ? { otherTaskId } : {}) },
+  });
+  const failed = and(eq(schema.tasks.id, taskId), eq(schema.tasks.status, 'failed'));
+  if (!watchSince) {
+    // A watch from before awaiting_provider_since cannot be told from a later cleared one, so it
+    // is only dropped: no notice beats a false one.
+    await db
+      .update(schema.tasks)
+      .set({
+        awaitingAllowanceProviderId: null,
+        awaitingProviderReason: null,
+        allowanceResetAt: null,
+        updatedAt: new Date(),
+      })
+      .where(and(failed, isNull(schema.tasks.awaitingProviderSince)));
+    return;
+  }
+  await db
+    .update(schema.tasks)
+    .set({ allowanceReplenishedAt: new Date(), updatedAt: new Date() })
+    // A Retry that failed again since armed a new watch, which this refusal says nothing about.
+    .where(and(failed, eq(schema.tasks.awaitingProviderSince, watchSince)));
 }
