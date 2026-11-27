@@ -318,6 +318,7 @@ export function agentsIndexMarkdown(agents: AgentSpec[], ext: 'md' | 'toml' = 'm
     // `\\|`, which Markdown reads as an escaped backslash followed by a live
     // cell separator, splitting the row.
     const desc = a.description
+      .replace(/[\u0000-\u001F\u007F-\u009F\u2028\u2029]/g, ' ')
       .replace(/\\/g, '\\\\')
       .replace(/\|/g, '\\|')
       .replace(/\s+/g, ' ')

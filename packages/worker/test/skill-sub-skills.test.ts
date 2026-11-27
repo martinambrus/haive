@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { parse } from 'yaml';
 import {
   sanitizeSubSkills,
   type SkillEntry,
@@ -75,12 +76,12 @@ describe('subSkillToMarkdown', () => {
     expect(md.indexOf('Function')).toBeLessThan(md.indexOf('Parent'));
   });
 
-  it('uses YAML folded form when description is long or multi-line', () => {
+  it('preserves a long description through the shared YAML scalar encoding', () => {
     const longDesc =
       'Long activation description that runs well past the single-line threshold ' +
-      'so the renderer should switch to the YAML folded scalar form for readability.';
+      'keeps its complete text in the frontmatter.';
     const md = subSkillToMarkdown('task-tracking', { ...goodSub, description: longDesc });
-    expect(md).toContain('description: >');
+    expect(parse(md.split('\n---\n')[0]!.slice(4)).description).toBe(longDesc);
   });
 });
 

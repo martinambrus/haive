@@ -40,11 +40,11 @@ describe('skillToMarkdown', () => {
     expect(parseSkillMarkdown(skillToMarkdown(entry)).description).toBe(entry.description);
   });
 
-  it('reads back a long description written as a folded block, not the literal ">"', () => {
+  it('reads back a long description through the shared scalar encoding', () => {
     const description =
       'Use when changing how grids are built: DataTables column types, sorting, ColReorder, per-user state and the shared Excel export button.';
     const md = skillToMarkdown({ id: 'grids', title: 'Grids', description });
-    expect(md).toContain('description: >\n');
+    expect(md).toContain(`description: ${JSON.stringify(description)}\n`);
     expect(parseSkillMarkdown(md).description).toBe(description);
   });
 

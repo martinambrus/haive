@@ -68,6 +68,15 @@ the banner offers the newer.
 
 Out of scope of onboarding-upgrades: `.claude/skills/` and agents written from LLM discovery (06_5) without a bundle source, `.haive-data/knowledge_base/`, `.claude/mcp_settings.json`, `.claude/onboarding-review.md`. **Skills and agents installed from custom bundles are tracked and upgradable** (each bundle item lands as an `onboarding_artifacts` row with `templateId = "custom.<bundleId>.<itemId>"`; the `bundle_resync` step before `01-upgrade-plan` refreshes git bundles and the upgrade-plan/apply path treats `custom.*` rows the same as Haive templates). LLM-generated skills and KB content are refreshed by the `/workflow` code-change phase. Project knowledge lives under `.haive-data/` — `knowledge_base/` and `learnings/` — not under a vendor dir, because Haive is model-agnostic; the canonical paths are `KB_DIR`/`LEARNINGS_DIR` in `packages/shared/src/knowledge-paths.ts`, and `stripManagedKnowledgeGlobs` makes them impossible to scope-exclude from the folder pickers (06_7/09_7, the api exclusions endpoint, and the repos-page editor). `mcp_settings.json` is user-owned — created on first onboarding, never rewritten.
 
+The agents index collapses C0, DEL, C1 and Unicode line separators to spaces in description
+cells, then escapes backslashes before pipes and collapses whitespace. This is an index body
+change, not an agent-file renderer change: its per-repository render comparison handles the new
+bytes without a schema bump. Sharing the unchanged TOML agent encoder with MCP config likewise
+leaves `AGENT_RENDERER_VERSION` and the recorded agent corpus hash unchanged. Generated skill
+frontmatter uses the shared scalar for every description length (see [Skills per CLI](skills-per-cli.md));
+it does not change an agent file or a template's required fields or paths, so it needs no agent
+renderer or template schema bump.
+
 ## LSP installation metadata is separate from artifact versions
 
 The optional `env_templates.declared_deps.lspInstallContractVersion` describes who installs servers:

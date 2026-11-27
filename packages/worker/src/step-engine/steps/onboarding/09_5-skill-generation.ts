@@ -648,10 +648,7 @@ function renderRelatedSkills(items: SkillRelated[]): string[] {
 }
 
 function yamlDescription(desc: string): string {
-  const clean = desc.trim();
-  if (clean.length <= 120 && !clean.includes('\n')) return `description: ${yamlScalar(clean)}`;
-  const wrapped = clean.replace(/\s+/g, ' ').match(/.{1,78}(?:\s|$)/g) ?? [clean];
-  return ['description: >', ...wrapped.map((line) => `  ${line.trim()}`)].join('\n');
+  return `description: ${yamlScalar(desc.trim())}`;
 }
 
 export function skillToMarkdown(entry: SkillEntry): string {
