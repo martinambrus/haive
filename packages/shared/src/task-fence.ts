@@ -1,5 +1,5 @@
 import { and, eq, inArray, notInArray, sql } from 'drizzle-orm';
-import { schema, type DbTx } from '@haive/database';
+import { schema, type Database, type DbTx } from '@haive/database';
 
 /** Statuses a task never comes back from. Cancel is the user's final word and completion is
  *  done; only `failed` is revivable (retry / allowance auto-resume). Every write that could flip
@@ -53,4 +53,19 @@ export async function setTaskSettlementTimeout(
   if (!Number.isInteger(timeoutMs) || timeoutMs <= 0 || timeoutMs > 2_147_483_647)
     throw new Error('Invalid task settlement transaction timeout');
   await tx.execute(sql.raw(`SET LOCAL transaction_timeout = '${timeoutMs}ms'`));
+}
+
+/** postgres.js may reject a transaction while its callback is still awaiting external IO.
+ * End the callback's authority on every exit, including a connection closed by the server.
+ * Check this signal immediately before each destructive call, including nested helpers. */
+export async function withTaskSettlementTransaction<T>(
+  db: Database | DbTx,
+  section: (tx: DbTx, signal: AbortSignal) => Promise<T>,
+): Promise<T> {
+  const controller = new AbortController();
+  try {
+    return await db.transaction((tx) => section(tx, controller.signal));
+  } finally {
+    controller.abort(new Error('Task settlement transaction ended'));
+  }
 }

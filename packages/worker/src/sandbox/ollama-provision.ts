@@ -1,4 +1,8 @@
-import { taskWriteTarget, setTaskSettlementTimeout } from '@haive/shared';
+import {
+  taskWriteTarget,
+  setTaskSettlementTimeout,
+  withTaskSettlementTransaction,
+} from '@haive/shared';
 import { and, eq, ne, notInArray } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
 import { safeErrorMessage } from '@haive/shared/logger';
@@ -253,7 +257,7 @@ export async function unloadTaskOllamaCliModels(db: Database, taskId: string): P
     }
     if (models.size === 0) return true;
     for (const model of models) {
-      await db.transaction(async (tx) => {
+      await withTaskSettlementTransaction(db, async (tx, signal) => {
         await setTaskSettlementTimeout(tx);
         const [task] = await tx
           .select({ id: schema.tasks.id })
@@ -286,12 +290,13 @@ export async function unloadTaskOllamaCliModels(db: Database, taskId: string): P
           log.debug({ taskId, model }, 'skip ollama cli model unload — another live task uses it');
           return;
         }
+        signal.throwIfAborted();
         try {
           const resp = await fetch(`${IN_STACK_OLLAMA_URL}/api/generate`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ model, keep_alive: 0 }),
-            signal: AbortSignal.timeout(10_000),
+            signal: AbortSignal.any([signal, AbortSignal.timeout(10_000)]),
           });
           log.info({ taskId, model, ok: resp.ok }, 'requested ollama cli model unload');
         } catch (err) {

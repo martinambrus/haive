@@ -1,4 +1,8 @@
-import { taskWriteTarget, setTaskSettlementTimeout } from '../task-fence.js';
+import {
+  taskWriteTarget,
+  setTaskSettlementTimeout,
+  withTaskSettlementTransaction,
+} from '../task-fence.js';
 import { and, desc, eq, notInArray } from 'drizzle-orm';
 import { schema, type Database, type DbTx } from '@haive/database';
 import { listResidentOllamaModels, unloadOllamaModel } from './embed.js';
@@ -94,14 +98,14 @@ export async function releaseEmbedModelIfUnused(
   if (!resident.includes(model)) return 'not_resident';
   if (alsoInUse) return 'in_use';
   if (await isEmbedModelUsedByLiveTask(db, url, model)) return 'in_use';
-  const release = async (): Promise<EmbedReleaseStatus> => {
-    const ok = await unloadOllamaModel(url, model);
+  const release = async (signal?: AbortSignal): Promise<EmbedReleaseStatus> => {
+    const ok = await unloadOllamaModel(url, model, undefined, undefined, signal);
     return ok ? 'unloaded' : 'unreachable';
   };
   if (!settlingTaskId) return release();
   // The settling task may have been revived after the job's first check. Its row
   // lock orders this unload against Retry's status/epoch write through the HTTP call.
-  return db.transaction(async (tx) => {
+  return withTaskSettlementTransaction(db, async (tx, signal) => {
     await setTaskSettlementTimeout(tx);
     const [task] = await tx
       .select({ id: schema.tasks.id })
@@ -109,6 +113,7 @@ export async function releaseEmbedModelIfUnused(
       .where(taskWriteTarget(settlingTaskId, { settled: true }))
       .for('no key update');
     if (!task) return 'in_use';
-    return release();
+    signal.throwIfAborted();
+    return release(signal);
   });
 }

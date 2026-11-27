@@ -417,7 +417,12 @@ describe('failed-task settlement bookkeeping is best-effort', () => {
 
       expect(cleanup).toHaveBeenCalledWith(db, 'task-1');
       expect(syncRefreshedAuthToUserVolumes).toHaveBeenCalledWith(db, 'task-1');
-      expect(cleanupTaskAuthVolumes).toHaveBeenCalledWith('task-1', undefined, []);
+      expect(cleanupTaskAuthVolumes).toHaveBeenCalledWith(
+        'task-1',
+        undefined,
+        [],
+        expect.any(AbortSignal),
+      );
       expect(reapAllSessionsForTask).toHaveBeenCalledWith(
         expect.anything(),
         expect.anything(),
@@ -436,4 +441,36 @@ describe('failed-task settlement bookkeeping is best-effort', () => {
       expect(finish).toHaveBeenCalledTimes(stage === 'capture' ? 0 : 1);
     },
   );
+});
+
+it('task-queue installs its production settlement bound before the locking select', async () => {
+  const { recordSettlementBounds } = await import('./helpers/settlement-bound.js');
+  const fake = createFakeDb(
+    { tasks: schema.tasks, taskEvents: schema.taskEvents },
+    { rowLocks: true },
+  );
+  fake.insert(schema.tasks, {
+    id: TASK_UUID,
+    status: 'failed',
+    orchestrationEpoch: 5,
+    completedAt: new Date(0),
+  });
+  const { db, sections } = recordSettlementBounds(fake.db as unknown as Database);
+  setContainerCleanupRunner(async () => 0);
+  await handleResult(
+    db,
+    { taskId: TASK_UUID, userId: 'user-1', orchestrationEpoch: 5 } as never,
+    STEP_ID,
+    { status: 'superseded', row } as never,
+  );
+  setContainerCleanupRunner(null);
+  const settlement = sections.filter((s) =>
+    s.some((q) => q.startsWith('SET LOCAL transaction_timeout')),
+  );
+  expect(settlement).toHaveLength(1);
+  expect(settlement[0]?.slice(0, 3)).toEqual([
+    "SET LOCAL transaction_timeout = '60000ms'",
+    'select',
+    'for no key update',
+  ]);
 });

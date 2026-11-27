@@ -1,4 +1,8 @@
-import { taskWriteTarget, setTaskSettlementTimeout } from '@haive/shared';
+import {
+  taskWriteTarget,
+  setTaskSettlementTimeout,
+  withTaskSettlementTransaction,
+} from '@haive/shared';
 import { safeProcessor } from '../safe-processor.js';
 import { randomUUID } from 'node:crypto';
 import { mkdir, rm, writeFile } from 'node:fs/promises';
@@ -658,7 +662,7 @@ export async function cleanupAuthAfterTerminalSummary(db: Database, taskId: stri
     try {
       await syncRefreshedAuthToUserVolumes(db, taskId);
       const volumes = await findTaskAuthVolumes(taskId);
-      await db.transaction(async (tx) => {
+      await withTaskSettlementTransaction(db, async (tx, signal) => {
         await setTaskSettlementTimeout(tx);
         const [task] = await tx
           .select({ id: schema.tasks.id })
@@ -666,8 +670,9 @@ export async function cleanupAuthAfterTerminalSummary(db: Database, taskId: stri
           .where(taskWriteTarget(taskId, { settled: true }))
           .for('no key update');
         if (!task) return;
+        signal.throwIfAborted();
         clearTaskAuthPreparationState(taskId);
-        const result = await cleanupTaskAuthVolumes(taskId, undefined, volumes);
+        const result = await cleanupTaskAuthVolumes(taskId, undefined, volumes, signal);
         if (result.removed.length > 0) {
           log.info(
             { taskId, volumes: result.removed.length },

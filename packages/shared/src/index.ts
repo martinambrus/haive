@@ -25,6 +25,7 @@ export {
   TERMINAL_TASK_STATUSES,
   taskWriteTarget,
   setTaskSettlementTimeout,
+  withTaskSettlementTransaction,
   TASK_SETTLEMENT_TIMEOUT_MS,
   type TaskFence,
 } from './task-fence.js';

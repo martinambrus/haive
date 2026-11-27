@@ -1402,3 +1402,19 @@ describe('whether an MCP preparation is in place', () => {
     });
   });
 });
+
+it('auth cleanup stops between helper removal and volume removal when the section ends', async () => {
+  const controller = new AbortController();
+  const runner = makeRunner();
+  const helpers = vi
+    .spyOn(runner, 'removeStoppedContainersUsingVolume')
+    .mockImplementation(async () => {
+      controller.abort(new Error('section ended'));
+      return { ok: true, removed: [], stderr: '' };
+    });
+  await expect(
+    cleanupTaskAuthVolumes('task', runner, ['one', 'two'], controller.signal),
+  ).rejects.toThrow('section ended');
+  expect(helpers).toHaveBeenCalledTimes(1);
+  expect(runner.removeCalls).toEqual([]);
+});

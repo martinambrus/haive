@@ -149,6 +149,7 @@ it('CLI model cleanup unloads an unused ended-task model while holding the task 
   await unloadTaskOllamaCliModels(withModels(db), TASK);
   expect(locked).toBe(true);
   expect(fetch).toHaveBeenCalledOnce();
+  expect(fetch.mock.calls[0]![1]!.signal?.aborted).toBe(true);
   expect(JSON.parse(fetch.mock.calls[0]![1]!.body as string)).toEqual({
     model: 'qwen:4b',
     keep_alive: 0,
@@ -166,3 +167,37 @@ it('summary probes volumes outside the row lock and rechecks before removal', as
   expect(findTaskAuthVolumes).toHaveBeenCalledOnce();
   expect(cleanupTaskAuthVolumes).not.toHaveBeenCalled();
 });
+
+it.each(['summary', 'terminal', 'ollama'] as const)(
+  '%s installs its production settlement bound before the locking select',
+  async (site) => {
+    const { recordSettlementBounds } = await import('./helpers/settlement-bound.js');
+    const { db: base } = taskDb();
+    const { db, sections } = recordSettlementBounds(site === 'ollama' ? withModels(base) : base);
+    if (site === 'summary') await cleanupAuthAfterTerminalSummary(db, TASK);
+    if (site === 'terminal') {
+      const redis = {
+        scan: async () => ['0', ['session']],
+        hgetall: async () => ({ containerName: 'shell' }),
+        del: async () => 1,
+      } as unknown as Redis;
+      const docker = {
+        getContainer: () => ({ remove: async () => undefined }),
+      } as unknown as Docker;
+      await reapAllSessionsForTask(redis, docker, TASK, db);
+    }
+    if (site === 'ollama') {
+      vi.stubGlobal(
+        'fetch',
+        vi.fn(async () => ({ ok: true })),
+      );
+      await unloadTaskOllamaCliModels(db, TASK);
+    }
+    expect(sections).toHaveLength(1);
+    expect(sections[0]?.slice(0, 3)).toEqual([
+      "SET LOCAL transaction_timeout = '60000ms'",
+      'select',
+      'for no key update',
+    ]);
+  },
+);

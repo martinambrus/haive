@@ -684,8 +684,28 @@ a Retry arriving during removal waits for the section to end before publishing i
 These sections acquire no step/run rows or repository locks. Each sets LOCAL
 `transaction_timeout` to 60s (PostgreSQL 18, also used in CI) before taking the row:
 a wedged Docker or Redis await cannot pin it indefinitely. postgres.js races the callback
-against connection closure, so expiry rejects into the existing catch/log path. A failed
-section leaves the Stop or Cancel finish marker unwritten for the ordinary re-drive. Volume existence
+against connection closure, so expiry rejects into the existing catch/log path.
+`withTaskSettlementTransaction` aborts the section's signal whenever that transaction ends or
+errors. Each destructive call checks it immediately before starting, including the auth helper's
+Docker removal after its listing, every volume removal, cache invalidation and the terminal's
+Redis deletion after Docker returns. Model unload requests combine that signal with their HTTP
+timeout, including the embed egress guard's asynchronous allowlist read. An abandoned callback may finish an external operation
+already issued before expiry; it cannot retract that operation, but starts no further destructive
+call after observing transaction termination. A removal completing after rollback can therefore
+leave no `auth_volumes.destroyed` audit row (the next probe finds the volume absent).
+
+Resource-section failures are logged and still allow the Stop or Cancel finish marker, as on main.
+Those markers acknowledge that the teardown pass ran, not that every resource disappeared.
+Auth-volume leftovers are retried by the last terminal summary and boot's `reapOrphanedAuthVolumes`;
+stopped helper containers are removed by that boot reaper before the volumes. Shell containers and
+registry keys stay for `TerminalSessionReaper` once disconnected and idle; the next shell ensure
+can recreate an absent shell. Embed models have `reconcileEmbedModelResidency` at boot and the
+explicit release endpoint; CLI models have Ollama's keep_alive expiry. The next model use loads
+an evicted model again. A wedged volume existence probe still looks like absence and can defer
+cleanup until boot. Cancel still withholds its finish marker when a CLI sandbox remains or its
+listing is unknown, or no-change directory discard fails, since merge-directory safety depends
+on those checks. The existing Cancel re-drive is capped at three, as described above; resource
+section failure alone no longer consumes that recovery path. Volume existence
 probes and the embed live-task scan run before the transaction; the task's settlement is
 rechecked after those reads, under the row lock. Auth sync-back remains outside
 the row lock: it may wait for the CLI auth session lock, which must never be awaited while

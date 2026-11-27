@@ -1464,6 +1464,7 @@ export async function cleanupTaskAuthVolumes(
   taskId: string,
   runner: DockerRunner = defaultDockerRunner,
   volumes?: readonly string[],
+  signal?: AbortSignal,
 ): Promise<{ removed: string[]; failed: { name: string; stderr: string }[] }> {
   const removed: string[] = [];
   const failed: { name: string; stderr: string }[] = [];
@@ -1473,7 +1474,8 @@ export async function cleanupTaskAuthVolumes(
     // volume mounted, and make `docker volume rm --force` fail forever. Reap only STOPPED
     // users of this exact task volume before removing it; a running final step-summary is
     // deliberately spared and gets a second cleanup chance when it finishes.
-    const containerCleanup = await runner.removeStoppedContainersUsingVolume?.(taskVol);
+    signal?.throwIfAborted();
+    const containerCleanup = await runner.removeStoppedContainersUsingVolume?.(taskVol, signal);
     if (containerCleanup && !containerCleanup.ok) {
       log.warn(
         { taskVol, stderr: containerCleanup.stderr },
@@ -1485,6 +1487,7 @@ export async function cleanupTaskAuthVolumes(
         'removed stopped auth helper containers',
       );
     }
+    signal?.throwIfAborted();
     const result = await runner.volumeRemove(taskVol);
     if (result.ok) {
       removed.push(taskVol);

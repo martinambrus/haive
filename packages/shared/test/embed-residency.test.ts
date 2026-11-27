@@ -17,10 +17,10 @@ const MODEL = 'qwen3-embedding:4b';
 /** A fetch stub that branches on path: `/api/ps` returns the given resident set
  *  (or throws when `psThrows`), `/api/embed` records the unload + returns ok. */
 function stubFetch(opts: { resident?: string[]; psThrows?: boolean }) {
-  const calls = { unload: 0 };
+  const calls = { unload: 0, unloadSignal: null as AbortSignal | null };
   vi.stubGlobal(
     'fetch',
-    vi.fn(async (input: unknown) => {
+    vi.fn(async (input: unknown, init?: RequestInit) => {
       const u = String(input);
       if (u.endsWith('/api/ps')) {
         if (opts.psThrows) throw new Error('connection refused');
@@ -30,6 +30,7 @@ function stubFetch(opts: { resident?: string[]; psThrows?: boolean }) {
         } as unknown as Response;
       }
       if (u.endsWith('/api/embed')) {
+        calls.unloadSignal = init?.signal ?? null;
         calls.unload += 1;
         return { ok: true, json: async () => ({}) } as unknown as Response;
       }
@@ -169,6 +170,7 @@ describe('releaseEmbedModelIfUnused', () => {
       }),
     ).toBe('unloaded');
     expect(calls.unload).toBe(1);
+    expect(calls.unloadSignal?.aborted).toBe(true);
   });
 
   it('scans live tasks before taking the settling task row and rechecks a Retry after the scan', async () => {
@@ -232,4 +234,52 @@ describe('resolveTaskEmbedTarget', () => {
     const db = fakeDb({ toolingReturns: [null], tasksReturns: [{ repositoryId: null }] });
     expect(await resolveTaskEmbedTarget(db, 'task-x')).toBeNull();
   });
+});
+
+it('embed installs its production settlement bound before the locking select', async () => {
+  const { PgDialect } = await import('drizzle-orm/pg-core');
+  const fake = createFakeDb(
+    { tasks: schema.tasks, taskSteps: schema.taskSteps },
+    { rowLocks: true },
+  );
+  const id = '00000000-0000-4000-8000-000000000005';
+  fake.insert(schema.tasks, { id, status: 'failed' });
+  const db = fake.db as unknown as Database;
+  const statements: string[] = [];
+  const transaction = db.transaction.bind(db);
+  vi.spyOn(db, 'transaction').mockImplementation((fn) =>
+    transaction(async (tx) => {
+      const execute = tx.execute.bind(tx);
+      vi.spyOn(tx, 'execute').mockImplementation((query) => {
+        statements.push(new PgDialect().sqlToQuery(query as never).sql);
+        return execute(query);
+      });
+      const select = tx.select.bind(tx);
+      vi.spyOn(tx, 'select').mockImplementation((fields) => {
+        statements.push('select');
+        const selection = select(fields);
+        const from = selection.from.bind(selection);
+        selection.from = ((table) => {
+          const query = from(table);
+          const lock = query.for.bind(query);
+          query.for = ((...args) => {
+            statements.push(`for ${args[0]}`);
+            return lock(...args);
+          }) as typeof query.for;
+          return query;
+        }) as typeof selection.from;
+        return selection;
+      });
+      return fn(tx);
+    }),
+  );
+  stubFetch({ resident: [MODEL] });
+  expect(await releaseEmbedModelIfUnused(db, { url: URL, model: MODEL, settlingTaskId: id })).toBe(
+    'unloaded',
+  );
+  expect(statements.slice(0, 3)).toEqual([
+    "SET LOCAL transaction_timeout = '60000ms'",
+    'select',
+    'for no key update',
+  ]);
 });

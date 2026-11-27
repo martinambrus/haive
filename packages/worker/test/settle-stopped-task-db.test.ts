@@ -1,4 +1,4 @@
-import { STOP_SETTLE_EVENTS } from '@haive/shared';
+import { TASK_JOB_NAMES, STOP_SETTLE_EVENTS } from '@haive/shared';
 import { randomUUID } from 'node:crypto';
 import os from 'node:os';
 import path from 'node:path';
@@ -27,7 +27,7 @@ const h = vi.hoisted(() => {
     /** When set, the db the job is handed instead of `db`. */
     wrap: undefined as unknown,
     calls,
-    authCleanup: undefined as (() => Promise<void>) | undefined,
+    authCleanup: undefined as ((signal?: AbortSignal) => Promise<void>) | undefined,
     seen: (seam: string, taskId: string): void => {
       calls.push(`${seam}:${taskId}`);
     },
@@ -92,9 +92,14 @@ vi.mock('../src/sandbox/task-auth-volume.js', async (importOriginal) => ({
   syncRefreshedAuthToUserVolumes: async (_db: unknown, taskId: string) =>
     h.seen('syncRefreshedAuthToUserVolumes', taskId),
   findTaskAuthVolumes: async () => [],
-  cleanupTaskAuthVolumes: async (taskId: string) => {
+  cleanupTaskAuthVolumes: async (
+    taskId: string,
+    _runner: unknown,
+    _volumes: unknown,
+    signal?: AbortSignal,
+  ) => {
     h.seen('cleanupTaskAuthVolumes', taskId);
-    await h.authCleanup?.();
+    await h.authCleanup?.(signal);
     return { removed: [], failed: [] };
   },
 }));
@@ -447,7 +452,7 @@ describe.skipIf(!url)('the worker settle job for a task the api Stop failed, on 
       const redis = {
         scan: async () => ['0', ['session']],
         hgetall: async () => ({ containerName: 'shell' }),
-        del: hang === 'redis' ? stall : async () => 1,
+        del: vi.fn(hang === 'redis' ? stall : async () => 1),
       };
       const docker = {
         getContainer: () => ({ remove: hang === 'docker' ? stall : async () => undefined }),
@@ -475,72 +480,106 @@ describe.skipIf(!url)('the worker settle job for a task the api Stop failed, on 
         release();
         await cleanup;
       }
+      // Let the abandoned callback resume after Retry has committed. It must not delete
+      // the registry entry belonging to the revived shell after the old remove returns.
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      expect(redis.del).toHaveBeenCalledTimes(hang === 'redis' ? 1 : 0);
     },
   );
 
-  it('does not acknowledge a timed-out auth section and the Stop sweep re-drives it', async () => {
-    const taskId = await seedTask('failed');
-    await db.insert(schema.taskEvents).values({
-      taskId,
-      eventType: STOP_SETTLE_EVENTS.REQUESTED,
-      payload: { failedAt: FAILED_AT.toISOString() },
-      createdAt: T0,
-    });
-    let release!: () => void;
-    const blocked = new Promise<void>((resolve) => {
-      release = resolve;
-    });
-    h.authCleanup = () => blocked;
-    // Shorten only the production section's timeout. No test database or dev stack is used
-    // outside this file's throwaway-harness guard.
-    h.wrap = new Proxy(db, {
-      get(target, prop) {
-        if (prop === 'transaction')
-          return (fn: (tx: Database) => Promise<unknown>) =>
-            target.transaction(async (tx) => {
-              await tx.execute(sql`SET LOCAL transaction_timeout = '100ms'`);
-              const short = new Proxy(tx, {
-                get(handle, key) {
-                  if (key === 'execute')
-                    return (query: Parameters<typeof tx.execute>[0]) => {
-                      const statement = new PgDialect().sqlToQuery(query as never).sql;
-                      return handle.execute(
-                        statement.startsWith('SET LOCAL transaction_timeout')
-                          ? sql`SET LOCAL transaction_timeout = '100ms'`
-                          : query,
-                      );
-                    };
-                  const value = Reflect.get(handle, key);
-                  return typeof value === 'function' ? value.bind(handle) : value;
-                },
-              });
-              return fn(short as unknown as Database);
-            });
-        const value = Reflect.get(target, prop);
-        return typeof value === 'function' ? value.bind(target) : value;
-      },
-    });
-    try {
-      expect(describeOutcome(await run(payloadFor(taskId)))).toBe('resolved');
-      const events = await db.query.taskEvents.findMany({
-        where: eq(schema.taskEvents.taskId, taskId),
+  it.each(['stop', 'cancel'] as const)(
+    '%s finishes despite a timed-out auth section, without starting further destructive calls',
+    async (action) => {
+      const taskId = await seedTask(action === 'stop' ? 'failed' : 'cancelled');
+      await db.insert(schema.taskEvents).values({
+        taskId,
+        eventType: STOP_SETTLE_EVENTS.REQUESTED,
+        payload: { failedAt: FAILED_AT.toISOString() },
+        createdAt: T0,
       });
-      expect(events.some((e) => e.eventType === STOP_SETTLE_EVENTS.FINISHED)).toBe(false);
-      const enqueueStopSettle = vi.fn(async () => undefined);
-      expect(
-        await stalled.redriveStoppedTasks(
-          db,
-          { enqueueStopSettle, queuedStoppedTaskIds: async () => new Set<string>() },
-          { staleMs: 300_000 },
-        ),
-      ).toBe(1);
-      expect(enqueueStopSettle).toHaveBeenCalledWith(taskId, userId, FAILED_AT.toISOString());
-    } finally {
-      release();
-      h.authCleanup = undefined;
-      h.wrap = undefined;
-    }
-  });
+      const actual = await vi.importActual<typeof import('../src/sandbox/task-auth-volume.js')>(
+        '../src/sandbox/task-auth-volume.js',
+      );
+      let release!: () => void;
+      const blocked = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const volumeRemove = vi.fn(async () => {
+        await blocked;
+        return { ok: true, stderr: '' };
+      });
+      let abandoned: Promise<unknown> | undefined;
+      h.authCleanup = async (signal) => {
+        abandoned = actual.cleanupTaskAuthVolumes(
+          taskId,
+          { volumeRemove } as never,
+          ['old-1', 'old-2'],
+          signal,
+        );
+        // Observe the abandoned callback's rejection without changing the production catch.
+        await abandoned;
+      };
+      const statements: string[] = [];
+      h.wrap = new Proxy(db, {
+        get(target, prop) {
+          if (prop === 'transaction')
+            return (fn: (tx: Database) => Promise<unknown>) =>
+              target.transaction(async (tx) => {
+                const short = new Proxy(tx, {
+                  get(handle, key) {
+                    if (key === 'execute')
+                      return (query: Parameters<typeof tx.execute>[0]) => {
+                        const statement = new PgDialect().sqlToQuery(query as never).sql;
+                        statements.push(statement);
+                        return handle.execute(
+                          statement.startsWith('SET LOCAL transaction_timeout')
+                            ? sql`SET LOCAL transaction_timeout = '100ms'`
+                            : query,
+                        );
+                      };
+                    const value = Reflect.get(handle, key);
+                    return typeof value === 'function' ? value.bind(handle) : value;
+                  },
+                });
+                return fn(short as unknown as Database);
+              });
+          const value = Reflect.get(target, prop);
+          return typeof value === 'function' ? value.bind(target) : value;
+        },
+      });
+      try {
+        const job = settleJob(payloadFor(taskId));
+        if (action === 'cancel') job.name = TASK_JOB_NAMES.CANCEL;
+        expect.soft(describeOutcome(await outcomeOf(processTaskJob(job)))).toBe('resolved');
+        expect(statements).toContain("SET LOCAL transaction_timeout = '60000ms'");
+        // Retry can publish immediately once PG expires the section.
+        if (action === 'stop')
+          await db
+            .update(schema.tasks)
+            .set({ status: 'running' })
+            .where(eq(schema.tasks.id, taskId));
+        release();
+        await abandoned?.catch(() => undefined);
+        await new Promise<void>((resolve) => setImmediate(resolve));
+        expect.soft(volumeRemove).toHaveBeenCalledTimes(1);
+        const events = await db.query.taskEvents.findMany({
+          where: eq(schema.taskEvents.taskId, taskId),
+        });
+        expect(
+          events.some(
+            (e) =>
+              e.eventType ===
+              (action === 'stop' ? STOP_SETTLE_EVENTS.FINISHED : 'task.cancel_finished'),
+          ),
+        ).toBe(true);
+      } finally {
+        release();
+        await abandoned?.catch(() => undefined);
+        h.authCleanup = undefined;
+        h.wrap = undefined;
+      }
+    },
+  );
 
   it(
     'W1: a failed task whose completed_at is the stamp is settled and nothing else is touched',
