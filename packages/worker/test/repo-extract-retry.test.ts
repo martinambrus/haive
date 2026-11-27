@@ -8,7 +8,12 @@ import { createFakeDb } from '@haive/database/testing';
 import type { RepoJobPayload } from '@haive/shared';
 import { handleExtract } from './support/repo-preparation.js';
 
-const claim = vi.hoisted(() => ({ release: vi.fn(async () => {}) }));
+const claim = vi.hoisted(() => ({
+  release: vi.fn(async () => {}),
+  resume: vi.fn(),
+  suspend: vi.fn(),
+}));
+vi.mock('../src/repo/interactive-checkout.js', () => ({ suspendCheckoutSessions: claim.suspend }));
 
 // Root-claim SQL is covered against Postgres by the claim tests; this fixture exercises extraction.
 vi.mock('@haive/database', async (importOriginal) => ({
@@ -36,6 +41,8 @@ function makeDb() {
 }
 beforeEach(async () => {
   claim.release.mockClear();
+  claim.resume.mockReset();
+  claim.suspend.mockReset().mockResolvedValue(claim.resume);
   root = await mkdtemp(path.join(tmpdir(), 'extract-retry-'));
   fake = makeDb();
   payload = {
@@ -131,4 +138,36 @@ describe('extract upload retry', () => {
     expect(claim.release).toHaveBeenCalledTimes(1);
     expect(await readFile(payload.archivePath!)).not.toHaveLength(0);
   });
+});
+
+it('stops the errored upload Editor before root replacement and releases only after ready', async () => {
+  const dest = path.join(root, USER, REPO);
+  await mkdir(dest, { recursive: true });
+  await writeFile(path.join(dest, 'old.txt'), 'Editor mount');
+  await archive();
+  claim.suspend.mockImplementation(async () => {
+    expect(fake.rows(schema.repositories)[0]!.status).toBe('cloning');
+    expect(await readFile(path.join(dest, 'old.txt'), 'utf8')).toBe('Editor mount');
+    return claim.resume;
+  });
+  claim.resume.mockImplementation(() => {
+    expect(fake.rows(schema.repositories)[0]!.status).toBe('ready');
+  });
+  await handleExtract(payload, fake.db as never, root);
+  expect(claim.suspend).toHaveBeenCalledExactlyOnceWith(fake.db, REPO);
+  expect(claim.resume).toHaveBeenCalledOnce();
+});
+it('defers upload replacement if the Editor cannot be stopped', async () => {
+  const dest = path.join(root, USER, REPO);
+  await mkdir(dest, { recursive: true });
+  await writeFile(path.join(dest, 'old.txt'), 'Editor mount');
+  await archive();
+  claim.suspend.mockRejectedValueOnce(
+    Object.assign(new Error('unknown Docker state'), { code: 'checkout_sessions_busy' }),
+  );
+  await expect(handleExtract(payload, fake.db as never, root)).rejects.toMatchObject({
+    code: 'checkout_sessions_busy',
+  });
+  expect(await readFile(path.join(dest, 'old.txt'), 'utf8')).toBe('Editor mount');
+  expect(claim.resume).not.toHaveBeenCalled();
 });

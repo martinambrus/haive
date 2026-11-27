@@ -1,3 +1,11 @@
+vi.mock('../src/repo/interactive-checkout.js', async (original) => ({
+  ...(await original<typeof import('../src/repo/interactive-checkout.js')>()),
+  suspendCheckoutSessions: vi.fn(async () => () => {}),
+}));
+import {
+  suspendCheckoutSessions,
+  CheckoutSessionsBusyError,
+} from '../src/repo/interactive-checkout.js';
 import { execFile } from 'node:child_process';
 import {
   cp,
@@ -120,12 +128,14 @@ const row: {
   errorCode?: string | null;
   refreshPending?: boolean;
   refreshJobId?: string | null;
+  checkoutSessionReason?: string | null;
 } = {
   status: 'ready',
 };
 const db = {
   execute: async () => {},
   query: {
+    repositories: { findFirst: async () => row },
     taskSteps: { findMany: async () => h.legacyWorktrees },
     users: { findFirst: async () => ({ role: 'admin' }) },
     tasks: {
@@ -173,6 +183,7 @@ beforeEach(async () => {
   h.restore.mockReset().mockResolvedValue(undefined);
   delete row.statusMessage;
   delete row.errorCode;
+  delete row.checkoutSessionReason;
   h.persist.mockImplementation(async (_db, _id, _dest, note) => {
     row.status = 'ready';
     row.statusMessage = note;
@@ -907,6 +918,7 @@ it('recounts checkout holders under the task lock after credentials are prepared
     'Not refreshed: 1 task is using this repository. Refresh once it finishes.',
   );
   expect(h.clone).not.toHaveBeenCalled();
+  expect(suspendCheckoutSessions).not.toHaveBeenCalled();
   await untouched(dest);
 });
 
@@ -918,6 +930,16 @@ it('holds the task lock for the rename and releases the transaction before cloni
   const tx = { ...db };
   const fenced = {
     ...db,
+    update: () => ({
+      set: (values: Record<string, unknown>) => {
+        return {
+          where: () =>
+            Object.assign(Promise.resolve(Object.assign(row, values)), {
+              returning: async () => [row],
+            }),
+        };
+      },
+    }),
     transaction: async (fn: (conn: typeof tx) => Promise<unknown>) => {
       inTransaction = true;
       try {
@@ -941,7 +963,7 @@ it('holds the task lock for the rename and releases the transaction before cloni
     await git(root, ['clone', payload.localPath!, to]);
   });
   await handleRefresh(remotePayload, fenced, root);
-  expect(lock).toHaveBeenCalledOnce();
+  expect(lock).toHaveBeenCalledTimes(2);
   expect(h.clone).toHaveBeenCalledOnce();
   expect(await asidesOf(dest)).toHaveLength(1);
   expect(row.status).toBe('ready');
@@ -1072,4 +1094,86 @@ it('T594 R1: clears pending refresh work only after its handler succeeds', async
   row.refreshPending = true;
   await runRefresh(payload);
   expect(row).toMatchObject({ status: 'ready', refreshPending: false });
+});
+
+it('drains sessions after cloning commits and before the first rename', async () => {
+  const { dest, payload } = await fixture();
+  await rm(path.join(dest, '.git/HEAD'));
+  let entered!: () => void;
+  const captured = new Promise<void>((resolve) => {
+    entered = resolve;
+  });
+  let resume!: () => void;
+  const gate = new Promise<void>((resolve) => {
+    resume = resolve;
+  });
+  const release = vi.fn();
+  vi.mocked(suspendCheckoutSessions).mockImplementationOnce(async () => {
+    expect(row.status).toBe('cloning');
+    expect(row.checkoutSessionReason).toBe('draining');
+    entered();
+    await gate;
+    return release;
+  });
+  const refresh = handleRefresh(payload, db, root);
+  await captured;
+  expect(await readFile(path.join(dest, '.haive-data/plan.md'), 'utf8')).toBe('pending\n');
+  expect(await asidesOf(dest)).toEqual([]);
+  resume();
+  await refresh;
+  expect(await asidesOf(dest)).toHaveLength(1);
+  expect(release).toHaveBeenCalledOnce();
+});
+
+it('a Docker stop that cannot be verified leaves the checkout in place and defers the owned queue job', async () => {
+  const { dest, payload } = await fixture();
+  await rm(path.join(dest, '.git/HEAD'));
+  vi.mocked(suspendCheckoutSessions).mockRejectedValueOnce(
+    new CheckoutSessionsBusyError('docker_unknown'),
+  );
+  await expect(handleRefresh(payload, db, root)).rejects.toMatchObject({
+    code: 'checkout_sessions_busy',
+  });
+  expect(await asidesOf(dest)).toEqual([]);
+  expect(await readFile(path.join(dest, '.haive-data/plan.md'), 'utf8')).toBe('pending\n');
+});
+
+it('defers an unverifiable Docker stop without failing the repository or spending an attempt', async () => {
+  const { dest, payload } = await fixture();
+  await rm(path.join(dest, '.git/HEAD'));
+  row.refreshPending = true;
+  row.refreshJobId = 'refresh-job';
+  vi.mocked(suspendCheckoutSessions).mockRejectedValueOnce(
+    new CheckoutSessionsBusyError('docker_unknown'),
+  );
+  startRepoWorker(root);
+  const moveToDelayed = vi.fn();
+  const job = {
+    id: 'refresh-job',
+    name: REPO_JOB_NAMES.REFRESH,
+    data: payload,
+    attemptsMade: 0,
+    timestamp: Date.now(),
+    opts: { attempts: 1 },
+    moveToDelayed,
+  };
+  await expect(h.processor!(job as unknown as Job, 'token')).rejects.toMatchObject({
+    name: 'DelayedError',
+  });
+  expect(moveToDelayed).toHaveBeenCalledWith(expect.any(Number), 'token');
+  expect(row).toMatchObject({
+    status: 'cloning',
+    refreshPending: true,
+    refreshJobId: 'refresh-job',
+  });
+  expect(await asidesOf(dest)).toEqual([]);
+});
+
+it('injects suspension in the Git/SQL smoke seam without contacting Docker or Redis', async () => {
+  const { dest, payload } = await fixture();
+  await rm(path.join(dest, '.git/HEAD'));
+  const suspend = vi.fn(async () => () => {});
+  await handleRefresh(payload, db, root, suspend);
+  expect(suspend).toHaveBeenCalledOnce();
+  expect(suspendCheckoutSessions).not.toHaveBeenCalled();
 });

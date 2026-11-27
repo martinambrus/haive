@@ -1,3 +1,8 @@
+vi.mock('../src/sandbox/checkout-identity.js', async (original) => ({
+  ...(await original<typeof import('../src/sandbox/checkout-identity.js')>()),
+  CHECKOUT_IDENTITY_LABEL: 'haive.checkout.identity',
+  checkoutIdentity: async () => '1:2',
+}));
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { schema, type Database } from '@haive/database';
 import { createFakeDb } from '@haive/database/testing';
@@ -98,6 +103,7 @@ describe('task editor launch', () => {
       id: REPO,
       userId: USER,
       storagePath: `/var/lib/haive/repos/${SUBPATH}`,
+      status: 'ready',
     });
     fake.insert(schema.tasks, { id: taskId, userId: USER, repositoryId: REPO, type: 'workflow' });
     expect(

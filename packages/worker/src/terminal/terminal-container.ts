@@ -1,3 +1,8 @@
+import {
+  CHECKOUT_IDENTITY_LABEL,
+  checkoutIdentity,
+  checkoutMountMatches,
+} from '../sandbox/checkout-identity.js';
 import { eq } from 'drizzle-orm';
 import Docker from 'dockerode';
 import { schema, type Database } from '@haive/database';
@@ -18,6 +23,7 @@ import { SANDBOX_USER, SANDBOX_USER_HOME, SANDBOX_WORKDIR } from '../sandbox/san
 import {
   CONTAINER_FAMILY,
   INSTALL_LABEL,
+  RUNNER_SUBPATH_LABEL,
   installId,
   containerPrefix,
   getCliProviderMetadata,
@@ -218,10 +224,27 @@ export async function ensureShellContainer(
 
   // Reuse an existing container when one is still alive — covers the
   // "navigate away then back within 2 min" path described in the plan.
+  const identity = repoMount?.subpath ? await checkoutIdentity(repoMount.subpath) : null;
   const existing = docker.getContainer(containerName);
   try {
     const inspect = await existing.inspect();
-    if (inspect.State.Running) {
+    if (
+      identity &&
+      !(await checkoutMountMatches(
+        repoMount!.subpath!,
+        inspect.Config.Labels?.[CHECKOUT_IDENTITY_LABEL],
+        identity,
+      ))
+    ) {
+      if (inspect.State.Running) await existing.stop({ t: 10 });
+      await existing.remove({ force: false });
+      try {
+        await existing.inspect();
+        throw new Error('Old shell remains after removal');
+      } catch (error) {
+        if (!isNotFoundError(error)) throw error;
+      }
+    } else if (inspect.State.Running) {
       const shell = await detectShell(docker, containerName);
       // A container that has been alive since before a tmux setting changed never
       // re-reads the conf, so push the settings at the live server too. Best-effort.
@@ -249,10 +272,10 @@ export async function ensureShellContainer(
         cliName: provider.name,
         gitCredMintedAt,
       };
+    } else {
+      // Container exists but isn't running. Remove it and recreate cleanly.
+      await existing.remove({ force: true }).catch(() => undefined);
     }
-    // Container exists but isn't running (likely killed by reaper between
-    // inspect and now, or a crash). Remove it and recreate cleanly.
-    await existing.remove({ force: true }).catch(() => undefined);
   } catch (err) {
     if (!isNotFoundError(err)) throw err;
   }
@@ -364,6 +387,9 @@ export async function ensureShellContainer(
       Env: envList,
       HostConfig: hostConfig as never,
       Labels: {
+        ...(identity
+          ? { [CHECKOUT_IDENTITY_LABEL]: identity, [RUNNER_SUBPATH_LABEL]: repoMount!.subpath! }
+          : {}),
         [INSTALL_LABEL]: installId(),
         'haive.role': 'terminal-shell',
         'haive.scope': scope,
@@ -382,7 +408,15 @@ export async function ensureShellContainer(
         .getContainer(containerName)
         .inspect()
         .catch(() => null);
-      if (sibling?.State?.Running) {
+      if (
+        sibling?.State?.Running &&
+        (!identity ||
+          (await checkoutMountMatches(
+            repoMount!.subpath!,
+            sibling.Config.Labels?.[CHECKOUT_IDENTITY_LABEL],
+            identity,
+          )))
+      ) {
         const shell = await detectShell(docker, containerName);
         log.info(
           { containerName, scope, scopeId, providerId },

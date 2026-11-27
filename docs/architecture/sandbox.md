@@ -1585,3 +1585,20 @@ Undo: revert the code commit. No schema/data rollback is needed. Already-built
 images keep their installed modules; remove the package from the editable body
 and rebuild only if removing it is desired. The optional declared-deps key is
 ignored by the older generator.
+
+## Checkout replacement and interactive sessions
+
+A checkout rebuild suspends interactive mounts before the host directory is renamed; see
+[Repository refresh](repository-refresh.md#interactive-mounts-at-replacement).
+This stop path is distinct from repository/task deletion: it never removes `/udata`, extensions
+or provider authentication volumes. It gives code-server ten seconds to flush hot-exit state,
+removes the container and verifies absence. A Docker failure defers replacement. Hot-exit state is
+retained for review, not permission to save old buffers into rebuilt files automatically.
+
+A changed stamped inode requires identity repair. Legacy unstamped mounts and device-only
+remount differences are kept. No replacement history is recorded. Identity repair uses ordinary
+runner recovery, including during a running step; a stale stamped Editor is removed even if held.
+An unreadable Docker identity label keeps app/Editor runners; DDEV raises the retryable
+`RunnerProbeError`. An unreadable filesystem identity still refuses admission without removal. Existing workspace/spec rules remain.
+Removal uses `-v` for anonymous volumes; named Editor hot-exit, extensions and auth volumes
+survive. See the repository topic for bounded defer codes and deployment.

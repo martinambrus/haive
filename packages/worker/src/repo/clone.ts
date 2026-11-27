@@ -1,3 +1,4 @@
+import { suspendCheckoutSessions } from './interactive-checkout.js';
 import { RootClaimBusyError } from './root-claim-busy.js';
 import { assertRepoJobOwner, ObsoleteRepoJobError, repoJobPredicate } from './job-owner.js';
 import { auditRepositorySettings, logAuditEvent, type AuditEvent } from '../audit.js';
@@ -347,6 +348,7 @@ export async function persistDetection(
       sizeBytes: detection.sizeBytes,
       storagePath,
       status: 'ready',
+      checkoutSessionReason: null,
       errorCode: null,
       // `null` when this import dropped nothing, so a clean re-import CLEARS a previous run's note
       // rather than leaving the repository labelled with a caveat that no longer applies.
@@ -835,47 +837,67 @@ export async function handleExtract(
     });
     if (holding.length > 0)
       throw new Error('A task is using this repository. Retry once it finishes.');
-    const report = await extractArchive(
-      archive,
-      archiveFormat,
-      {
-        anchor: repoStorageRoot,
-        rel: `${payload.userId}/${payload.repositoryId}`,
-      },
-      { repositoryImport: true },
-    ).catch(async (err: unknown) => {
-      if (!(err instanceof MissingArchiveError)) throw err;
-      // Cancel only this completed source, never an in-progress upload or another user's row.
-      // The list can then hide Retry without interpreting status_message or probing the disk.
-      await db
-        .update(schema.repoUploads)
-        .set({ status: 'cancelled', updatedAt: new Date() })
-        .where(
-          and(
-            eq(schema.repoUploads.id, payload.repositoryId),
-            eq(schema.repoUploads.userId, payload.userId),
-            eq(schema.repoUploads.archivePath, payload.archivePath!),
-            eq(schema.repoUploads.status, 'complete'),
-          ),
+    let resumeSessions: (() => void) | undefined;
+    try {
+      const report = await extractArchive(
+        archive,
+        archiveFormat,
+        {
+          anchor: repoStorageRoot,
+          rel: `${payload.userId}/${payload.repositoryId}`,
+        },
+        {
+          repositoryImport: true,
+          beforeSwap: async () => {
+            const rows = await db
+              .update(schema.repositories)
+              .set({ status: 'cloning', checkoutSessionReason: 'draining', updatedAt: new Date() })
+              .where(repoJobPredicate(payload.repositoryId))
+              .returning({ id: schema.repositories.id });
+            if (rows.length === 0) throw new ObsoleteRepoJobError();
+            resumeSessions = await suspendCheckoutSessions(db, payload.repositoryId);
+            await db
+              .update(schema.repositories)
+              .set({ checkoutSessionReason: null })
+              .where(repoJobPredicate(payload.repositoryId));
+          },
+        },
+      ).catch(async (err: unknown) => {
+        if (!(err instanceof MissingArchiveError)) throw err;
+        // Cancel only this completed source, never an in-progress upload or another user's row.
+        // The list can then hide Retry without interpreting status_message or probing the disk.
+        await db
+          .update(schema.repoUploads)
+          .set({ status: 'cancelled', updatedAt: new Date() })
+          .where(
+            and(
+              eq(schema.repoUploads.id, payload.repositoryId),
+              eq(schema.repoUploads.userId, payload.userId),
+              eq(schema.repoUploads.archivePath, payload.archivePath!),
+              eq(schema.repoUploads.status, 'complete'),
+            ),
+          );
+        throw new Error(
+          'The uploaded archive is no longer available. Delete this repository and upload it again.',
         );
-      throw new Error(
-        'The uploaded archive is no longer available. Delete this repository and upload it again.',
-      );
-    });
-    if (report.note) {
-      logger.warn({ repositoryId: payload.repositoryId, dropped: report.dropped }, report.note);
+      });
+      if (report.note) {
+        logger.warn({ repositoryId: payload.repositoryId, dropped: report.dropped }, report.note);
+      }
+      await persistDetection(db, payload.repositoryId, dest, report.note);
+      // Only remove the archive after successful extract + detection. Leaving it
+      // in place on failure lets the user (or a retry) look at what actually
+      // arrived on disk instead of silently masking the error.
+      await removeNoFollow(archive.anchor, archive.rel).catch((err: unknown) => {
+        logger.warn(
+          { err, repositoryId: payload.repositoryId, rel: archive.rel },
+          'extracted repository archive was not removed',
+        );
+      });
+      logger.info({ repositoryId: payload.repositoryId, dest }, 'Repo extract complete');
+    } finally {
+      resumeSessions?.();
     }
-    await persistDetection(db, payload.repositoryId, dest, report.note);
-    // Only remove the archive after successful extract + detection. Leaving it
-    // in place on failure lets the user (or a retry) look at what actually
-    // arrived on disk instead of silently masking the error.
-    await removeNoFollow(archive.anchor, archive.rel).catch((err: unknown) => {
-      logger.warn(
-        { err, repositoryId: payload.repositoryId, rel: archive.rel },
-        'extracted repository archive was not removed',
-      );
-    });
-    logger.info({ repositoryId: payload.repositoryId, dest }, 'Repo extract complete');
   });
 }
 

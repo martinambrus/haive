@@ -1,3 +1,4 @@
+import { interactiveCheckouts } from '../src/repo/interactive-checkout.js';
 import { PassThrough } from 'node:stream';
 import { beforeEach, describe, expect, it, vi, type Mock } from 'vitest';
 import {
@@ -107,6 +108,7 @@ function harness(probe: string | null, killExit: number | number[] = 0): Harness
           repositoryId: 'repo-1',
         }),
       },
+      repositories: { findFirst: async () => ({ id: 'repo-1', status: 'ready' }) },
       taskSteps: { findFirst: async () => ({ status: 'done' }) },
       cliProviders: { findFirst: async () => ({ enabled: provider.enabled }) },
     },
@@ -675,4 +677,57 @@ describe('provider shell revocation', () => {
     await h.sendRequest({ op: 'close-provider', userId: 'user-1' });
     expect(h.attaches[0]!.destroyed).toBe(false);
   });
+});
+
+describe('checkout replacement shell closure', () => {
+  it.each(['task', 'repo'] as const)(
+    'closes the %s PTY, removes input routing and retains a structural exit',
+    async (scope) => {
+      const h = harness(ROOT);
+      const opened = await (scope === 'task' ? h.openTask() : h.openRepo());
+      expect(opened.ok).toBe(true);
+      await h.mgr.closeRepository(scope === 'task' ? 'repo-1' : 'repo-1');
+      expect(h.attaches[0]!.destroyed).toBe(true);
+      const reason = JSON.stringify({ type: 'exit', reason: 'repository_rebuilt' });
+      expect(h.published()).toContain(reason);
+      expect(h.stored().some(([, value]) => value === reason)).toBe(true);
+      const before = h.attaches[0]!.readableLength;
+      if (opened.ok) await h.sendInput(opened.sessionId);
+      expect(h.attaches[0]!.readableLength).toBe(before);
+      h.attaches[0]!.emit('end');
+      expect(h.published().filter((raw) => raw === JSON.stringify({ type: 'exit' }))).toHaveLength(
+        0,
+      );
+    },
+  );
+});
+
+it('drains a Terminal open started before cloning before stopping detached containers', async () => {
+  const h = harness(ROOT);
+  let entered!: () => void;
+  const arrived = new Promise<void>((resolve) => {
+    entered = resolve;
+  });
+  let resume!: () => void;
+  const gate = new Promise<void>((resolve) => {
+    resume = resolve;
+  });
+  vi.mocked(ensureShellContainer).mockImplementationOnce(async () => {
+    entered();
+    await gate;
+    return { containerName: 'haive-shell-late', shell: 'bash' } as never;
+  });
+  const opening = h.openRepo();
+  const refused = expect(opening).rejects.toMatchObject({ code: 'checkout_unavailable' });
+  await arrived;
+  const stop = vi.fn(async () => {
+    await h.mgr.closeRepository('repo-1');
+  });
+  const suspension = interactiveCheckouts.suspend('repo-1', stop);
+  expect(stop).not.toHaveBeenCalled();
+  resume();
+  await refused;
+  (await suspension)();
+  expect(stop).toHaveBeenCalledOnce();
+  expect(h.attaches).toHaveLength(0);
 });

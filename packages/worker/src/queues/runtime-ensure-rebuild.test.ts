@@ -30,7 +30,9 @@ vi.mock('../db.js', () => ({
   getDb: () => ({
     query: {
       tasks: { findFirst: h.task },
-      repositories: { findFirst: async () => ({ storagePath: '/repos/user/repo' }) },
+      repositories: {
+        findFirst: async () => ({ storagePath: '/repos/user/repo', status: 'ready' }),
+      },
     },
   }),
 }));

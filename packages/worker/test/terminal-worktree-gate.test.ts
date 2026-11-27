@@ -41,6 +41,7 @@ function open(
   };
   const db = {
     query: {
+      repositories: { findFirst: async () => ({ id: 'repo-1', status: 'ready' }) },
       tasks: {
         findFirst: async () => ({
           id: 'task-1',

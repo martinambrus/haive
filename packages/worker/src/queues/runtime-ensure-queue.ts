@@ -1,3 +1,5 @@
+import { requireCheckoutAccess } from '@haive/shared/checkout-access';
+import { withInteractiveCheckout } from '../repo/interactive-checkout.js';
 import { randomUUID } from 'node:crypto';
 import { safeProcessor } from './safe-processor.js';
 import { Queue, Worker, type Job } from 'bullmq';
@@ -95,6 +97,7 @@ async function runtimeContext(taskId: string): Promise<AppRuntimeCtx | null> {
     columns: { repositoryId: true },
   });
   if (!task?.repositoryId) return null;
+  await requireCheckoutAccess(db, task.repositoryId, { mode: 'read' });
   const repo = await db.query.repositories.findFirst({
     where: eq(schema.repositories.id, task.repositoryId),
     columns: { storagePath: true, localPath: true },
@@ -242,16 +245,25 @@ export function startRuntimeEnsureWorker(): Worker<RuntimeEnsurePayload, Runtime
   const worker = new Worker<RuntimeEnsurePayload, RuntimeEnsureResult>(
     QUEUE_NAMES.RUNTIME_ENSURE,
     safeProcessor(async (job: Job<RuntimeEnsurePayload>) => {
-      if (job.name === RUNTIME_ENSURE_JOB_NAMES.REBUILD_DDEV) {
-        return rebuildDdevForTask(job.data);
-      }
-      if (job.name === RUNTIME_ENSURE_JOB_NAMES.NAVIGATE_MAILPIT) {
-        return navigateDesktopToMailpit(job.data.taskId);
-      }
-      if (job.name !== RUNTIME_ENSURE_JOB_NAMES.ENSURE) {
-        throw new Error(`Unknown runtime-ensure job: ${job.name}`);
-      }
-      return ensureRuntimeForTask(job.data.taskId);
+      const task = await getDb().query.tasks.findFirst({
+        where: eq(schema.tasks.id, job.data.taskId),
+        columns: { repositoryId: true },
+      });
+      return withInteractiveCheckout(getDb(), task?.repositoryId, async (check) => {
+        await check();
+        if (job.name === RUNTIME_ENSURE_JOB_NAMES.REBUILD_DDEV) {
+          return rebuildDdevForTask(job.data);
+        }
+        if (job.name === RUNTIME_ENSURE_JOB_NAMES.NAVIGATE_MAILPIT) {
+          return navigateDesktopToMailpit(job.data.taskId);
+        }
+        if (job.name !== RUNTIME_ENSURE_JOB_NAMES.ENSURE) {
+          throw new Error(`Unknown runtime-ensure job: ${job.name}`);
+        }
+        const result = await ensureRuntimeForTask(job.data.taskId);
+        await check();
+        return result;
+      });
     }),
     { connection: getBullRedis(), concurrency: 3 },
   );

@@ -404,3 +404,86 @@ Apply `0254_checkout_session_reason.sql` before reloading API/worker with the ne
 The warning alone precedes the stop layer, so its promised stops become active only when
 the worker layer is deployed. DDEV replacement discards changes since the saved snapshot.
 A failed status poll closes admission until a successful poll, then requires explicit reopen.
+
+## Interactive mounts at replacement
+
+The rebuild commits `cloning` with `checkout_session_reason = 'draining'`, then recounts
+checkout holders and worktrees in a short task-key transaction **before** suspending anything.
+A task admitted before cloning must finish admission before that recount; subsequent starts
+and revivals refuse the committed status/root claim. The rename transaction retains its final
+recount as defense in depth. No database connection spans draining or Docker work.
+
+The single worker closes interactive admission synchronously and drains Terminal opens and
+Editor/runtime boots already in flight, with `CHECKOUT_DRAIN_TIMEOUT_MS` (30 seconds, injectable).
+A timeout raises `drain_timeout` before notifications, stops or rename. Once drained it rotates
+the Redis epoch, closes PTYs with `repository_rebuilt`, enumerates Docker containers in **all**
+states, and stops repository/task shells, Editors and app/DDEV runners, including detached warm
+shells and failed root tasks. Holder/worktree guards still govern rebuild eligibility.
+The barrier remains held through replacement/detection and releases in `finally`.
+
+Removal uses immutable Docker IDs, SIGTERM with ten seconds' grace, and `remove({ v: true })`.
+The reuse-repair paths for DDEV/app runners also pass `docker rm -v`. This removes anonymous
+volumes only: DDEV's Dockerfile-declared `/var/lib/docker` stores its nested image cache and DB,
+and a new runner gets a fresh one anyway. Editor `/udata` and extensions, provider auth, the
+repository volume, DDEV CA and registry cache are named volumes and survive. An app runner mounts
+the named repository volume; any image-declared anonymous volumes are likewise removed. A new
+DDEV runner restores the ordinary saved snapshot; changes newer than it are lost on replacement,
+not retained in a usable detached anonymous volume. A successful second listing must prove the
+selected containers absent before rename.
+
+`CheckoutSessionsBusyError.reason` is structural and is persisted as `checkout_session_reason`
+while draining, deferred and failed. `foreign_container`, `container_remains` and unrecognized
+reasons require repair: the owned job fails unrecoverably, writes `error` with that code and
+releases its pending owner without moving the checkout. `docker_unknown`,
+`session_transport_unknown`, `drain_timeout` and `already_suspending` can resolve; retry them every
+`CHECKOUT_SESSION_RETRY_MS` (30 seconds) without spending an attempt, for a total
+`CHECKOUT_SESSION_DEFER_MAX_MS` (30 minutes from the durable job submission timestamp). Expiry
+uses the same visible error/Retry state. Some sessions may already be stopped after a Docker
+failure. The stranded-preparation sweep does not count permanently blocked or expired deferred
+jobs as live; an active `draining` preparation still counts. A stranded failure clears the old
+suspension reason so the stranded-preparation explanation is visible. The web uses
+`checkoutPreparationBanner` keyed on status and code, never on display-copy presence.
+
+Shells, Editors and runtimes stamp `haive.checkout.identity` with the root's decimal device/inode
+pair, read through fs-safe. A different stamped inode requires replacement. A missing legacy
+stamp is always kept; a changed device number with the same inode (overlay/tmpfs remount)
+is also kept. No replacement history or container creation time is consulted. Identity repair
+uses the ordinary runner recovery path: DDEV/app runners still recreate for another workspace
+or a failed nested dockerd during a running step. Editors with a different stamped inode are
+removed even when their registry is held. The eligible rebuild stop pass is the primary guard;
+it preserves named Editor hot-exit data for review.
+
+Upload Retry (`handleExtract`) commits cloning and takes the same suspension barrier immediately
+before its archive swap, after validating the private staged tree. The old root remains in place
+if stopping fails; the barrier stays held through detection and releases on every outcome.
+
+The worker writes a persistent Redis epoch before closure. Editor grants/cookies bind it;
+HTTP/WebSocket admission and browser upgrades recheck status and epoch, including after ensure.
+Terminal exit frames/retained exit keys carry the reason and close code 4426. No keystroke runs SQL.
+Keep Redis persistence (AOF/noeviction). An explicit Redis flush makes a post-rebuild non-null
+epoch cookie stale and requires reopen. One narrow stale-cookie case remains: a cookie granted
+before the first rebuild carries null; after a rebuild **and** a Redis flush it matches null
+again. Container identity still protects the mount, but that stale tab can save its retained
+old buffer into new files. This change does not make epochs durable outside Redis.
+
+The lifecycle fence is a per-process Map and relies on **one worker per install**, as compose
+runs. Two workers can admit a boot in one process past the other's drain; horizontal worker
+scaling needs a shared lifecycle fence before it is supported.
+
+Deploy the warning web and API attach guards before this worker layer. Drain preparations,
+interactive boots and task work through maintenance. Apply migration 0254 first and rebuild database/shared libraries.
+Use `pnpm docker restart api worker web` for deployment after that drain; never restart live
+services as a test. Legacy unstamped containers survive deployment and ordinary next ensures
+regardless of replacement history. A worker recreation still interrupts PTYs.
+Rollback settles work, reverts packages together and rebuilds libraries, **keeping migration
+0254's file and its column applied**, all aside/staging directories and named Editor/auth/cache
+volumes. Reverting cannot revive stopped commands and restores the older mount-reuse hazard.
+
+The warning Dialog and API epoch/attach guards must already be deployed before this worker
+stop layer. Existing surfaces close or refuse stale attachment; the explicit reopen controls
+already accompany Editor/VNC attachment; terminal reopen controls follow in the final web
+layer. Reopening a session remains a user action.
+
+Unreadable Docker identity labels preserve app/Editor runners. DDEV wraps that probe failure
+in `RunnerProbeError`, retaining its transient retry classification. Filesystem identity failures
+still refuse admission; the pre-swap stop/absence barrier remains the replacement guarantee.
