@@ -21,6 +21,9 @@ if (url && !new URL(url).pathname.startsWith('/repository_security_audit_test'))
   throw new Error('Use a dedicated repository_security_audit_test database');
 const h = vi.hoisted(() => ({
   db: undefined as any,
+  freshCalls: 0,
+  relinkDatabase: undefined as
+    ((db: ReturnType<typeof createDatabase>) => ReturnType<typeof createDatabase>) | undefined,
   actor: '',
   gitHook: undefined as ((args: string[]) => Promise<void>) | undefined,
   lockTimeoutMs: 30_000,
@@ -44,7 +47,8 @@ vi.mock('../src/db.js', () => ({
   withFreshDatabase: async (run: (db: ReturnType<typeof createDatabase>) => Promise<unknown>) => {
     const fresh = createDatabase(url!);
     try {
-      return await run(fresh);
+      h.freshCalls += 1;
+      return await run(h.freshCalls === 2 && h.relinkDatabase ? h.relinkDatabase(fresh) : fresh);
     } finally {
       await fresh.$client.end({ timeout: 5 });
     }
@@ -143,6 +147,8 @@ describe.skipIf(!url)('Repository security settings commit with their audit, on 
     await db.$client.end({ timeout: 5 });
   });
   beforeEach(async () => {
+    h.freshCalls = 0;
+    h.relinkDatabase = undefined;
     h.actor = (await makeActor(db)).id;
     const [repo] = await db
       .insert(schema.repositories)
@@ -353,7 +359,7 @@ describe.skipIf(!url)('Repository security settings commit with their audit, on 
       });
     },
   );
-  it('restores a failed remote update before a queued relink acquires the row', async () => {
+  it('restores a failed remote update while refusing a competing relink, then admits its retry', async () => {
     const root = await mkdtemp(path.join(tmpdir(), 'remote-race-'));
     roots.push(root);
     await git(root, ['init']);
@@ -370,51 +376,45 @@ describe.skipIf(!url)('Repository security settings commit with their audit, on 
     const resume = new Promise<void>((resolve) => {
       release = resolve;
     });
-    let first = true;
-    let holderPid = 0;
     let second: Promise<Response> | undefined;
-    h.db = new Proxy(db, {
-      get(target, key) {
-        if (key === 'transaction')
-          return async (fn: (tx: any) => Promise<unknown>) => {
-            if (!first) return target.transaction(fn);
-            first = false;
-            try {
-              return await target.transaction(async (tx) => {
-                const [holder] = await tx.execute<{ pid: number }>(
-                  sql`select pg_backend_pid() as pid`,
-                );
-                holderPid = holder!.pid;
-                return fn(
-                  new Proxy(tx, {
-                    get(t, prop) {
-                      if (prop === 'update')
-                        return () => ({
-                          set: () => ({
-                            where: async () => {
-                              reached();
-                              await resume;
-                              throw new Error('first persistence failed');
-                            },
-                          }),
-                        });
-                      const value = Reflect.get(t, prop);
-                      return typeof value === 'function' ? value.bind(t) : value;
-                    },
-                  }),
-                );
-              });
-            } catch (err) {
-              // Hold the rejected transaction's caller until its queued successor commits.
-              // Restoration after ROLLBACK would then clobber the successor's checkout.
-              await second;
-              throw err;
-            }
-          };
-        const value = Reflect.get(target, key);
-        return typeof value === 'function' ? value.bind(target) : value;
-      },
-    });
+    // Fresh client 1 commits intent; client 2 runs the actual Git/persistence transaction.
+    h.relinkDatabase = (fresh) =>
+      new Proxy(fresh, {
+        get(target, key) {
+          if (key === 'transaction')
+            return async (fn: (tx: any) => Promise<unknown>) => {
+              try {
+                return await target.transaction(async (tx) => {
+                  return fn(
+                    new Proxy(tx, {
+                      get(t, prop) {
+                        if (prop === 'update')
+                          return () => ({
+                            set: () => ({
+                              where: async () => {
+                                reached();
+                                await resume;
+                                throw new Error('first persistence failed');
+                              },
+                            }),
+                          });
+                        const value = Reflect.get(t, prop);
+                        return typeof value === 'function' ? value.bind(t) : value;
+                      },
+                    }),
+                  );
+                });
+              } catch (err) {
+                // Delay the rejection until the competing request has answered. Its claim
+                // must refuse while this writer still owns the checkout, including rollback.
+                await second;
+                throw err;
+              }
+            };
+          const value = Reflect.get(target, key);
+          return typeof value === 'function' ? value.bind(target) : value;
+        },
+      });
     const remote = (remoteUrl: string) =>
       Promise.resolve(
         app.request(`/repos/${repository}/remote`, {
@@ -427,20 +427,23 @@ describe.skipIf(!url)('Repository security settings commit with their audit, on 
     try {
       await atUpdate;
       second = remote('https://second.test/r');
-      await expect
-        .poll(async () => (await waitersOn(holderPid)).length, { timeout: 15_000 })
-        .toBeGreaterThan(0);
+      const answer = await answeredWithin(5_000, second);
+      expect(answer.status).toBe(409);
+      expect(await answer.json()).toMatchObject({ code: 'checkout_unavailable' });
     } finally {
       release();
     }
     try {
       expect((await failed).status).toBe(500);
-      expect((await second!).status).toBe(200);
+      expect((await stored())!.remoteUrl).toBe('https://old.test/r');
+      expect(await git(root, ['remote', 'get-url', 'origin'])).toBe('https://old.test/r');
+      expect(await audits(db)).toHaveLength(0);
+      expect((await remote('https://second.test/r')).status).toBe(200);
       expect((await stored())!.remoteUrl).toBe('https://second.test/r');
       expect(await git(root, ['remote', 'get-url', 'origin'])).toBe('https://second.test/r');
       expect(await audits(db)).toHaveLength(1);
     } finally {
-      h.db = db;
+      h.relinkDatabase = undefined;
     }
   }, 30_000);
   it('allows a task insert while a relink is held inside Git', async () => {
@@ -535,7 +538,11 @@ describe.skipIf(!url)('Repository security settings commit with their audit, on 
       queued = relink('https://queued.test/r');
       const answer = await answeredWithin(5_000, queued);
       expect(answer.status).toBe(409);
-      expect(await answer.json()).toEqual({ error: REPOSITORY_BUSY, code: null });
+      expect(await answer.json()).toEqual({
+        error:
+          'This repository is being changed by another file or configuration operation. Try again in a moment.',
+        code: 'checkout_unavailable',
+      });
       expect(queuedGitCalls).toEqual([]);
       expect(await git(root, ['config', '--get-all', 'remote.origin.url'])).toBe(
         'https://old.test/r',

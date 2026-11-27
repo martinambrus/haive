@@ -205,7 +205,64 @@ presence before counting so it can drain a source schema that predates 0250. Kee
 reverting code never restores or removes them. The recovery staging and repair-code retention
 already shipped in `2c16ca95e` remain unchanged. T594 C2 also resolves T602 item 2; refusing a second refresh resolves T602 item 5.
 
+## Checkout access during replacement (T780 PR2, reduced scope)
+
+`@haive/shared/checkout-access` is the server-side admission policy. `read` requires ready;
+`mutation` admission requires ready, no owed preparation (`refresh_pending`) and no foreign live
+root claim. Explicit `repair` availability also permits an error checkout for raw attachment
+reads, attachment removal and remote configuration repair. Neither admits cloning.
+`preparation` requires the actual renewing `RootClaimHandle`, verified against its private runtime
+registration, repository ID, preparation kind (`rebuild` or `refresh`) and the live row's owner.
+A boolean, copied object, another repository's handle, expired/replaced claim or released handle grants no permission. This mode is available for
+preparation's private restore; wiring existing preparation/projection callers remains follow-up work.
+
+`withCheckoutMutation` acquires a distinct `mutation` root claim **before** attachment/domain/row locks,
+checks availability again after acquisition and releases in `finally`. It retains no connection
+across an upload body or subprocess. A claim collision answers 409 `checkout_unavailable`;
+concurrent independent mutations in the same repository must retry, with copy naming the held
+kind. A preparation queued after an admitted mutation waits: `withRootClaim` raises
+`RootClaimBusyError`, and the queue delays pickup five seconds without changing status, clearing
+its owner or consuming a failure attempt. The admitted mutation can finish while that preparation
+is owed; a new mutation cannot enter that queue gap. Before every physical step, independent
+writes check the registered handle's last confirmed lease stamp as well as `owner.lost()`,
+refusing at `ROOT_CLAIM_STALE_MS - CHECKOUT_MUTATION_SAFETY_MS` (30 seconds before takeover)
+even when renewal cannot prove a takeover. Neither failed attempts nor delayed reply arrival
+refresh that stamp. This write fence has an injectable clock and does not stop lease renewal.
+Claim loss is logged on release. A refused post-stream recheck takes back
+the upload by its pinned inode, leaving no orphan in the public tree and preserving an aside.
+A read uses admission only:
+a failed acquisition rechecks availability to classify a rename as `checkout_unavailable`, while
+an already verified descriptor can finish on the preserved inode. These are not snapshot exports.
+The policy never creates an anchor or changes repository status or preparation ownership.
+
+This PR applies that policy to attachment upload/raw/single-delete/folder-delete, remote relink
+and its reconciliation sweep (one info line per checkout hold, redriven after release), and
+whole-plan deletion (the lease spans its database deletion and both physical mirror removals). Attachment lists and database-only plan list/detail/node edits
+remain available. A task whose repository was deleted can remove its attachment rows DB-only,
+without guessing a filesystem root. The raw route's error recheck preserves ordinary missing-file
+and containment errors when the checkout is still ready. Ordinary ready fast-forwards do not hide read-only access.
+
+The remaining independent entries in the T780 analysis are **not yet covered**: plan writer/importer
+and Save/Pull, project-state sync/writer/journal/rules/metadata recovery, initial detection/legacy
+imports, task file/archive/root resolvers, scope/code previews, onboarding/upgrade/data/snapshot
+status, runtime ensure and DDEV control. They still need the same policy at their admission/locked
+boundaries, with task-key → domain → repository-row order and dirty/outbox obligations retained
+on holds. Interactive mount suspension is PR3. Do not infer complete checkout exclusion from the
+new attachment/remote/deletion coverage.
+
+Rollback: settle active attachment, remote and plan-delete operations and all preparations, then
+revert the API/shared/database code together and rebuild shared/database from that revision. There
+is no schema migration. Preserve relink intents, dirty/outbox rows and every aside/staging sibling.
+Rollback reopens the covered races; it never moves an aside back automatically.
+
 ## Remote relink reconciliation
+
+Relink and reconciliation hold the checkout mutation lease before their existing intent/row
+locks. Repair on an error checkout stays available; cloning and a foreign claim hold work without
+consuming the relink intent. The route uses a dedicated fresh client for its Git transaction,
+keeping the request pool free. Both reconciliation and attachment transactions drain callbacks
+through `withSettledTransaction`: a driver rejection cannot release replacement exclusion while
+Git or filesystem work still runs.
 
 `POST /repos/:id/remote` commits a credential-free UUID in
 `repositories.remote_relink_intent` before the relink transaction or its first Git
@@ -260,7 +317,9 @@ timer when the server closes. It selects only repositories with non-null
 database intent, at most 25 IDs per 30-second tick, rotating the cursor and
 scheduling only after the preceding pass finishes; its timers are unref'd. The
 request pool is used only to collect the page, never held across sweep Git.
-Each selected repository is rechecked under the fresh-client lock, taken with
+Each selected repository first takes the mutation lease; a live API writer's lease holds repair
+as `checkout`, including after its database connection drops. After API death the intent remains
+untouched until that lease expires. It is then rechecked under the fresh-client lock, taken with
 `SKIP LOCKED`: a repository a relink holds is passed over, not waited for, so the
 sweep never acts on a live request's intent the moment that request rolls back;
 the next tick sees it again. A dropped database connection releases that lock

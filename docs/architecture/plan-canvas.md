@@ -286,3 +286,9 @@ query and fragment from that response while keeping the non-secret SSH login and
 Plan-page attention uses the shared presence clock and a page-owned pending registry, with
 no additional overview or node-detail polls. Its reporter rules, cached-state bound and
 repository/hour delivery are documented in [Human active time](human-time.md#plan-page-delivery).
+
+Whole-plan deletion takes the renewing checkout mutation claim before `applyPlanPatch`, retaining
+it through both physical mirror removals and cleanup. Cloning or a foreign root claim refuses with
+409 `checkout_unavailable` before deleting plan rows. Existing plan confirmation/task refusals
+remain first, and database-only node edits/list/detail remain available. This does not yet fence
+the plan sweep/importer or Save/Pull; their replacement exclusion is T780 PR2 follow-up work.

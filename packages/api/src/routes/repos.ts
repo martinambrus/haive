@@ -1,10 +1,16 @@
+import {
+  assertCheckoutMutationOwner,
+  CheckoutUnavailableError,
+  withCheckoutMutation,
+} from '@haive/shared/checkout-access';
+import type { RootClaimHandle, DbTx } from '@haive/database';
 import { DerivedRunPlanError, pinnedTaskStepIds } from '@haive/shared/modularity';
 import { MERGE_LANDED_EVENT, readLandedMerge } from '@haive/shared/merge-left-open';
 import { checkoutWorktreeRefusal } from '@haive/shared/repo-rebuild';
 import { randomUUID } from 'node:crypto';
 import path from 'node:path';
 import { Readable } from 'node:stream';
-import { Hono } from 'hono';
+import { Hono, type MiddlewareHandler } from 'hono';
 import {
   eq,
   and,
@@ -120,7 +126,7 @@ import {
 } from '@haive/shared/knowledge-paths';
 import { markProjectStateDirty } from '@haive/shared/project-state-outbox';
 import { logger, type RepoRagCleanupPayload, type RepoResourceCleanupPayload } from '@haive/shared';
-import { getDb } from '../db.js';
+import { getDb, withFreshDatabase } from '../db.js';
 import { relinkGit, gitFailureText, verifyRelinkCheckout } from '../lib/relink-git.js';
 import {
   markRemoteIntent,
@@ -2738,7 +2744,36 @@ export async function resetOnboardingArtifacts(
  * `source` is left alone on purpose. It records how the repository came to
  * exist, which is still true, and resolvers key on it.
  */
-repoRoutes.post('/:id/remote', async (c) => {
+// Keep this route's capability out of the public router's Context contract.
+const remoteCheckoutOwners = new WeakMap<object, RootClaimHandle>();
+const remoteCheckoutAccess: MiddlewareHandler<AppEnv> = async (c, next) => {
+  const db = getDb();
+  const id = c.req.param('id')!;
+  const userId = c.get('userId');
+  const repo = await db.query.repositories.findFirst({
+    where: and(eq(schema.repositories.id, id), eq(schema.repositories.userId, userId)),
+    columns: { id: true },
+  });
+  if (!repo) throw new HttpError(404, 'Repository not found');
+  await withCheckoutMutation(
+    db,
+    id,
+    userId,
+    async (owner) => {
+      remoteCheckoutOwners.set(c, owner);
+      try {
+        await next();
+      } finally {
+        remoteCheckoutOwners.delete(c);
+      }
+    },
+    'repair',
+  );
+};
+
+repoRoutes.post('/:id/remote', remoteCheckoutAccess, async (c) => {
+  const checkoutOwner = remoteCheckoutOwners.get(c);
+  if (!checkoutOwner) throw new CheckoutUnavailableError();
   const userId = c.get('userId');
   const id = c.req.param('id');
   const body = linkRepoRemoteRequestSchema.parse(await c.req.json());
@@ -2784,7 +2819,10 @@ repoRoutes.post('/:id/remote', async (c) => {
     body.credentialsId === undefined ? repo.credentialsSecretId : body.credentialsId,
   );
 
-  const git = (args: string[]) => relinkGit(root, args);
+  const git = (args: string[]) => {
+    assertCheckoutMutationOwner(checkoutOwner);
+    return relinkGit(root, args);
+  };
   await verifyRelinkCheckout(root);
 
   let intent: Awaited<ReturnType<typeof markRemoteIntent>>;
@@ -2853,7 +2891,7 @@ repoRoutes.post('/:id/remote', async (c) => {
   // cannot clear the intent while a write that outlived a dropped connection is still running.
   const endWriter = beginRelinkWriter(repo.id);
   try {
-    await db.transaction(async (tx) => {
+    const writeRemote = async (tx: DbTx) => {
       let settle!: () => void;
       callbackSettled = new Promise<void>((resolve) => {
         settle = resolve;
@@ -2990,7 +3028,8 @@ repoRoutes.post('/:id/remote', async (c) => {
       } finally {
         settle();
       }
-    });
+    };
+    await withFreshDatabase((fresh) => fresh.transaction(writeRemote));
   } catch (err) {
     // postgres.js can reject on connection close while the callback still awaits Git.
     // Let its last write and any in-callback restore finish before the fallback runs.
@@ -3000,7 +3039,7 @@ repoRoutes.post('/:id/remote', async (c) => {
     if (isRemoteConnectionError(err)) {
       if (!intentWritten) throw err;
       try {
-        await reconcileRemote(id, userId);
+        await reconcileRemote(id, userId, { owner: checkoutOwner });
       } catch (reconcileError) {
         logger.error(
           { err: reconcileError, repositoryId: id },

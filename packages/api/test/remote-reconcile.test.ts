@@ -14,7 +14,7 @@ vi.mock('../src/lib/relink-git.js', () => ({
   gitFailureText: () => 'git operation failed',
 }));
 import { logger } from '@haive/shared';
-import { schema } from '@haive/database';
+import { acquireRootClaim, type Database, schema } from '@haive/database';
 import { createFakeDb } from '@haive/database/testing';
 import {
   isRemoteConnectionError,
@@ -37,6 +37,7 @@ beforeEach(() => {
   vi.resetAllMocks();
   fake = createFakeDb({ repositories: schema.repositories });
   fake.insert(schema.repositories, {
+    status: 'ready',
     ...repo,
     name: 'owned',
     remoteUrl: 'https://saved.test/repo',
@@ -275,5 +276,92 @@ it('does not report a deleted repository as locked in a sweep', async () => {
     expect(h.git).not.toHaveBeenCalled();
   } finally {
     stop();
+  }
+});
+
+it.each(['cloning', 'claimed'])(
+  'holds reconciliation during %s without consuming intent',
+  async (state) => {
+    fake.patch(
+      schema.repositories,
+      id,
+      state === 'cloning'
+        ? { status: 'cloning' }
+        : { rootClaimedAt: new Date(), rootClaimKind: 'rebuild', rootClaimOwner: 'foreign' },
+    );
+    await expect(reconcileRemote(id, userId)).rejects.toMatchObject({
+      code: 'checkout_unavailable',
+    });
+    expect(h.git).not.toHaveBeenCalled();
+    expect(pending()).toBeTruthy();
+  },
+);
+
+it('retains the root lease until Git settles after its transaction rejects', async () => {
+  let entered!: () => void;
+  let resume!: () => void;
+  let rejectDriver!: (error: Error) => void;
+  const started = new Promise<void>((r) => {
+    entered = r;
+  });
+  const continued = new Promise<void>((r) => {
+    resume = r;
+  });
+  let callback: Promise<unknown> | undefined;
+  h.fresh.mockImplementation((run: (db: unknown) => Promise<unknown>) =>
+    run({
+      ...fake.db,
+      transaction(fn: Parameters<typeof fake.db.transaction>[0]) {
+        callback = fake.db.transaction(fn);
+        return new Promise((_, reject) => {
+          rejectDriver = reject;
+        });
+      },
+    }),
+  );
+  h.git.mockImplementationOnce(async () => {
+    entered();
+    await continued;
+    return { ok: true, exitedClean: true, code: 0, stdout: '', stderr: '' };
+  });
+  let returned = false;
+  const result = reconcileRemote(id, userId).catch((error: unknown) => {
+    returned = true;
+    return error;
+  });
+  await started;
+  const error = new Error('connection lost');
+  rejectDriver(error);
+  for (let i = 0; i < 20; i += 1) await Promise.resolve();
+  try {
+    expect(returned).toBe(false);
+    expect(fake.rows(schema.repositories)[0]!.rootClaimedAt).not.toBeNull();
+  } finally {
+    resume();
+    await callback;
+    await result;
+  }
+  expect(await result).toBe(error);
+  expect(fake.rows(schema.repositories)[0]!.rootClaimedAt).toBeNull();
+});
+
+it('sweep logs a held mutation once, retains intent and reconciles after release', async () => {
+  vi.useFakeTimers();
+  const owner = (await acquireRootClaim(fake.db as unknown as Database, id, 'edit', userId))!;
+  vi.spyOn(fake.db.query.repositories!, 'findMany').mockResolvedValue([repo] as never);
+  const stop = startRemoteReconcileSweep({ intervalMs: 10 });
+  try {
+    await vi.advanceTimersByTimeAsync(20);
+    expect(h.git).not.toHaveBeenCalled();
+    expect(pending()).toBeTruthy();
+    expect(logger.warn).not.toHaveBeenCalled();
+    expect(info).toHaveBeenCalledTimes(1);
+    await owner.release();
+    await vi.advanceTimersByTimeAsync(10);
+    expect(h.git).toHaveBeenCalled();
+    expect(pending()).toBeNull();
+  } finally {
+    stop();
+    await owner.release();
   }
 });

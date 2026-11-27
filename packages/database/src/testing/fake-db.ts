@@ -392,6 +392,21 @@ export function createFakeDb<const T extends Record<string, PgTable>>(
         };
       }
       if (key !== undefined && is(col, Column)) {
+        if (ch.length === 3 && text(op) === ' < ' && is(val, SQL)) {
+          const interval = val.queryChunks.filter((c) => text(c) !== '');
+          if (
+            interval.length === 3 &&
+            text(interval[0]) === 'now() - ' &&
+            typeof interval[1] === 'string' &&
+            text(interval[2]) === '::interval'
+          ) {
+            const ms = /^(\d+) milliseconds$/.exec(interval[1]);
+            if (ms)
+              return (row) =>
+                row[key] instanceof Date &&
+                (row[key] as Date).getTime() < Date.now() - Number(ms[1]);
+          }
+        }
         if (ch.length === 2 && text(op) === ' is null') return (row) => row[key] == null;
         if (ch.length === 2 && text(op) === ' is not null') return (row) => row[key] != null;
         if (ch.length === 3 && text(op) === ' = ' && is(val, Param)) {

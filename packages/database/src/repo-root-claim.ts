@@ -7,9 +7,9 @@ import type { Database } from './index.js';
 // transaction can use these too. Mirrors dag-reset.ts, the other helper api and worker both call.
 type DbHandle = Parameters<Parameters<Database['transaction']>[0]>[0];
 
-/** Who is rewriting the root. Carried only so a refusal can say what it is waiting for — nothing
- *  branches on it, because the exclusion is mutual either way. */
-export type RootClaimKind = 'reset' | 'rebuild' | 'refresh' | 'edit' | 'verify';
+/** Who holds the root, for truthful refusal copy and preparation capability checks.
+ * Exclusion is mutual for every kind. */
+export type RootClaimKind = 'reset' | 'rebuild' | 'refresh' | 'edit' | 'mutation' | 'verify';
 
 /**
  * How long a root claim is honoured WITHOUT a heartbeat before readers treat it as abandoned.
@@ -514,13 +514,51 @@ export interface RootClaimHandle {
    * enough for someone else's takeover CAS — a partition that reaches us and not them, or an
    * event loop blocked for fifteen minutes. It means two writers touched one tree.
    *
-   * Observable rather than fatal, deliberately. The destructive work cannot be preempted: there
-   * is no cancelling a `copyTree` or an `rm -rf` mid-call, and THROWING afterwards would hand the
+   * Independent mutations check this AND the last confirmed lease stamp before each physical
+   * write: an unreachable database need not prove takeover before write authority expires.
+   * For preparation's already-destructive work, observable rather than fatal, deliberately.
+   * The destructive work cannot be preempted: there is no cancelling a `copyTree` or an `rm -rf` mid-call, and THROWING afterwards would hand the
    * job back to BullMQ's `attempts: 3`, which re-runs the clone and puts a third writer on the
    * same tree. What is left is to say so, loudly, at the point where a caller would otherwise
    * report a clean result.
    */
   lost(): boolean;
+}
+
+// Runtime identity, not structural typing: a fabricated handle cannot authorize checkout access.
+const heldClaims = new WeakMap<
+  RootClaimHandle,
+  {
+    repositoryId: string;
+    owner: string;
+    kind: RootClaimKind;
+    active: () => boolean;
+    confirmedAt: () => Date;
+  }
+>();
+
+/** Last proven lease stamp, never an unacknowledged attempt or the time a delayed reply arrived.
+ * Independent writers stop before this stamp can expire even when no takeover was observed.
+ * This does not end renewal or change preparation's non-preemptible lease semantics. */
+export function rootClaimHandleConfirmedAt(handle: RootClaimHandle): Date | null {
+  const held = heldClaims.get(handle);
+  return held?.active() ? new Date(held.confirmedAt()) : null;
+}
+
+export function rootClaimHandleOwns(
+  handle: RootClaimHandle,
+  repositoryId: string,
+  owner: string | null,
+  kinds?: readonly RootClaimKind[],
+): boolean {
+  const held = heldClaims.get(handle);
+  return (
+    !!held &&
+    held.repositoryId === repositoryId &&
+    held.owner === owner &&
+    (!kinds || kinds.includes(held.kind)) &&
+    held.active()
+  );
 }
 
 /**
@@ -582,6 +620,7 @@ export async function acquireRootClaim(
   if (first === null) return null;
 
   let current: Date | null = first.claimedAt;
+  let confirmedAt = first.claimedAt;
 
   // Set where the loss is LEARNED, not where it is noticed. Deriving it from `current === null` at
   // release time would be wrong in both directions: `lost()` would answer false for a lease
@@ -657,6 +696,7 @@ export async function acquireRootClaim(
     }
     // null means the lease was taken over while we worked. Stop renewing and stop releasing:
     // the claim on the row is someone else's now, and clearing it would strip their protection.
+    if (next.proven && next.stamp !== null) confirmedAt = next.stamp;
     current = next.stamp;
     if (current === null) {
       lost = true;
@@ -673,7 +713,7 @@ export async function acquireRootClaim(
   }, ROOT_CLAIM_RENEW_MS);
   timer.unref?.();
 
-  return {
+  const handle: RootClaimHandle = {
     lost: () => lost,
     async release() {
       clearInterval(timer);
@@ -717,6 +757,14 @@ export async function acquireRootClaim(
       current = null;
     },
   };
+  heldClaims.set(handle, {
+    repositoryId,
+    owner,
+    kind,
+    active: () => current !== null && !lost,
+    confirmedAt: () => confirmedAt,
+  });
+  return handle;
 }
 
 /** The live claim on this repository, or null. Readers that only need to refuse use this; the
@@ -749,6 +797,9 @@ export function rootClaimRefusal(kind: RootClaimKind | null): string {
   }
   if (kind === 'edit') {
     return 'A knowledge file in this repository is being saved. Try again in a moment.';
+  }
+  if (kind === 'mutation') {
+    return 'This repository is being changed by another file or configuration operation. Try again in a moment.';
   }
   if (kind === 'verify') {
     return 'This repository is being checked. Try again in a moment.';

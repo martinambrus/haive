@@ -1,3 +1,4 @@
+import { RootClaimBusyError } from './root-claim-busy.js';
 import { assertRepoJobOwner, ObsoleteRepoJobError, repoJobPredicate } from './job-owner.js';
 import { auditRepositorySettings, logAuditEvent, type AuditEvent } from '../audit.js';
 import { spawn } from 'node:child_process';
@@ -460,11 +461,8 @@ export function copyTree(src: string, dest: string): Promise<void> {
  * while the tree is being recursively removed underneath it. Holding the same claim the reset
  * takes makes the two mutually exclusive: whichever arrives second is refused.
  *
- * Throwing on a refusal is the right shape, not a silent return: the repo queue runs `attempts: 3`
- * with exponential backoff, so a reset lasting seconds is simply waited out, and one that outlives
- * the retries parks the row at `error` carrying this message. A silent return would report success
- * without `persistDetection` marking the checkout `ready`; the boot/60s stranded-preparation sweep
- * would later report an error instead of retrying the busy claim.
+ * A busy claim yields the queue job to delayed pickup without consuming a failure attempt or
+ * changing checkout availability. Even an attempts: 1 preparation can wait for a long upload.
  */
 export async function withRootClaim<T>(
   db: Database,
@@ -475,9 +473,7 @@ export async function withRootClaim<T>(
   const claim = await acquireRootClaim(db, repositoryId, kind);
   if (claim === null) {
     const held = await readLiveRootClaim(db, repositoryId);
-    throw new Error(
-      `the repository root is claimed (${held?.kind ?? 'unknown'}); it must not be rebuilt until that finishes`,
-    );
+    throw new RootClaimBusyError(held?.kind ?? null);
   }
   try {
     return await run();

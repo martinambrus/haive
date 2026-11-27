@@ -1,8 +1,16 @@
+import {
+  CheckoutUnavailableError,
+  assertCheckoutMutationOwner,
+  requireCheckoutAccess,
+  withCheckoutMutation,
+  withCheckoutRead,
+} from '@haive/shared/checkout-access';
+import type { RootClaimHandle } from '@haive/database';
 import { randomUUID } from 'node:crypto';
 import { type FileHandle } from 'node:fs/promises';
 import { join } from 'node:path';
 import { Readable } from 'node:stream';
-import { Hono } from 'hono';
+import { Hono, type MiddlewareHandler } from 'hono';
 import { and, asc, eq, inArray } from 'drizzle-orm';
 import { isLockNotAvailable, schema, withTaskAttachmentsLock } from '@haive/database';
 import {
@@ -54,7 +62,47 @@ import { HttpError, type AppEnv } from '../../context.js';
 // sandbox user). We create the files 0644 and chown them 1000:1000 so the agent
 // can read them.
 
-export const attachmentRoutes = new Hono<AppEnv>();
+type AttachmentEnv = AppEnv & {
+  Variables: { checkout: { repositoryId: string | null; owner?: RootClaimHandle } };
+};
+export const attachmentRoutes = new Hono<AttachmentEnv>();
+
+// The renewing root claim is outside the short attachment sections, including body streaming
+// and cleanup. A read only needs admission; its already-verified file may finish on the old inode.
+const checkoutAccess: MiddlewareHandler<AttachmentEnv> = async (c, next) => {
+  if (c.req.method === 'GET' && !c.req.path.endsWith('/raw')) return next();
+  const db = getDb();
+  const task = await db.query.tasks.findFirst({
+    where: and(eq(schema.tasks.id, c.req.param('id')!), eq(schema.tasks.userId, c.get('userId'))),
+    columns: { repositoryId: true },
+  });
+  if (!task) throw new HttpError(404, 'Task not found');
+  if (!task.repositoryId) {
+    if (c.req.method !== 'DELETE')
+      throw new HttpError(409, 'Task has no repository; cannot attach files');
+    c.set('checkout', { repositoryId: null });
+    return next();
+  }
+  const repositoryId = task.repositoryId;
+  if (c.req.method === 'GET') {
+    c.set('checkout', { repositoryId });
+    await requireCheckoutAccess(db, repositoryId, { mode: 'read', availability: 'repair' });
+    return next();
+  }
+  await withCheckoutMutation(
+    db,
+    repositoryId,
+    c.get('userId'),
+    async (owner) => {
+      c.set('checkout', { repositoryId, owner });
+      await next();
+    },
+    c.req.method === 'DELETE' ? 'repair' : 'ready',
+  );
+};
+attachmentRoutes.use('/:id/attachments', checkoutAccess);
+attachmentRoutes.use('/:id/attachments/:attachmentId', checkoutAccess);
+attachmentRoutes.use('/:id/attachments/:attachmentId/raw', checkoutAccess);
 
 const NODE_UID = 1000;
 const NODE_GID = 1000;
@@ -161,6 +209,8 @@ function safeUploadPath(raw: string): string {
  *  read routes' answer; errors that are not containment refusals (a full disk or descriptor
  *  exhaustion) propagate to the 500 handler. */
 function uploadPathError(err: unknown): never {
+  if (['ENOENT', 'ENOTDIR'].includes((err as NodeJS.ErrnoException).code ?? ''))
+    throw new CheckoutUnavailableError();
   if (isPathContainmentError(err, 'not-directory')) {
     throw new HttpError(409, 'A file already has the name of a folder in that path');
   }
@@ -181,11 +231,17 @@ function lockBusyError(err: unknown): never {
 
 /** Make every level of `relDir` under the uploads root traversable + owned by the
  *  sandbox user. A folder upload creates directories the api never touched. */
-async function ensureDirTree(anchor: string, uploadsRel: string, relDir: string): Promise<void> {
+async function ensureDirTree(
+  anchor: string,
+  uploadsRel: string,
+  relDir: string,
+  beforeWrite: () => void,
+): Promise<void> {
   if (relDir === '') return;
   const owner = { uid: NODE_UID, gid: NODE_GID };
   // The owner is applied by the best-effort pass below, not by the primitive: it is fatal there, and
   // an api that is not root cannot chown to the sandbox uid — 0755 is world-traversable regardless.
+  beforeWrite();
   await ensureDirNoFollow(anchor, `${uploadsRel}/${relDir}`, { mode: 0o755 });
   // `ensureDirNoFollow` applies owner and mode only to what IT created, on purpose — walking to a
   // deep path must not rewrite an existing directory's permissions. But a level an earlier upload
@@ -193,7 +249,9 @@ async function ensureDirTree(anchor: string, uploadsRel: string, relDir: string)
   let cursor = uploadsRel;
   for (const segment of relDir.split('/')) {
     cursor = `${cursor}/${segment}`;
+    beforeWrite();
     await chownNoFollow(anchor, cursor, owner).catch(() => {});
+    beforeWrite();
     await chmodNoFollow(anchor, cursor, 0o755).catch(() => {});
   }
 }
@@ -214,9 +272,10 @@ async function createUniqueAttachment(
   anchor: string,
   uploadsRel: string,
   relPath: string,
+  beforeWrite: () => void,
 ): Promise<ClaimedName> {
   const { dir: relDir, base } = splitAttachmentPath(relPath);
-  await ensureDirTree(anchor, uploadsRel, relDir);
+  await ensureDirTree(anchor, uploadsRel, relDir, beforeWrite);
   const rel = (name: string): string => (relDir === '' ? name : `${relDir}/${name}`);
 
   // The name is CLAIMED by creating it, not by probing for it. The `access` probe this replaces
@@ -226,6 +285,7 @@ async function createUniqueAttachment(
     const candidate = n === 1 ? base : attachmentCopyName(base, n, true);
     if (isReservedAttachmentName(candidate, relDir === '')) continue;
     try {
+      beforeWrite();
       const fh = await openFileNoFollow(
         anchor,
         `${uploadsRel}/${rel(candidate)}`,
@@ -233,13 +293,23 @@ async function createUniqueAttachment(
         { fileMode: 0o644 },
       );
       const identity = await fileIdentity(fh);
-      // Best-effort, as the chown here has always been: an api that is not root cannot hand the
-      // file to the sandbox uid, and 0644 is world-readable, so the upload must not fail over it.
-      await chownNoFollow(anchor, `${uploadsRel}/${rel(candidate)}`, {
-        uid: NODE_UID,
-        gid: NODE_GID,
-      }).catch(() => {});
-      return { rel: rel(candidate), fh, identity };
+      // Identity-only cleanup remains safe after loss while this descriptor pins the inode.
+      try {
+        beforeWrite();
+        await chownNoFollow(anchor, `${uploadsRel}/${rel(candidate)}`, {
+          uid: NODE_UID,
+          gid: NODE_GID,
+        }).catch(() => {});
+        return { rel: rel(candidate), fh, identity };
+      } catch (err) {
+        await removeFileIfIdentityNoFollow(
+          anchor,
+          `${uploadsRel}/${rel(candidate)}`,
+          identity,
+        ).catch(() => {});
+        await fh.close().catch(() => {});
+        throw err;
+      }
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err;
     }
@@ -261,18 +331,22 @@ async function claimAttachmentName(
   anchor: string,
   uploadsRel: string,
   relPath: string,
+  beforeWrite: () => void,
 ): Promise<ClaimedName> {
   let section = null as Promise<ClaimedName> | null;
   const settled: string[] = [];
   try {
     await withTaskAttachmentsLock(getDb(), taskId, (tx) => {
       section = (async () => {
-        await settleExpansionIntents(tx, taskId, anchor, uploadsRel, settled);
-        return createUniqueAttachment(anchor, uploadsRel, relPath);
+        await settleExpansionIntents(tx, taskId, anchor, uploadsRel, settled, beforeWrite);
+        return createUniqueAttachment(anchor, uploadsRel, relPath, beforeWrite);
       })();
       return section;
     });
-    return await section!;
+    const claimed = await section!;
+    // A lost lease during staging cleanup must still take back the newly claimed name.
+    await removeExpansionStagings(anchor, uploadsRel, settled, beforeWrite);
+    return claimed;
   } catch (err) {
     const claimed = section === null ? null : await section.catch(() => null);
     if (claimed !== null) {
@@ -284,10 +358,9 @@ async function claimAttachmentName(
       ).catch(() => {});
       await claimed.fh.close().catch(() => {});
     }
+    // Outside the section. On lease loss leave inert staging for a later sweep.
+    await removeExpansionStagings(anchor, uploadsRel, settled, beforeWrite).catch(() => {});
     return isLockNotAvailable(err) ? lockBusyError(err) : uploadPathError(err);
-  } finally {
-    // Outside the section: a staging dir can hold a whole extracted archive.
-    await removeExpansionStagings(anchor, uploadsRel, settled);
   }
 }
 
@@ -297,6 +370,7 @@ async function streamToFileWithCap(
   body: ReadableStream<Uint8Array>,
   fh: FileHandle,
   maxBytes: number,
+  beforeWrite: () => void,
 ): Promise<number> {
   // Written through the descriptor the caller already created and verified, so the bytes cannot
   // land anywhere but that inode, and left open: the caller owns cleanup on failure.
@@ -306,6 +380,8 @@ async function streamToFileWithCap(
       fh,
       maxBytes,
       () => new HttpError(413, `attachment exceeds ${maxBytes} bytes limit`),
+      0,
+      beforeWrite,
     );
   } catch (err) {
     if (err instanceof HttpError) throw err;
@@ -315,14 +391,21 @@ async function streamToFileWithCap(
 
 /** Make a freshly-created dir traversable + owned by the sandbox user. Best-effort
  *  (the api is root; failures are non-fatal since 0755/0644 are world-readable). */
-async function ensureUploadsDir(anchor: string, uploadsRel: string): Promise<void> {
+async function ensureUploadsDir(
+  anchor: string,
+  uploadsRel: string,
+  beforeWrite: () => void,
+): Promise<void> {
   const owner = { uid: NODE_UID, gid: NODE_GID };
+  beforeWrite();
   await ensureDirNoFollow(anchor, uploadsRel, { mode: 0o755 });
   // `.haive/task-uploads/` and the task dir both, because either can predate this upload and be
   // root-owned — an unwritable parent defeats a writable child.
   const parentRel = uploadsRel.slice(0, uploadsRel.lastIndexOf('/'));
   for (const rel of [parentRel, uploadsRel]) {
+    beforeWrite();
     await chownNoFollow(anchor, rel, owner).catch(() => {});
+    beforeWrite();
     await chmodNoFollow(anchor, rel, 0o755).catch(() => {});
   }
 }
@@ -355,6 +438,7 @@ async function finalizeAttachment(args: {
   sizeBytes: number;
   contentType: string | null;
   description: string | null;
+  beforeWrite: () => void;
 }) {
   // No chmod/chown here: `createUniqueAttachment` created the file 0644 and chowned it to the
   // sandbox uid (best-effort) before any bytes were written.
@@ -393,13 +477,21 @@ async function finalizeAttachment(args: {
     row = found;
   }
 
-  await rewriteAttachmentsManifest(getDb(), args.taskId, args.anchor, args.uploadsRel);
+  await rewriteAttachmentsManifest(
+    getDb(),
+    args.taskId,
+    args.anchor,
+    args.uploadsRel,
+    args.beforeWrite,
+  );
   return row!;
 }
 
 attachmentRoutes.post('/:id/attachments', async (c) => {
   const userId = c.get('userId');
   const taskId = c.req.param('id');
+  const checkout = c.get('checkout');
+  const beforeWrite = () => assertCheckoutMutationOwner(checkout.owner!);
   const { dir, anchor, rel: uploadsRel } = await resolveTaskUploadsDir(taskId, userId);
 
   const query = uploadTaskAttachmentQuerySchema.parse({
@@ -417,17 +509,17 @@ attachmentRoutes.post('/:id/attachments', async (c) => {
     DEFAULT_TASK_ATTACHMENT_MAX_BYTES,
   );
 
-  await ensureUploadsDir(anchor, uploadsRel).catch(uploadPathError);
+  await ensureUploadsDir(anchor, uploadsRel, beforeWrite).catch(uploadPathError);
 
   const {
     rel: safeName,
     fh,
     identity,
-  } = await claimAttachmentName(taskId, anchor, uploadsRel, relPath);
+  } = await claimAttachmentName(taskId, anchor, uploadsRel, relPath, beforeWrite);
   const destPath = join(dir, safeName);
   let size: number;
   try {
-    size = await streamToFileWithCap(body, fh, maxBytes);
+    size = await streamToFileWithCap(body, fh, maxBytes, beforeWrite);
   } catch (err) {
     // The name was claimed by creating it, so an aborted or over-cap upload has to unclaim it —
     // otherwise the next attempt collides with our own empty file. Removed while still open, so no
@@ -442,6 +534,18 @@ attachmentRoutes.post('/:id/attachments', async (c) => {
   // Open until the row is recorded, so a take-back after a failed insert still pins the inode.
   let row: Awaited<ReturnType<typeof finalizeAttachment>>;
   try {
+    try {
+      beforeWrite();
+      await requireCheckoutAccess(getDb(), checkout.repositoryId!, {
+        mode: 'mutation',
+        owner: checkout.owner,
+      });
+    } catch (err) {
+      await removeFileIfIdentityNoFollow(anchor, `${uploadsRel}/${safeName}`, identity).catch(
+        () => {},
+      );
+      throw err;
+    }
     row = await finalizeAttachment({
       anchor,
       uploadsRel,
@@ -453,6 +557,7 @@ attachmentRoutes.post('/:id/attachments', async (c) => {
       sizeBytes: size,
       contentType: headerContentType(c.req.header('content-type')),
       description: query.description ?? null,
+      beforeWrite,
     });
   } finally {
     await fh.close().catch(() => {});
@@ -494,10 +599,19 @@ attachmentRoutes.get('/:id/attachments/:attachmentId/raw', async (c) => {
   const anchor = row.storedPath.slice(0, -suffix.length);
   const rel = join('.haive', 'task-uploads', taskId, row.filename);
 
-  const fh = await openFileNoFollow(anchor, rel, 'read', { strict: true }).catch((err: unknown) =>
-    containmentHttpError(err, 'Attachment path is outside the task workspace'),
+  const fh = await withCheckoutRead(
+    getDb(),
+    c.get('checkout').repositoryId!,
+    async () => {
+      const held = await openFileNoFollow(anchor, rel, 'read', { strict: true }).catch(
+        (err: unknown) =>
+          containmentHttpError(err, 'Attachment path is outside the task workspace'),
+      );
+      if (held === null) throw new HttpError(404, 'Attachment file is missing on disk');
+      return held;
+    },
+    'repair',
   );
-  if (fh === null) throw new HttpError(404, 'Attachment file is missing on disk');
   const size = (await fh.stat()).size;
 
   // The BASENAME: `filename` may be a relative path now, and a header carrying
@@ -519,6 +633,21 @@ attachmentRoutes.delete('/:id/attachments/:attachmentId', async (c) => {
   const row = await findAttachment(taskId, userId, attachmentId);
 
   const db = getDb();
+  const checkout = c.get('checkout');
+  const beforeWrite = () => assertCheckoutMutationOwner(checkout.owner!);
+  if (!checkout.repositoryId) {
+    await withTaskAttachmentsLock(db, taskId, async (tx) => {
+      const rows = await tx.query.taskAttachments.findMany({
+        where: and(
+          eq(schema.taskAttachments.taskId, taskId),
+          eq(schema.taskAttachments.userId, userId),
+        ),
+      });
+      const plan = attachmentRemovalPlan(new Set([attachmentId]), rows);
+      await tx.delete(schema.taskAttachments).where(inArray(schema.taskAttachments.id, plan.ids));
+    }).catch(lockBusyError);
+    return c.json({ ok: true });
+  }
   // The repository ROOT, recovered from the row's own stored path. The uploads dir cannot be the
   // anchor: it lives under `.haive/`, which the cli-exec sandbox mounts read-write. A row whose
   // path does not have the shape the api wrote is refused rather than deleted from a guessed root.
@@ -542,7 +671,7 @@ attachmentRoutes.delete('/:id/attachments/:attachmentId', async (c) => {
       columns: { id: true, filename: true, expandedFromId: true },
     });
     const plan = attachmentRemovalPlan(new Set([attachmentId]), rows);
-    await removeFiles(anchor, uploadsRel, plan.files);
+    await removeFiles(anchor, uploadsRel, plan.files, beforeWrite);
     await tx.delete(schema.taskAttachments).where(inArray(schema.taskAttachments.id, plan.ids));
     // An expansion of a removed archive the worker was interrupted in: with the archive's row gone,
     // no later call would know it had anything to take back.
@@ -552,13 +681,15 @@ attachmentRoutes.delete('/:id/attachments/:attachmentId', async (c) => {
       anchor,
       uploadsRel,
       new Set(plan.ids),
+      null,
+      beforeWrite,
     );
-    await pruneAfter(anchor, uploadsRel, plan.files);
-    await rewriteAttachmentsManifest(tx, taskId, anchor, uploadsRel);
+    await pruneAfter(anchor, uploadsRel, plan.files, beforeWrite);
+    await rewriteAttachmentsManifest(tx, taskId, anchor, uploadsRel, beforeWrite);
     return attempts;
   }).catch(lockBusyError);
   // Outside the section: a staging dir can hold a whole extracted archive.
-  await removeExpansionStagings(anchor, uploadsRel, settled);
+  await removeExpansionStagings(anchor, uploadsRel, settled, beforeWrite);
   return c.json({ ok: true });
 });
 
@@ -571,6 +702,8 @@ attachmentRoutes.delete('/:id/attachments', async (c) => {
   const raw = c.req.query('prefix');
   if (!raw) throw new HttpError(400, 'prefix query parameter is required');
   const prefix = safeAttachmentPath(raw);
+  const checkout = c.get('checkout');
+  const beforeWrite = () => assertCheckoutMutationOwner(checkout.owner!);
 
   // The same one section as the single delete, and for the same reason.
   const done = await withTaskAttachmentsLock(getDb(), taskId, async (tx) => {
@@ -585,6 +718,11 @@ attachmentRoutes.delete('/:id/attachments', async (c) => {
     const marked = rows.filter((r) => r.filename.startsWith(`${prefix}/`));
     if (marked.length === 0) throw new HttpError(404, `No attachments under "${prefix}/"`);
 
+    if (!checkout.repositoryId) {
+      const plan = attachmentRemovalPlan(new Set(marked.map((r) => r.id)), rows);
+      await tx.delete(schema.taskAttachments).where(inArray(schema.taskAttachments.id, plan.ids));
+      return { removed: plan.ids.length, anchor: '', uploadsRel: '', settled: [] as string[] };
+    }
     const split = splitAttachmentStoredPath(marked[0]!, taskId);
     if (!split) throw new HttpError(409, 'Attachment path is not in a recognised layout');
     const { anchor, uploadsRel } = split;
@@ -593,7 +731,7 @@ attachmentRoutes.delete('/:id/attachments', async (c) => {
     // members of any archive in the folder, whose tree sits at the uploads ROOT, not under the
     // folder.
     const plan = attachmentRemovalPlan(new Set(marked.map((r) => r.id)), rows);
-    await removeFiles(anchor, uploadsRel, plan.files);
+    await removeFiles(anchor, uploadsRel, plan.files, beforeWrite);
     await tx.delete(schema.taskAttachments).where(inArray(schema.taskAttachments.id, plan.ids));
     const settled = await settleExpansionAttempts(
       tx,
@@ -601,12 +739,14 @@ attachmentRoutes.delete('/:id/attachments', async (c) => {
       anchor,
       uploadsRel,
       new Set(plan.ids),
+      null,
+      beforeWrite,
     );
-    await pruneAfter(anchor, uploadsRel, plan.files);
-    await rewriteAttachmentsManifest(tx, taskId, anchor, uploadsRel);
+    await pruneAfter(anchor, uploadsRel, plan.files, beforeWrite);
+    await rewriteAttachmentsManifest(tx, taskId, anchor, uploadsRel, beforeWrite);
     return { removed: plan.ids.length, anchor, uploadsRel, settled };
   }).catch(lockBusyError);
   // Outside the section: a staging dir can hold a whole extracted archive.
-  await removeExpansionStagings(done.anchor, done.uploadsRel, done.settled);
+  await removeExpansionStagings(done.anchor, done.uploadsRel, done.settled, beforeWrite);
   return c.json({ ok: true, removed: done.removed });
 });
