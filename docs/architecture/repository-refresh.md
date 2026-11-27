@@ -47,15 +47,28 @@ that BullMQ job (`UnrecoverableError`), names every retained aside by its basena
 scrubbing cannot hide them, and requires a manual Retry with a new job.
 Refresh lists this repository's exact `<repoId>.aside-<ISO timestamp with colon/dot replaced>`
 siblings through fs-safe under the renewing root claim, before preparation and after a move or
-failure. It records all basenames, sorted oldest first, in `repositories.checkout_aside_paths`
-(migration 0255, declared last). The ready note and the page's failure text are derived from that
-structured list; no recovery decision parses a message. Failure objects also carry the list as
+failure. It records all nonempty-directory, file and link basenames, sorted oldest first, in
+`repositories.checkout_aside_paths` (migration 0255). Disk discovery is the inventory evidence;
+the stored list is informational and is not read to render the page. The rebuild's ready note
+and failure text use the in-memory discovery list; no recovery decision parses a message.
+Failure objects also carry the list as
 `checkoutAsidePaths`. The queue appends those names after sanitizing a bound-query failure, whose
 diagnosis remains `Database operation failed`; neither query values nor paths are recovered from
-error text. Discovery only reports entries: it never follows, restores or removes one.
+error text. Discovery never follows links, restores or removes an entry. `renameNoFollow` with
+`noReplace` claims a directory name with mkdir before rename: a death between them can leave an
+empty `<repoId>.aside-<time>` directory while the old tree still stands at the checkout. Discovery
+omits empty directory claims from both the notice and column, leaving them on disk. Review the
+chosen tree's contents before undo; age alone does not prove it contains the original files.
 A death between rename and recording is recovered by listing on the next Retry, including
 legacy siblings absent from the row. A failure of the final `persistDetection` write remains
-retryable; usable-checkout and held-task retries reconstruct the notice instead of clearing it.
+retryable. Before attempting the move, the owned inventory write stamps
+`repositories.checkout_aside_job_id` with the current pending preparation's job ID (additive
+migration 0256, declared last). Usable-checkout and held-task redeliveries of that same job
+recover notice ownership even if the rename transaction's reply was lost. They
+reconstruct its notice even when the queue has replaced its error copy. A later ordinary refresh
+has a different admission ID and restores ordinary status-message clearing: old aside names
+remain in the inventory, but do not become a permanent ready warning or annotate unrelated
+refresh failures. A new rebuild reports all retained trees again. No message text gates this policy.
 
 Undo requires choosing the original tree after reviewing **all** retained names: an older attempt
 may have left a partial tree in a later aside. Once preparations and interactive commands have
@@ -67,9 +80,9 @@ this change adds no removal policy. Neither rebuild nor Retry deletes the preser
 read-only folder import is re-scanned as before, and a repository with no remote and no folder answers 409 without
 touching its row.
 
-T486 deployment/rollback: apply additive migration 0255 before loading the worker/database
+T486 deployment/rollback: apply additive migrations 0255 and 0256 before loading the worker/database
 barrel. Settle preparation work before reverting the code and rebuild the database library from
-the reverted revision. Keep the migration file and column applied, and retain every `.aside-*`
+the reverted revision. Keep both migration files and columns applied, and retain every `.aside-*`
 and `.rebuild-*` sibling. Reverting restores ordinary remote cloning in place and notice-loss
 risks; it neither restores the original tree nor removes retained data.
 

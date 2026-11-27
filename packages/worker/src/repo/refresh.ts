@@ -63,7 +63,7 @@ const firstLine = (text: string): string => text.trim().split('\n')[0] ?? '';
 /** Rebuild evidence is structural; display copy is always derived from these names. */
 function asideNotice(paths: string[]): string | null {
   if (paths.length === 0) return null;
-  return `${paths.length === 1 ? 'The previous folder was' : 'Previous folders were'} kept next to the checkout as ${paths.join(', ')}. Their files and unpushed commits are retained there.`;
+  return `${paths.length === 1 ? 'The previous folder was' : 'Previous folders were'} kept next to the checkout as ${paths.join(', ')}. ${paths.length === 1 ? 'Its' : 'Their'} files and unpushed commits are retained there.`;
 }
 
 const originalFailureMessage = Symbol('originalFailureMessage');
@@ -89,33 +89,54 @@ async function withAsideReport(
   repoStorageRoot: string,
   rel: string,
   run: (
-    recordAsides: () => Promise<string[]>,
+    recordAsides: (rebuilt?: boolean) => Promise<string[]>,
     notice: (message: string | null) => string | null,
   ) => Promise<void>,
 ): Promise<void> {
+  // Diagnose stale admissions before the first inventory write can reduce the refusal to
+  // ownership_changed. Display-copy presence never authorizes a retry's rebuild notice.
+  const owned = await assertRepoJobOwner(db, payload.repositoryId);
+  let reportNotice = !!owned.refreshJobId && owned.checkoutAsideJobId === owned.refreshJobId;
   let paths: string[] = [];
-  const recordAsides = async () => {
+  const recordAsides = async (rebuilt = false) => {
+    if (rebuilt) reportNotice = true;
     const prefix = `${payload.repositoryId}.aside-`;
-    // Exact generated names only. Listing never opens, removes or restores a sibling, including
-    // one preserving a link/file rather than a directory. Redis/job memory is not recovery evidence.
-    paths = ((await readdirNoFollow(repoStorageRoot, path.dirname(rel), { strict: true })) ?? [])
-      .map((entry) => entry.name)
-      .filter(
-        (name) =>
-          name.startsWith(prefix) &&
-          /^\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-\d{3}Z$/.test(name.slice(prefix.length)),
+    // Exact generated names only. Keep files/links; skip empty directory claims left by
+    // a death between noReplace's mkdir and rename. Discovery never removes or restores one.
+    const found: string[] = [];
+    for (const entry of (await readdirNoFollow(repoStorageRoot, path.dirname(rel), {
+      strict: true,
+    })) ?? []) {
+      if (
+        !entry.name.startsWith(prefix) ||
+        !/^\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-\d{3}Z$/.test(entry.name.slice(prefix.length))
       )
-      .sort();
+        continue;
+      if (
+        entry.isDirectory() &&
+        (
+          await readdirNoFollow(repoStorageRoot, `${path.dirname(rel)}/${entry.name}`, {
+            strict: true,
+          })
+        )?.length === 0
+      )
+        continue;
+      found.push(entry.name);
+    }
+    paths = found.sort();
     const saved = await db
       .update(schema.repositories)
-      .set({ checkoutAsidePaths: paths })
+      .set({
+        checkoutAsidePaths: paths,
+        ...(rebuilt ? { checkoutAsideJobId: owned.refreshJobId } : {}),
+      })
       .where(repoJobPredicate(payload.repositoryId))
       .returning({ id: schema.repositories.id });
     if (saved.length === 0) throw new ObsoleteRepoJobError();
     return paths;
   };
   const notice = (message: string | null) =>
-    [message, asideNotice(paths)].filter(Boolean).join('\n\n') || null;
+    [message, reportNotice ? asideNotice(paths) : null].filter(Boolean).join('\n\n') || null;
   await recordAsides();
   try {
     await run(recordAsides, notice);
@@ -130,6 +151,7 @@ async function withAsideReport(
         'checkout aside report could not be persisted',
       );
     }
+    if (!reportNotice) throw err;
     const error = (err instanceof Error ? err : new Error(String(err))) as AsideFailure;
     error[originalFailureMessage] ??= error.message;
     error.checkoutAsidePaths = paths;
@@ -571,7 +593,7 @@ async function rebuild(
   rel: string,
   dest: string,
   suspendSessions: typeof suspendCheckoutSessions,
-  recordAsides: () => Promise<string[]>,
+  recordAsides: (rebuilt?: boolean) => Promise<string[]>,
 ): Promise<void> {
   const worktreeRefusal = await checkoutWorktreeRefusal(db, payload.repositoryId, dest);
   if (worktreeRefusal) throw new Error(worktreeRefusal);
@@ -699,6 +721,9 @@ async function rebuild(
       .update(schema.repositories)
       .set({ checkoutSessionReason: null })
       .where(repoJobPredicate(payload.repositoryId));
+    // Persist notice ownership before rename: its transaction reply can be lost after
+    // the old tree moved. A failed inventory/marker write must prevent that move.
+    await recordAsides(true);
     await db.transaction(async (tx) => {
       // Starts and revivals take this key before writing task state. Recount after the slow
       // preparation, then hold the key only through the rename, never through the clone or copy.
@@ -845,7 +870,6 @@ export async function handleRefresh(
     payload.repositoryId,
     () =>
       withAsideReport(db, payload, repoStorageRoot, rel, async (recordAsides, notice) => {
-        await assertRepoJobOwner(db, payload.repositoryId);
         const state = await usableCheckout(dest);
         // A read that never finished stays the transient failure below, not a repair verdict.
         if (payload.checkCheckoutOnly && state === 'unusable') {

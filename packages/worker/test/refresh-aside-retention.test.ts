@@ -14,6 +14,7 @@ const h = vi.hoisted(() => ({
   build: null as null | ((source: string, dest: string) => Promise<void>),
   clone: vi.fn(),
   cleanupFails: false,
+  asideReplyFails: false,
 }));
 vi.mock('../src/repo/clone.js', async (original) => {
   const real = await original<typeof import('../src/repo/clone.js')>();
@@ -34,6 +35,11 @@ vi.mock('@haive/shared/fs-safe', async (original) => {
   const real = await original<typeof import('@haive/shared/fs-safe')>();
   return {
     ...real,
+    renameNoFollow: async (...args: Parameters<typeof real.renameNoFollow>) => {
+      await real.renameNoFollow(...args);
+      if (h.asideReplyFails && args[2].includes('.aside-'))
+        throw new Error('simulated lost aside rename reply');
+    },
     removeNoFollow: (...args: Parameters<typeof real.removeNoFollow>) => {
       if (h.cleanupFails && args[1].includes('.rebuild-'))
         throw new Error('simulated cleanup refusal');
@@ -42,7 +48,8 @@ vi.mock('@haive/shared/fs-safe', async (original) => {
   };
 });
 import { handleRefresh } from './support/repo-preparation.js';
-import { usableCheckout } from '../src/repo/refresh.js';
+import { handleRefresh as ownedRefresh, usableCheckout } from '../src/repo/refresh.js';
+import { withRepoJobOwner } from '../src/repo/job-owner.js';
 
 const exec = promisify(execFile);
 const REPO = '00000000-0000-4000-8000-000000000001';
@@ -83,6 +90,7 @@ beforeEach(async () => {
   vi.clearAllMocks();
   h.build = null;
   h.cleanupFails = false;
+  h.asideReplyFails = false;
   root = await mkdtemp(path.join(tmpdir(), 'refresh-asides-'));
   source = (await template.copy()).dir;
   dest = path.join(root, 'u1', REPO);
@@ -198,22 +206,111 @@ describe('T486 retained checkout controls on real temporary trees', () => {
     expect(row().statusMessage).not.toContain('another.aside');
   });
 
+  it('omits an empty rename claim from the notice and column without removing it', async () => {
+    const emptyClaim = path.join(path.dirname(dest), oldName);
+    await mkdir(emptyClaim);
+    await handleRefresh(payload('copy'), db, root, async () => () => {});
+    const kept = (await asides()).filter((name) => name !== oldName);
+    expect(kept).toHaveLength(1);
+    expect(row().checkoutAsidePaths).toEqual(kept);
+    expect(row().statusMessage).not.toContain(oldName);
+    expect(await readdir(emptyClaim)).toEqual([]);
+  });
+
+  it('still names the old tree when a completed aside rename throws', async () => {
+    h.asideReplyFails = true;
+    const error = await handleRefresh(payload('copy'), db, root, async () => () => {}).catch(
+      (err: Error) => err,
+    );
+    const kept = await asides();
+    expect(kept).toHaveLength(1);
+    expect(error).toMatchObject({ checkoutAsidePaths: kept });
+    expect((error as Error).message).toContain(kept[0]);
+    expect(row().checkoutAsidePaths).toEqual(kept);
+    expect(await readFile(path.join(path.dirname(dest), kept[0]!, 'private.txt'), 'utf8')).toBe(
+      'original unpushed work\n',
+    );
+  });
+
   it.each([false, true])(
-    'member 6: a retry after persistDetection throws retains aside names (holder=%s)',
+    'a later ordinary refresh clears the rebuild notice while retaining the inventory (holder=%s)',
     async (holding) => {
-      h.persist.mockImplementationOnce(async (_db, _id, _to, note) => {
-        fake.patch(schema.repositories, REPO, { status: 'ready', statusMessage: note });
-        throw new Error('persistDetection failed after publication');
-      });
-      await expect(handleRefresh(payload('copy'), db, root, async () => () => {})).rejects.toThrow(
-        'persistDetection failed',
-      );
+      await handleRefresh(payload('copy'), db, root, async () => () => {});
       const kept = await asides();
-      expect(kept).toHaveLength(1);
       expect(row().statusMessage).toContain(kept[0]);
       if (holding)
         fake.insert(schema.tasks, { repositoryId: REPO, status: 'running', deadAt: null });
       await handleRefresh(payload('copy'), db, root, async () => () => {});
+      if (holding) {
+        expect(row().statusMessage).toContain('Not refreshed:');
+        expect(row().statusMessage).not.toContain(kept[0]);
+      } else expect(row().statusMessage).toBeNull();
+      expect(row().checkoutAsidePaths).toEqual(kept);
+    },
+  );
+
+  it('an unrelated ordinary refresh failure does not revive an old rebuild notice', async () => {
+    await handleRefresh(payload('copy'), db, root, async () => () => {});
+    const kept = await asides();
+    // A corrupt config is unknown, rather than proof authorizing another rebuild.
+    await writeFile(path.join(dest, '.git/config'), '[invalid');
+    const error = await handleRefresh(payload('copy'), db, root, async () => () => {}).catch(
+      (err: Error) => err,
+    );
+    expect(error).toBeInstanceOf(Error);
+    expect((error as Error).message).not.toContain(kept[0]);
+    expect(row().checkoutAsidePaths).toEqual(kept);
+  });
+
+  it('uses singular file ownership when reporting one aside', async () => {
+    await handleRefresh(payload('copy'), db, root, async () => () => {});
+    expect(row().statusMessage).toMatch(/\. Its files and unpushed commits are retained there\.$/);
+  });
+
+  it.each([
+    [null, true, 'no_owner_on_row'],
+    ['another-job', true, 'different_owner'],
+    ['current-job', false, 'not_pending'],
+  ])(
+    'diagnoses an obsolete job before recording asides (%s, %s)',
+    async (jobId, pending, reason) => {
+      fake.patch(schema.repositories, REPO, {
+        refreshJobId: jobId,
+        refreshPending: pending,
+        checkoutAsidePaths: ['existing-evidence'],
+      });
+      await expect(
+        withRepoJobOwner(REPO, 'current-job', () =>
+          ownedRefresh(payload('copy'), db, root, async () => () => {}),
+        ),
+      ).rejects.toMatchObject({ reason });
+      expect(row().checkoutAsidePaths).toEqual(['existing-evidence']);
+      expect(await asides()).toEqual([]);
+    },
+  );
+
+  it.each([false, true])(
+    'member 6: a retry after persistDetection throws retains aside names (holder=%s)',
+    async (holding) => {
+      // Redelivery belongs to the same pending admission; a new ordinary refresh does not.
+      const jobId = 'rebuild-job';
+      fake.patch(schema.repositories, REPO, { refreshJobId: jobId, refreshPending: true });
+      const retry = () =>
+        withRepoJobOwner(REPO, jobId, () =>
+          ownedRefresh(payload('copy'), db, root, async () => () => {}),
+        );
+      h.persist.mockImplementationOnce(async (_db, _id, _to, note) => {
+        fake.patch(schema.repositories, REPO, { status: 'ready', statusMessage: note });
+        throw new Error('persistDetection failed after publication');
+      });
+      await expect(retry()).rejects.toThrow('persistDetection failed');
+      const kept = await asides();
+      expect(kept).toHaveLength(1);
+      expect(row().statusMessage).toContain(kept[0]);
+      fake.patch(schema.repositories, REPO, { status: 'error', statusMessage: 'retry pending' });
+      if (holding)
+        fake.insert(schema.tasks, { repositoryId: REPO, status: 'running', deadAt: null });
+      await retry();
       expect(row().status).toBe('ready');
       expect(row().statusMessage).toContain(kept[0]);
       expect(await asides()).toEqual(kept);

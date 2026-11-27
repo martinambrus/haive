@@ -314,6 +314,8 @@ export const repositories = pgTable(
     checkoutSessionReason: text('checkout_session_reason'),
     /** Preserved rebuild siblings, as basenames under the owner's storage directory. LAST for parity. */
     checkoutAsidePaths: jsonb('checkout_aside_paths').$type<string[]>().notNull().default([]),
+    /** Preparation whose rebuild owes an aside notice, including redelivery. LAST for parity. */
+    checkoutAsideJobId: text('checkout_aside_job_id'),
   },
   (table) => [
     index('repositories_user_id_idx').on(table.userId),

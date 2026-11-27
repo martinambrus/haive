@@ -603,7 +603,9 @@ it.each(['copy', 'clone'] as const)(
     expect(more).toEqual([]);
     expect(err).toBeInstanceOf(UnrecoverableError);
     expect((err as Error).message).toContain(path.basename(aside!));
-    expect((err as Error).message).toContain('the rebuilt checkout is not usable.');
+    expect((err as Error).message).toMatch(
+      /the rebuilt checkout is not usable\.\n\nThe previous folder was kept next to the checkout as r1\.aside-[\dTZ-]+\. Its files and unpushed commits are retained there\.$/,
+    );
     expect(row.status).toBe('error');
     expect(row.statusMessage).toContain(`kept next to the checkout as ${path.basename(aside!)}`);
     expect(row.statusMessage).toBe((err as Error).message);
@@ -623,7 +625,7 @@ it('a rebuilt tree git gave no answer about ends the job unrecoverably too, and 
   expect(err).toBeInstanceOf(UnrecoverableError);
   expect((err as Error).message).toContain(path.basename(aside!));
   expect((err as Error).message).toMatch(
-    /the rebuilt checkout could not be examined \(.*SIGKILL.*\)\./,
+    /the rebuilt checkout could not be examined \(.*SIGKILL.*\)\.\n\nThe previous folder was kept next to the checkout as r1\.aside-[\dTZ-]+\. Its files and unpushed commits are retained there\.$/,
   );
   expect(row.status).toBe('error');
   expect(h.persist).not.toHaveBeenCalled();

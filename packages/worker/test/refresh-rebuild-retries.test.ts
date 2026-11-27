@@ -78,6 +78,7 @@ const row: {
   status: string;
   statusMessage?: string;
   checkoutAsidePaths?: string[];
+  checkoutAsideJobId?: string | null;
   errorCode?: string | null;
   refreshPending: boolean;
   refreshJobId: string | null;
@@ -127,6 +128,7 @@ beforeEach(async () => {
   row.status = 'cloning';
   delete row.statusMessage;
   delete row.checkoutAsidePaths;
+  delete row.checkoutAsideJobId;
   row.errorCode = 'stale';
   row.refreshPending = false;
   row.refreshJobId = null;
@@ -286,7 +288,7 @@ describe.skipIf(!redisUrl)('a refresh job with attempts: 3 on a real queue', () 
     );
   });
 
-  it('a real BullMQ retry after detection publication retains the aside notice', async () => {
+  it('a real BullMQ retry retains the rebuild notice and a later refresh clears it', async () => {
     const { dest, payload } = await fixture();
     const publish = h.persist.getMockImplementation()!;
     h.persist.mockImplementationOnce(async (...args) => {
@@ -302,6 +304,11 @@ describe.skipIf(!redisUrl)('a refresh job with attempts: 3 on a real queue', () 
     expect(row.checkoutAsidePaths).toEqual(kept);
     expect(row.statusMessage).toContain(kept[0]);
     expect(h.persist).toHaveBeenCalledTimes(2);
+    const next = await refreshJob(payload);
+    expect(await next.getState()).toBe('completed');
+    expect(next.attemptsMade).toBe(1);
+    expect(row.statusMessage).toBeNull();
+    expect(row.checkoutAsidePaths).toEqual(kept);
   });
 
   it('a dead folder source leaves the checkout where it was, whichever attempt runs', async () => {

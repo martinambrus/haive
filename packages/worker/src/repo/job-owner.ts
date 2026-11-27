@@ -36,6 +36,8 @@ export async function assertRepoJobOwner(db: Database, repositoryId: string) {
       id: schema.repositories.id,
       status: schema.repositories.status,
       storagePath: schema.repositories.storagePath,
+      refreshJobId: schema.repositories.refreshJobId,
+      checkoutAsideJobId: schema.repositories.checkoutAsideJobId,
     })
     .from(schema.repositories)
     .where(repoJobPredicate(repositoryId))
