@@ -15,7 +15,7 @@ import { getAccessCookie } from '../auth/cookies.js';
 import { verifyAccessToken } from '../auth/jwt.js';
 import { getRedis } from '../redis.js';
 import { editorOrigin } from './request-origin.js';
-import { ensureIde, ideTarget, targetBelongsToUser } from './ide-target.js';
+import { ensureIde, ideTarget, targetBelongsToUser, requireIdeCheckout } from './ide-target.js';
 import { isCanonicalUuid } from './uuid.js';
 
 export interface EditorGrant {
@@ -24,6 +24,7 @@ export interface EditorGrant {
   target: { kind: 'task' | 'repo'; id: string };
   runtimeSessionId: string;
   editorOrigin: string;
+  checkoutEpoch?: string | null;
 }
 
 export function editorGrantKey(secret: string): string {
@@ -43,6 +44,7 @@ export async function grantEditor(c: Context<AppEnv>, repository = false): Promi
   // Checked before the ensure: a missing origin is a configuration error, not a cold start.
   const origin = editorOrigin();
   if (!origin) throw new HttpError(503, 'The public API or editor origin must be configured');
+  const checkout = await requireIdeCheckout(target);
   // The worker owns runtime resolution; only its ready result authorizes a grant.
   // A refusal from the worker is final (409); no answer in time is retryable (503).
   const ready = await ensureIde(target).then(
@@ -61,6 +63,7 @@ export async function grantEditor(c: Context<AppEnv>, repository = false): Promi
   }
   const user = await requireEditorUser(userId, payload.tv);
   if (!(await targetBelongsToUser(target))) throw new HttpError(404, 'Not found');
+  await requireIdeCheckout(target, checkout);
   const secret = randomBytes(32).toString('base64url');
   const grant: EditorGrant = {
     userId,
@@ -68,6 +71,7 @@ export async function grantEditor(c: Context<AppEnv>, repository = false): Promi
     target: { kind: repository ? 'repo' : 'task', id },
     runtimeSessionId: target.sessionId,
     editorOrigin: origin,
+    checkoutEpoch: checkout.epoch,
   };
   await getRedis().set(editorGrantKey(secret), JSON.stringify(grant), 'PX', 60_000);
   return c.json({ url: `${origin}/ide/_handshake#${secret}` });
@@ -79,6 +83,7 @@ const grantSchema = z.object({
   target: editorTargetSchema,
   runtimeSessionId: z.string(),
   editorOrigin: z.string(),
+  checkoutEpoch: z.string().nullable().optional(),
 });
 
 export async function redeemEditor(c: Context<AppEnv>): Promise<Response> {
@@ -111,6 +116,7 @@ export async function redeemEditor(c: Context<AppEnv>): Promise<Response> {
     target: g.target,
     runtimeSessionId: g.runtimeSessionId,
     editorOrigin: g.editorOrigin,
+    checkoutEpoch: g.checkoutEpoch,
   };
   if (!editorClaimsMatch(payload, g.target)) throw refused();
   const origin = c.req.header('origin');
@@ -118,6 +124,7 @@ export async function redeemEditor(c: Context<AppEnv>): Promise<Response> {
   await requireEditorUser(g.userId, g.tokenVersion);
   const target = ideTarget(g.target.id, g.userId, g.target.kind === 'repo');
   if (!(await targetBelongsToUser(target))) throw refused();
+  await requireIdeCheckout(target, { epoch: g.checkoutEpoch ?? null });
   const token = await signEditorSession(payload);
   setEditorCookie(c, payload, token);
   return c.json({ next: `${target.prefix}/` });

@@ -9,6 +9,7 @@ const USER = vi.hoisted(() => '00000000-0000-4000-8000-0000000000a1');
 const REPO = '00000000-0000-4000-8000-0000000000b1';
 const TASK = '00000000-0000-4000-8000-0000000000c1';
 const h = vi.hoisted(() => ({ db: undefined as unknown, add: vi.fn(), enabled: true }));
+vi.mock('../src/redis.js', () => ({ getRedis: () => ({ get: async () => null }) }));
 vi.mock('../src/db.js', () => ({ getDb: () => h.db }));
 vi.mock('../src/middleware/auth.js', () => ({
   requireAuth: async (
@@ -49,7 +50,7 @@ beforeEach(() => {
   h.enabled = true;
   h.add.mockReset().mockResolvedValue({ waitUntilFinished: async () => ({ ok: true }) });
   const fake = createFakeDb({ repositories: schema.repositories, tasks: schema.tasks });
-  fake.insert(schema.repositories, { id: REPO, userId: USER });
+  fake.insert(schema.repositories, { id: REPO, userId: USER, status: 'ready' });
   fake.insert(schema.tasks, { id: TASK, userId: USER });
   h.db = fake.db;
 });

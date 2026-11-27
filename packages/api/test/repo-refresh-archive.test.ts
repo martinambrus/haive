@@ -1,3 +1,7 @@
+vi.mock('../../worker/src/repo/interactive-checkout.js', async (original) => ({
+  ...(await original<Record<string, unknown>>()),
+  suspendCheckoutSessions: async () => () => {},
+}));
 import { execFile } from 'node:child_process';
 import { cp, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';

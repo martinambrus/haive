@@ -59,3 +59,45 @@ export async function ensureIde(target: IdeTarget): Promise<IdeEnsureResult> {
     IDE_ENSURE_TIMEOUT_MS,
   )) as IdeEnsureResult;
 }
+
+/** Ready/epoch admission is repeated after long ensures. An old Editor cookie cannot silently
+ * reconnect and start writing to a new checkout; a new handshake is an explicit reopen. */
+export async function ideCheckoutState(target: IdeTarget) {
+  const db = getDb();
+  const repositoryId =
+    target.payload.repositoryId ??
+    (
+      await db.query.tasks.findFirst({
+        where: eq(schema.tasks.id, target.payload.taskId!),
+        columns: { repositoryId: true },
+      })
+    )?.repositoryId;
+  if (!repositoryId) return { repositoryId: null, status: 'ready', epoch: null };
+  const repo = await db.query.repositories.findFirst({
+    where: eq(schema.repositories.id, repositoryId),
+    columns: { status: true },
+  });
+  const { getRedis } = await import('../redis.js');
+  return {
+    repositoryId,
+    status: repo?.status ?? 'unavailable',
+    epoch: await getRedis().get(`repo-interactive-epoch:${repositoryId}`),
+  };
+}
+
+export async function requireIdeCheckout(target: IdeTarget, expected?: { epoch: string | null }) {
+  const state = await ideCheckoutState(target);
+  if (state.status !== 'ready') {
+    const { CheckoutUnavailableError } = await import('@haive/shared/checkout-access');
+    throw new CheckoutUnavailableError();
+  }
+  if (expected && expected.epoch !== state.epoch) {
+    const { HttpError } = await import('../context.js');
+    throw new HttpError(
+      409,
+      'Repository sessions stopped for a checkout rebuild. Reopen the Editor and review retained unsaved buffers before saving.',
+      'repository_rebuilt',
+    );
+  }
+  return state;
+}

@@ -508,6 +508,7 @@ export const TERMINAL_CLOSE_CODES = {
   REPO_READ_ONLY: 4423,
   REPO_NOT_READY: 4424,
   PROVIDER_DISABLED: 4425,
+  REPOSITORY_REBUILT: 4426,
 } as const;
 
 /** Maximum time from enqueue before a sign-out must acquire its auth scope and start. */
@@ -780,6 +781,9 @@ export const PUBSUB_CHANNELS = {
  *  → reaper kills container and deletes registry entry. */
 export const TERMINAL_SESSION_PREFIX = 'terminal:session:';
 export const TERMINAL_REQUEST_CHANNEL = 'terminal:request';
+export const TERMINAL_REPOSITORY_REBUILT_MESSAGE =
+  'Repository sessions stopped for a checkout rebuild. Reopen after the repository is ready.';
+
 export const TERMINAL_PROVIDER_DISABLED_MESSAGE =
   'The CLI provider is disabled. Enable it before opening a terminal.';
 export const TERMINAL_IN_CHANNEL_PREFIX = 'terminal:in:';

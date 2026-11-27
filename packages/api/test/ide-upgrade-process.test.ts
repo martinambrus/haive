@@ -32,6 +32,8 @@ import { parse } from 'hono/utils/cookie';
 import { createServer } from 'node:http';
 const SESSION_COOKIES = new Set(['haive_access', 'haive_refresh']);
 const log = { info() {}, warn() {} };
+const requireIdeCheckout = async () => {};
+class HttpError extends Error {};
 const acquireIdeSession = async () => {};
 const releaseIdeSession = async () => {};
 const isSessionSetCookie = () => false;
@@ -53,7 +55,7 @@ ${functions}
 const server = createServer((req, res) => res.end('alive'));
 server.on('upgrade', (req, socket, head) => {
   ${brokenHeader ? "req.headers['x-broken'] = '\\u0100';" : ''}
-  proxyWsUpgrade(req, socket, head, { sessionId: 'test', prefix: '/ide/test' }, session);
+  proxyWsUpgrade(req, socket, head, { sessionId: 'test', prefix: '/ide/test' }, session, { epoch: null });
 });
 await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
 const port = server.address().port;

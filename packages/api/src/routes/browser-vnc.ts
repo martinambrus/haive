@@ -1,3 +1,5 @@
+import { HttpError } from '../context.js';
+import { ideTarget, requireIdeCheckout } from '../lib/ide-target.js';
 import { boundedAdd } from '../lib/queue-bounded.js';
 import net from 'node:net';
 import type { Server } from 'node:http';
@@ -77,6 +79,11 @@ export function installBrowserVncWebSocket(server: Server, opts: BrowserVncWsOpt
           return;
         }
         if (auth.session.revoked) return;
+        const expected = {
+          epoch: new URL(rawUrl, 'http://local').searchParams.get('checkoutEpoch') || null,
+        };
+        const target = ideTarget(taskId, auth.userId);
+        await requireIdeCheckout(target, expected);
         // Fast path: if the desktop VNC is ALREADY reachable, bridge straight to it. Do NOT run
         // the ensure job on a reconnect — it re-navigates Chrome to the app root (page.goto),
         // which resets an in-progress session (e.g. an install wizard) each time the bridge
@@ -95,13 +102,18 @@ export function installBrowserVncWebSocket(server: Server, opts: BrowserVncWsOpt
           }
           desktopHost = await resolveDesktopContainer(taskId, vncPort);
         }
+        await requireIdeCheckout(target, expected);
         const host = desktopHost;
         if (auth.session.revoked) return;
         wss.handleUpgrade(req, socket, head, (ws) => {
           if (!auth.session.accept(ws)) return;
-          runVncBridge(ws, host, vncPort, taskId);
+          runVncBridge(ws, host, vncPort, taskId, target, expected);
         });
       } catch (err) {
+        if (err instanceof HttpError) {
+          rejectUpgrade(socket, err.status, 'Runtime checkout unavailable; reopen from Haive');
+          return;
+        }
         log.error({ err, path: rawUrl.split(/[?#]/)[0] }, 'vnc upgrade handler failed');
         rejectUpgrade(socket, 500, 'Internal Server Error');
       }
@@ -113,8 +125,17 @@ export function installBrowserVncWebSocket(server: Server, opts: BrowserVncWsOpt
 
 /** Pipe RFB bytes both ways between the browser's WS and the runner's VNC TCP
  *  socket. Either side closing/erroring tears down the other. */
-function runVncBridge(ws: WebSocket, host: string, port: number, taskId: string): void {
+function runVncBridge(
+  ws: WebSocket,
+  host: string,
+  port: number,
+  taskId: string,
+  target: ReturnType<typeof ideTarget>,
+  checkout: { epoch: string | null },
+): void {
   const tcp = net.connect({ host, port });
+  tcp.pause();
+  let admitted = false;
   let closed = false;
 
   // Keepalive: a VNC session parked on a STATIC screen (a Gate-2 review, an idle desktop) sends
@@ -151,7 +172,16 @@ function runVncBridge(ws: WebSocket, host: string, port: number, taskId: string)
     }
   };
 
-  tcp.on('connect', () => {
+  tcp.on('connect', async () => {
+    try {
+      await requireIdeCheckout(target, checkout);
+      if (closed) return;
+      admitted = true;
+      tcp.resume();
+    } catch {
+      teardown('checkout unavailable at attach');
+      return;
+    }
     log.info({ taskId, host, port }, 'vnc bridge connected');
   });
   tcp.on('data', (chunk) => {
@@ -162,7 +192,7 @@ function runVncBridge(ws: WebSocket, host: string, port: number, taskId: string)
 
   ws.on('message', (data) => {
     const buf = Array.isArray(data) ? Buffer.concat(data) : Buffer.from(data as Buffer);
-    if (!tcp.destroyed) tcp.write(buf);
+    if (admitted && !tcp.destroyed) tcp.write(buf);
   });
   ws.on('error', (err) => teardown(`ws error: ${err.message}`));
   ws.on('close', () => teardown('ws closed'));

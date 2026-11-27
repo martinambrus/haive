@@ -310,6 +310,8 @@ export const repositories = pgTable(
       retry?: { attempts: number; retryAt: number };
       outcome?: 'done' | 'done-with-skips';
     }>(),
+    /** Structural drain/defer/failure reason, independent of display copy. LAST for parity. */
+    checkoutSessionReason: text('checkout_session_reason'),
   },
   (table) => [
     index('repositories_user_id_idx').on(table.userId),

@@ -228,7 +228,7 @@ use the policy's read admission and failed-acquisition recheck; a verified old h
 The DB-only list stays available during cloning. Error checkouts retain raw download and deletion
 for repair; upload refuses. A task with no repository removes rows DB-only and never touches disk.
 Worker expansion and sidecar writers still rely on their task's checkout holder; independent background projection coverage is a follow-up (see
-[Repository refresh](repository-refresh.md#checkout-access-during-replacement-t780-pr2-reduced-scope)).
+[Repository refresh](repository-refresh.md#checkout-access-during-replacement)).
 
 The attachment-lock helper drains its entire callback even if postgres.js rejects the transaction
 first. A lost SQL lock is not retained, but the API's renewing root lease stays held until the

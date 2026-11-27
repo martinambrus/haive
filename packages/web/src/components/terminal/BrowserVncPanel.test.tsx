@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
-import { BrowserVncPanel } from './BrowserVncPanel';
+import { BrowserVncPanelSession as BrowserVncPanel } from './BrowserVncPanel';
 
 // This package uses Node tests. Keep hooks in slots and attach the panel's host refs.
 const h = vi.hoisted(() => ({
@@ -8,7 +8,12 @@ const h = vi.hoisted(() => ({
   effects: [] as (() => unknown)[],
   tree: undefined as unknown,
   sockets: [] as WebSocket[],
+  urls: [] as string[],
   rfbs: [] as EventTarget[],
+}));
+vi.mock('@/components/checkout-session-boundary', () => ({
+  CheckoutSessionBoundary: () => null,
+  useCheckoutEpoch: () => 'replacement/epoch',
 }));
 vi.mock('react', async (original) => ({
   ...(await original<typeof import('react')>()),
@@ -68,6 +73,7 @@ class Socket extends EventTarget {
   constructor(_url: string) {
     super();
     h.sockets.push(this as unknown as WebSocket);
+    h.urls.push(_url);
   }
   close() {}
   drop(code: number, reason: string) {
@@ -98,6 +104,7 @@ beforeEach(async () => {
   vi.stubGlobal('document', { fullscreenElement: null });
   h.slots = [];
   h.sockets = [];
+  h.urls = [];
   h.rfbs = [];
   draw();
   for (const effect of h.effects) effect();
@@ -128,4 +135,11 @@ it('an ordinary live drop still reconnects', async () => {
   (h.sockets[0] as unknown as Socket).drop(1006, 'session_revoked');
   await vi.advanceTimersByTimeAsync(3000);
   expect(h.sockets).toHaveLength(2);
+});
+
+it('sends the accepted checkout epoch on the initial attach and ordinary reconnect', async () => {
+  expect(h.urls).toEqual(['ws://localhost/browser-vnc/task?checkoutEpoch=replacement%2Fepoch']);
+  (h.sockets[0] as unknown as Socket).drop(1006, 'network drop');
+  await vi.advanceTimersByTimeAsync(3000);
+  expect(h.urls).toEqual([h.urls[0], h.urls[0]]);
 });

@@ -1,4 +1,5 @@
 'use client';
+import { CheckoutSessionBoundary, useCheckoutEpoch } from '@/components/checkout-session-boundary';
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { api, apiWebSocketUrl, type ApiError } from '@/lib/api-client';
@@ -61,7 +62,15 @@ interface BrowserVncPanelProps {
  * click things agents can't reach (native Chrome popups). noVNC is imported
  * lazily in the browser only — it touches window at module load.
  */
-export function BrowserVncPanel({
+export function BrowserVncPanel(props: BrowserVncPanelProps) {
+  return (
+    <CheckoutSessionBoundary key={props.taskId} path={`/tasks/${props.taskId}`}>
+      <BrowserVncPanelSession {...props} />
+    </CheckoutSessionBoundary>
+  );
+}
+
+export function BrowserVncPanelSession({
   taskId,
   title,
   autoCollapse,
@@ -70,6 +79,7 @@ export function BrowserVncPanel({
   mailpitUrl,
   terminalStepRowId,
 }: BrowserVncPanelProps) {
+  const checkoutEpoch = useCheckoutEpoch();
   // Persisted per task (when a persistId is given) so a reload restores whether this
   // panel was open. autoCollapse below is edge-guarded so it never clobbers a restore.
   const [expanded, setExpanded, setExpandedAuto] = usePersistedToggle(
@@ -150,7 +160,11 @@ export function BrowserVncPanel({
       const { default: RFB } = await import('@novnc/novnc');
       // noVNC's disconnect event carries only `clean`. Observe the raw close first,
       // then hand the channel to noVNC through its public constructor.
-      socket = new WebSocket(apiWebSocketUrl(`/browser-vnc/${taskId}`));
+      socket = new WebSocket(
+        apiWebSocketUrl(
+          `/browser-vnc/${taskId}?checkoutEpoch=${encodeURIComponent(checkoutEpoch ?? '')}`,
+        ),
+      );
       let closeCode: number | undefined;
       socket.addEventListener(
         'close',
@@ -226,7 +240,7 @@ export function BrowserVncPanel({
       setMessage((err as Error).message ?? 'Failed to load the VNC client');
       setState('error');
     }
-  }, [taskId]);
+  }, [taskId, checkoutEpoch]);
   connectRef.current = connect;
 
   const retry = useCallback(() => {

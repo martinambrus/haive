@@ -205,7 +205,7 @@ presence before counting so it can drain a source schema that predates 0250. Kee
 reverting code never restores or removes them. The recovery staging and repair-code retention
 already shipped in `2c16ca95e` remain unchanged. T594 C2 also resolves T602 item 2; refusing a second refresh resolves T602 item 5.
 
-## Checkout access during replacement (T780 PR2, reduced scope)
+## Checkout access during replacement
 
 `@haive/shared/checkout-access` is the server-side admission policy. `read` requires ready;
 `mutation` admission requires ready, no owed preparation (`refresh_pending`) and no foreign live
@@ -235,7 +235,7 @@ a failed acquisition rechecks availability to classify a rename as `checkout_una
 an already verified descriptor can finish on the preserved inode. These are not snapshot exports.
 The policy never creates an anchor or changes repository status or preparation ownership.
 
-This PR applies that policy to attachment upload/raw/single-delete/folder-delete, remote relink
+The policy applies to attachment upload/raw/single-delete/folder-delete, remote relink
 and its reconciliation sweep (one info line per checkout hold, redriven after release), and
 whole-plan deletion (the lease spans its database deletion and both physical mirror removals). Attachment lists and database-only plan list/detail/node edits
 remain available. A task whose repository was deleted can remove its attachment rows DB-only,
@@ -247,7 +247,7 @@ and Save/Pull, project-state sync/writer/journal/rules/metadata recovery, initia
 imports, task file/archive/root resolvers, scope/code previews, onboarding/upgrade/data/snapshot
 status, runtime ensure and DDEV control. They still need the same policy at their admission/locked
 boundaries, with task-key → domain → repository-row order and dirty/outbox obligations retained
-on holds. Interactive mount suspension is PR3. Do not infer complete checkout exclusion from the
+on holds. Interactive mount suspension is described below. Do not infer complete checkout exclusion from the
 new attachment/remote/deletion coverage.
 
 Rollback: settle active attachment, remote and plan-delete operations and all preparations, then
@@ -369,7 +369,7 @@ bounded sweep rotation and API start/stop wiring. The Git signal controls wait
 for a FIFO reader with a nonblocking writer open, keep that writer until cleanup,
 and close it in `finally`; they do not read kernel wait-channel names.
 
-## Warn before checkout replacement (T780 PR3, first prefix)
+## Warn before checkout replacement
 
 Retry preparation and Rebuild checkout use the shared Escape-dismissable Dialog before posting.
 It warns that replacement stops running terminal, Editor and runtime commands and retains
@@ -383,3 +383,24 @@ The shared Dialog panel caps its height at `calc(100dvh - 2rem)` and scrolls ver
 Continue remains reachable in a short viewport. Existing callers retain their own inner
 scroll regions and height limits; caller classes can override the shared defaults through
 `tailwind-merge`, including the fixed-position task history panel's responsive height cap.
+
+## Interactive attach fencing
+
+Editor grants/cookies and HTTP/WebSocket admission bind the repository's Redis epoch; Browser
+attach repeats checkout admission, and Terminal understands close code 4426. Before the worker
+stop layer ships, no replacement epoch is written and legacy cookies remain valid. This API
+layer starts no stop or rebuild of its own. The authenticated interactive-status endpoint is
+passive. Migration 0254 adds only nullable checkout_session_reason, declared last; it ships
+here because Retry now clears that column. Keep the additive migration on rollback. Ship this
+API layer after the warning and before the worker suspension layer.
+
+The VNC epoch sender and the Editor/VNC session boundary ship with these API guards,
+before any worker writes epochs. A fresh pane obtains its accepted epoch through the
+passive status endpoint; a changed epoch requires explicit reopen. An absent epoch is
+still a null expectation and refuses a non-null current epoch. Terminal and shell clients
+never automatically reconnect after replacement; Editor grants bind the epoch on the
+server and each proxied request rechecks it (database lookups and one Redis GET; task targets also resolve their repository).
+Apply `0254_checkout_session_reason.sql` before reloading API/worker with the new schema.
+The warning alone precedes the stop layer, so its promised stops become active only when
+the worker layer is deployed. DDEV replacement discards changes since the saved snapshot.
+A failed status poll closes admission until a successful poll, then requires explicit reopen.
