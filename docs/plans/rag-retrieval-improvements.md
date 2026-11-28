@@ -2,9 +2,9 @@
 
 > **Partially implemented; reviewed 2026-11-12 at `3426c8c34`.** P0 was an untracked historical
 > eval; P1 chunk corrections, own-file budgets, the dense-search settings and accent-insensitive
-> lexical configuration have since shipped. P2(c) was measured on 2026-11-28 and does not win (T147,
-> not shipped); P2(b) remains parked (T144), as does index-space
-> work (T149); P3 has two local GPU measurements below, neither recommended to ship, and P4 remains conditional. The committed shared-source eval below supplies a reproducible baseline; ranking
+> lexical configuration have since shipped. P2(b) and P2(c) were measured on 2026-11-28 and neither
+> wins (T144/T147; not shipped), while index-space
+> work (T149) remains parked; P3 has two local GPU measurements below, neither recommended to ship, and P4 remains conditional. The committed shared-source eval below supplies a reproducible baseline; ranking
 > changes still require held-out comparisons, including negative and overview results. The original status was stale. Seven external
 > sources are reviewed so far. The findings were measured read-only on the dev install on
 > 2026-09-30, and the P0 numbers on 2026-10-12. Keep this file current by editing the section a
@@ -528,9 +528,10 @@ all original questions in the denominator: a gold span lost by chunking is a mis
 delete. Report by query class and language, include no-answer queries, and separate tuning from
 held-out grading. Compare the same corpus/config, with paired per-query changes and uncertainty;
 20 valid spot checks do not establish every gold's correctness. Public fixtures must not contain
-client code or logged private queries. Main `TASKS.md` parked T144/T147 pending such an
-eval. The committed shared-source baseline supplies that scoped prerequisite; each ranking PR
-still needs the same corpus/config, held-out comparisons, and explicit negative/overview results.
+client code or logged private queries. Main `TASKS.md` parked T144/T147 pending such an eval (both
+since measured, below). The committed shared-source baseline supplies that scoped prerequisite;
+each ranking PR still needs the same corpus/config, held-out comparisons, and explicit
+negative/overview results.
 
 ### P1. Chunker corrections, shipped as one reindex
 
@@ -587,9 +588,10 @@ new retrieval/store measurements or provider runs were made for this follow-up.
 Each sits behind a config key, off until P0 says on, so the rollback is the key.
 
 - **(a)** The query instruction, for F7.
-- **(b)** An IDF-weighted ranker over the query's rare prose terms, for F6, with its candidates
-  capped like `identifierCandidates`: an uncapped ranker rewrites the page (AGENTS.md, identifier
-  search).
+- **(b) Measured 2026-11-28: no win, not shipped.** An IDF-weighted ranker over the query's rare
+  prose terms, for F6, with its candidates capped like `identifierCandidates`: an uncapped ranker
+  rewrites the page (AGENTS.md, identifier search). Capped, it still changes most pages and lowers
+  MRR in all nine arms tried, all pure IDF with ties by row id (MEASURED (b) below).
 - **(c) Measured 2026-11-28: no win, not shipped.** Collapse identical bodies on a page, for F5:
   compare bodies without their header, keep the best, name the others, as `dedupeGlobalByEntry`
   does for global entries. It needs the SQL pool widened past `top_k` so that collapsing does not
@@ -613,6 +615,90 @@ candidate expansion/deduplication/reranking; removing reserved KB/learning slots
 experiment. Dedupe retains all source locations and chooses deterministically without merging
 semantically different bodies that merely normalize alike. A score cliff uses a documented score
 scale and a minimum useful page; low RRF alone is not a calibrated relevance probability.
+
+**MEASURED (b) (2026-11-28): no arm wins; do not ship.** Candidate: a fourth RRF input at full
+weight on the hybrid branch only (the lexical-only branch is untouched). It took the stemmed query
+lexemes, in the store's own text configuration, that at most `proseMaxDfRatio` of the scoped rows
+hold, ranked the rows holding ANY of them by the sum of `ln(N / df)` (ties by row id), cut the list
+to `proseCandidates`, and still made a prose-only row clear the dense floor. With the knobs off, or
+on with nothing for them to act on, the search statements and the hits are main's byte for byte (512
+generated cases: 128 inputs by 4 settings; the statistics read is the one extra statement), and with
+them off all 900 baseline pages (180 queries at 5 page sizes) came back identical. Its 16 controls
+(5 against a real Postgres) pass, those for new behavior failed on main first, and each of 6
+mutations of the candidate is caught. Arms were paired
+on one store built from unchanged main (`ac4e96202`; 2,141 chunks; fixture fingerprint
+`4d56e5bc11b765f1c6b5539f1fc7de097df7f98d16e54314114c601c1da90068`; `qwen3-embedding:4b`,
+`df5bd2e3...ff907`, equal to the manifest before and after); a re-run of main's code on it matched
+the committed baseline on every query at all five page sizes. The rule was fixed before any arm ran:
+choose cap {2, 3, 5} x df ratio {0.02, 0.05, 0.10} on the tuning split alone (recall@8 delta, tie
+MRR@8, then the smaller change), grade that one configuration on held-out, and allow default-on
+only if its held-out recall@8 delta has a 95% CI lower bound above 0, MRR@8 is not lower, the
+no-answer FPR is not higher and overview coverage is not lower. Paired deltas against the baseline
+re-run at k=8 (the held-out columns of the eight unselected arms are shown for completeness and
+decide nothing):
+
+| cap | df ratio | tuning recall@8 | tuning MRR@8 (wins / losses) | held-out recall@8 | held-out MRR@8 (wins / losses) |
+|---:|---:|---|---|---|---|
+| 2 | 0.02 | +0.000 | -0.099 (4 / 26) | +0.014 [-0.028, +0.056] | -0.032 (5 / 24) |
+| 2 | 0.05 | +0.014 | -0.081 (6 / 25) | +0.028 [+0.000, +0.069] | -0.041 (4 / 25) |
+| 2 | 0.10 | +0.014 | -0.077 (6 / 26) | +0.028 [+0.000, +0.069] | -0.044 (4 / 27) |
+| 3 | 0.02 | +0.014 | -0.052 (6 / 21) | +0.014 [-0.028, +0.056] | -0.035 (6 / 24) |
+| 3 | 0.05 | +0.000 | -0.045 (6 / 21) | +0.000 [-0.056, +0.056] | -0.032 (6 / 22) |
+| 3 | 0.10 | +0.014 | -0.061 (6 / 23) | +0.000 [-0.056, +0.056] | -0.039 (6 / 25) |
+| 5 **(selected)** | 0.02 | +0.014 | -0.051 (6 / 19) | -0.028 [-0.097, +0.042] | -0.049 (7 / 23) |
+| 5 | 0.05 | +0.000 | -0.053 (6 / 21) | -0.028 [-0.097, +0.042] | -0.030 (8 / 20) |
+| 5 | 0.10 | -0.014 | -0.066 (6 / 22) | -0.028 [-0.097, +0.042] | -0.060 (7 / 25) |
+
+Five arms tie on tuning recall (+0.014, one gold); MRR breaks the tie for cap 5, ratio 0.02. That
+arm, by class, language and split, before / after and as a paired delta at k=8:
+
+| split | cell | n | recall@8 before / after | recall delta [95% CI] | MRR@8 before / after | MRR delta [95% CI] |
+|---|---|---:|---|---|---|---|
+| tuning | all answerable | 72 | 0.861 / 0.875 | +0.014 [-0.028, +0.056] | 0.679 / 0.628 | -0.051 [-0.120, +0.014] |
+| tuning | identifier English | 12 | 1.000 / 1.000 | +0.000 [+0.000, +0.000] | 0.878 / 0.783 | -0.095 [-0.250, +0.023] |
+| tuning | identifier French | 12 | 1.000 / 1.000 | +0.000 [+0.000, +0.000] | 0.836 / 0.929 | +0.092 [-0.010, +0.245] |
+| tuning | identifier Slovak | 12 | 1.000 / 1.000 | +0.000 [+0.000, +0.000] | 0.878 / 0.878 | +0.000 [-0.167, +0.167] |
+| tuning | paraphrase English | 12 | 0.833 / 1.000 | +0.167 [+0.000, +0.417] | 0.590 / 0.489 | -0.101 [-0.362, +0.180] |
+| tuning | paraphrase French | 12 | 0.667 / 0.583 | -0.083 [-0.250, +0.000] | 0.441 / 0.278 | -0.163 [-0.288, -0.056] |
+| tuning | paraphrase Slovak | 12 | 0.667 / 0.667 | +0.000 [+0.000, +0.000] | 0.451 / 0.410 | -0.042 [-0.125, +0.000] |
+| held-out | all answerable | 72 | 0.861 / 0.833 | -0.028 [-0.097, +0.042] | 0.600 / 0.552 | -0.049 [-0.107, +0.012] |
+| held-out | identifier English | 12 | 0.917 / 0.917 | +0.000 [+0.000, +0.000] | 0.757 / 0.819 | +0.062 [-0.083, +0.229] |
+| held-out | identifier French | 12 | 1.000 / 0.917 | -0.083 [-0.250, +0.000] | 0.763 / 0.804 | +0.041 [-0.050, +0.183] |
+| held-out | identifier Slovak | 12 | 0.917 / 0.917 | +0.000 [+0.000, +0.000] | 0.753 / 0.739 | -0.014 [-0.039, +0.000] |
+| held-out | paraphrase English | 12 | 0.750 / 0.833 | +0.083 [-0.167, +0.417] | 0.406 / 0.289 | -0.117 [-0.328, +0.100] |
+| held-out | paraphrase French | 12 | 0.833 / 0.667 | -0.167 [-0.417, +0.000] | 0.529 / 0.279 | -0.249 [-0.379, -0.128] |
+| held-out | paraphrase Slovak | 12 | 0.750 / 0.750 | +0.000 [+0.000, +0.000] | 0.396 / 0.380 | -0.016 [-0.044, +0.000] |
+
+At the other page sizes the selected arm's held-out recall delta is -0.097 [-0.194, -0.014] at k=5,
++0.014 at k=12, -0.028 at k=20 and 0 at k=50, and MRR is lower at every size (-0.040 to -0.059, 20
+to 28 losses against 7 wins). The no-answer FPR (0.556) and AUROC (0.845) do not move, which says
+little: that diagnostic reads only a page's top dense similarity, which an added lexical row rarely
+changes. The secondary no-answer `maxRrf` (lower is better) rose on 2 of the 18 negatives, 1 of them
+held-out, and fell on none. Held-out overview coverage falls from 0.278 to 0.250 (English 0.333 to
+0.250).
+
+Why it loses: it engages on almost every prose query (at cap 5, ratio 0.02, 146 of the 180 pages
+gain rows at k=8 and 385 rows are added, with a median dense similarity of 0.316 against 0.501 for
+the rows kept), unlike the identifier ranker, which fires only on identifier-shaped tokens. An added
+row earns 1/(60 + rank) exactly as a dense rank-1 hit does, and the rows land at page positions 1 to
+8. The words that pick them are the rarest ones, and in French queries those are function words that
+the English configuration neither drops nor stems and that are rare in English code: at ratio 0.02,
+57 of the 60 French queries have one in their rare set (`de` in 46, `comment` in 37) and 15 have
+nothing else. Slovak queries are touched less: 23 of 60 have no rare word and the ranker stays off,
+and `na`, `za` or `od` is the whole rare set of 13 more. Held-out French paraphrases lose 0.249 MRR
+[-0.379, -0.128], the one held-out cell whose interval excludes 0; English paraphrases gain recall
+(+0.083 held-out, +0.167 tuning) and still lose MRR (-0.117, -0.101). The gain has a low ceiling: of
+the 10 held-out golds missing at k=8, 9 already sit on the baseline 50-page; the ranker moved 2 onto
+the 8-page, brought in no gold the dense pool lacked, and pushed 4 golds off the held-out page.
+
+Not tried, with the reason: a lower fusion weight (identifier-search.md measured weight as the wrong
+knob for the identifier ranker); an English-only gate (both golds the selected arm rescued are in
+English queries already, and a held-out win needs about 4 rescued golds and none lost: 2 wins and 0
+losses leave the CI lower bound at 0.000, as the two best held-out arms show); and a term-frequency
+or `ts_rank_cd` order within the matches. The ranker is pure IDF with ties by row id: with one rare
+lexeme (36 of the 180 queries at ratio 0.02) every match ties and the cap keeps the lowest ids, so a
+ranker that orders matches by their own text score is untested. Nothing shipped: no key, no route
+plumbing, no toggle, and the measured code is not in the tree.
 
 **MEASURED (c) (2026-11-28): no win; do not ship.** Candidate: `collapseIdenticalBodies`, off by
 default. Its first statement is main's. Only when that page holds one body twice (same source type
