@@ -346,7 +346,9 @@ alone permits the non-key UPDATE that acquires a root claim or publishes cloning
 `projection` policy requires ready and no foreign live root owner. A pending preparation marker
 alone does not own the root, so a ready read-only scan can import while its job is still counted.
 Cloning, an error checkout, a foreign live claim or bounded row contention holds with structural
-`holdReason: checkout_unavailable` (the existing `plan_mirror_held` code), a fixed `last_error`, and a dirty revision. Neither mirror file nor a
+`holdReason: checkout_unavailable` (the existing `plan_mirror_held` code), a fixed `last_error`, and a dirty revision: a clean
+row's revision is bumped once and a dirty row's is left alone, so a repository stuck unavailable is not rewritten every tick. A held boot
+stamp only logs, so a clean unstamped row stays clean until its next edit. Neither mirror file nor a
 read/import/base stamp changes. The next sweep retries after readiness; a held first import is
 reconciled before an empty database can remove its unstamped incoming mirror. Missing anchors
 are never recreated. Ordinary missing-checkout holds retain their existing code and behavior.
@@ -354,6 +356,22 @@ Import and reconcile take the ancestry key only with a nonblocking try after fil
 a busy try rolls back. Hold diagnostic/outbox writes have their own 250 ms bound after the
 section unwinds; when a peer also blocks those writes, existing obligations survive and the
 typed hold still returns. Database-only plan edits keep their existing admission.
+
+The flush, import, reconcile and boot-stamp sections hold the task key and the repository row
+`FOR NO KEY UPDATE` from admission to commit, across their checkout reads and writes and the
+`gitOperationInProgress` Git spawns. Meanwhile every autocommit UPDATE of that row waits behind
+them (root claim acquisition and renewal, cloning publication, api repository updates), and a task
+Start waits on the tasks key and answers 409 only past its 5 s bound: the pattern and bounds of a
+project-state write ([Worker restarts](worker-restarts.md), task Start). MEASURED for the flush
+(throwaway Postgres 18, checkout on the host disk, a second connection probing both locks every
+2 ms; the probed windows match the flush transaction within 20 ms): 0.20-0.37 s for 2,000 nodes with
+2,000-character bodies (4.5 MB plan.json), 0.31-0.45 s for 20,000 nodes, 0.24-0.66 s for 78 nodes of
+200,000 characters (15.4 MB), and at the 16 MiB plan.json cap 0.44-1.01 s for 20,000 nodes with
+560-character bodies (16.7 MB) and 0.60-1.03 s for 20,000 nodes with 62,000 edges (16.5 MB; the byte
+cap is reached near 63,000 edges, before the 100,000-edge cap). The first rewrite after a first write
+was the slowest in every shape (0.93-1.03 s at the cap, 0.30-0.66 s below it); later rewrites at the
+cap took 0.48-0.62 s, and the cause of the slow first rewrite was not investigated. Only the two cap
+shapes reached 1 s; the lock order was left as it is.
 
 Explicit plan Save/Pull take the renewing `mutation` root lease before preparation and before any
 merge/domain/row lock, and retain it through commits, fetch/integration, re-sync, push and failure
@@ -365,6 +383,29 @@ transactions called by these plan operations drain their callbacks before releas
 including when the driver rejects while filesystem/Git work is outstanding. Existing task-holder,
 merge-conversation and open-Git-operation refusals remain. The independent Haive-data Save has
 not gained this admission in this change.
+
+Save and Pull answer 409 while a refresh is owed (`refresh_pending`), while the status is not
+`ready`, and while another root claim is live; the api returns the worker's refusal text under
+`plan_snapshot_save_failed` / `plan_snapshot_pull_failed` (the `checkout_unavailable` code does not
+survive the queue). For the whole operation the lease also refuses Task Start, attachment writes,
+reset, verify, remote relink and whole-plan deletion with the held kind's copy, and a refresh or
+rebuild queued meanwhile waits (`RootClaimBusyError`, five-second delayed pickup). When the lease is
+lost, or 14.5 minutes have passed since its last confirmed renewal (30 s before takeover), further Git
+is refused, recovery's own reads included (`recoverAfterMoveFailure` stops at its first
+`git rev-parse`). A half-done merge is then left as it stands, and the mirror holds it as an open Git
+operation (`git_operation`) until a person finishes or aborts it.
+
+The post-push base advance (`advancePlanBaseFromCommit`, after Save's push and after the
+`01-plan-merge` push) runs on the plain database handle, not the settled-transaction facade: it only
+reads Git (still behind the owner check under a Save) and writes the database base in one
+transaction, and a failure is logged (`plan base not advanced after push`) because the push already
+landed. `recoverAfterMoveFailure` keeps the facade because it restores files.
+
+`seedPlanBaseFromCheckout` (the base seed before a Pull moves the checkout) takes the plan mirror
+domain lock only and admits nothing itself; each caller owns what it reads: refresh inside its own
+refresh claim, Pull inside the plan mutation lease, `00a-sync-base` and `01-plan-merge` as the task
+that holds the checkout, the merge resolver on its own scratch merge directory. A new caller must
+hold one of these or read a tree it made.
 
 Preparation carries its actual renewing handle through the plan-only asynchronous scope in
 `withRootClaim`. The policy verifies that handle's repository, owner, preparation kind and live

@@ -309,8 +309,9 @@ Plan mirror writer/importer/reconciler, refresh, dirty sweep and boot stamping a
 The stronger row lock excludes non-key claim/status updates; acquisition uses the existing 250 ms
 late-lock bound; the task key has the existing five-second admission bound, and hold
 diagnostic/outbox writes are bounded separately at 250 ms. Ready with no foreign live root owner is required; owed work alone permits a
-ready scan's import. A hold reads/writes no checkout data, leaves the mirror revision dirty and
-records the fixed `checkout_unavailable` reason, so a later sweep retries. A held initial import
+ready scan's import. A hold reads/writes no checkout data, leaves the mirror dirty (a clean row's
+revision is bumped once, a dirty row's is left alone) and records the fixed `checkout_unavailable`
+reason, so a later sweep retries; a held boot stamp only logs. A held initial import
 cannot be turned into deletion of its incoming mirror on that retry.
 
 Explicit plan Save/Pull hold a renewing mutation lease across preparation and the complete
@@ -319,8 +320,12 @@ plan operations use that registered owner. The plan push helper accepts only the
 unrelated claim still refuses. Per-command Git and mirror-writer file checks stop an
 unproven/expired owner before another physical step (set-aside and put-back moves are not checked one by one); projection transaction callbacks drain
 before lease release after driver errors. Task/worktree-holder and open-Git-operation refusals
-are retained. The independent `project-state/save.ts` admission is unchanged. See the
-[plan mirror contract](plan-canvas.md) for the private restore, lock order and retry details.
+are retained. The independent `project-state/save.ts` admission is unchanged. Save/Pull answer 409
+while a refresh is owed, the status is not `ready` or another root claim is live. Held, the lease
+refuses Start, attachments, reset, verify, relink and plan deletion for the whole operation, and a
+refresh or rebuild waits behind it (`RootClaimBusyError`). A lost or unproven lease refuses further
+Git, recovery's included, so a half-done merge stays as an open Git operation until a person acts.
+See the [plan mirror contract](plan-canvas.md) for the private restore, lock order and retry details.
 
 The remaining independent entries in the T780 analysis are **not yet covered**: independent
 Haive-data Save, project-state sync/writer/journal/rules/metadata recovery, initial detection/legacy
