@@ -639,7 +639,8 @@ The Tooling read completes recorded membership without writing it; a missing, re
 unresolved current context displays those names read-only until setup or configuration completion.
 Its explicit `POST /repositories/:id/cli-targets/remove` action still requires a valid current
 context and compares canonical recorded membership against the observed set under bounded
-ordered locks and records the dirty revision atomically; a stale list, active root claim,
+ordered locks (taken after an unlocked owner read, so a caller who does not own the repository
+never queues on them) and records the dirty revision atomically; a stale list, active root claim,
 onboarding/upgrade holder or journal holds it. A no-op does not clear legacy fallback or dirty the
 record. This action leaves files and ledger rows in place: the next upgrade offers owned obsolete
 files with its usual Keep choices. 04 restores files while preserving current repository membership.

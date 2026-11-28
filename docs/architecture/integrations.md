@@ -869,10 +869,14 @@ The same step covers what a spelling reaches outside an advisory key. `ragSyncLo
 (`@haive/shared/rag`, the `haive:rag-sync:` lock) canonicalizes, since the api holds a route
 parameter and the worker a database id. A route that already read the row builds from `row.id`
 (PostgreSQL prints the lowercase form), never from the parameter: the task attachment routes'
-uploads directory and stored paths (`requireOwnedTask`, `resolveTaskUploadsDir`), and the job ids and
-payloads of the browser-access, merge abort/undo/resync and module-source fetch routes.
+uploads directory and stored paths (`requireOwnedTask`, `resolveTaskUploadsDir`), the job ids and
+payloads of the browser-access, merge abort/undo/resync and module-source fetch routes, and the
+module-source delete's token secret key and the audit target of its delete and fetch (a delete through
+an upper-case id once left `module_source:<id>:token` behind).
 `enqueueCheckoutSync` and `enqueuePlanMirrorRefresh` take a route parameter or a body id from many
-callers, so they use `canonicalUuid` in the helper. An attachment row stored under another spelling
+callers, so they use `canonicalUuid` in the helper. The browser-VNC bridge needs no step:
+`extractTaskId` admits only the canonical form and answers 404 before any read to another, so its
+runner names and `ensure-<id>` job id already have one spelling. An attachment row stored under another spelling
 before this stays refused (404, or 409 "not in a recognised layout" on delete), as it already was
 under the canonical one. Other ids built from a spelling, such as the `ensure-ide-` job id
 (`ideTarget`, `lib/ide-target.ts`), are not covered.
@@ -883,7 +887,9 @@ remote key → row and acquire no task-creation, project-state or allow-list key
 Gate 4 opens its own transaction with no outer task/domain key; credential validation and
 audit insertion acquire no advisory key. The shared `remoteRelinkKey` in `@haive/database`
 defines the key text for API and worker. Existing writers keep task key →
-domain key → row (or their existing subset), and deletion keeps task key → row. No holder of
+domain key → row (or their existing subset), and deletion keeps task key → row. The repository
+delete and the CLI-target removal read the owner's row without a lock before their keys, so a caller
+who does not own the repository never queues on them. No holder of
 a row waits for the new remote key. The final KEY SHARE → NO KEY UPDATE upgrade adds no
 reverse key edge. RAG Retry's post-commit restore remains bounded and can now pass during Git;
 `forceRagReembed` retains its pre-existing cross-relink limitation.
