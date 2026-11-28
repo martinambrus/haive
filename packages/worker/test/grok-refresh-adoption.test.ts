@@ -159,6 +159,7 @@ function fixture() {
   let probeExit: number | undefined;
   let probeTimeout = false;
   let failFenceClear = false;
+  let failFenceRead = false;
   let failArchive = false;
   const runner = {
     volumeList: async (prefix: string) =>
@@ -192,6 +193,8 @@ function fixture() {
           durationMs: 0,
           timedOut: probeTimeout,
         };
+      if (failFenceRead && script.includes('cat "/vol/.haive-grok-refresh"'))
+        return { exitCode: 1, stdout: '', stderr: '', durationMs: 0, timedOut: false };
       if (
         failFenceClear &&
         script.includes('haive-grok-refresh.haive-tmp') &&
@@ -254,6 +257,9 @@ function fixture() {
     },
     failClear: () => {
       failFenceClear = true;
+    },
+    failFenceRead: (on: boolean) => {
+      failFenceRead = on;
     },
     task,
     ctx,
@@ -624,6 +630,22 @@ it.each([400, 401, 403, 429, 500, 503])(
     else await expect(f.adopt()).rejects.toMatchObject({ code: 'grok_login_required' });
   },
 );
+
+it('an unreadable fence skips the refresh, so a later 4xx cannot clear earlier uncertainty', async () => {
+  const f = fixture();
+  f.fetchMock.mockRejectedValueOnce(new Error('response lost'));
+  await refreshExpiringCliCredentials(f.db, f.runner);
+  f.fetchMock.mockResolvedValueOnce({
+    ok: false,
+    status: 429,
+    text: async () => '{"error":"temporarily_unavailable"}',
+  } as never);
+  f.failFenceRead(true);
+  await refreshExpiringCliCredentials(f.db, f.runner);
+  f.failFenceRead(false);
+  expect(f.fetchMock).toHaveBeenCalledTimes(1);
+  await expect(f.adopt()).rejects.toMatchObject({ code: 'grok_login_required' });
+});
 
 it('a failed same-token fence clear is reported and retried even before the next refresh is due', async () => {
   const f = fixture();

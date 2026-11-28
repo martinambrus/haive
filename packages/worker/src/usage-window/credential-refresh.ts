@@ -220,7 +220,10 @@ async function refreshGrokVolume(
   const cred = parseGrokAuthFile(raw);
   if (!cred) return;
   // A failed same-token fence clear must retry even with a newly renewed access token.
-  const fence = await readVolumeFile(vol, GROK_REFRESH_FENCE_FILE, runner);
+  // An unreadable fence throws: read as absent, a later 4xx would clear earlier uncertainty.
+  const fence = await readVolumeFile(vol, GROK_REFRESH_FENCE_FILE, runner, {
+    throwOnFailure: true,
+  });
   const fenced = fence === grokRefreshFingerprint(cred.refreshToken);
   if (!grokTokenNeedsRefresh(cred.expiresAtMs) && !fenced) return;
   if (deadRefreshToken.get(vol) === cred.refreshToken) return;
