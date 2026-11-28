@@ -509,6 +509,16 @@ export const CLI_LOGIN_CLOSE_CODES = {
   UNSUPPORTED: 4411,
 } as const;
 
+/** Why a login could not start because its provider's sandbox image was unusable. The worker
+ *  decides on the image state, never on message wording; the login dialog maps each code to the
+ *  reason text the providers list shows for the same state. */
+export const CLI_LOGIN_REFUSAL_CODES = {
+  SANDBOX_IMAGE_BUILDING: 'sandbox_image_building',
+  SANDBOX_IMAGE_FAILED: 'sandbox_image_failed',
+} as const;
+export type CliLoginRefusalCode =
+  (typeof CLI_LOGIN_REFUSAL_CODES)[keyof typeof CLI_LOGIN_REFUSAL_CODES];
+
 /** Terminal refusals sent only after origin, authentication and ownership checks. */
 export const TERMINAL_CLOSE_CODES = {
   CONTAINER_NOT_RUNNING: 4420,
@@ -760,6 +770,8 @@ export interface CliLoginCreateResult {
   containerRowId?: string;
   dockerContainerId?: string;
   error?: string;
+  /** Set only on a refusal that came from the provider's sandbox image state. */
+  code?: CliLoginRefusalCode;
 }
 
 export const PUBSUB_CHANNELS = {

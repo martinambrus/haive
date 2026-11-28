@@ -1,10 +1,12 @@
 import { describe, expect, it } from 'vitest';
+import { CLI_LOGIN_REFUSAL_CODES } from '@haive/shared/constants';
 import {
   IMAGE_BUILDING_REASON,
   IMAGE_BUILD_POLL_MS,
   IMAGE_FAILED_REASON,
   anyImageBuilding,
   cliImageBuild,
+  loginRefusalReason,
 } from './cli-image-build';
 
 const row = (
@@ -58,5 +60,22 @@ describe('cliImageBuild', () => {
     expect(anyImageBuilding([])).toBe(false);
     expect(anyImageBuilding([row('ready'), row('idle'), row('failed', 'x')])).toBe(false);
     expect(anyImageBuilding([row('ready'), row('building'), row('failed')])).toBe(true);
+  });
+});
+
+describe('loginRefusalReason', () => {
+  it('L6 gives each image refusal code the reason the list shows for that state', () => {
+    expect(loginRefusalReason(CLI_LOGIN_REFUSAL_CODES.SANDBOX_IMAGE_BUILDING)).toBe(
+      cliImageBuild(row('building'))?.reason,
+    );
+    expect(loginRefusalReason(CLI_LOGIN_REFUSAL_CODES.SANDBOX_IMAGE_FAILED)).toBe(
+      cliImageBuild(row('failed'))?.reason,
+    );
+  });
+
+  it('L7 says nothing for a missing or unknown code, so the message is kept', () => {
+    expect(loginRefusalReason(undefined)).toBeNull();
+    expect(loginRefusalReason('something_new')).toBeNull();
+    expect(loginRefusalReason(4409)).toBeNull();
   });
 });

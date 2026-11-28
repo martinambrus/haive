@@ -1,7 +1,8 @@
-import { CLI_LOGIN_CLOSE_CODES } from '@haive/shared/constants';
+import { CLI_LOGIN_CLOSE_CODES, CLI_LOGIN_REFUSAL_CODES } from '@haive/shared/constants';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { CliAuthBannerModal } from './cli-auth-banner-modal';
 import { buttons, createRenderer, fire, textOf, type Renderer } from '../../test/render-tree';
+import { IMAGE_BUILDING_REASON, IMAGE_FAILED_REASON } from '@/lib/cli-image-build';
 
 const h = vi.hoisted(() => ({ stateUpdate: vi.fn(), errorRender: vi.fn() }));
 vi.mock('react', async (original) => {
@@ -348,4 +349,31 @@ it.each([
   expect(textOf(view.tree())).toContain(message);
   expect(textOf(view.tree())).not.toContain('WebSocket error');
   expect(buttons(view.tree(), 'retry')).toHaveLength(1);
+});
+
+describe('CLI auth banner image refusals', () => {
+  it.each([
+    [CLI_LOGIN_REFUSAL_CODES.SANDBOX_IMAGE_BUILDING, IMAGE_BUILDING_REASON],
+    [CLI_LOGIN_REFUSAL_CODES.SANDBOX_IMAGE_FAILED, IMAGE_FAILED_REASON],
+  ])(
+    'shows the providers list reason for the coded refusal %s, not the worker text',
+    (code, reason) => {
+      socket.frame({ type: 'error', message: 'sandbox image not ready (status=idle)', code });
+      view.draw();
+      expect(textOf(view.tree())).toContain(reason);
+      expect(textOf(view.tree())).not.toContain('sandbox image not ready');
+      expect(buttons(view.tree(), 'retry')).toHaveLength(1);
+    },
+  );
+
+  it.each([
+    ['without a code', undefined],
+    ['with a code it does not know', 'something_new'],
+  ])('keeps the worker message of a refusal %s', (_label, code) => {
+    socket.frame({ type: 'error', message: 'provider not found', code });
+    view.draw();
+    expect(textOf(view.tree())).toContain('provider not found');
+    expect(textOf(view.tree())).not.toContain(IMAGE_BUILDING_REASON);
+    expect(textOf(view.tree())).not.toContain(IMAGE_FAILED_REASON);
+  });
 });

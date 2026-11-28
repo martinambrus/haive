@@ -982,9 +982,8 @@ export async function holdImportedMcpServerLists(db: Database): Promise<void> {
  *  Two states go stale, and neither is cosmetic:
  *
  *  `ready` — a `docker image prune` leaves the row green while the image is gone. Nothing
- *  in the exec path is fooled (it inspects the image before it reads the row), but
- *  createSandboxLoginContainer gates on `status === 'ready'` and then hands the tag to
- *  dockerode, so a stale row turns "not built yet" into `No such image`.
+ *  in the exec path or the login is fooled (each inspects the image before it reads the
+ *  row), so a stale row only misreports the image.
  *
  *  `building` — nothing anywhere resets it. The api writes it before `queue.add`, the
  *  worker writes it around a build that a SIGKILL can interrupt, and the jobs are

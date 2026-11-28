@@ -1,4 +1,4 @@
-import { CLI_LOGIN_CLOSE_CODES } from '@haive/shared/constants';
+import { CLI_LOGIN_CLOSE_CODES, CLI_LOGIN_REFUSAL_CODES } from '@haive/shared/constants';
 vi.mock('@haive/database', async (original) => ({
   ...(await original<typeof import('@haive/database')>()),
   tryCliAuthLock: async () => {
@@ -42,6 +42,7 @@ const h = vi.hoisted(() => ({
   exec: vi.fn(),
   queueError: undefined as Error | undefined,
   createError: undefined as string | undefined,
+  createCode: undefined as string | undefined,
   probeError: undefined as Error | string | undefined,
   // While set, a post-login probe job stays pending until it resolves.
   probeGate: undefined as Promise<void> | undefined,
@@ -94,7 +95,7 @@ vi.mock('../src/queues.js', () => ({
           if (name !== 'cli-login-create' && h.probeError) throw h.probeError;
           return name === 'cli-login-create'
             ? h.createError
-              ? { ok: false, error: h.createError }
+              ? { ok: false, error: h.createError, ...(h.createCode ? { code: h.createCode } : {}) }
               : { ok: true, containerRowId: 'row', dockerContainerId: 'container' }
             : h.probeResult;
         },
@@ -140,6 +141,7 @@ beforeEach(() => {
   h.exec.mockReset().mockResolvedValue({ exitCode: 0, stdout: '', stderr: '' });
   h.queueError = undefined;
   h.createError = undefined;
+  h.createCode = undefined;
   h.probeError = undefined;
   h.probeGate = undefined;
   h.probeResult = {
@@ -822,6 +824,28 @@ describe('CLI login banner credential logging', () => {
         return frame.type === 'error' && frame.message === message;
       }),
     ).toBe(true);
+  });
+
+  it.each(Object.values(CLI_LOGIN_REFUSAL_CODES))(
+    'forwards the worker code of a sandbox image refusal beside its message: %s',
+    async (code) => {
+      h.createError = 'synthetic image refusal';
+      h.createCode = code;
+      await start('', false);
+      const frames = ws.send.mock.calls.map(([raw]) => JSON.parse(raw));
+      expect(frames.filter((frame) => frame.type === 'error')).toEqual([
+        { type: 'error', message: 'synthetic image refusal', code },
+      ]);
+    },
+  );
+
+  it('sends no code when the worker refused without one', async () => {
+    h.createError = 'provider not found';
+    await start('', false);
+    const frames = ws.send.mock.calls.map(([raw]) => JSON.parse(raw));
+    expect(frames.filter((frame) => frame.type === 'error')).toEqual([
+      { type: 'error', message: 'provider not found' },
+    ]);
   });
 
   it('fix7 preserves the non-Error post-login fallback', async () => {

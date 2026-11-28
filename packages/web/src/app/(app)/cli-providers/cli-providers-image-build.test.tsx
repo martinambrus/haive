@@ -22,7 +22,10 @@ vi.mock('lucide-react', async (original) => ({
 }));
 vi.mock('next/link', () => ({ default: ({ children }: { children: unknown }) => children }));
 vi.mock('@/lib/use-page-title', () => ({ usePageTitle() {} }));
-vi.mock('@/lib/use-cli-login', () => ({ useCliLogin: () => ({ requireCliLogin() {} }) }));
+const login = vi.hoisted(() => ({ request: null as { providerId: string } | null }));
+vi.mock('@/lib/use-cli-login', () => ({
+  useCliLogin: () => ({ requireCliLogin() {}, request: login.request }),
+}));
 vi.mock('@/components/cli-upgrade-all', () => ({
   CliUpgradeAll: ({ onUpgrade }: { onUpgrade: (ids: string[]) => void }) =>
     createElement('button', { onClick: () => onUpgrade(['p']) }, 'Upgrade everything'),
@@ -134,6 +137,7 @@ beforeEach(() => {
   h.post.mockReset();
   h.patch.mockReset();
   h.probe.mockReset();
+  login.request = null;
   state.status = 'ready';
   state.error = null;
   state.authStatus = 'ok';
@@ -464,5 +468,61 @@ describe('image build state on the providers list', () => {
     await vi.advanceTimersByTimeAsync(0);
     view.draw();
     expect(notices()).toEqual([]);
+  });
+
+  it('P16 reads the list while a login is open, so the build that login starts shows', async () => {
+    fakeDocument();
+    state.authStatus = 'unknown';
+    const view = await mount();
+    expect(isDisabled(menuButton(view.tree(), /^log in$/i))).toBe(false);
+    expect(vi.getTimerCount()).toBe(0);
+    login.request = { providerId: 'p' };
+    view.draw();
+    // The worker began the image build for this idle row after the page had read it.
+    state.status = 'building';
+    await vi.advanceTimersByTimeAsync(3000);
+    view.draw();
+    expect(pollCalls()).toHaveLength(1);
+    expect(textOf(view.tree())).toContain('Rebuilding sandbox image');
+    expect(isDisabled(menuButton(view.tree(), /^log in$/i))).toBe(true);
+  });
+
+  it('P17 keeps reading while the login stays open, then stops once it closes', async () => {
+    fakeDocument();
+    const view = await mount();
+    login.request = { providerId: 'p' };
+    view.draw();
+    state.status = 'building';
+    await vi.advanceTimersByTimeAsync(3000);
+    state.status = 'ready';
+    await vi.advanceTimersByTimeAsync(3000);
+    await vi.advanceTimersByTimeAsync(3000);
+    view.draw();
+    expect(textOf(view.tree())).not.toContain('Rebuilding sandbox image');
+    expect(pollCalls()).toHaveLength(3);
+    login.request = null;
+    view.draw();
+    await vi.advanceTimersByTimeAsync(0);
+    const before = listCalls().length;
+    await vi.advanceTimersByTimeAsync(20_000);
+    expect(listCalls()).toHaveLength(before);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('P18 reads the list once when the login closes, for a build that began after the last read', async () => {
+    fakeDocument();
+    const view = await mount();
+    const loads = () => listCalls().filter(([, signal]) => signal === undefined).length;
+    expect(loads()).toBe(1);
+    login.request = { providerId: 'p' };
+    view.draw();
+    state.status = 'building';
+    login.request = null;
+    view.draw();
+    await vi.advanceTimersByTimeAsync(0);
+    view.draw();
+    expect(loads()).toBe(2);
+    expect(textOf(view.tree())).toContain('Rebuilding sandbox image');
+    expect(vi.getTimerCount()).toBeGreaterThan(0);
   });
 });

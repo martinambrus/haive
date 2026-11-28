@@ -91,7 +91,20 @@ export async function waitForInFlightBuild(
   return { done: 'timeout' };
 }
 
-async function ensureProviderSandboxImage(
+/** `ensureProviderSandboxImage` could not hand back an image: another builder holds it
+ *  (`building`) or its build ended without one (`failed`). A caller that has to tell the two
+ *  apart decides on `reason`, never on the message. */
+export class SandboxImageUnavailableError extends Error {
+  constructor(
+    readonly reason: 'building' | 'failed',
+    message: string,
+  ) {
+    super(message);
+    this.name = 'SandboxImageUnavailableError';
+  }
+}
+
+export async function ensureProviderSandboxImage(
   db: Database,
   provider: {
     id: string;
@@ -136,10 +149,16 @@ async function ensureProviderSandboxImage(
       return resolution.tag;
     }
     if (outcome.done === 'build_failed') {
-      throw new Error(`sandbox image build failed: ${outcome.error ?? 'unknown'}`);
+      throw new SandboxImageUnavailableError(
+        'failed',
+        `sandbox image build failed: ${outcome.error ?? 'unknown'}`,
+      );
     }
     if (outcome.done === 'timeout') {
-      throw new Error('sandbox image build is in progress, please wait for it to finish and retry');
+      throw new SandboxImageUnavailableError(
+        'building',
+        'sandbox image build is in progress, please wait for it to finish and retry',
+      );
     }
     // 'not_building' — the other builder left without an image, so fall through and
     // build it here rather than failing on a lock nobody holds any more.
@@ -154,7 +173,10 @@ async function ensureProviderSandboxImage(
     userId: provider.userId,
   });
   if (!result.ok) {
-    throw new Error(`sandbox image build failed: ${result.error ?? 'unknown'}`);
+    throw new SandboxImageUnavailableError(
+      'failed',
+      `sandbox image build failed: ${result.error ?? 'unknown'}`,
+    );
   }
   return result.imageTag ?? null;
 }
