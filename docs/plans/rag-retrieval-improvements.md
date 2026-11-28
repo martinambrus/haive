@@ -2,7 +2,8 @@
 
 > **Partially implemented; reviewed 2026-11-12 at `3426c8c34`.** P0 was an untracked historical
 > eval; P1 chunk corrections, own-file budgets, the dense-search settings and accent-insensitive
-> lexical configuration have since shipped. P2(b)/(c) remain parked (T144/T147), as does index-space
+> lexical configuration have since shipped. P2(c) was measured on 2026-11-28 and does not win (T147,
+> not shipped); P2(b) remains parked (T144), as does index-space
 > work (T149); P3 has two local GPU measurements below, neither recommended to ship, and P4 remains conditional. The committed shared-source eval below supplies a reproducible baseline; ranking
 > changes still require held-out comparisons, including negative and overview results. The original status was stale. Seven external
 > sources are reviewed so far. The findings were measured read-only on the dev install on
@@ -263,7 +264,8 @@ narrower. The dev install's code indexes are gone, so the chunker ran read-only 
 - **F5. Identical bodies across files.** 1,805 of 21,813 chunks (8.3%) share their body with another
   file's chunk: 651 groups, one body in 40 files, and the custom inspection variants share bodies
   across 15-20 files. They differ only in the path header, so they can fill a page with copies; how
-  often they do is unmeasured (F8). → P2.
+  often they do was unmeasured (F8): 1 of the 29 logged pages that kept their hits holds one
+  (P2(c)). → P2.
 - **F6. The lexical rankers rarely co-support a hit.** One ranker alone scores at most 1/61 and two
   rankers at ranks ≤ 50 at least 2/110, so `max_rrf` separates them. Of 2,514 logged calls that
   returned code (none with a runbook hit; all on repositories deleted since), 1,700 (67.6%) had
@@ -280,7 +282,7 @@ narrower. The dev install's code indexes are gone, so the chunker ran read-only 
   → P2.
 - **F8. No hit list is recorded.** `rag_query_log` kept counts and score maxima, so none of the
   3,103 calls logged before 0180 can be replayed or labelled. 0180 adds the final page
-  (`result_hits`); every row on the dev install is still NULL. → P0.
+  (`result_hits`); 40 of the 17,065 rows on the dev install hold it (2026-11-28). → P0.
 - **F9. Context-poor chunks.** 36.2% of chunks carry a path-only header. 32.4% are continuation
   chunks, and 52.4% of those are path-only; the rest keep their `class > function` breadcrumb.
   → P1, then P4.
@@ -588,10 +590,11 @@ Each sits behind a config key, off until P0 says on, so the rollback is the key.
 - **(b)** An IDF-weighted ranker over the query's rare prose terms, for F6, with its candidates
   capped like `identifierCandidates`: an uncapped ranker rewrites the page (AGENTS.md, identifier
   search).
-- **(c)** Collapse identical bodies on a page, for F5: compare bodies without their header, keep the
-  best, name the others, as `dedupeGlobalByEntry` does for global entries. It needs the SQL pool
-  widened past `top_k` so that collapsing does not shrink the page. S3 found retrieved look-alikes
-  harder on a reader than random text.
+- **(c) Measured 2026-11-28: no win, not shipped.** Collapse identical bodies on a page, for F5:
+  compare bodies without their header, keep the best, name the others, as `dedupeGlobalByEntry`
+  does for global entries. It needs the SQL pool widened past `top_k` so that collapsing does not
+  shrink the page. S3 found retrieved look-alikes harder on a reader than random text. Copies
+  rarely reach a page, so the change has little to do (MEASURED (c) below).
 - **(d)** Ranked-list truncation, for S3: end a page at a relative score cliff instead of filling
   `top_k` whenever candidates clear the absolute floors, which today almost never cut a page of 12
   or fewer (F10). The cut needs an absolute signal: `rrf` depends only on ranks, so today it is
@@ -610,6 +613,31 @@ candidate expansion/deduplication/reranking; removing reserved KB/learning slots
 experiment. Dedupe retains all source locations and chooses deterministically without merging
 semantically different bodies that merely normalize alike. A score cliff uses a documented score
 scale and a minimum useful page; low RRF alone is not a calibrated relevance probability.
+
+**MEASURED (c) (2026-11-28): no win; do not ship.** Candidate: `collapseIdenticalBodies`, off by
+default. Its first statement is main's. Only when that page holds one body twice (same source type
+and the same text after the header line, compared exactly; an empty body is never a copy) does a
+second statement read `LIMIT top_k + candidatePool`. It keeps the best copy of each body (`rrf`,
+then dense similarity, then path), names the rest in `alsoAt`, cuts to `top_k` and runs
+`applyKnowledgeReserve` on that page with the absorbed rows counted as ranked: a control caught the
+reserve re-adding an absorbed copy until they were. Its 11 controls pass (those for new behavior
+failed on main first), and each of 6 mutations of the candidate is caught. The paired arm used the
+same store, model digest (`qwen3-embedding:4b`, `df5bd2e3...ff907`, equal to the manifest before
+and after) and settings as the baseline re-run. The fixture cannot show a gain: it holds 3
+duplicate groups (7 of 2,141 chunks, 0.33%; F5's repository has 8.3%), and 0 of its 180 baseline
+pages hold a duplicate body at
+k=5, 8 and 12, 1 at k=20 and 2 at k=50 (tuning paraphrases). The arm therefore changed no page at
+k <= 12, one at k=20 (refilled to 20) and two at k=50 (9,000 hits became 8,998), and every paired
+delta is exactly 0 at every page size, in recall, MRR, overview coverage and the no-answer FPR,
+whether a hit counts only through its own path or also through the locations it names. Logged
+pages agree: of the 29 pages with code hits that kept their hits on the dev install (268 hits), 1
+holds a duplicate body, one redundant hit (0.4%). The held-out effect is 0 by construction, so
+default-on has no case and the code would only ever stay off. Nothing shipped: no key, no route
+plumbing, no toggle. To revisit it on a repository where copies do crowd a page, rebuild from this
+description and keep three properties: a single statement when the page shows no copy, absorbed
+rows counted as ranked, and a choice of copy that does not depend on row order. `formatRagHits` is
+serialized into the sandbox MCP script and pinned by `rag-mcp-response.test.ts`, so rendering
+`alsoAt` must leave a hit without it byte-identical.
 
 MMR only if P0 shows near-duplicate crowding that (c) leaves.
 
