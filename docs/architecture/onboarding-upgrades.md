@@ -1010,8 +1010,8 @@ policy). A foreground writer fails its apply with a retry-this-step text (`failI
 `project-state/write.ts`): 02 instead of its stale-plan one, 04 and 12 instead of a `recordWrite: 'failed'`
 warning. The hold leaves no dirty outbox row, so nothing but a retry of the step writes that record. A retry
 re-runs the whole step: 12 supersedes and re-inserts its artifact rows in one transaction, and 04 detects
-again (the rows the held pass already put aside are not listed again) and writes the record from the rows now
-live, so its summary counts only that pass (`onboarding-recorded-membership.test.ts`, gated). The refresh
+again and writes the record from the rows now live (`onboarding-recorded-membership.test.ts`, gated). Its
+summary does not list the rows the held pass put aside, and lists a path the upgrade removed again. The refresh
 keeps the row dirty with one fixed `last_error` (set only on a dirty row) and answers `held` with
 reason `checkout`; the sweep writes once the checkout is ready. A caller's own claim is carried by the
 ambient scope, so a clone, a refresh and the Undo's edit claim are not refused by themselves. A sync refused
