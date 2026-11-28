@@ -413,15 +413,16 @@ describe('buildFilesRead steps', () => {
     expect(out.steps.rows[0]?.exceedsPrompt).toBe(false);
   });
 
-  it('orders by estimate (null last), runs, then step id, and caps with truncated', () => {
-    const mk = (stepId: string, runs: number, chars: number) =>
-      step({
-        stepId,
-        runs,
-        shareRuns: chars > 0 ? 5 : 0,
-        shareWeightedChars: chars,
-        shareInputTokens: 10000,
-      });
+  const mk = (stepId: string, runs: number, chars: number) =>
+    step({
+      stepId,
+      runs,
+      shareRuns: chars > 0 ? 5 : 0,
+      shareWeightedChars: chars,
+      shareInputTokens: 10000,
+    });
+
+  it('orders by estimate (null last), runs, then step id', () => {
     const out = buildFilesRead(
       rollup(
         [],
@@ -429,15 +430,34 @@ describe('buildFilesRead steps', () => {
       ),
     );
     expect(out.steps.rows.map((r) => r.stepId)).toEqual(['e', 'b', 'c', 'a', 'd']);
+    expect(out.steps.truncated).toBe(false);
+  });
 
-    const many = Array.from({ length: FILES_READ_STEP_LIMIT + 3 }, (_, i) =>
+  it('caps the rows at the step limit it is given and still counts every step', () => {
+    const many = Array.from({ length: 7 }, (_, i) => mk(`s${i}`, 1, 400));
+    const capped = buildFilesRead(rollup([], many), { stepLimit: 4 });
+    expect(capped.steps.rows.map((r) => r.stepId)).toEqual(['s0', 's1', 's2', 's3']);
+    expect(capped.steps.count).toBe(7);
+    expect(capped.steps.truncated).toBe(true);
+    const exact = buildFilesRead(rollup([], many.slice(0, 4)), { stepLimit: 4 });
+    expect(exact.steps.rows).toHaveLength(4);
+    expect(exact.steps.truncated).toBe(false);
+  });
+
+  it('falls back to the production step limit when none, or none above zero, is given', () => {
+    const many = Array.from({ length: FILES_READ_STEP_LIMIT + 1 }, (_, i) =>
       mk(`s${String(i).padStart(3, '0')}`, 1, 400),
     );
-    const capped = buildFilesRead(rollup([], many));
-    expect(capped.steps.rows).toHaveLength(FILES_READ_STEP_LIMIT);
-    expect(capped.steps.count).toBe(FILES_READ_STEP_LIMIT + 3);
-    expect(capped.steps.truncated).toBe(true);
-    expect(out.steps.truncated).toBe(false);
+    for (const opts of [undefined, {}, { stepLimit: 0 }, { stepLimit: -3 }]) {
+      const out = buildFilesRead(rollup([], many), opts);
+      expect(out.steps.rows).toHaveLength(FILES_READ_STEP_LIMIT);
+      expect(out.steps.count).toBe(FILES_READ_STEP_LIMIT + 1);
+      expect(out.steps.truncated).toBe(true);
+    }
+  });
+
+  it('pins the production step limit', () => {
+    expect(FILES_READ_STEP_LIMIT).toBe(60);
   });
 });
 

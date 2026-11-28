@@ -331,8 +331,9 @@ count is `count(*) over ()`, taken before the cut. Everything the cut and the re
 bucket beside the list, and the ranked rows plus the three buckets equal `totals` in reads, characters and
 weighted characters: `otherPaths` (the remainder), `overflow` (paths a run left off its own 50-path list,
 D1; `omitted` is summed per run) and `multiFile` (one shell call read several files, so no single path
-owns it). Steps are capped at `FILES_READ_STEP_LIMIT` (60). Sums of characters, weights and tokens are
-`double precision`, never `::int`: they pass 2^31 on a busy install.
+owns it). Steps are capped at `FILES_READ_STEP_LIMIT` (60); `buildFilesRead` takes an optional
+`stepLimit`, so a test reaches the cut at 4 steps and one assertion pins the 60. Sums of characters,
+weights and tokens are `double precision`, never `::int`: they pass 2^31 on a busy install.
 
 **Cost is the shape of the SQL, and it was measured.** On synthetic rows (postgres:18-bookworm, 100,000 runs
 over 365 days in one repository, 50 listed paths per run, 45,800 distinct paths) the first version took

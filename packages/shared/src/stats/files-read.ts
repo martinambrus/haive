@@ -211,8 +211,12 @@ function sumCoverage(groups: FilesReadGroupRow[]): FilesReadCoverage {
   };
 }
 
-/** Shape a rollup into the report. Pure and total: every rule in the header is applied here. */
-export function buildFilesRead(rollup: FilesReadRollup): FilesReadReport {
+/** Shape a rollup into the report. Pure and total: every rule in the header is applied here.
+ *  `stepLimit` defaults to `FILES_READ_STEP_LIMIT`; a test passes a small one to reach the cut. */
+export function buildFilesRead(
+  rollup: FilesReadRollup,
+  opts: { stepLimit?: number } = {},
+): FilesReadReport {
   const { groups } = rollup;
   const sum = (pick: (g: FilesReadGroupRow) => number): number =>
     groups.reduce((acc, g) => acc + pick(g), 0);
@@ -320,7 +324,9 @@ export function buildFilesRead(rollup: FilesReadRollup): FilesReadReport {
         b.runs - a.runs ||
         byCodePoint(a.stepId, b.stepId),
     );
-  const stepRows = steps.slice(0, FILES_READ_STEP_LIMIT);
+  const stepLimit =
+    opts.stepLimit !== undefined && opts.stepLimit > 0 ? opts.stepLimit : FILES_READ_STEP_LIMIT;
+  const stepRows = steps.slice(0, stepLimit);
 
   return {
     coverage: { ...coverage, byProvider },
