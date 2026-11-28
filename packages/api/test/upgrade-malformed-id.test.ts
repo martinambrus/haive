@@ -252,19 +252,29 @@ describe.each(HANDLERS)('the $name upgrade', ({ install, prefix }) => {
   });
 });
 
+// The other spellings PostgreSQL reads as one uuid. A runner name and an ensure job id are built from
+// the id as the URL spells it, so only the canonical form may get past the shape check.
+const SPELLED = randomUUID();
+const OTHER_SPELLINGS = [
+  ['uppercase', SPELLED.toUpperCase()],
+  ['unhyphenated', SPELLED.replaceAll('-', '')],
+  ['braced', `{${SPELLED}}`],
+] as const;
+
 describe.each([
   { name: 'browser-vnc', install: installBrowserVncWebSocket, prefix: '/browser-vnc/' },
   { name: 'ide', install: installIdeWebSocket, prefix: '/ide/' },
 ])('the $name upgrade, whose id names a container', ({ install, prefix }) => {
-  it('answers an uppercase uuid with 404 before any database read, as it always did', async () => {
-    const port = await listen(install);
+  it.each(OTHER_SPELLINGS)(
+    'answers the %s spelling of a uuid with 404 before any database read, as it always did',
+    async (_label, spelled) => {
+      const port = await listen(install);
 
-    expect(await handshake(port, `${prefix}${randomUUID().toUpperCase()}`)).toBe(
-      'HTTP/1.1 404 Not Found',
-    );
-    expect(h.dbCalls).toBe(0);
-    expect(h.error).not.toHaveBeenCalled();
-  });
+      expect(await handshake(port, `${prefix}${spelled}`)).toBe('HTTP/1.1 404 Not Found');
+      expect(h.dbCalls).toBe(0);
+      expect(h.error).not.toHaveBeenCalled();
+    },
+  );
 });
 
 describe.each(HELD)(
