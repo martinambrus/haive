@@ -554,7 +554,7 @@ PRE-EXISTING, from the T393 build (2026-11-07); cost is a cold start or lost she
 
 ### T543 · FNF[task-auth-volume-lifecycle] · task auth volume teardown leftovers (+1)
 
-status: open, PARKED for owner decision 2026-11-27 (PR #1370 at f00671c65; fixes 7-9 unpushed on branch fix/task-auth-volume-lifecycle at 2d1d1fcd6, review `.claude/tmp/codex-run/T543-S/review-fix9.md`): after 9 fix rounds the last review left M-1 (the admission retry counter counts since `started_at`, which Resume keeps, so Resume after exhaustion re-fails; the counter also prefix-matches `cli_invocations.error_message`) and M-2, an owner call: an unrecognized Grok `auth.json` fails closed (20 retries, then exhausted; re-login cannot help) versus admit with a coded warning when no refresh fence is set (recommended). Proposed finish: one narrow fix 10 (M-1 count since the later of `started_at` and the last Resume, keyed on a structural signal; M-2 as decided), gate only, merge · kind: fix · priority: P3
+status: done 2026-11-28, #1370 (3e0b756fd, worker hot reload, 0 errors): 10 fix rounds plus two gate fixes. Owner decision 2026-11-28 M-2 = option b (an unreadable Grok `auth.json` is admitted with warning `grok_refresh_untracked` when no refresh fence exists); M-1 fixed (the retry cap counts distinct 30 s waves since the later of `started_at` and the newest Resume or AI retry); gate: the poller reads the refresh fence with `throwOnFailure` (Greptile P1). Found-not-fixed went to T798 · kind: fix · priority: P3
 PRE-EXISTING, from the T393 build (2026-11-07).
 
 1. The boot reaper removes failed-task volumes without syncing a rotated single-use token back (worker auth-volume-reaper.ts ~:19, 125, 148).
@@ -1227,6 +1227,17 @@ status: done 2026-11-26, module #20 (d8a8db7, deployed with `pnpm docker libs`):
 In `martinambrus/haive-module-translator`. The owner's English-to-Slovak run failed at `tr-translate`: unit 0's accuracy pass was accepted, its restructure pass was refused with `Source-present keep term missing`. `keepTermLost` (`src/protocol/passes.ts` ~:115, used ~:142, `review.ts` ~:123, `patch.ts` ~:50) needs the literal keep term in the target as often as in the source, so a declined name (Marek to Marka) fails. One attempt is left on that pass key.
 
 1. Accept a declined form (same stem, up to 2 trailing letters changed on words of 5+ letters) at every keep-term check; a translated name still fails; codes and short words stay exact. Then the owner Retries the step.
+
+### T798 · FNF[T543] · leftovers of the task auth volume lifecycle fix
+
+status: open · kind: fix · found: T543 fix 10 and its review 2026-11-28 · priority: P3
+
+1. After a successful rotation that keeps the refresh token, a failed fence clear leaves the old fingerprint, and the poller retries the clear; but after a rotation to a NEW token the fence still names the old token, so option b's admission of an unreadable `auth.json` stays refused on that volume until a fresh login (`packages/worker/src/usage-window/credential-refresh.ts` ~:218-262, `sandbox/task-auth-volume.ts` fence readers). Fail-closed; recommendation: leave it unless a user hits it.
+2. Step `01b` applies its auth result directly and keeps its own retry counter, outside the wave-based cap.
+3. The exhaustion message (`cli_auth_probe_exhausted`) says only Retry; Resume also reopens the allowance.
+4. A park that clears `started_at` resets the cap's window; confirm no park path does so outside Resume and Retry.
+5. Test gaps named by the fix-10 review (`.claude/tmp/codex-run/T543-S/review-fix10.md`).
+6. Earlier rounds: safe over-refusals (a failed summary row with no provider, a provider row created after the task) and a pre-existing sign-out generation gap.
 
 ### T797 · FNF[T794] · Log in on an idle-image row, and raw image text in the login modal
 
