@@ -139,6 +139,11 @@ import {
 import { insertAuditEvent, logAuditEvent, type AuditEvent } from '../lib/audit.js';
 import { summarizeScopeChange } from '@haive/shared/audit';
 import { getRepoQueue, type RepoJobPayload } from '../queues.js';
+import {
+  boundedAdd,
+  QueueAddTimeoutError,
+  QueueOutcomeUnknownError,
+} from '../lib/queue-bounded.js';
 import { requireAuth } from '../middleware/auth.js';
 import { enqueueCheckoutSync, observeCheckoutBranchForReset } from '../lib/plan-mirror.js';
 import {
@@ -245,6 +250,9 @@ function deriveTopLevelPaths(fileTree: string[] | null): string[] {
  *  failure actually happens. All enqueue failures compare the admission
  *  job id too, since a lost acknowledgement can outlive that job and a newer admission.
  *
+ *  A deadline on the add leaves its outcome unknown: the job can still land, so the row stays as
+ *  admitted for that job, or for the stranded-preparation sweep, and the request answers 503.
+ *
  *  Rethrows, because the caller's request really did fail and must say so. The status write is
  *  best-effort: if the database is unreachable too there is nothing to be done, and masking the
  *  original error with a second one helps nobody. */
@@ -256,8 +264,12 @@ export async function addRepoJobOrMarkError(
   refreshJobId: string,
 ): Promise<void> {
   try {
-    await add();
+    await boundedAdd(add);
   } catch (err) {
+    if (err instanceof QueueAddTimeoutError) {
+      logger.warn({ err, repositoryId }, 'repository job enqueue outcome unknown');
+      throw new QueueOutcomeUnknownError();
+    }
     await db
       .update(schema.repositories)
       .set({

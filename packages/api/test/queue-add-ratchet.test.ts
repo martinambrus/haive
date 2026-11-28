@@ -10,6 +10,7 @@ const WRAPPERS = new Map([
   ['addOrRefuse', 0],
   // This wrapper also compensates the committed bundle state on failure.
   ['addBundleJobOrMarkFailed', 2],
+  ['addRepoJobOrMarkError', 2],
 ]);
 
 function sources(dir: string): string[] {
@@ -30,7 +31,9 @@ function wrapped(node: ts.Node, checker: ts.TypeChecker): boolean {
     const trusted =
       name === 'addBundleJobOrMarkFailed'
         ? owner === join(SRC, 'routes/bundles.ts')
-        : owner === join(SRC, 'lib/queue-bounded.ts');
+        : name === 'addRepoJobOrMarkError'
+          ? owner === join(SRC, 'routes/repos.ts')
+          : owner === join(SRC, 'lib/queue-bounded.ts');
     if (
       trusted &&
       parent.arguments[WRAPPERS.get(name) ?? -1] === current &&
@@ -131,24 +134,18 @@ beforeAll(() => {
 
 it('bounds every API queue add, including modules and libraries', () => {
   let queues = 0;
-  let reposSites = 0;
   const unbounded: string[] = [];
   for (const file of files) {
     const found = scan(program.getSourceFile(file)!, checker);
-    if (relative(SRC, file) === 'routes/repos.ts') {
-      reposSites += found.unbounded.length;
-      continue;
-    }
     queues += found.queues;
     unbounded.push(...found.unbounded.map((call) => `${relative(SRC, file)}: ${call}`));
   }
   expect(queues).toBeGreaterThan(40);
   expect(unbounded).toEqual([]);
-  // T780 owns these exact remaining sites. Remove the exemption when its conversions land.
-  expect(reposSites).toBe(3);
   expect(readFileSync(join(SRC, 'routes/bundles.ts'), 'utf8')).toMatch(
     /await (?:boundedAdd|addOrRefuse)\(add/,
   );
+  expect(readFileSync(join(SRC, 'routes/repos.ts'), 'utf8')).toMatch(/await boundedAdd\(add/);
 });
 
 it('resolves the mutant fixture without type errors', () => {
