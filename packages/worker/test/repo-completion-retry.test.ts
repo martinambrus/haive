@@ -28,6 +28,7 @@ vi.mock('../src/repo/clone.js', () => ({
   handleInit: h.prepare,
   handleScan: h.prepare,
   completePreparationImports: h.imports,
+  withRootClaim: (_db: unknown, _id: string, run: () => Promise<unknown>) => run(),
 }));
 import { startRepoWorker } from '../src/queues/repo-queue.js';
 

@@ -26,6 +26,7 @@ import {
   handleExtract,
   handleInit,
   handleScan,
+  withRootClaim,
 } from '../repo/clone.js';
 import { checkoutFailureMessage, handleRefresh } from '../repo/refresh.js';
 
@@ -59,12 +60,18 @@ export function startRepoWorker(repoStorageRoot: string): Worker {
             REPO_JOB_NAMES.EXTRACT,
           ].some((name) => name === job.name);
           // Ready precedes imports. A redelivery must finish that obligation without
-          // replacing a checkout that may already carry user work or task worktrees.
+          // replacing a checkout that may already carry user work or task worktrees. It takes the
+          // claim the handlers take, so a crashed predecessor's live claim or a reset, edit,
+          // verify or mutation makes it wait (RootClaimBusyError) instead of running the imports
+          // held and partial, and the imports run under that claim's preparation access.
           if (initialOnly && owned.status === 'ready') {
-            await completePreparationImports(
-              db,
-              payload.repositoryId,
-              owned.storagePath ?? path.join(repoStorageRoot, payload.userId, payload.repositoryId),
+            await withRootClaim(db, payload.repositoryId, () =>
+              completePreparationImports(
+                db,
+                payload.repositoryId,
+                owned.storagePath ??
+                  path.join(repoStorageRoot, payload.userId, payload.repositoryId),
+              ),
             );
           } else if (job.name === REPO_JOB_NAMES.CLONE) {
             await handleClone(payload, db, repoStorageRoot);
