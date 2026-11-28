@@ -2,15 +2,16 @@ import { randomBytes } from 'node:crypto';
 import { DrizzleQueryError } from 'drizzle-orm/errors';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 
-const h = vi.hoisted(() => ({ create: vi.fn(), run: vi.fn() }));
+const h = vi.hoisted(() => ({ create: vi.fn(), run: vi.fn(), inspect: vi.fn() }));
 beforeEach(() => {
   vi.clearAllMocks();
   h.run.mockResolvedValue({ exitCode: 0 });
+  h.inspect.mockResolvedValue({ exists: true, imageId: 'sha256:synthetic' });
   h.create.mockResolvedValue({ containerRowId: 'row', dockerContainerId: 'container' });
 });
 vi.mock('../src/sandbox/login-container.js', () => ({ createSandboxLoginContainer: h.create }));
 vi.mock('../src/sandbox/docker-runner.js', () => ({
-  defaultDockerRunner: { run: h.run },
+  defaultDockerRunner: { run: h.run, inspect: h.inspect },
 }));
 vi.mock('../src/cli-adapters/registry.js', () => ({
   cliAdapterRegistry: { has: () => true, get: () => ({ defaultExecutable: 'claude' }) },

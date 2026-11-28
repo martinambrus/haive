@@ -30,6 +30,8 @@ export interface CreateLoginContainerOpts {
   leaseId?: string;
   provider: CliProviderRecord;
   commandSpec: CliCommandSpec;
+  /** The image to run in, already on the host: the caller ensured it. */
+  imageTag: string;
   docker: Docker;
 }
 
@@ -49,9 +51,6 @@ export async function createSandboxLoginContainer(
   const { provider, commandSpec, docker } = opts;
   if (!cliAdapterRegistry.has(provider.name)) {
     throw new Error(`no adapter registered for ${provider.name}`);
-  }
-  if (provider.sandboxImageBuildStatus !== 'ready' || !provider.sandboxImageTag) {
-    throw new Error(`sandbox image not ready (status=${provider.sandboxImageBuildStatus})`);
   }
 
   const volumeMounts = resolveCliAuthMounts(
@@ -82,7 +81,7 @@ export async function createSandboxLoginContainer(
       [INSTALL_LABEL]: installId(),
       ...(opts.leaseId ? { [CLI_LOGIN_LEASE_LABEL]: opts.leaseId } : {}),
     },
-    Image: provider.sandboxImageTag,
+    Image: opts.imageTag,
     Cmd: [commandSpec.command, ...commandSpec.args],
     Env: envArr,
     Tty: true,

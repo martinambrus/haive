@@ -544,6 +544,8 @@ async function runBannerSession(opts: RunBannerOpts): Promise<void> {
     wsSend(ws, {
       type: 'error',
       message: createResult.error ?? 'Failed to create login container',
+      // An image-state refusal carries a code; the dialog words it from the code, not the message.
+      ...(createResult.code ? { code: createResult.code } : {}),
     });
     try {
       ws.close(1011, 'create_failed');

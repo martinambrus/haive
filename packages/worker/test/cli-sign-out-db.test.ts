@@ -12,13 +12,18 @@ import {
 } from '../src/queues/cli-exec/handlers.js';
 import type { DockerRunner } from '../src/sandbox/docker-runner.js';
 
-const login = vi.hoisted(() => ({ create: vi.fn(), run: vi.fn(), probe: vi.fn() }));
+const login = vi.hoisted(() => ({
+  create: vi.fn(),
+  run: vi.fn(),
+  probe: vi.fn(),
+  inspect: vi.fn(),
+}));
 vi.mock('../src/sandbox/login-container.js', () => ({
   createSandboxLoginContainer: login.create,
 }));
 vi.mock('../src/sandbox/docker-runner.js', async (original) => ({
   ...(await original<typeof import('../src/sandbox/docker-runner.js')>()),
-  defaultDockerRunner: { run: login.run },
+  defaultDockerRunner: { run: login.run, inspect: login.inspect },
 }));
 vi.mock('../src/queues/cli-exec/images.js', async (original) => ({
   ...(await original<typeof import('../src/queues/cli-exec/images.js')>()),
@@ -39,6 +44,8 @@ describe.skipIf(!url)('sign-out generation and critical section on PostgreSQL', 
   });
   beforeEach(async () => {
     vi.resetAllMocks();
+    // The login's sandbox image is on the host, so no build is started.
+    login.inspect.mockResolvedValue({ exists: true, imageId: 'sha256:synthetic' });
     vi.spyOn(secretsService, 'getMasterKek').mockResolvedValue('ab'.repeat(32));
     const [user] = await db
       .insert(schema.users)

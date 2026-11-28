@@ -201,14 +201,17 @@ it('labels Docker creation with the API attempt lease before persisting its row'
       name: 'codex',
       authMode: 'subscription',
       isolateAuth: false,
-      sandboxImageBuildStatus: 'ready',
-      sandboxImageTag: 'test-image',
+      // The caller ensured the image; the row's own state is not asked.
+      sandboxImageBuildStatus: 'idle',
+      sandboxImageTag: null,
     } as never,
     commandSpec: { command: 'codex', args: ['login'], env: {} },
+    imageTag: 'test-image',
     docker: { createContainer } as never,
   });
   expect(createContainer).toHaveBeenCalledWith(
     expect.objectContaining({
+      Image: 'test-image',
       Labels: {
         [CLI_LOGIN_LABEL]: '1',
         [CLI_LOGIN_LEASE_LABEL]: 'api-attempt',

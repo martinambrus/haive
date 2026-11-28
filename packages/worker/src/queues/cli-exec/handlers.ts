@@ -17,6 +17,7 @@ import { safeErrorMessage, safeErrorForTransport } from '@haive/shared/logger';
 import { scrubWorkerErrorPaths } from '../../repo/stored-error.js';
 import {
   CLI_EXEC_JOB_NAMES,
+  CLI_LOGIN_REFUSAL_CODES,
   VERSION_REFRESH_KIND,
   VERSION_REFRESH_JOB_ID,
   CLI_POLLABLE_JOB_OPTS,
@@ -116,6 +117,8 @@ import {
   STATUS_DEFAULT_MESSAGE,
 } from './resolvers.js';
 import {
+  SandboxImageUnavailableError,
+  ensureProviderSandboxImage,
   markProvidersReady,
   probeCliPath,
   removeOrphanedPreviousImage,
@@ -1257,6 +1260,31 @@ export async function handleLoginCreateJob(
     return { ok: false, error: safeErrorMessage(err) };
   }
 
+  // The login runs in the image the provider Test uses, through the same call: one on the host is
+  // used as it is, a missing one is built here (joining a build of its tag already running in this
+  // worker), and one being built elsewhere or whose build failed ends the login with a code the
+  // dialog maps to the providers list's reason. The row's status is not read: the build decides it.
+  // Before the auth volume is touched, so a refused login leaves the volume alone.
+  let imageTag: string | null;
+  try {
+    imageTag = await ensureProviderSandboxImage(db, provider);
+  } catch (err) {
+    if (err instanceof SandboxImageUnavailableError) {
+      log.warn({ err, providerId: provider.id }, 'login refused: sandbox image unavailable');
+      return {
+        ok: false,
+        error: safeErrorMessage(err),
+        code:
+          err.reason === 'building'
+            ? CLI_LOGIN_REFUSAL_CODES.SANDBOX_IMAGE_BUILDING
+            : CLI_LOGIN_REFUSAL_CODES.SANDBOX_IMAGE_FAILED,
+      };
+    }
+    log.error({ err, providerId: provider.id }, 'login sandbox image could not be ensured');
+    return { ok: false, error: safeErrorMessage(err) };
+  }
+  if (!imageTag) return { ok: false, error: 'no sandbox image is configured for this provider' };
+
   // Ensure the per-user auth volume(s) are owned by the sandbox user (uid 1000)
   // before the login container (which runs as `node`) mounts them. Docker
   // creates fresh named-volume mountpoints root-owned, which blocks native CLIs
@@ -1294,6 +1322,7 @@ export async function handleLoginCreateJob(
       leaseId: payload.leaseId,
       provider,
       commandSpec,
+      imageTag,
       docker,
     });
     return {
