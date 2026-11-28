@@ -610,14 +610,14 @@ describe('a login failure', () => {
         expect(stubs.resumeStepIfLinked).toHaveBeenCalledExactlyOnceWith(
           base,
           false,
-          'log in first',
+          original.message,
         );
         expect(failed).toBe(original);
         expect(runWrites(writes).find((w) => w.set.exitCode === -1)?.set.errorMessage).toBe(
-          'log in first',
+          original.message,
         );
         expect(miningWrites(writes).find((w) => w.set.status === 'failed')?.set.errorMessage).toBe(
-          'log in first',
+          original.message,
         );
         expect(hintWrites(writes)).toEqual([]);
         expect(warn).toHaveBeenCalledExactlyOnceWith(
