@@ -1,5 +1,5 @@
 import { planMirrorErrorsSuppressed } from './error-scope.js';
-import { lockRepositoryTasksKey } from '@haive/database';
+import { canonicalUuid, lockRepositoryTasksKey } from '@haive/database';
 import { checkoutMatches, checkoutMissing, type NamedCheckout } from '../repo/checkout-head.js';
 import { admitWatchedRepository } from '../project-state/watch-admission.js';
 import { scrubErrorPaths } from '@haive/shared/logger';
@@ -146,7 +146,9 @@ async function stampSyncedHash(
 }
 
 export const lockPlanMirror = (db: Pick<Database, 'execute'>, repositoryId: string) =>
-  db.execute(sql`select pg_advisory_xact_lock(hashtextextended(${repositoryId}, 0))`);
+  db.execute(
+    sql`select pg_advisory_xact_lock(hashtextextended(${canonicalUuid(repositoryId)}, 0))`,
+  );
 
 type PlanQuestion = {
   nodeId: string;

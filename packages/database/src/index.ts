@@ -80,4 +80,5 @@ export {
 } from './repository-task-lock.js';
 
 export { withSettledTransaction } from './settled-transaction.js';
+export { canonicalUuid } from './canonical-uuid.js';
 export { remoteRelinkKey } from './remote-relink-lock.js';
