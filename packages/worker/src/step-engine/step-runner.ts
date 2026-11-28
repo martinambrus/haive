@@ -52,7 +52,6 @@ import {
   desc,
   eq,
   getTableColumns,
-  gte,
   inArray,
   isNotNull,
   isNull,
@@ -3792,10 +3791,29 @@ async function recordFinishedUsage(
     });
 }
 
-/** Events written in the transaction that reopens a step without clearing `started_at`: Resume
- *  (api `routes/tasks/steps.ts` fan-out and loop arms, `scripts/resume-plan-sequence-review.ts`)
- *  and `retry_ai`. The auth admission gate counts only invocations created after the newest one. */
-const AUTH_LEDGER_RESET_EVENTS = ['step.resume', 'step.retry_ai'] as const;
+/** The events a user's recovery press writes: Retry (api action route), the task-level Retry at its
+ *  stopped step, Retry with AI and Resume (api `routes/tasks/steps.ts` fan-out and loop arms,
+ *  `worker/scripts/resume-plan-sequence-review.ts`). The auth admission gate counts only invocations
+ *  created after the newest one. Each names the step it re-runs. Retry, the task-level Retry and a
+ *  Resume of a degraded fan-out step also re-run every row below it in place, and those rows carry
+ *  no event of their own, so one bounds the window of every row of the task, not only the row it
+ *  names. With no step id (the START retry of a task that never reached a step) it re-runs no row
+ *  and bounds nothing. A row at the cap that a press leaves alone stays failed, and only a user's
+ *  press writes these, so an over-reopen is bounded by presses.
+ *  `started_at` is no bound: a park or requeue clears it and the next claim stamps it, which would
+ *  reopen the allowance with no one pressing anything. Recovery writes none of these
+ *  (`task.auto_resumed`, `task.revived`), so it keeps counting, as does a worker-side in-place
+ *  reset (insight continuation, a learning self-revise, a recheck into rows that exist). */
+const AUTH_LEDGER_PRESS_EVENTS = [
+  'step.retry',
+  'task.retried',
+  'step.resume',
+  'step.retry_ai',
+] as const;
+/** A CLI switch's event bounds only the row it names; the rows it also resets (those the task leaves
+ *  active elsewhere) carry no event of their own and keep counting. With no step id (a pick for an
+ *  upcoming step) there is no row. */
+const AUTH_LEDGER_SWITCH_EVENT = 'step.cli_provider_preference_changed';
 
 export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceStepResult> {
   const { db, stepDef, taskId } = params;
@@ -3915,15 +3933,15 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
     let current = row;
     // One gate before every dispatch family (LLM, mining and all DAG roles).
     // The existing invocation ledger bounds unknown WAVES even after superseding runs.
-    // Retry clears started_at/output, so earlier attempts cannot spend its allowance;
-    // Resume and retry_ai keep started_at, so the newest step.resume/step.retry_ai event
-    // of this step is a second lower bound (AUTH_LEDGER_RESET_EVENTS).
+    // The newest user press of the task is the lower bound (AUTH_LEDGER_PRESS_EVENTS, or this row's
+    // own CLI switch), so earlier attempts cannot spend a fresh allowance, a row a press re-runs
+    // by cascade gets one, and a park cannot give one.
     if (row.status === 'waiting_cli') {
       const direct = row.output as { _authProbeUnknowns?: number; _authRetryAt?: number } | null;
       const unknownPrefix = cliAuthStoredPrefix(CLI_AUTH_PROBE_UNKNOWN);
       const busyPrefix = cliAuthStoredPrefix(CLI_AUTH_BUSY);
-      const resetEvents = sql.join(
-        AUTH_LEDGER_RESET_EVENTS.map((type) => sql`${type}`),
+      const pressEvents = sql.join(
+        AUTH_LEDGER_PRESS_EVENTS.map((type) => sql`${type}`),
         sql`, `,
       );
       const [wait] = await db
@@ -3945,8 +3963,7 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
           and(
             eq(schema.cliInvocations.taskStepId, row.id),
             isNotNull(schema.cliInvocations.endedAt),
-            row.startedAt ? gte(schema.cliInvocations.createdAt, row.startedAt) : undefined,
-            sql`${schema.cliInvocations.createdAt} >= coalesce((select max(${schema.taskEvents.createdAt}) from ${schema.taskEvents} where ${schema.taskEvents.taskId} = ${row.taskId} and ${schema.taskEvents.taskStepId} = ${row.id} and ${schema.taskEvents.eventType} in (${resetEvents})), '-infinity'::timestamp)`,
+            sql`${schema.cliInvocations.createdAt} >= coalesce((select max(${schema.taskEvents.createdAt}) from ${schema.taskEvents} where ${schema.taskEvents.taskId} = ${row.taskId} and ((${schema.taskEvents.eventType} in (${pressEvents}) and ${schema.taskEvents.taskStepId} is not null) or (${schema.taskEvents.eventType} = ${AUTH_LEDGER_SWITCH_EVENT} and ${schema.taskEvents.taskStepId} = ${row.id}))), '-infinity'::timestamp)`,
             sql`(starts_with(${schema.cliInvocations.errorMessage}, ${unknownPrefix}) or starts_with(${schema.cliInvocations.errorMessage}, ${busyPrefix}))`,
           ),
         );

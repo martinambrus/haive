@@ -186,19 +186,33 @@ Before any of those dispatch paths re-enters, the shared step runner enforces th
 30-second delay from the last admission failure. Busy stays uncapped. Unknown failures have a
 separate fixed cap, `MAX_AUTH_PROBE_UNKNOWNS = 20` (injectable through advance parameters),
 counted in waves: distinct 30-second buckets of `created_at` among the step's ended invocation
-rows with the unknown code, including superseded rows, from the later of the step's current
-`started_at` and its newest `step.resume` or `step.retry_ai` event. One wide fan-out that fails
-admission together counts once, since the delay above keeps two waves at least a bucket apart.
-Successful siblings and busy waits cannot erase that attempt's count.
-At the cap the step fails for user action with `cli_auth_probe_exhausted` and Retry guidance;
-no further automatic dispatch or code fix loop occurs. Retry resets the step start/output and
-therefore its allowance. Resume (loop and fan-out arms) and Retry with AI keep `started_at` and
-the old rows but write their event in the transaction that reopens the step, so each starts a
-fresh allowance of invocation-row failures and its first dispatch is not paced by earlier rows.
-No new table, queue or fence is used.
+rows with the unknown code, including superseded rows, from the task's newest user press:
+`step.retry` (Retry), `task.retried` (the task-level Retry at its stopped step), `step.resume`
+(loop and fan-out arms) or `step.retry_ai`, each naming a step, or a
+`step.cli_provider_preference_changed` (a CLI switch) naming this step; with none, from its first
+row. Retry, the task-level Retry and a Resume of a degraded fan-out step re-run every row below
+the step they name in place, and those rows carry no event of their own, so the four presses bound
+every row of the task, not only the row they name. A CLI switch's event bounds only the row it
+names; the rows it also resets, which the task leaves active elsewhere, keep counting. An event
+with no step id (a CLI pick for an upcoming step, the START retry of a task that never reached a
+step) re-runs no row and opens no allowance. A row at the cap that a press leaves alone stays
+failed, and only a user's press writes these events, so an over-reopen is bounded by presses.
+`started_at` is no bound: a runtime-slot or
+integration park, a pause re-offer and an orphan requeue clear it and the next claim stamps it, so
+a bound on it would let a park reopen the allowance with no one pressing anything. Recovery
+writes none of those events (`task.auto_resumed`, `task.revived`) and keeps counting, as does a
+worker-side in-place reset (insight continuation, a learning self-revise, a recheck into rows that
+exist). One wide fan-out that fails admission together counts once, since the delay above keeps two
+waves at least a bucket apart. Successful siblings and busy waits cannot erase that attempt's count.
+At the cap the step fails for user action with `cli_auth_probe_exhausted`; its text names Retry
+and, where the step offers it, Resume, and nothing decides on that text. No further automatic
+dispatch or code fix loop occurs. Each of those presses writes its event, naming the step row it
+re-runs, in the transaction that reopens the step (a switch that re-runs nothing writes it alone),
+so each starts a fresh allowance of invocation-row failures and its first dispatch is not paced by
+earlier rows. No new table, queue or fence is used.
 The direct plugin-install apply has no invocation ledger row: its existing deferred catch
 keeps just its unknown count and retry timestamp in temporary step output, replaced on success
-and cleared by Retry only, not by Resume or Retry with AI. It uses the same cap and delay, parking `waiting_cli` with the idle marker
+and cleared only where the step's output is (Retry), not by Resume, Retry with AI or a CLI switch. It uses the same cap and delay, parking `waiting_cli` with the idle marker
 between attempts. A missing login keeps its existing inline login hint on both paths.
 Image ensure stays outside the lock. The lock covers only scope/source verification and copy IO,
 never a task-row transaction, an image build or a wait for a sibling's mounted copy.
@@ -241,6 +255,13 @@ refusal of an unreadable Grok `auth.json` even when no fence is set. The
 `grok_refresh_untracked` warning is a log field and nothing persisted depends on it. A recovery
 copy kept for an unreadable moved source (reason `unreadable_source_replaced`) stays until
 recovery, sign-out or removal, like any retired copy; reverting code does not remove it.
+
+Rollback of the admission window and exhaustion text is code only, with no schema, data or event
+change: it restores counting from the later of `started_at` and the newest `step.resume` or
+`step.retry_ai` event (a park or requeue reopens the allowance again; Retry still does, by
+clearing `started_at`) and the Retry-only text. The events it reads are written either way.
+Reverting only the task-wide bound restores a per-row bound: the rows a press re-runs by cascade
+keep their old waves, and a row already at the cap fails again after its first paid run.
 
 Rollback: revert fix 8 to restore fix 7's refusal behavior; its reader ignores the extra login-id
 label field. Retired user-owned volumes remain retained until explicit recovery/removal or user

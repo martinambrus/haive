@@ -2552,6 +2552,15 @@ stepRoutes.patch('/:id/steps/:stepId/cli-provider', async (c) => {
       by: userId,
     });
   };
+  const preferenceChanged = (left: (typeof schema.taskSteps.$inferSelect)[]) => ({
+    stepId,
+    cliProviderId: body.cliProviderId,
+    remembered: choice.remember,
+    by: userId,
+    ...(left.length > 0
+      ? { leftActive: left.map((r) => ({ stepId: r.stepId, round: r.round })) }
+      : {}),
+  });
   // A re-run saves the choice inside its transaction, after its check of the row it holds, so a
   // refused one changes nothing: a row that never enters the transaction saves it here.
   if (!reruns) await db.transaction((tx) => saveChoice(tx));
@@ -2655,6 +2664,15 @@ stepRoutes.patch('/:id/steps/:stepId/cli-provider', async (c) => {
         : null;
       // After the step row and, when the task moves, the task row, as a pass and a Retry take them.
       await saveChoice(tx);
+      // This event reopens the row's auth admission allowance: it commits with the re-run or not at
+      // all, since a row re-run without it is failed again after its first paid run.
+      await appendTaskEvent(
+        tx,
+        id,
+        step.id,
+        'step.cli_provider_preference_changed',
+        preferenceChanged(moved?.leftActive ?? pendingResetExtras),
+      );
       return moved;
     });
     if ((redrive?.leftActive ?? pendingResetExtras).some(isLive)) {
@@ -2666,20 +2684,14 @@ stepRoutes.patch('/:id/steps/:stepId/cli-provider', async (c) => {
     }
   }
 
-  await appendTaskEvent(db, id, step.id, 'step.cli_provider_preference_changed', {
-    stepId,
-    cliProviderId: body.cliProviderId,
-    remembered: choice.remember,
-    by: userId,
-    ...((redrive?.leftActive ?? pendingResetExtras).length > 0
-      ? {
-          leftActive: (redrive?.leftActive ?? pendingResetExtras).map((r) => ({
-            stepId: r.stepId,
-            round: r.round,
-          })),
-        }
-      : {}),
-  });
+  if (!reruns)
+    await appendTaskEvent(
+      db,
+      id,
+      step.id,
+      'step.cli_provider_preference_changed',
+      preferenceChanged([]),
+    );
 
   // Re-enqueue the step so the worker re-runs detect/form against the new
   // CLI. Without this the step would sit in 'pending' forever and the user

@@ -556,9 +556,8 @@ describe.skipIf(!url)(
           errorMessage: code ? new CliAuthRetryableError(code).message : null,
           supersededAt: code === 'cli_auth_probe_unknown' ? new Date() : null,
         });
-      // Waves, not rows, are counted: the two unknown rows after the start are one
-      // delay apart, so they are two waves.
-      await addRun('cli_auth_probe_unknown', new Date(start.getTime() - 1000));
+      // Waves, not rows, are counted: the two unknown rows are one delay apart, so they are
+      // two waves, and the busy, successful and same-wave rows add none.
       for (const [code, offset] of [
         ['cli_auth_probe_unknown', 1000],
         ['cli_auth_busy', 1000],
@@ -595,7 +594,8 @@ describe.skipIf(!url)(
       expect(capped.row.errorMessage).toContain('cli_auth_probe_exhausted:');
       expect(apply).not.toHaveBeenCalled();
       expect(enqueueCliInvocation).not.toHaveBeenCalled();
-      // Retry clears output/start and reopens the row. Old ended errors stay in the ledger.
+      // Retry clears output/start, reopens the row and writes step.retry in the same transaction.
+      // Old ended errors stay in the ledger; the event is what leaves them out of the window.
       const retriedAt = new Date();
       await db
         .update(schema.taskSteps)
@@ -607,6 +607,12 @@ describe.skipIf(!url)(
           errorMessage: null,
         })
         .where(eq(schema.taskSteps.id, step!.id));
+      await db.insert(schema.taskEvents).values({
+        taskId: task!.id,
+        taskStepId: step!.id,
+        eventType: 'step.retry',
+        createdAt: retriedAt,
+      });
       await addRun('cli_auth_probe_unknown', new Date(retriedAt.getTime() + 1));
       const paced = await advanceStep(params);
       expect(paced.status).toBe('deferred');
@@ -701,40 +707,169 @@ describe.skipIf(!url)(
         expect(res.status).toBe('deferred');
         expect(f.apply).not.toHaveBeenCalled();
       };
+      // The row is re-run after the events: its next pass is neither failed nor deferred, it
+      // dispatches (the fixture's `apply` is the dispatch).
+      const expectDispatched = async (f: Awaited<ReturnType<typeof mkStep>>) => {
+        await f.reopen();
+        const res = await advanceStep(f.params);
+        expect(res.status).not.toBe('failed');
+        expect(res.row.errorMessage ?? '').not.toContain('cli_auth_probe_exhausted:');
+        expect(f.apply).toHaveBeenCalledTimes(1);
+      };
+      // Two unknown waves under a cap of two: the row's next pass fails.
+      const mkAtCap = async () => {
+        const f = await mkStep(2);
+        await f.addRun('cli_auth_probe_unknown', at(1000));
+        await f.addRun('cli_auth_probe_unknown', at(1000 + WAVE_GAP));
+        return f;
+      };
 
-      it.each(['step.resume', 'step.retry_ai'])(
-        'a %s event reopens the allowance, which is then bounded again',
+      // Each is written by a user's recovery press in the transaction that reopens the step.
+      it.each([
+        'step.resume',
+        'step.retry_ai',
+        'step.retry',
+        'task.retried',
+        'step.cli_provider_preference_changed',
+      ])('a %s event reopens the allowance, which is then bounded again', async (eventType) => {
+        const f = await mkStep(2);
+        await f.addRun('cli_auth_probe_unknown', at(1000));
+        await f.addRun('cli_auth_probe_unknown', at(1000 + WAVE_GAP));
+        await expectExhausted(f);
+        const eventAt = at(1000 + 2 * WAVE_GAP);
+        await f.addEvent(eventType, f.step.id, eventAt);
+        // A successful run after the event: nothing in the set is left to pace on, so the pass
+        // is neither failed nor deferred: it dispatches (the fixture's `apply` is the dispatch).
+        await f.addRun(null, new Date(eventAt.getTime() + 1000));
+        await f.reopen();
+        const res = await advanceStep(f.params);
+        expect(res.status).not.toBe('failed');
+        expect(res.row.errorMessage ?? '').not.toContain('cli_auth_probe_exhausted:');
+        expect(f.apply).toHaveBeenCalledTimes(1);
+        f.apply.mockClear();
+        // Two NEW waves after the event spend the fresh allowance.
+        await f.addRun('cli_auth_probe_unknown', new Date(eventAt.getTime() + 2000));
+        await f.addRun('cli_auth_probe_unknown', new Date(eventAt.getTime() + 2000 + WAVE_GAP));
+        await f.reopen();
+        await expectExhausted(f);
+      });
+
+      // Retry, the task-level Retry and a Resume of a degraded fan-out step re-run every row below
+      // the step they name in place, by cascade (api `resetRowsForRerun`), so those rows carry no
+      // event of their own. The four press kinds therefore bound the window for the whole task, not
+      // for the row they name. The first two controls below were per-row in T543 fix 10 and are
+      // inverted on purpose.
+
+      // A Resume of a degraded (done) fan-out step re-runs the rows below it and writes one event,
+      // naming the Resumed row. A row at the cap below it has no event of its own, so its old waves
+      // stayed counted and it failed again after one paid run.
+      it('a step.resume of another step reopens a row its cascade re-runs', async () => {
+        const f = await mkAtCap();
+        await expectExhausted(f);
+        await f.addEvent('step.resume', f.other.id, at(1000 + 2 * WAVE_GAP));
+        await expectDispatched(f);
+      });
+
+      // The same for Retry. A row at the cap that a press does not re-run stays failed, so reopening
+      // its allowance costs nothing, and only a user's press writes these events: any over-reopen is
+      // bounded by presses.
+      it('a step.retry of another step reopens a row its cascade re-runs', async () => {
+        const f = await mkAtCap();
+        await expectExhausted(f);
+        await f.addEvent('step.retry', f.other.id, at(1000 + 2 * WAVE_GAP));
+        await expectDispatched(f);
+      });
+
+      // The other two presses are task-wide as well. The task-level Retry at its stopped step resets
+      // that step and every row below it in place (api `retryTaskAtStep`) and names only the target
+      // row; Retry with AI re-runs the failed row and resets the rows the task leaves active
+      // elsewhere, which carry no event of their own.
+      it.each(['task.retried', 'step.retry_ai'])(
+        'a %s of another step reopens a row it resets without an event of its own',
         async (eventType) => {
-          const f = await mkStep(2);
-          await f.addRun('cli_auth_probe_unknown', at(1000));
-          await f.addRun('cli_auth_probe_unknown', at(1000 + WAVE_GAP));
+          const f = await mkAtCap();
           await expectExhausted(f);
-          const eventAt = at(1000 + 2 * WAVE_GAP);
-          await f.addEvent(eventType, f.step.id, eventAt);
-          // A successful run after the event: nothing in the set is left to pace on,
-          // so the pass is not failed and not exhausted (it is dispatched, not deferred).
-          await f.addRun(null, new Date(eventAt.getTime() + 1000));
-          await f.reopen();
-          const res = await advanceStep(f.params);
-          expect(res.status).not.toBe('failed');
-          expect(res.row.errorMessage ?? '').not.toContain('cli_auth_probe_exhausted:');
-          f.apply.mockClear();
-          // Two NEW waves after the event spend the fresh allowance.
-          await f.addRun('cli_auth_probe_unknown', new Date(eventAt.getTime() + 2000));
-          await f.addRun('cli_auth_probe_unknown', new Date(eventAt.getTime() + 2000 + WAVE_GAP));
-          await f.reopen();
+          await f.addEvent(eventType, f.other.id, at(1000 + 2 * WAVE_GAP));
+          await expectDispatched(f);
+        },
+      );
+
+      // The cascade as a user meets it: the row below an upstream step exhausts after an earlier press
+      // on that step, and a second press re-runs it in place. The newest press decides, so the older
+      // one, from before the waves, holds nothing open, and the allowance it opens is bounded again.
+      it('a second press on the upstream step reopens the row below it, which is then bounded again', async () => {
+        const f = await mkAtCap();
+        await f.addEvent('step.retry', f.other.id, at(500));
+        await expectExhausted(f);
+        const pressAt = at(1000 + 2 * WAVE_GAP);
+        await f.addEvent('step.retry', f.other.id, pressAt);
+        await expectDispatched(f);
+        f.apply.mockClear();
+        await f.addRun('cli_auth_probe_unknown', new Date(pressAt.getTime() + 2000));
+        await f.addRun('cli_auth_probe_unknown', new Date(pressAt.getTime() + 2000 + WAVE_GAP));
+        await f.reopen();
+        await expectExhausted(f);
+      });
+
+      it.each([
+        ['a step.skip of this step', 'step.skip'],
+        // Recovery keeps counting: only a user's recovery press reopens the allowance.
+        ['a task.auto_resumed of this step', 'task.auto_resumed'],
+        ['a task.revived of this step', 'task.revived'],
+      ] as const)('%s does not reset the count', async (_label, eventType) => {
+        const f = await mkAtCap();
+        await f.addEvent(eventType, f.step.id, at(1000 + 2 * WAVE_GAP));
+        await expectExhausted(f);
+      });
+
+      // A CLI switch's event bounds only the row it names, unlike the presses above: the rows a switch
+      // also resets (those the task leaves active elsewhere) carry no event and keep counting.
+      it('a CLI switch of another step does not reopen', async () => {
+        const f = await mkAtCap();
+        await f.addEvent(
+          'step.cli_provider_preference_changed',
+          f.other.id,
+          at(1000 + 2 * WAVE_GAP),
+        );
+        await expectExhausted(f);
+      });
+
+      // A pick for an upcoming step (the api writes it with no step id) and the START retry of a task
+      // that never reached a step (`task.retried` with no step id) re-run no row, so they open no
+      // allowance for any row.
+      it.each(['step.cli_provider_preference_changed', 'task.retried'])(
+        'a %s event with no step id does not reopen',
+        async (eventType) => {
+          const f = await mkAtCap();
+          await db.insert(schema.taskEvents).values({
+            taskId: f.step.taskId,
+            taskStepId: null,
+            eventType,
+            createdAt: at(1000 + 2 * WAVE_GAP),
+          });
           await expectExhausted(f);
         },
       );
 
-      it.each([
-        ['a step.resume of another step', 'step.resume', 'other'],
-        ['a step.skip of this step', 'step.skip', 'step'],
-      ] as const)('%s does not reset the count', async (_label, eventType, which) => {
+      // The window is the task's own: a press in another task bounds nothing here.
+      it('a press of another task does not reopen', async () => {
+        const f = await mkAtCap();
+        const g = await mkStep(2);
+        await g.addEvent('step.retry', g.step.id, at(1000 + 2 * WAVE_GAP));
+        await expectExhausted(f);
+      });
+
+      it('a park that stamps started_at again does not reopen the allowance', async () => {
         const f = await mkStep(2);
         await f.addRun('cli_auth_probe_unknown', at(1000));
         await f.addRun('cli_auth_probe_unknown', at(1000 + WAVE_GAP));
-        await f.addEvent(eventType, f[which].id, at(1000 + 2 * WAVE_GAP));
+        await expectExhausted(f);
+        // A park or a requeue clears started_at and the next claim stamps it, after the waves.
+        await db
+          .update(schema.taskSteps)
+          .set({ startedAt: at(1000 + 2 * WAVE_GAP) })
+          .where(eq(schema.taskSteps.id, f.step.id));
+        await f.reopen();
         await expectExhausted(f);
       });
 

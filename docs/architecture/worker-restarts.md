@@ -1655,23 +1655,35 @@ an explicit fs-safe mutation. Generic parks retain their age policy. Details and
 ## Bounded auth admission retries
 
 Before re-entering ordinary LLM, mining or any DAG dispatch, the step runner reads existing
-ended auth failures for this step created since the later of its current `started_at` and its
-newest `step.resume` or `step.retry_ai` event. Superseding an unknown failure does not erase
-it. Every busy/unknown retry waits 30 seconds from the last ended auth failure in that window.
+ended auth failures for this step created since the task's newest user press: `step.retry`,
+`task.retried`, `step.resume` or `step.retry_ai`, each naming a step, or a
+`step.cli_provider_preference_changed` (a CLI switch) naming this step (none: from its first row).
+Retry, the task-level Retry and a Resume of a degraded fan-out step re-run every row below the step
+they name in place, and those rows carry no event of their own, so the four presses bound every row
+of the task. A CLI switch's event bounds only the row it names (the rows it also resets, which the
+task leaves active elsewhere, keep counting), and an event with no step id re-runs no row and opens
+nothing. A row at the cap that a press leaves alone stays failed, and only a user's press writes
+these, so an over-reopen is bounded by presses. `started_at` is no bound, since a park or a
+requeue clears it and the next claim stamps it; recovery (`task.auto_resumed`, `task.revived`)
+writes none of them and keeps counting, as does a worker-side in-place reset (insight
+continuation, a learning self-revise, a recheck into rows that exist). Superseding an unknown
+failure does not erase it. Every busy/unknown retry waits 30 seconds from the last ended auth
+failure in that window.
 Unknowns stop at `MAX_AUTH_PROBE_UNKNOWNS` (20, injectable) distinct waves, a wave being one
 30-second bucket of `created_at`, so one wide fan-out failing together counts once. The cap
-fails with named reason `cli_auth_probe_exhausted` and Retry guidance before any further
-dispatch. This is user action, never a code fix loop. Retry clears `started_at`; Resume and
-Retry with AI keep it and the old rows, but write their event in the transaction that reopens
-the step, so either starts a fresh allowance of invocation-row failures (a Resume after the cap
-no longer fails again after one paid run). Busy stays uncapped and free of crash-loop budgets. The two stored code
+fails with named reason `cli_auth_probe_exhausted` before any further dispatch; its text names
+Retry and, where the step offers it, Resume. This is user action, never a code fix loop. Each
+press writes its event, naming the step row it re-runs, in the transaction that reopens the step
+(a switch that re-runs nothing writes it alone), so each starts a fresh allowance of invocation-row
+failures (a Resume after the cap no longer fails again after one paid run). Busy stays uncapped
+and free of crash-loop budgets. The two stored code
 prefixes are `CLI_AUTH_BUSY` and `CLI_AUTH_PROBE_UNKNOWN` in `sandbox/cli-auth-errors.ts`; the
 error class, `isCliAuthWaitFailure` and the gate query all derive from them, and their values
 are persisted in `cli_invocations.error_message`, so a rename must never be done there. Direct
 applies use the same delay/cap with a small temporary count/timestamp in existing step output,
-since they have no invocation; Resume and Retry with AI keep that output, so only Retry clears
-it. Retry clears start/output and gives a fresh allowance; a failed row cannot automatically
-reopen. No new state machine, table, queue or fence is introduced.
+since they have no invocation; Resume, Retry with AI and a CLI switch keep that output, so only
+Retry clears it. Retry clears output and writes `step.retry`, which gives a fresh allowance; a
+failed row cannot automatically reopen. No new state machine, table, queue or fence is introduced.
 Existing login refusals, auth-lock serialization and settlement guards are unchanged.
 
 ## Interactive checkout replacement recovery

@@ -134,9 +134,7 @@ function makeMockDb(state: MockState, opts: MockDbOptions = {}, inTransaction = 
                 ).filter(
                   (run) =>
                     run.endedAt instanceof Date &&
-                    /^(cli_auth_busy|cli_auth_probe_unknown):/.test(String(run.errorMessage)) &&
-                    (!(state.taskStepRow.startedAt instanceof Date) ||
-                      (run.createdAt as Date) >= state.taskStepRow.startedAt),
+                    /^(cli_auth_busy|cli_auth_probe_unknown):/.test(String(run.errorMessage)),
                 );
                 return [
                   {
@@ -3750,6 +3748,8 @@ describe('bounded auth admission', () => {
       expect(result.status).toBe('failed');
       expect(state.taskStepRow.errorMessage).toContain('cli_auth_probe_exhausted:');
       expect(state.taskStepRow.errorMessage).toContain('Retry');
+      // Resume reopens the allowance too, on the steps that offer it.
+      expect(state.taskStepRow.errorMessage).toContain('Resume');
       expect(enqueueCliInvocation).not.toHaveBeenCalled();
       expect(state.inserts.filter((entry) => entry.table === 'cli_invocations')).toEqual([]);
     },
