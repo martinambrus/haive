@@ -14,6 +14,7 @@ import { formatTokens } from '@haive/web-kit/format-tokens';
 import { formatSampledTps } from '@haive/web-kit/format-throughput';
 import {
   getStatsEstimates,
+  getStatsFilesRead,
   getStatsPlan,
   getStatsQuality,
   getStatsReliability,
@@ -27,6 +28,7 @@ import {
   patchUiPrefs,
   type Repository,
   type StatsEstimates,
+  type StatsFilesRead,
   type StatsPlan,
   type StatsQuality,
   type StatsNormalizedTokens,
@@ -47,6 +49,7 @@ import { PlanActiveTimeTile } from './components/plan-active-time-tile.js';
 import { ActivityHeatmap } from './components/activity-heatmap.js';
 import { StackedShareBar } from './components/stacked-share-bar.js';
 import { RankedBars, InlineBar } from './components/ranked-bars.js';
+import { FilesReadSection } from './components/files-read-section.js';
 import { CHART_COLORS, TOKEN_COLORS } from './components/palette.js';
 import {
   formatAgentHours,
@@ -362,6 +365,8 @@ function StatsPageInner({ moduleId, api, MarkdownView }: Omit<ModulePageProps, '
   const [reportRetry, setReportRetry] = useState(0);
   const [steps, setSteps] = useState<StatsSteps | null>(null);
   const [toolUsage, setToolUsage] = useState<StatsToolUsage | null>(null);
+  const [filesRead, setFilesRead] = useState<StatsFilesRead | null>(null);
+  const [filesReadFailed, setFilesReadFailed] = useState(false);
   const [repos, setRepos] = useState<Repository[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -529,6 +534,21 @@ function StatsPageInner({ moduleId, api, MarkdownView }: Omit<ModulePageProps, '
     };
   }, [tab, params, reliability, quality, estimates, plan, taskTime, steps, toolUsage]);
 
+  // Files read is its own request, so it has its own effect: inside the one above, each of two
+  // finished loads would cancel the other's callback and send that request again. A failure
+  // stands until the filters change or the card's Retry clears `filesReadFailed`, which runs
+  // this effect again.
+  useEffect(() => {
+    if (!params || tab !== 'tools' || !repositoryId || filesRead || filesReadFailed) return;
+    let cancelled = false;
+    getStatsFilesRead(api, params)
+      .then((d) => !cancelled && setFilesRead(d))
+      .catch(() => !cancelled && setFilesReadFailed(true));
+    return () => {
+      cancelled = true;
+    };
+  }, [tab, params, repositoryId, filesRead, filesReadFailed]);
+
   // A filter change invalidates the lazily-loaded tabs, or switching back would show the
   // previous window's numbers under the new filter's heading.
   useEffect(() => {
@@ -539,6 +559,8 @@ function StatsPageInner({ moduleId, api, MarkdownView }: Omit<ModulePageProps, '
     setTaskTime(null);
     setSteps(null);
     setToolUsage(null);
+    setFilesRead(null);
+    setFilesReadFailed(false);
   }, [params]);
 
   const cd = summary?.costDisplay ?? null;
@@ -1714,6 +1736,14 @@ function StatsPageInner({ moduleId, api, MarkdownView }: Omit<ModulePageProps, '
               </Card>
             </>
           )}
+
+          <FilesReadSection
+            repositoryId={repositoryId}
+            report={filesRead}
+            failed={filesReadFailed}
+            onRetry={() => setFilesReadFailed(false)}
+            MarkdownView={MarkdownView}
+          />
         </>
       )}
 

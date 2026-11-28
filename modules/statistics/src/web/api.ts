@@ -1,6 +1,6 @@
 import type { HostApi } from '@haive/web-kit/host';
 import type { CostDisplay } from '@haive/web-kit/format-cost';
-import type { buildTimeCostReport } from '@haive/shared/stats';
+import type { FilesReadReport, buildTimeCostReport } from '@haive/shared/stats';
 
 export type StatsTimeCost = Omit<ReturnType<typeof buildTimeCostReport>, 'rows'> & {
   rows: (ReturnType<typeof buildTimeCostReport>['rows'][number] & {
@@ -628,4 +628,24 @@ export async function getStatsToolUsage(
   params: StatsQueryParams = {},
 ): Promise<StatsToolUsage> {
   return api.get<StatsToolUsage>(`/m/statistics/tool-usage${statsQueryString(params)}`);
+}
+
+export type StatsFilesRead =
+  | {
+      range: StatsToolUsage['range'];
+      scope: StatsToolUsage['scope'];
+      available: false;
+      reason: 'repository-required';
+    }
+  | ({
+      range: StatsToolUsage['range'];
+      scope: StatsToolUsage['scope'];
+      available: true;
+    } & FilesReadReport);
+
+export async function getStatsFilesRead(
+  api: HostApi,
+  params: StatsQueryParams = {},
+): Promise<StatsFilesRead> {
+  return api.get<StatsFilesRead>(`/m/statistics/files-read${statsQueryString(params)}`);
 }

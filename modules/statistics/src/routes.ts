@@ -11,11 +11,13 @@ import {
 } from '@haive/shared';
 import {
   buildTaskTimeBreakdown,
+  buildFilesRead,
   buildUnusedReport,
   computeBusySpan,
   computeDelta,
   dayKey,
   dayKeysBetween,
+  FILES_READ_ROW_LIMIT,
   hasEnoughSamples,
   isHaiveMcpServer,
   knownTaskTypes,
@@ -47,6 +49,7 @@ import {
   sumProviderBreakdownWhere,
   type CostDisplay,
   type TaskProviderUsage,
+  rollupFilesRead,
   rollupToolUsage,
   toolUsageLastSeen,
   toolUsageLoadedIds,
@@ -1562,6 +1565,45 @@ export default function createStatsRoutes(ctx: ModuleRouteContext): Hono<AppEnv>
       ),
       unused,
     });
+  });
+
+  /**
+   * Files read: which repository files agents read, ranked by how long their content stayed in
+   * context, and what share of each step's prompt tokens that is (`buildFilesRead` states every
+   * honesty rule). The same attribution filter as /tool-usage applies, so the run counts
+   * reconcile with that tab's coverage line.
+   *
+   * A repository is required: a path names a file only inside one repository, so paths of
+   * different repositories are not comparable and a window-wide ranking would merge unrelated
+   * files. Without one the answer is `available: false` and the rollup never runs.
+   */
+  statsRoutes.get('/files-read', async (c) => {
+    const userId = c.get('userId');
+    const q = parseStatsQuery(c.req.query());
+    if (q.allUsers && c.get('userRole') !== 'admin') {
+      throw new HttpError(403, 'Admin access required for install-wide statistics');
+    }
+
+    const from = new Date(q.fromMs);
+    const to = new Date(q.toMs);
+    const range = { from: from.toISOString(), to: to.toISOString(), timeZone: q.timeZone };
+    const scope = {
+      repositoryId: q.repositoryId,
+      cliProviderId: q.cliProviderId,
+      taskClass: q.taskClass,
+      allUsers: q.allUsers,
+    };
+    if (!q.repositoryId) {
+      return c.json({ range, scope, available: false, reason: 'repository-required' });
+    }
+
+    const report = buildFilesRead(
+      await rollupFilesRead(ctx.db, {
+        where: invocationWindowFilter(q, userId, from, to),
+        rowLimit: FILES_READ_ROW_LIMIT,
+      }),
+    );
+    return c.json({ range, scope, available: true, ...report });
   });
 
   /**

@@ -7,3 +7,4 @@ export * from './throughput.js';
 export * from './tokens.js';
 export * from './tool-usage.js';
 export * from './check-runs.js';
+export * from './files-read.js';

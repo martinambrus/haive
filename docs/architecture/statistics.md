@@ -3,7 +3,7 @@
 The statistics module's page at `/m/statistics` (`modules/statistics/src/web/stats-page.tsx`; `/stats`
 redirects there) and its dashboard widget (`src/dashboard/stats-widget.tsx`) both read the
 statistics module's api (`modules/statistics/src/routes.ts`, mounted by the module loader at
-`/m/statistics/*` behind the same auth), nine endpoints sharing one query parser
+`/m/statistics/*` behind the same auth), eleven endpoints sharing one query parser
 (`query.ts`: 30-day default, `MAX_RANGE_DAYS` 731, IANA zone validated against `Intl`, repo /
 task-class / provider facets, and an `allUsers` flag each ROUTE re-checks against the caller's
 role because the parser has no access to it). Every arithmetic answer is a pure function in
@@ -33,7 +33,7 @@ module page rendered by the host's `DashboardRenderer` with no compiled React: i
 the caller's own rows, and take the module's `defaultWindow` setting as the window. A declared spec
 carries fixed endpoint strings, so they cannot follow the page's time zone: days are cut in UTC.
 
-**`/summary` + `/timeline` are fetched for every tab; the other five endpoints are lazy**, so an
+**`/summary` + `/timeline` are fetched for every tab; the other nine endpoints are lazy**, so an
 unopened tab costs nothing. A new section belongs on a tab that already pays for its data —
 `/m/statistics/tasks` exists as its own endpoint for exactly this reason rather than as extra fields on
 `/timeline`. Both pages resolve `timeZone` and the relative-preset clock on the CLIENT only and
@@ -287,6 +287,104 @@ reports NO rows, since nothing can then be called unused. MCP rows are offered-m
 the runs' own `loaded.mcpServers`, never from `.claude/mcp_settings.json`, which is user-owned
 and not read here. The three failures — `no-repository`, `no-path`, `unreadable` — are answers,
 never a 404, so the rest of the tab still renders.
+
+## Files read
+
+`GET /m/statistics/files-read` (lazy: the Tools tab asks for it only with a repository selected) ranks the
+files agents read in ONE repository and gives each step's share of its prompt tokens. It is its own
+endpoint, not extra fields on `/tool-usage`, so a slow or failing window cannot blank that tab's other
+cards and the existing payload stays as it was. It reads `cli_invocations.tool_usage -> 'reads'`, the
+per-run record `cli-executor/read-exposure.ts` writes, through `rollupFilesRead`
+(`shared/src/stats-server/files-read-rollup.ts`: one per-path query, ranked and capped in SQL, and one
+per (step, provider) group query). The caller composes the predicate, as for `rollupToolUsage`:
+`taskScopeFilter` (owner, repository, task class; `allUsers` is admin-only, 403 otherwise), the provider
+facet, `invocationAttributionFilter` and `[from, to)`. `buildFilesRead` (`@haive/shared/stats`,
+`stats/files-read.ts`) turns the rollup into the report (estimates, ratios, buckets, caps); the page
+only formats.
+
+**A repository is required.** A path names a file only inside one repository, so a window-wide ranking
+would merge unrelated files. Without `repositoryId` the route answers `available: false, reason:
+'repository-required'` and runs no SQL.
+
+**Populations are named, never implied.** `recorded`: `reads` is a JSON object. A missing key, a JSON null
+or a NULL `tool_usage` is not recorded: with no `ended_at` it is `inFlight`, else `unrecorded`, and
+`recorded` wins, so a running run that already carries a record counts as recorded. `observable`: coverage
+`full` or `partial`; `none` adds nothing, not even paths. `weighted`: observable with a known
+`fileReads.weightedChars`. The recorder nulls EVERY weight of a run whose turns are unknown or whose
+transcript is elided (`partial`), so such a run adds exact reads and characters (floors) and no estimate.
+A step share counts only runs that are weighted, have `resultSeen`, a recorded `token_usage` with a
+positive prompt side and a known provider; prompt tokens are fresh + cache read + cache creation after
+`normalizeTokens` per provider (codex and gemini report input inclusive of cache reads). An estimate
+larger than the exact prompt is shown unclamped and flagged `exceedsPrompt`.
+
+**Estimates are characters / 4 and labelled so.** `weightedChars` is characters times the turns a result
+stayed in context before compaction: repeated exposure, not billed tokens (cache reads dominate real
+spend). Unknown is null and renders as a dash, a known zero as `≈0`, never the other way round. A share's
+n is the repository's weighted runs; below `MIN_SAMPLES_FOR_TREND` it renders `n=` instead of a
+percentage.
+
+**The ranking is bounded and says what it leaves out.** `FILES_READ_ROW_LIMIT` (50) paths are cut in SQL
+(weighted descending with nulls last, characters descending, path ascending under `COLLATE "C"`, so ties
+break by code point whatever the database locale; the builder re-sorts by code point too, not by UTF-16
+unit, which would put an astral character before U+E000..U+FFFF). The distinct-path
+count is `count(*) over ()`, taken before the cut. Everything the cut and the recorder left out is a
+bucket beside the list, and the ranked rows plus the three buckets equal `totals` in reads, characters and
+weighted characters: `otherPaths` (the remainder), `overflow` (paths a run left off its own 50-path list,
+D1; `omitted` is summed per run) and `multiFile` (one shell call read several files, so no single path
+owns it). Steps are capped at `FILES_READ_STEP_LIMIT` (60); `buildFilesRead` takes an optional
+`stepLimit`, so a test reaches the cut at 4 steps and one assertion pins the 60. Sums of characters,
+weights and tokens are `double precision`, never `::int`: they pass 2^31 on a busy install.
+
+**Cost is the shape of the SQL, and it was measured.** On synthetic rows (postgres:18-bookworm, 100,000 runs
+over 365 days in one repository, 50 listed paths per run, 45,800 distinct paths) the first version took
+3.3 s for 30 days and 24 s for 365 days, 6 to 10 times `/tool-usage` from 30 days up. Three causes, each
+fixed in `files-read-rollup.ts`:
+
+- Every `tool_usage -> 'reads'` detoasts and copies the whole record, and the group query extracted it 86
+  times per row (3.5 s to 0.32 s once an `offset 0` lateral, `rr`, reads it once). `offset 0` is the
+  load-bearing part: without it the planner inlines `rr` and the extraction repeats.
+- The per-path `count(distinct)` x3 forced a sort per aggregate over the 416,650 elements of a 30-day
+  window. It counts entries instead, grouped per (path, task) so that `tasks` is the number of groups. That
+  is exact because the recorder keys a run's `files` by path; a hand-edited record listing one path twice
+  would overcount `runs` and `weightedRuns` for it.
+- Grouping the path under the locale's collation made the sort twice as slow. `COLLATE "C"` groups it, and
+  the same collation in the `ORDER BY` is the tie rule, code point order, which `buildFilesRead` repeats.
+
+Now 0.4 s for 30 days and 2.8 s for 365 days, level with `/tool-usage` (0.5 s and 2.7 s). Real-data timing is
+owed (the dev install was not read): time both queries there before trusting a 731-day window. The two
+statements run on two connections, so two READ COMMITTED snapshots: a run whose record lands between them
+enters one side only, and the builder floors every remainder at zero rather than show a negative bucket.
+
+**Tests.** `packages/api/test/files-read-route-db.test.ts` (gated `FILES_READ_TEST_URL`; run it with
+`pnpm test:gated api/test/files-read-route-db.test.ts`) seeds committed rows, drives the compiled module
+route and asserts hand-computed figures: owner, facets (provider and task class), window, supersession,
+attribution, coverage per provider, ties, buckets and their partition, step shares, unknown staying null,
+values above 2^31, and record shapes no recorder writes (a `files` that is an object or a string, elements
+that are not objects, a path that is not a string, a number written as a string or a boolean: the route
+answers 200 and counts only what is a string or a number).
+Rebuild shared and the module first (`pnpm --filter @haive/shared build`, then
+`pnpm --filter @haive/module-statistics build`): the test imports their `dist`. Dropping `COLLATE "C"` fails
+the tie test only where the database default is not byte order: MEASURED on `postgres:18-bookworm`
+(`en_US.utf8`) it returns `cut/a.ts` for `cut/B.ts`. CI's `postgres:18-alpine` orders by bytes already, so
+there the clause cannot be proven; an explicit `und-x-icu` in its place fails the test on alpine.
+
+**The card** (`web/components/files-read-section.tsx`, last on the Tools tab) is hook-free, so its states
+and helpers are tested by direct call (`test/web/files-read.test.ts`; `react-dom/server` does not resolve
+in this module). The page requests it in its own effect and renders it whether or not `/tool-usage` has
+loaded: inside the shared lazy effect, each of two finished loads would cancel the other's callback and
+send the heavier request again. A failed request shows its message and a Retry button; a failure stands
+until the filters change or Retry clears it, which sends the same request again, and an answer that
+arrives for an old window is dropped. The page's retry and stale-answer rules run against the real page in
+`packages/web/test/statistics-files-read-tab.test.tsx` (jsdom), since this module has no renderer. A path
+is text an agent's transcript chose, so it is a text child of a span, never `MarkdownView`, a link, a
+`title` or `dangerouslySetInnerHTML`; control and format characters (a newline, a right-to-left override,
+a zero-width character) show as `\u{...}` escapes (`displayPath`), the key and the stored path staying
+as recorded; only the fixed note goes through the host `MarkdownView`. The
+card draws no bar where an estimate is unknown, so a dash never looks like a known zero. It reads no value
+from `@haive/shared`: web must not pull that barrel in, so the note says "too few runs" and names no
+threshold. The card does not use `StatTile` or `RankedBars`: their hint and rank text
+sits below the dark-UI floor of neutral-400, and `RankedBars` truncates the END of a label, which for a
+path is the file name.
 
 ## Plan-page attention
 
