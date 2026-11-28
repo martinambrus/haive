@@ -235,6 +235,16 @@ export function failIfColumnStale(err: unknown): void {
   if (err instanceof ProjectStateWriteError && err.columnStale) throw err;
 }
 
+const CHECKOUT_BUSY =
+  'The repository checkout is preparing or in use by another operation. Retry this step in a moment.';
+
+/** A foreground writer fails its step on a checkout hold. The hold refuses before the column or any
+ *  file changes, so no outbox row is left dirty for the sweep: a warning would end the step with the
+ *  record never written, and only a retry of the step writes it. */
+export function failIfCheckoutUnavailable(err: unknown): void {
+  if (err instanceof ProjectStateCheckoutUnavailableError) throw new Error(CHECKOUT_BUSY);
+}
+
 /** Current explicit membership, then strict history/current legacy metadata, then recorded caller
  * provenance only while both are genuinely unknown. Never consult local provider configuration. */
 export function completeWriterCliMembership(

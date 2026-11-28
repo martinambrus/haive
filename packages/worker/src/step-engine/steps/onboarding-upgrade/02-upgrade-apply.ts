@@ -61,8 +61,8 @@ import {
 } from '../../_retire-install-manifest.js';
 import { loadLiveArtifacts, unionExpandedFor } from '../../_upgrade-render.js';
 import {
+  failIfCheckoutUnavailable,
   failIfColumnStale,
-  ProjectStateCheckoutUnavailableError,
   ProjectStateImportDeferredError,
   lockProjectState,
   ProjectStateMovedError,
@@ -139,9 +139,6 @@ export interface ApplySelections {
 const PLAN_NO_LONGER_HOLDS =
   "The repository's project settings changed after this upgrade was planned, so its plan " +
   'no longer holds. Retry the plan step to plan the upgrade again.';
-
-const CHECKOUT_BUSY =
-  'The repository checkout is preparing or in use by another operation. Retry this step in a moment.';
 
 /** The columns this plan may find: the one it read, or the one its own record write stores. */
 function plannedColumns(plan: UpgradePlanOutput): unknown[] {
@@ -2014,7 +2011,7 @@ export const upgradeApplyStep: StepDefinition<UpgradePlanOutput, UpgradeApplyOut
       await listRetired(await retireLegacyMirrors(ctx, warnings, keepTooling, recordRetired));
     } catch (err) {
       failIfColumnStale(err);
-      if (err instanceof ProjectStateCheckoutUnavailableError) throw new Error(CHECKOUT_BUSY);
+      failIfCheckoutUnavailable(err);
       if (err instanceof ProjectStateMovedError) throw new Error(PLAN_NO_LONGER_HOLDS);
       // The files stand on disk whatever the database kept, and the commit stages what is listed here.
       if (err instanceof ProjectStateWriteError) {
