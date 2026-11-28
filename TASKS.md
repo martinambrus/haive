@@ -1242,7 +1242,7 @@ PostgreSQL accepts a uuid in any case, braced, unhyphenated or regrouped, and fi
 
 ### T790 · FNF[relink-hold-leftovers] · leftovers of the T516 relink row hold
 
-status: open · kind: fix · found: T516 review 1 and PR gates (#1392) 2026-11-27 · priority: P3
+status: open for items 1, 2, 4, 5, 6 (item 3 DONE 2026-11-28, merged #1397 (e23e2a555) and live (libs): `canonicalUuid` in `@haive/database` keys the 10 splittable advisory key builders, 12 sites; the 19-site classification is in `.claude/tmp/codex-run/T790-S/classification.md`; spellings outside advisory keys filed as T791) · kind: fix · found: T516 review 1 and PR gates (#1392) 2026-11-27 · priority: P3
 
 1. Residual 409: delete and onboarding/upgrade admission keep a bounded `FOR UPDATE` (`lockRepositoryRow`), so they queue behind a relink's KEY SHARE for up to 30 s while holding their task key, and a concurrent task Start reaches its shorter 5 s bound and answers busy. Documented in integrations.md.
 2. Lock ratchet blind spots (`api/test/repository-lock-ratchet.test.ts`): an identifier receiver, a helper-returned builder, joins, non-literal lock modes, raw SQL, table aliases or named imports, and worker sources outside its api-only scan. None affects the current tree.
