@@ -9,7 +9,10 @@ vi.mock('@haive/shared', async (original) => ({
 import { schema, type Database, type RootClaimHandle } from '@haive/database';
 import { createFakeDb } from '@haive/database/testing';
 import { configService } from '@haive/shared';
-import { withAdmittedCheckoutMutation } from '../src/lib/admitted-checkout-mutation.js';
+import {
+  acquireAdmittedRootClaim,
+  withAdmittedCheckoutMutation,
+} from '../src/lib/admitted-checkout-mutation.js';
 import { NewWorkRefused } from '../src/middleware/maintenance.js';
 import { HttpError } from '../src/context.js';
 
@@ -105,5 +108,65 @@ describe('withAdmittedCheckoutMutation', () => {
     expect((err as HttpError).status).toBe(409);
     expect(claimed()).toBe(false);
     expect(run).not.toHaveBeenCalled();
+  });
+});
+
+describe('acquireAdmittedRootClaim', () => {
+  const take = (kind: 'edit' | 'verify' | 'reset' = 'verify') =>
+    acquireAdmittedRootClaim(fake.db as unknown as Database, REPO, kind, USER);
+
+  it('hands back a held claim of the requested kind with the fence committed before it returns', async () => {
+    const claim = await take('reset');
+    expect(claim).not.toBeNull();
+    expect(events).toEqual(['fence-lock-after-claim', 'fence-committed']);
+    expect(claimed()).toBe(true);
+    expect(fake.rows(schema.repositories)[0]!.rootClaimKind).toBe('reset');
+    await claim!.release();
+    expect(claimed()).toBe(false);
+  });
+
+  it('returns null and takes no fence when another holder has the claim', async () => {
+    const other = await take('edit');
+    events.length = 0;
+    h.lock.mockClear();
+    expect(await take('verify')).toBeNull();
+    expect(h.lock).not.toHaveBeenCalled();
+    expect(events).toEqual([]);
+    expect(claimed()).toBe(true);
+    await other!.release();
+  });
+
+  it.each(['draining', 'maintenance'])(
+    'refuses at the precheck while %s, with no claim write and no fence',
+    async (state) => {
+      fresh.mockResolvedValue(state);
+      await expect(take()).rejects.toBeInstanceOf(NewWorkRefused);
+      expect(claimWrites).toBe(0);
+      expect(h.lock).not.toHaveBeenCalled();
+    },
+  );
+
+  it('releases the claim it took when the state turns draining after the precheck', async () => {
+    fresh.mockResolvedValueOnce('normal').mockResolvedValue('draining');
+    await expect(take()).rejects.toBeInstanceOf(NewWorkRefused);
+    expect(claimWrites).toBeGreaterThan(0);
+    expect(events).toEqual(['fence-lock-after-claim']);
+    expect(claimed()).toBe(false);
+  });
+
+  it('answers 409 busy and releases the claim when the fence wait times out', async () => {
+    vi.useFakeTimers();
+    h.lock.mockImplementation(
+      () =>
+        new Promise((_resolve, reject) =>
+          setTimeout(() => reject(Object.assign(new Error('lock wait'), { code: '55P03' })), 1_000),
+        ),
+    );
+    const outcome = take().catch((err: unknown) => err);
+    await vi.advanceTimersByTimeAsync(1_000);
+    const err = await outcome;
+    expect(err).toBeInstanceOf(HttpError);
+    expect((err as HttpError).status).toBe(409);
+    expect(claimed()).toBe(false);
   });
 });

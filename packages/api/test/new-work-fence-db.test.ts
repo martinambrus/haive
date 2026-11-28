@@ -95,7 +95,10 @@ import {
 import { bundleRoutes } from '../src/routes/bundles.js';
 import { cliProviderRoutes } from '../src/routes/cli-providers.js';
 import { maintenanceRoutes } from '../src/routes/maintenance.js';
-import { withAdmittedCheckoutMutation } from '../src/lib/admitted-checkout-mutation.js';
+import {
+  acquireAdmittedRootClaim,
+  withAdmittedCheckoutMutation,
+} from '../src/lib/admitted-checkout-mutation.js';
 import { NewWorkRefused } from '../src/middleware/maintenance.js';
 import { repoRoutes } from '../src/routes/repos.js';
 import { taskRoutes } from '../src/routes/tasks/index.js';
@@ -1152,5 +1155,24 @@ describe.skipIf(!url)('the new-work fence on Postgres', () => {
     expect(await admitted).toBeInstanceOf(NewWorkRefused);
     expect(await claimed()).toBe(false);
     expect(run).not.toHaveBeenCalled();
+  });
+
+  it('counts a root claim taken before the updater and clears it once the state turns', async () => {
+    const claimed = async () => {
+      const [row] = await db.execute<{ n: number }>(
+        sql`select count(*)::int as n from repositories
+             where id = ${repositoryId} and root_claimed_at is not null`,
+      );
+      return row!.n === 1;
+    };
+    await holdFence();
+    const admitted = acquireAdmittedRootClaim(db, repositoryId, 'verify', USER).catch(
+      (err: unknown) => err,
+    );
+    await untilBlocked();
+    expect(await claimed()).toBe(true);
+    await drain();
+    expect(await admitted).toBeInstanceOf(NewWorkRefused);
+    expect(await claimed()).toBe(false);
   });
 });

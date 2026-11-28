@@ -346,6 +346,11 @@ at the same instant refuse one another with "try again in a moment". Accepted de
 hold is one file write long, and a per-file lock would not exclude the reset, which is repo-wide
 by nature. A task with no repository takes nothing, since there is no root to protect.
 
+Where the editor claim is taken, and for mark-onboarded (`verify`) and this reset (`reset`), the
+claim is also admitted as new work (`acquireAdmittedRootClaim`, [release drain](release.md#the-drain-an-upgrade-runs-first)):
+503 while the system drains or is in maintenance, before any claim is written, and the claim is
+released when the fence refuses after it. A save that takes no claim is not refused.
+
 Uploads, attachment removals, remote relinks/reconciliation and whole-plan removal hold a separate
 `mutation` claim (`withCheckoutMutation`, reached through `withAdmittedCheckoutMutation`, which
 answers 503 while the system drains), often for minutes across a streamed body or Git.

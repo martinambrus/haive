@@ -137,29 +137,54 @@ describe('the new-work fence and the locks an admission takes', () => {
 describe('checkout mutations that start new work', () => {
   const WRAPPER = 'lib/admitted-checkout-mutation.ts';
 
-  /** Every file under src other than the wrapper that calls withCheckoutMutation directly. */
-  const directCallers = (extra?: ts.SourceFile): string[] => {
+  /** Every file under src other than the wrapper that calls `name` directly. */
+  const directCallers = (name: string, extra?: ts.SourceFile): string[] => {
     const found: string[] = [];
     const scan = (file: string, sf: ts.SourceFile) => {
-      if (file !== WRAPPER && callsOf(sf, 'withCheckoutMutation').length > 0) found.push(file);
+      if (file !== WRAPPER && callsOf(sf, name).length > 0) found.push(file);
     };
     for (const file of files()) scan(file, parse(file));
     if (extra) scan(extra.fileName, extra);
     return found;
   };
 
-  it('no file but the wrapper calls withCheckoutMutation', () => {
-    expect(directCallers()).toEqual([]);
-  }, 30_000);
+  it.each(['withCheckoutMutation', 'acquireRootClaim'])(
+    'no file but the wrapper calls %s',
+    (name) => {
+      expect(directCallers(name)).toEqual([]);
+    },
+    30_000,
+  );
 
-  it('the scan reports a synthetic direct call', () => {
-    const synthetic = ts.createSourceFile(
-      'routes/synthetic.ts',
-      'await withCheckoutMutation(db, id, userId, async () => {});',
-      ts.ScriptTarget.Latest,
-      true,
+  it.each(['withCheckoutMutation', 'acquireRootClaim'])(
+    'the scan reports a synthetic direct call of %s',
+    (name) => {
+      const synthetic = ts.createSourceFile(
+        'routes/synthetic.ts',
+        `await ${name}(db, id, userId, async () => {});`,
+        ts.ScriptTarget.Latest,
+        true,
+      );
+      expect(directCallers(name, synthetic)).toContain('routes/synthetic.ts');
+    },
+    30_000,
+  );
+
+  it('acquireAdmittedRootClaim checks the state, then claims, then takes the fence', () => {
+    const sf = parse(WRAPPER);
+    const fn = sf.statements.find(
+      (s): s is ts.FunctionDeclaration =>
+        ts.isFunctionDeclaration(s) && s.name?.text === 'acquireAdmittedRootClaim',
     );
-    expect(directCallers(synthetic)).toContain('routes/synthetic.ts');
+    expect(fn, 'the wrapper file must declare acquireAdmittedRootClaim').toBeDefined();
+    const precheck = callsOf(fn!, 'assertNewWorkAllowed')[0];
+    const claim = callsOf(fn!, 'acquireRootClaim')[0];
+    const fence = callsOf(fn!, 'admitUnderFence')[0];
+    expect(precheck, 'it must call assertNewWorkAllowed').toBeDefined();
+    expect(claim, 'it must call acquireRootClaim').toBeDefined();
+    expect(fence, 'it must call admitUnderFence').toBeDefined();
+    expect(precheck!.getStart()).toBeLessThan(claim!.getStart());
+    expect(claim!.getStart()).toBeLessThan(fence!.getStart());
   }, 30_000);
 
   it('the wrapper checks the state first and takes the fence inside the callback, before the work', () => {
@@ -172,9 +197,9 @@ describe('checkout mutations that start new work', () => {
 
     const callback = claim!.arguments[3];
     expect(callback).toBeDefined();
-    const fence = callsOf(callback!, FENCE)[0];
+    const fence = callsOf(callback!, 'admitUnderFence')[0];
     const work = callsOf(callback!, 'run')[0];
-    expect(fence, 'the callback must call admitNewWork').toBeDefined();
+    expect(fence, 'the callback must call admitUnderFence').toBeDefined();
     expect(work, 'the callback must call run').toBeDefined();
     expect(fence!.getStart()).toBeLessThan(work!.getStart());
   }, 30_000);

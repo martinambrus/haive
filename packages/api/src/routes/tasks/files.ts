@@ -5,13 +5,7 @@ import { basename, dirname, extname, join, relative, resolve } from 'node:path';
 import { Readable } from 'node:stream';
 import { Hono } from 'hono';
 import { eq } from 'drizzle-orm';
-import {
-  acquireRootClaim,
-  readLiveRootClaim,
-  rootClaimRefusal,
-  schema,
-  type RootClaimHandle,
-} from '@haive/database';
+import { readLiveRootClaim, rootClaimRefusal, schema, type RootClaimHandle } from '@haive/database';
 import { isReadOnlyLocalRepo } from '@haive/shared';
 import {
   isPathContainmentError,
@@ -25,6 +19,7 @@ import {
 import { KB_DIR, LEARNING_DRAFTS_DIR, LEARNINGS_DIR } from '@haive/shared/knowledge-paths';
 import { getDb } from '../../db.js';
 import { HttpError, type AppEnv } from '../../context.js';
+import { acquireAdmittedRootClaim } from '../../lib/admitted-checkout-mutation.js';
 import { containmentHttpError } from '../../lib/fs-http.js';
 import { createTaskArchiveStream } from '../../lib/task-archive.js';
 import {
@@ -345,7 +340,7 @@ async function holdRepositoryRoot(
   if (!repositoryId || !writesRepositoryRoot) {
     return { release: async () => {}, lost: () => false };
   }
-  return acquireRootClaim(db, repositoryId, 'edit');
+  return acquireAdmittedRootClaim(db, repositoryId, 'edit');
 }
 
 /** The held file's bytes, or null when it is over the editor's cap. The read stops at cap + 1 as well
