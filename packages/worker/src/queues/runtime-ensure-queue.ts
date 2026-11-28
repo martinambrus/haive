@@ -1,4 +1,4 @@
-import { requireCheckoutAccess } from '@haive/shared/checkout-access';
+import { CheckoutUnavailableError, requireCheckoutAccess } from '@haive/shared/checkout-access';
 import { withInteractiveCheckout } from '../repo/interactive-checkout.js';
 import { randomUUID } from 'node:crypto';
 import { safeProcessor } from './safe-processor.js';
@@ -179,12 +179,28 @@ function refuseDdevRebuild(
   return { ok: false, url: null, mode, rebuildRefusal: refusal };
 }
 
+/** The checkout is not open to a runtime job right now. Nothing has been touched when this answers,
+ *  so it is retryable. */
+function refuseUnavailableCheckout(
+  taskId: string,
+  error: CheckoutUnavailableError,
+): RuntimeEnsureResult {
+  return refuseDdevRebuild(taskId, 'none', {
+    reason: 'checkout-unavailable',
+    message: error.message,
+    retryable: true,
+  });
+}
+
 /** Removal is followed by the normal ensure job, which owns admission, wiring and
  * snapshot recovery. A fresh ID prevents coalescing into an older ensure that
  * already resolved its handle before this removal. */
 export async function rebuildDdevForTask(
   payload: RuntimeEnsurePayload,
 ): Promise<RuntimeEnsureResult> {
+  // Set right before the removal path starts: a checkout refusal raised by the first reads is a
+  // refusal, but once the rebuild has started a removal may have happened, so a failure stays one.
+  let rebuildStarted = false;
   try {
     const ctx = await runtimeContext(payload.taskId);
     if (!ctx)
@@ -200,6 +216,7 @@ export async function rebuildDdevForTask(
         message: 'This task has no DDEV runtime.',
         retryable: false,
       });
+    rebuildStarted = true;
     const { removed } = await rebuildDdevRunner(
       payload.taskId,
       spec.repoSubpath,
@@ -221,6 +238,8 @@ export async function rebuildDdevForTask(
     );
     return { ok: true, url: null, mode: 'ddev', removed };
   } catch (error) {
+    if (error instanceof CheckoutUnavailableError && !rebuildStarted)
+      return refuseUnavailableCheckout(payload.taskId, error);
     if (error instanceof DdevRebuildRefusedError)
       return refuseDdevRebuild(payload.taskId, 'ddev', error.refusal);
     if (error instanceof RunnerProbeError)
@@ -263,6 +282,16 @@ export function startRuntimeEnsureWorker(): Worker<RuntimeEnsurePayload, Runtime
         const result = await ensureRuntimeForTask(job.data.taskId);
         await check();
         return result;
+      }).catch((error: unknown) => {
+        // BullMQ hands the api a failed job as a message string, never its class, so the api could
+        // only mistake this refusal of an explicit rebuild for an outcome-unknown wait. It comes
+        // from the opens' checks, before anything is removed, and completes as a typed result.
+        if (
+          job.name === RUNTIME_ENSURE_JOB_NAMES.REBUILD_DDEV &&
+          error instanceof CheckoutUnavailableError
+        )
+          return refuseUnavailableCheckout(job.data.taskId, error);
+        throw error;
       });
     }),
     { connection: getBullRedis(), concurrency: 3 },

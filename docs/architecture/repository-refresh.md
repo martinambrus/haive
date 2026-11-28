@@ -386,11 +386,17 @@ imports stay admitted by the ambient `projection` access.
 ensure (`ENSURE`, `NAVIGATE_MAILPIT`, `REBUILD_DDEV`), the Editor ensure and a Terminal open each run under
 `withInteractiveCheckout`, which reads `ready` from the row before it opens. `ENSURE`, the Editor and the
 Terminal read it again after their long awaits; `NAVIGATE_MAILPIT` and `REBUILD_DDEV` read it only before.
+A refusal of `REBUILD_DDEV` completes as a typed `rebuildRefusal` (`checkout-unavailable`, retryable) because a
+failed BullMQ job reaches the api as a message string, never a class, so a thrown refusal could only read as an
+unknown outcome (202 `pending`); the other two jobs still reject and their clients poll on `pending`.
+The rebuild's own first reads (task context, runtime classification) answer the same refusal, but only before
+its removal path starts; from there on a failure stays the generic 500, since a removal may have happened.
 The row, not the process fence, covers a worker restart or a deferred suspend retry, when the row
 is `cloning` with no claim and an empty fence. DDEV control `restart` takes the same wrapper and checks
-again only before its cold-boot fallback, because the failing exec may be a checkout rebuild having removed the runner.
-Its refusal is returned, never thrown, as `ok: false` with the message in both `output` and `error` (the
-MCP shim shows the agent only `output`). `status` and `logs` only exec into a runner that already exists
+again after a failed in-place exec, before it decides anything, because the failing exec may be a checkout rebuild having removed the runner.
+Its refusal is returned, never thrown, as `ok: false` with the message in both `output` and `error`: the
+MCP shim shows the agent `error` and any output for every `ok: false` and marks it an error, while a shim
+already mounted in a running sandbox shows only `output`. `status` and `logs` only exec into a runner that already exists
 and stay ungated. Teardown (stopping runners and sessions) must stay ungated.
 
 The remaining independent entries in the T780 analysis are **not yet covered**: independent
@@ -412,6 +418,12 @@ reopens a redelivered import under a foreign claim and a DDEV restart during a r
 T780 PR2b-2 rollback: revert its code commits; there is no migration. Dirty outbox rows, write journals
 and their fixed reasons stay and the sweep retries them; nothing is rewritten or moved. Reverting reopens
 the project-state races above.
+
+T780 PR2b-6 rollback: revert its code commits; there is no migration and nothing to settle. The shim is
+written into each invocation from the worker's constant, so a revert reaches new runs only; the added
+`checkout-unavailable` reason is a type and vanishes at runtime. Reverting returns an empty success for an
+`ok: false` relay answer, the note "recovered via cold boot" after every failed restart whatever was done (and
+`ok: true` when the project was in fact serving) and a pending answer for a refused rebuild.
 
 ## Remote relink reconciliation
 

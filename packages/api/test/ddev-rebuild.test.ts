@@ -2,6 +2,7 @@ import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { Hono } from 'hono';
 import { and, eq, inArray, isNotNull, isNull } from 'drizzle-orm';
 import { schema } from '@haive/database';
+import { CheckoutUnavailableError } from '@haive/shared/checkout-access';
 import type { AppEnv } from '../src/context.js';
 const h = vi.hoisted(() => ({
   task: vi.fn(),
@@ -89,6 +90,7 @@ it.each([
   ['foreign-runner', 'Runner ownership is unproven.', false],
   ['workspace-mismatch', 'Runner workspace does not match.', false],
   ['no-ddev', 'This task has no DDEV runtime.', false],
+  ['checkout-unavailable', new CheckoutUnavailableError().message, true],
 ])('returns a worker %s refusal to the user', async (reason, message, retryable) => {
   h.wait.mockResolvedValue({
     ok: false,
@@ -157,6 +159,12 @@ it.each(['rm', 'audit-insert', 'enqueue'])(
 );
 it('treats a job already gone before its outcome was read as unknown, not failed', async () => {
   h.wait.mockRejectedValueOnce(new Error('arbitrary missing-job copy'));
+  const response = await request();
+  expect(response.status).toBe(202);
+  expect(await response.json()).toEqual({ ok: false, pending: true });
+});
+it('never keys on a rejected wait’s message text', async () => {
+  h.wait.mockRejectedValueOnce(new Error(new CheckoutUnavailableError().message));
   const response = await request();
   expect(response.status).toBe(202);
   expect(await response.json()).toEqual({ ok: false, pending: true });

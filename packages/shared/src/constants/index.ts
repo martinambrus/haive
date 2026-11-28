@@ -292,7 +292,13 @@ export interface RuntimeEnsurePayload {
 
 /** A refusal before rebuild removal; carried as a completed job result for the API. */
 export interface DdevRebuildRefusal {
-  reason: 'busy' | 'probe-unknown' | 'foreign-runner' | 'workspace-mismatch' | 'no-ddev';
+  reason:
+    | 'busy'
+    | 'probe-unknown'
+    | 'foreign-runner'
+    | 'workspace-mismatch'
+    | 'no-ddev'
+    | 'checkout-unavailable';
   message: string;
   retryable: boolean;
 }
