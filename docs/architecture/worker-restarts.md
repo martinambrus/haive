@@ -1665,17 +1665,20 @@ Unknowns stop at `MAX_AUTH_PROBE_UNKNOWNS` (20, injectable) distinct waves, a wa
 30-second bucket of `created_at`, so one wide fan-out failing together counts once. The cap
 fails with named reason `cli_auth_probe_exhausted` before any further dispatch; its text names
 Retry and, where the step offers it, Resume. This is user action, never a code fix loop. Each
-press writes its event in the transaction that reopens the step (the switch's follows its commit),
-so each starts a fresh allowance of invocation-row failures (a Resume after the cap
-no longer fails again after one paid run). A rerun that writes none of them (the cascade of a
-Retry at an upstream step, a worker loop reset) keeps the old rows in the count. Busy stays uncapped and free of crash-loop budgets. The two stored code
+press writes its event, naming the step row it re-runs, in the transaction that reopens the step
+(a switch that re-runs nothing writes it alone), so each starts a fresh allowance of invocation-row
+failures (a Resume after the cap no longer fails again after one paid run). A rerun that writes
+none of them keeps the old rows in the count: the downstream rows of a Retry at an upstream step
+and the rows a worker loop resets. A row already at the cap then fails again after its first paid
+run, and one Retry on it reopens the allowance; a bound on `started_at` would reopen it on every
+park instead. Busy stays uncapped and free of crash-loop budgets. The two stored code
 prefixes are `CLI_AUTH_BUSY` and `CLI_AUTH_PROBE_UNKNOWN` in `sandbox/cli-auth-errors.ts`; the
 error class, `isCliAuthWaitFailure` and the gate query all derive from them, and their values
 are persisted in `cli_invocations.error_message`, so a rename must never be done there. Direct
 applies use the same delay/cap with a small temporary count/timestamp in existing step output,
-since they have no invocation; Resume and Retry with AI keep that output, so only Retry clears
-it. Retry clears start/output and gives a fresh allowance; a failed row cannot automatically
-reopen. No new state machine, table, queue or fence is introduced.
+since they have no invocation; Resume, Retry with AI and a CLI switch keep that output, so only
+Retry clears it. Retry clears output and writes `step.retry`, which gives a fresh allowance; a
+failed row cannot automatically reopen. No new state machine, table, queue or fence is introduced.
 Existing login refusals, auth-lock serialization and settlement guards are unchanged.
 
 ## Interactive checkout replacement recovery

@@ -502,15 +502,22 @@ for (const contract of [fixed, { version: 99 }]) {
     },
   );
 }
-const effects: Record<string, { event: string; job: boolean; kill: boolean }> = {
-  'task Retry at a step': { event: 'task.retried', job: true, kill: true },
-  'step retry': { event: 'step.retry', job: true, kill: true },
-  'step resume': { event: 'step.resume', job: true, kill: true },
-  'step retry_ai': { event: 'step.retry_ai', job: true, kill: true },
+/** `reopens`: the press re-runs the step, so its event is one the step runner's auth admission
+ *  window starts from (`AUTH_LEDGER_RESET_EVENTS`) and must name the step row it re-runs. */
+const effects: Record<string, { event: string; job: boolean; kill: boolean; reopens?: true }> = {
+  'task Retry at a step': { event: 'task.retried', job: true, kill: true, reopens: true },
+  'step retry': { event: 'step.retry', job: true, kill: true, reopens: true },
+  'step resume': { event: 'step.resume', job: true, kill: true, reopens: true },
+  'step retry_ai': { event: 'step.retry_ai', job: true, kill: true, reopens: true },
   'step skip': { event: 'step.skip', job: true, kill: true },
   'form answer': { event: 'step.form_submitted', job: true, kill: false },
   clarification: { event: 'step.clarified', job: true, kill: false },
-  'provider switch': { event: 'step.cli_provider_preference_changed', job: false, kill: false },
+  'provider switch': {
+    event: 'step.cli_provider_preference_changed',
+    job: false,
+    kill: false,
+    reopens: true,
+  },
   'auto-continue wakeup': { event: 'task.auto_continue_changed', job: true, kill: false },
   'pause Resume': { event: 'task.resumed', job: false, kill: false },
 };
@@ -533,6 +540,10 @@ for (const contract of [empty, guarded]) {
     expect(res.status, await res.clone().text()).toBe(200);
     const effect = effects[test.label]!;
     expect(fake.rows(schema.taskEvents).map((e) => e.eventType)).toContain(effect.event);
+    if (effect.reopens)
+      expect(fake.rows(schema.taskEvents).find((e) => e.eventType === effect.event)).toMatchObject({
+        taskStepId: fake.rows(schema.taskSteps)[0]!.id,
+      });
     if (effect.job)
       expect(h.add).toHaveBeenCalledWith('advance-step', expect.anything(), expect.anything());
     else expect(h.add).not.toHaveBeenCalled();

@@ -556,9 +556,8 @@ describe.skipIf(!url)(
           errorMessage: code ? new CliAuthRetryableError(code).message : null,
           supersededAt: code === 'cli_auth_probe_unknown' ? new Date() : null,
         });
-      // Waves, not rows, are counted: the two unknown rows after the start are one
-      // delay apart, so they are two waves.
-      await addRun('cli_auth_probe_unknown', new Date(start.getTime() - 1000));
+      // Waves, not rows, are counted: the two unknown rows are one delay apart, so they are
+      // two waves, and the busy, successful and same-wave rows add none.
       for (const [code, offset] of [
         ['cli_auth_probe_unknown', 1000],
         ['cli_auth_busy', 1000],
@@ -723,13 +722,14 @@ describe.skipIf(!url)(
         await expectExhausted(f);
         const eventAt = at(1000 + 2 * WAVE_GAP);
         await f.addEvent(eventType, f.step.id, eventAt);
-        // A successful run after the event: nothing in the set is left to pace on,
-        // so the pass is not failed and not exhausted (it is dispatched, not deferred).
+        // A successful run after the event: nothing in the set is left to pace on, so the pass
+        // is neither failed nor deferred: it dispatches (the fixture's `apply` is the dispatch).
         await f.addRun(null, new Date(eventAt.getTime() + 1000));
         await f.reopen();
         const res = await advanceStep(f.params);
         expect(res.status).not.toBe('failed');
         expect(res.row.errorMessage ?? '').not.toContain('cli_auth_probe_exhausted:');
+        expect(f.apply).toHaveBeenCalledTimes(1);
         f.apply.mockClear();
         // Two NEW waves after the event spend the fresh allowance.
         await f.addRun('cli_auth_probe_unknown', new Date(eventAt.getTime() + 2000));

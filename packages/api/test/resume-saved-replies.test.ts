@@ -191,7 +191,12 @@ describe('Resume after mining replies were saved', () => {
         rawOutput: 'Saved reply',
         userRetryRequestedAt: null,
       });
-      expect(fake.rows(schema.taskEvents)[0]?.payload).toMatchObject({ fromIteration: 2 });
+      // The event names the row it resumes: the auth admission window starts from it.
+      expect(fake.rows(schema.taskEvents)[0]).toMatchObject({
+        eventType: 'step.resume',
+        taskStepId: STEP_ROW,
+        payload: { fromIteration: 2 },
+      });
       expect(h.add).toHaveBeenCalledWith(
         'advance-step',
         expect.objectContaining({ stepId: loop, epoch: 4 }),

@@ -188,8 +188,8 @@ separate fixed cap, `MAX_AUTH_PROBE_UNKNOWNS = 20` (injectable through advance p
 counted in waves: distinct 30-second buckets of `created_at` among the step's ended invocation
 rows with the unknown code, including superseded rows, from the step's newest reopening event:
 `step.retry` (Retry), `task.retried` (the task-level Retry at its stopped step), `step.resume`
-(loop and fan-out arms), `step.retry_ai` or `step.cli_provider_preference_changed` (a switch that
-re-runs the step); with none, from its first row. `started_at` is no bound: a runtime-slot or
+(loop and fan-out arms), `step.retry_ai` or `step.cli_provider_preference_changed` (a CLI switch on
+the step); with none, from its first row. `started_at` is no bound: a runtime-slot or
 integration park, a pause re-offer and an orphan requeue clear it and the next claim stamps it, so
 a bound on it would let a park reopen the allowance with no one pressing anything. Recovery
 writes none of those events (`task.auto_resumed`, `task.revived`) and keeps counting. One wide
@@ -197,14 +197,17 @@ fan-out that fails admission together counts once, since the delay above keeps t
 a bucket apart. Successful siblings and busy waits cannot erase that attempt's count.
 At the cap the step fails for user action with `cli_auth_probe_exhausted`; its text names Retry
 and, where the step offers it, Resume, and nothing decides on that text. No further automatic
-dispatch or code fix loop occurs. Each of those presses writes its event in the transaction that
-reopens the step (the switch's follows its commit), so each starts a fresh allowance of
-invocation-row failures and its first dispatch is not paced by earlier rows. A rerun that writes
-none of them (the cascade of a Retry at an upstream step, a worker loop reset) keeps the old rows
-in the count. No new table, queue or fence is used.
+dispatch or code fix loop occurs. Each of those presses writes its event, naming the step row it
+re-runs, in the transaction that reopens the step (a switch that re-runs nothing writes it alone),
+so each starts a fresh allowance of invocation-row failures and its first dispatch is not paced by
+earlier rows. A rerun that writes none of them keeps the old rows in the count: the downstream
+rows of a Retry at an upstream step and the rows a worker loop resets. A row already at the cap
+then fails again after its first paid run, and one Retry on it reopens the allowance. That is the
+cost of bounding by presses, since a bound on `started_at` would reopen it on every park. No new
+table, queue or fence is used.
 The direct plugin-install apply has no invocation ledger row: its existing deferred catch
 keeps just its unknown count and retry timestamp in temporary step output, replaced on success
-and cleared by Retry only, not by Resume or Retry with AI. It uses the same cap and delay, parking `waiting_cli` with the idle marker
+and cleared only where the step's output is (Retry), not by Resume, Retry with AI or a CLI switch. It uses the same cap and delay, parking `waiting_cli` with the idle marker
 between attempts. A missing login keeps its existing inline login hint on both paths.
 Image ensure stays outside the lock. The lock covers only scope/source verification and copy IO,
 never a task-row transaction, an image build or a wait for a sibling's mounted copy.
