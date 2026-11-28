@@ -68,6 +68,15 @@ describe('classifyDagIssueFailure', () => {
     ).toBe('environment');
   });
 
+  it.each(['cli_login_required', 'grok_login_required'])(
+    'environment: %s requires user action',
+    (code) => {
+      const errorMessage = `${code}: log in and retry`;
+      expect(classifyDagIssueFailure({ exitCode: -1, errorMessage })).toBe('environment');
+      expect(dagEnvironmentHaltReason({ errorMessage })).toBe(errorMessage);
+    },
+  );
+
   it('environment: no cli provider', () => {
     expect(
       classifyDagIssueFailure({

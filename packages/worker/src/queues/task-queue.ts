@@ -1453,58 +1453,61 @@ async function cleanupTaskContainers(
   // is destroyed below. codex rotates its OAuth tokens single-use, so without this the
   // user volume keeps the token the task already consumed — which kills the usage meter
   // (the poller reads the user volume) and hands the next task a dead refresh token.
+  let retainTaskCopy = true;
   try {
-    await syncRefreshedAuthToUserVolumes(db, taskId);
+    const sync = await syncRefreshedAuthToUserVolumes(db, taskId);
+    retainTaskCopy = sync?.retainTaskCopy ?? false;
   } catch (err) {
     logger.warn({ err, taskId, reason }, 'sync-refreshed-auth-to-user-volumes failed');
   }
 
   try {
-    const volumes = await findTaskAuthVolumes(taskId);
-    await withTaskSettlementTransaction(db, async (tx, signal) => {
-      await setTaskSettlementTimeout(tx);
-      const [task] = await tx
-        .select({
-          id: schema.tasks.id,
-          completedAt: schema.tasks.completedAt,
-          epoch: schema.tasks.orchestrationEpoch,
-        })
-        .from(schema.tasks)
-        .where(taskWriteTarget(taskId, { settled: true }))
-        .for('no key update');
-      if (!task) return;
-      // Retry writes this row last. Hold it through removal and cache invalidation;
-      // no step/run row or repository lock is acquired inside this section.
-      try {
-        const { removed, failed } = await cleanupTaskAuthVolumes(
-          taskId,
-          undefined,
-          volumes,
-          signal,
-        );
-        if (removed.length > 0 || failed.length > 0) {
-          await appendEventOnce(
-            tx,
+    const volumes = retainTaskCopy ? null : await findTaskAuthVolumes(taskId);
+    if (volumes)
+      await withTaskSettlementTransaction(db, async (tx, signal) => {
+        await setTaskSettlementTimeout(tx);
+        const [task] = await tx
+          .select({
+            id: schema.tasks.id,
+            completedAt: schema.tasks.completedAt,
+            epoch: schema.tasks.orchestrationEpoch,
+          })
+          .from(schema.tasks)
+          .where(taskWriteTarget(taskId, { settled: true }))
+          .for('no key update');
+        if (!task) return;
+        // Retry writes this row last. Hold it through removal and cache invalidation;
+        // no step/run row or repository lock is acquired inside this section.
+        try {
+          const { removed, failed } = await cleanupTaskAuthVolumes(
             taskId,
-            null,
-            'auth_volumes.destroyed',
-            {
-              endedAt: task.completedAt?.toISOString() ?? null,
-              epoch: String(task.epoch),
-              reason,
-              removed: removed.length,
-              failed: failed.length,
-            },
-            [
-              sql`${schema.taskEvents.payload} ->> 'removed' = ${String(removed.length)}`,
-              sql`${schema.taskEvents.payload} ->> 'failed' = ${String(failed.length)}`,
-            ],
+            undefined,
+            volumes,
+            signal,
           );
+          if (removed.length > 0 || failed.length > 0) {
+            await appendEventOnce(
+              tx,
+              taskId,
+              null,
+              'auth_volumes.destroyed',
+              {
+                endedAt: task.completedAt?.toISOString() ?? null,
+                epoch: String(task.epoch),
+                reason,
+                removed: removed.length,
+                failed: failed.length,
+              },
+              [
+                sql`${schema.taskEvents.payload} ->> 'removed' = ${String(removed.length)}`,
+                sql`${schema.taskEvents.payload} ->> 'failed' = ${String(failed.length)}`,
+              ],
+            );
+          }
+        } finally {
+          if (!signal.aborted) clearTaskAuthPreparationState(taskId);
         }
-      } finally {
-        if (!signal.aborted) clearTaskAuthPreparationState(taskId);
-      }
-    });
+      });
   } catch (err) {
     logger.warn({ err, taskId, reason }, 'cleanup-task-auth-volumes failed');
   }

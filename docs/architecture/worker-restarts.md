@@ -787,6 +787,43 @@ holding a row lock. The summary's deferred auth cleanup repeats the terminal che
 this fence after sync-back, before invalidating preparations. The superseded pass also
 refuses to initiate a settlement at a newer task epoch.
 
+Boot's auth-volume reaper starts in the background after the task and CLI queues start.
+It uses that same ordering for an existing terminal task: one source-identity-checked,
+ledger-based credential sync outside the task-row lock, then a bounded settlement
+transaction holding the task row through cache invalidation, stopped-helper cleanup and
+each volume removal. It checks the section signal between destructive calls and forwards
+it to stopped-helper cleanup. Retry during sync or before the row lock preserves the task's
+copies. A started invocation with neither an end nor a supersede skips sync entirely;
+the same predicate is checked again under the settlement fence before removal. Boot tries
+each auth lock once; a busy lock or a failed sync/helper lookup leaves
+those copies for another boot, while unrelated orphans continue. Credential-file and mtime
+helpers report failure separately from file absence, so a failed or timed-out read retains
+the copy rather than treating it as an empty credential. Temp-file sweeping runs inside the
+copy helper, logs and continues on failure, and never gates credential carry. Ordinary task-end
+and terminal-summary teardown honor the same `retainTaskCopy` result (or a thrown lookup),
+preserving copies and preparation state without blocking unrelated cleanup. Unlabeled refusals,
+including tasks older than the provider audit floor, and unknown source-label versions retain
+the copy unsynced; known labeled identity mismatches permit removal except for Grok. Grok
+admission and sync-back retain unverifiable or divergent copy lineage, including a known
+source mismatch, so an admission refusal cannot lose its recovery copy in settlement.
+See [Sandbox](sandbox.md) for its shared refresh/admission lock, typed `grok_login_required`
+login hint and preserved retired-copy recovery. `cli_auth_busy` and `cli_auth_probe_unknown`
+admission waits are transient, free re-dispatches in single-CLI, mining and DAG execution;
+they spend neither the crash-loop nor agent recovery budget. A login-required error instead
+halts DAG execution for user action (`environment`), never code-advisor escalation. Direct
+plugin-install applies use the same login hint; busy or unverifiable auth parks their step
+in `waiting_cli`, stamps the ordinary idle marker and returns a 30-second same-step deferral.
+Saved detection and form answers survive that park and boot recovery.
+A non-regular credential
+file is refused before reading, reported once with a structured reason and permits terminal
+leftover disposal, while transient helper failures keep retrying. See [Sandbox](sandbox.md) for
+the floor, warning fields and manual recovery. A deleted task has no row or invocation ledger
+left, so its original orphan-removal
+path remains. In-flight preparation locks survive cache invalidation and remove themselves
+on settlement; sync-back temporary files and MCP failure diagnostics are owned by their run
+(see [Sandbox](sandbox.md), including the label-reader compatibility required for rollback).
+No schema change is required.
+
 The kb-author sibling (`reconcileKbAuthorEntryOnTaskEnd`, shared by failed settlement and
 Cancel) now takes that same bounded task-row fence through its separate-store mutation,
 rechecking the exact ending status and forwarding the section signal to the store call.
@@ -1614,6 +1651,28 @@ A pass that detaches anything owes another full discovery, at most four passes. 
 for the current bounded batch and closes the iterator. Reads perform no recovery; the sweep calls
 an explicit fs-safe mutation. Generic parks retain their age policy. Details and residuals are in
 [Secret and git-data masking](sandbox-masking.md).
+
+## Bounded auth admission retries
+
+Before re-entering ordinary LLM, mining or any DAG dispatch, the step runner reads existing
+ended auth failures for this step created since the later of its current `started_at` and its
+newest `step.resume` or `step.retry_ai` event. Superseding an unknown failure does not erase
+it. Every busy/unknown retry waits 30 seconds from the last ended auth failure in that window.
+Unknowns stop at `MAX_AUTH_PROBE_UNKNOWNS` (20, injectable) distinct waves, a wave being one
+30-second bucket of `created_at`, so one wide fan-out failing together counts once. The cap
+fails with named reason `cli_auth_probe_exhausted` and Retry guidance before any further
+dispatch. This is user action, never a code fix loop. Retry clears `started_at`; Resume and
+Retry with AI keep it and the old rows, but write their event in the transaction that reopens
+the step, so either starts a fresh allowance of invocation-row failures (a Resume after the cap
+no longer fails again after one paid run). Busy stays uncapped and free of crash-loop budgets. The two stored code
+prefixes are `CLI_AUTH_BUSY` and `CLI_AUTH_PROBE_UNKNOWN` in `sandbox/cli-auth-errors.ts`; the
+error class, `isCliAuthWaitFailure` and the gate query all derive from them, and their values
+are persisted in `cli_invocations.error_message`, so a rename must never be done there. Direct
+applies use the same delay/cap with a small temporary count/timestamp in existing step output,
+since they have no invocation; Resume and Retry with AI keep that output, so only Retry clears
+it. Retry clears start/output and gives a fresh allowance; a failed row cannot automatically
+reopen. No new state machine, table, queue or fence is introduced.
+Existing login refusals, auth-lock serialization and settlement guards are unchanged.
 
 ## Interactive checkout replacement recovery
 

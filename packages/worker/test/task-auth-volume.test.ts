@@ -17,7 +17,7 @@ import {
   userAuthVolumeExists,
   writeMcpFileIntoTaskVolume,
   type ProviderAuthCtx,
-  failedMcpAddNames,
+  type CliMcpMergeDiagnostics,
 } from '../src/sandbox/task-auth-volume.js';
 import type { McpServerSpec } from '../src/sandbox/mcp-config.js';
 import { CORE_IDENTITY_LABEL, sandboxCoreIdentity } from '../src/sandbox/sandbox-core-image.js';
@@ -144,7 +144,16 @@ describe('ensureTaskAuthVolumes', () => {
   it('creates task volume and copies from user volume when user volume exists', async () => {
     const userVol = 'haive_cli_auth_abc_codex_0';
     const runner = makeRunner({ preExistingVolumes: [userVol] });
+    const create = vi.spyOn(runner, 'volumeCreate');
     await ensureTaskAuthVolumes(ctx('abc', 'codex'), 'task-111', runner);
+    expect(create).toHaveBeenCalledWith('haive_cli_auth_task_task111_codex_0', {
+      'haive.auth-source': JSON.stringify({
+        version: 1,
+        userVolume: userVol,
+        authMode: 'subscription',
+        isolateAuth: false,
+      }),
+    });
     const taskVol = 'haive_cli_auth_task_task111_codex_0';
     expect(runner.createCalls).toEqual([taskVol]);
     expect(runner.volumeSet.has(taskVol)).toBe(true);
@@ -1081,8 +1090,9 @@ describe('mergeCliMcpIntoTaskVolume when an mcp add fails', () => {
         return result;
       },
     });
+  let diagnostics: CliMcpMergeDiagnostics;
   const merge = (runner: DockerRunner): Promise<boolean> =>
-    mergeCliMcpIntoTaskVolume(TASK, 'grok', 'img:tag', [RAG, CUSTOM], runner);
+    mergeCliMcpIntoTaskVolume(TASK, 'grok', 'img:tag', [RAG, CUSTOM], runner, diagnostics);
 
   beforeEach(() => {
     clearTaskAuthPreparationState(TASK);
@@ -1102,6 +1112,7 @@ describe('mergeCliMcpIntoTaskVolume when an mcp add fails', () => {
     ]);
     failing = '';
     results = [];
+    diagnostics = { failedNames: [] };
   });
   afterEach(() => rmSync(root, { recursive: true, force: true }));
 
@@ -1113,7 +1124,7 @@ describe('mergeCliMcpIntoTaskVolume when an mcp add fails', () => {
       expect(await merge(runner)).toBe(false);
       expect(results[0]!.exitCode).not.toBe(0);
       expect(results[0]!.stderr).toContain(`haive-mcp: add ${broken.name} failed`);
-      expect(failedMcpAddNames(TASK, 'grok')).toEqual([broken.name]);
+      expect(diagnostics.failedNames).toEqual([broken.name]);
       // Both adds were tried, the marker lists both, and the closing ownership repair ran.
       expect(logged('grok.log').filter((line) => line.startsWith('mcp add'))).toHaveLength(2);
       expect(readFileSync(marker(), 'utf8')).toBe('haive-rag\nhaive-custom\n');
@@ -1123,16 +1134,16 @@ describe('mergeCliMcpIntoTaskVolume when an mcp add fails', () => {
       expect(await merge(runner)).toBe(true);
       expect(results[1]!.exitCode).toBe(0);
       expect(runner.runCalls).toHaveLength(2);
-      expect(failedMcpAddNames(TASK, 'grok')).toEqual([]);
+      expect(diagnostics.failedNames).toEqual([]);
     },
   );
 
-  it('forgets the failed names when the task state is cleared', async () => {
+  it('keeps caller diagnostics when the task state is cleared', async () => {
     failing = 'haive-rag';
     expect(await merge(shellRunner())).toBe(false);
-    expect(failedMcpAddNames(TASK, 'grok')).toEqual(['haive-rag']);
+    expect(diagnostics.failedNames).toEqual(['haive-rag']);
     clearTaskAuthPreparationState(TASK);
-    expect(failedMcpAddNames(TASK, 'grok')).toEqual([]);
+    expect(diagnostics.failedNames).toEqual(['haive-rag']);
   });
 
   it('takes a name only from a line that carries both ends of the failure line', async () => {
@@ -1148,7 +1159,7 @@ describe('mergeCliMcpIntoTaskVolume when an mcp add fails', () => {
     ]);
     failing = 'haive-custom';
     expect(await merge(shellRunner())).toBe(false);
-    expect(failedMcpAddNames(TASK, 'grok')).toEqual(['haive-custom']);
+    expect(diagnostics.failedNames).toEqual(['haive-custom']);
   });
 
   it('answers true, and skips a repeat, when every add lands', async () => {
@@ -1244,6 +1255,75 @@ describe('mergeGeminiMcpIntoSettings', () => {
 // DIFFERENT surfaces running their helper containers against one file at the same time. That
 // cost only a wrong surface until `toolProfile: 'none'` started CLEARING the file.
 describe('preparations against one file are serialised', () => {
+  it('keeps each merge failure after a sibling surface succeeds and the task cache clears', async () => {
+    const task = 'task-mcp-run-diagnostics';
+    const first = { failedNames: [] as readonly string[] };
+    const coalesced = { failedNames: [] as readonly string[] };
+    const sibling = { failedNames: [] as readonly string[] };
+    let n = 0;
+    const runner = {
+      volumeExists: async () => true,
+      run: async (): Promise<DockerRunResult> => ({
+        exitCode: ++n === 1 ? 1 : 0,
+        stdout: '',
+        stderr: n === 1 ? 'haive-mcp: add haive-custom failed\n' : '',
+        durationMs: 1,
+        timedOut: false,
+      }),
+    } as unknown as DockerRunner;
+    const servers = [{ name: 'haive-custom', command: 'node', args: ['/custom.mjs'] }];
+    const results = await Promise.all([
+      mergeCliMcpIntoTaskVolume(task, 'grok', 'img:tag', servers, runner, first),
+      mergeCliMcpIntoTaskVolume(task, 'grok', 'img:tag', servers, runner, coalesced),
+      mergeCliMcpIntoTaskVolume(task, 'grok', 'img:tag', [], runner, sibling),
+    ]);
+    clearTaskAuthPreparationState(task);
+    expect(results).toEqual([false, false, true]);
+    expect(n).toBe(2);
+    expect(first.failedNames).toEqual(['haive-custom']);
+    expect(coalesced.failedNames).toEqual(['haive-custom']);
+    expect(sibling.failedNames).toEqual([]);
+  });
+
+  it.each([undefined, 'codex'])(
+    'keeps live provider locks across a clear for %s',
+    async (provider) => {
+      const task = `task-clear-live-lock-${provider ?? 'all'}`;
+      clearTaskAuthPreparationState(task);
+      const started = Promise.withResolvers<void>();
+      const release = Promise.withResolvers<void>();
+      const events: string[] = [];
+      let n = 0;
+      const runner = {
+        volumeExists: async () => true,
+        run: async (): Promise<DockerRunResult> => {
+          const id = ++n;
+          events.push(`start${id}`);
+          if (id === 1) {
+            started.resolve();
+            await release.promise;
+          }
+          events.push(`end${id}`);
+          return { exitCode: 0, stdout: '', stderr: '', durationMs: 1, timedOut: false };
+        },
+      } as unknown as DockerRunner;
+      const first = mergeGeminiMcpIntoSettings(task, { first: { command: 'node' } }, runner);
+      await started.promise;
+      clearTaskAuthPreparationState(task, provider);
+      const second = mergeGeminiMcpIntoSettings(task, {}, runner, { clear: true });
+      // A microtask barrier, not a wall-clock wait: let an incorrectly unlocked helper start.
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+      const whileHeld = [...events];
+      release.resolve();
+      await Promise.all([first, second]);
+      clearTaskAuthPreparationState(task);
+      expect(whileHeld).toEqual(['start1']);
+      expect(events).toEqual(['start1', 'end1', 'start2', 'end2']);
+    },
+  );
+
   it('does not start a second surface while the first is still writing', async () => {
     clearTaskAuthPreparationState('taskgem-lock');
     const events: string[] = [];

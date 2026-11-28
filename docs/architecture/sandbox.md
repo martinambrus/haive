@@ -2,6 +2,298 @@
 
 `packages/worker/src/sandbox/clawker-client.ts` wraps the clawker binary. The worker container mounts `/var/run/docker.sock` and uses Docker-in-Docker to spawn per-task containers. The cloned repository and the run-owned files described below are mounted into the per-task container. The worker filesystem and the user home directory are never exposed. CLI authentication files are copied into a named volume per task at startup and the volume is destroyed at task end. At worker boot `reapOrphanedAuthVolumes` removes a task's copy whose task ended, and an isolated provider's or a user's auth volumes once that row is gone, so a deleted provider or user leaves no CLI credential on the host. A login session still holding such a volume is removed with it, since its row went with the owner's and nothing else would. The owner is read back from the volume's name (`cliAuthVolumeOwner`, beside the builders).
 
+Boot auth-volume reaping starts in the background after the task and CLI queues start,
+so a login's auth lock or Docker helpers cannot delay queue consumption. Before reaping an
+existing completed, failed or cancelled task's copies, the reaper calls
+`syncRefreshedAuthToUserVolumes` once for that task. It resolves provider rows from the invocation
+ledger and uses the same credential-only parse/mtime/auth-lock guards as task-end and summary
+sync. A task with a live invocation (started, neither ended nor superseded) is skipped
+before sync and checked again before removal. Boot tries each auth lock once; a busy lock or a helper/lookup failure keeps the task's
+copies for the next boot. Ordinary task-end and summary sync still wait up to 30 seconds;
+both honor `retainTaskCopy`, keeping the copies and preparation state on retryable failures
+or unverifiable sources, including a thrown ledger lookup. Unrelated teardown continues.
+No auth lock is awaited while holding a task row.
+Removal and preparation invalidation recheck settlement under the bounded task-row fence used
+by terminal-summary cleanup (see [Worker restarts](worker-restarts.md)). A Retry that won during
+sync keeps the copies. A task whose row is gone has no ledger to sync; its copies are removed.
+Ambiguous task-id slugs are retained rather than choosing one task's credentials.
+
+Every newly prepared task auth volume has a Docker-owned `haive.auth-source` label recording
+version 1, its source user-volume name, auth mode and isolation; a copy with no source records
+`none`. The sandbox cannot alter that label. Every sync-back path, including mid-task harvest,
+re-reads the ledger's current provider rows after acquiring the auth lock. A moved row or a source
+label whose parsed structural fields do not match refuses sync before any credential write.
+Key order and extra label fields are ignored. The original unversioned label is the known v0
+shape; explicit unknown versions are refused, retained unsynced and logged once per copy/reason
+in this worker process. The `none` sentinel ordinarily means nothing to sync and emits no refusal warning.
+For Grok, a `none` copy that has since gained credential bytes is retained unsynced too,
+including after its ledger provider was deleted; only an empty no-source copy permits disposal.
+A labeled copy can name its source
+among multiple ledger rows of the same CLI with different scopes. Harvest considers each distinct
+target volume and lets this locked label check choose the source.
+
+A null or deleted invocation-provider reference also triggers inspection of all existing task
+auth copies, even when no provider row remains in the ledger. Copies with unresolvable sources
+are retained read-only (labeled, unlabeled and unknown-version alike), with one structured
+`unresolved_auth_source` warning per copy in this worker process. A provider deleted while
+sync waits for its auth lock follows the same rule. A surviving sibling on the shared user volume
+does not establish the deleted row's source. Only an empty Grok copy, another CLI's `none` label or a provably absent/empty
+registered credential permits disposal; unparseable bytes and non-regular paths remain unknown.
+An inspection failure retains the copies with `unresolved_auth_source_lookup_failed`.
+
+For a copy from before labels, task-end, summary and non-terminal mid-task harvest use a guarded
+transition. After acquiring the auth lock, require the task's creation time and owner, complete
+invocation-ledger ownership (no null or deleted provider), provider rows created no later than the
+task, and one same-CLI source identity. `LEGACY_AUTH_AUDIT_FLOOR` is 2026-11-10 16:04:55 UTC,
+the timestamp of commit `1f1064268` (#1058), which introduced provider-update and sign-out audits.
+Tasks created before that floor refuse with `legacy_audit_history_unavailable`: absent audit rows
+cannot prove the source unchanged during the earlier unobservable window.
+Refuse a `cli_provider.update` audit at or after task
+creation whose structured `metadata.fields` array includes `authMode` or `isolateAuth`, including
+a change away and back; malformed field lists refuse too. PATCH is the only updater of those
+fields. It computes actual changes against the locked row and writes that audit, with
+`clock_timestamp()`, in the same transaction as the change. Create and clone supply immutable
+row creation times; deletes lose the invocation's provider FK and refuse even when the deleted
+row's CLI can no longer be known. Login-set changes that move the volume occur only through
+these creates, deletes and audited auth-setting saves.
+
+Sign-out's committed launch audit also refuses this fallback when its target or structured
+`setIds` names a ledger member, or its clicked row currently resolves to the same volume. An
+unknown/deleted clicked row conservatively refuses rather than guessing the old scope. This
+also covers a volume recreated after sign-out; the original missing-volume guard remains.
+Volume logins and generation-only writes do not change volume resolution, and newer user
+credentials still win by mtime. `auth_generation` has no baseline on an unlabeled copy.
+General `updated_at` changes never decide source identity: unrelated settings saves, manual
+rebuilds, probe health, image build bookkeeping, boot image reconcile and learned model limits
+must all preserve the credential carry. Ollama provisioning and Claude token/grant writers do
+not move a tracked credential-file volume either.
+
+Boot reaping never syncs unlabeled copies and now retains them unsynced. Every unlabeled refusal
+(including the audit floor, ambiguous ledger or changed scope) retains the copy at task end and
+summary cleanup too, since refusal cannot justify losing a possibly newer token. A structured
+warning includes `taskVol`, task/provider ids, the reason and `retained`; it is emitted once per
+unlabeled copy in this worker process, including across harvest ticks and provider rows. No label
+is backfilled. Known labeled source mismatches still permit cleanup except for Grok, whose
+admission refuses and retains a copy from another scope as described below. Sunset: remove this
+unlabeled fallback once all pre-label non-terminal task copies have settled or been recreated
+with source labels, after verifying no resumable task still depends on one.
+
+Manual recovery for retained unlabeled copies: use the warning's task and volume ids to identify
+the original login scope from independent operator records; the current provider row and absent
+audits alone are insufficient, especially before the floor. Preserve the volume until that review
+is complete. With all task invocations stopped and the original scope verified, an operator can
+recover the credential to that scope under its auth lock using the same credential-only parse,
+mtime and atomic-copy guards; never dump credential bytes into logs or attach them to a report.
+For Grok, a completed interactive login now lets admission preserve the old copy in a retired
+user-owned volume before preparing a new task copy (below). Other CLIs still require explicit
+operator recovery or retirement. Do not relabel a legacy copy to bypass verification.
+Unknown-version copies stay available for compatible-reader recovery; restarting alone does
+not establish their lineage.
+
+Background Grok credential refresh holds only while a nonterminal task or a started,
+not-ended, not-superseded invocation can still rotate a task copy. Retained terminal recovery
+copies never hold refresh, including unlabeled and unknown-version copies; this decision
+neither syncs nor removes them. A missing task has no invocation ledger left and does not hold.
+For live copies, the Docker-owned source label scopes the hold to its original user-volume
+name, so another user's or isolated provider's copy does not block this credential. The known
+v0 and v1 shapes are read structurally; `none` holds nothing. Unknown/malformed/absent labels
+conservatively hold that CLI while its task/invocation is live. Slug collisions hold if any
+matching task can rotate. Failed task/invocation lookups also hold, scoped by the label where
+known. No hold result is cached: every usage tick re-reads status and source, so a transient
+lookup failure ends on the next successful read showing settlement, or after the copy is
+removed. A persistent lookup outage continues to hold until repaired; no age timeout rotates
+against work whose state cannot be established. The refresher still locks each credential
+scope and rotates each distinct user volume once.
+
+Grok copy admission (`ensureTaskAuthVolumes`, reached by `resolveAuthMounts`) waits up to
+30 seconds for that same `cliAuthScope` session lock. Refresh lists task copies and rechecks
+live task/invocation state only after taking it. An invocation records `started_at` before
+resolving mounts, so after admission releases the lock the live-copy hold protects it through
+CLI execution. Retry can change task state during rotation, but cannot adopt its copy until
+rotation releases the lock. Preparation coalesces by task/CLI/source scope and serializes
+different source scopes for one task/CLI through the existing in-process preparation tail.
+Lock order is preparation tail, then auth session lock; no task/step/run row or transaction
+is held while waiting. Sync-back takes only the auth lock. Refresh's rejected-grant status
+transaction still takes `lockLoginSet` in provider-id order after the auth lock; neither path
+acquires task rows. Image ensure happens before the auth lock. Other users, isolated providers
+and CLIs retain independent scopes.
+
+Under that lock, admission re-reads the provider scope and the Docker-owned source label.
+The existing `.haive-source` credential fingerprint supplies a three-way comparison: if the
+source changed and the copy still equals its baseline, Retry recopies from the source. If both
+changed differently, or lineage cannot be verified, admission refuses with stable code
+`grok_login_required`, as a `CliLoginRequiredError`. Missing source credentials and a possibly
+consumed source grant use that same error. Admission marks the provider `auth_status = unknown`;
+the existing CLI handler writes the inline login hint, and DAG classification halts for user
+action (`environment`) instead of sending the problem to a code advisor.
+
+A completed interactive volume login supersedes the scope's old task copies. New Grok source
+labels record `volumeLoginId`, the latest `cli_provider.login` audit id with `source: volume`
+for the current login set, or `none`. Refresh, harvest, health checks and unrelated secret writes
+cannot advance that baseline. `auth_generation` alone is insufficient: it also changes on secret
+writes. A legacy, unlabeled or unknown-version copy has no baseline; a volume-login audit after
+the task's creation supplies its upgrade bridge. Without that evidence it still asks for login.
+A changed `authMode` or `isolateAuth` also selects a new scope. Before adopting that scope or the
+new login, admission copies the entire old volume to the scope-owned recovery volume described below
+and requires both `cp -a` and `diff -qr` to succeed. Only then
+may it remove the original and populate from the current source. Before preserving anything,
+admission requires that no already-admitted Grok invocation can still write this task copy,
+including one whose Docker container is not created yet. Invocation ids are passed by the
+ordinary, native and sequential exec paths. Pending preparation cohorts are excluded because
+the shared task/CLI tail prevents their writes; each cohort becomes admitted before that tail
+is released. A strict container listing also refuses a still-mounted ended/superseded run.
+Stopped helpers are removed first through the existing stopped-only cleanup, so a helper left
+Created by a worker death cannot pin recovery forever. Unknown lookups retain the original and
+retry; a busy writer creates no archive. A failed preservation keeps the original. Subscription
+mode requires a nonempty source credential. A nonempty `auth.json` the parser cannot read
+(unknown shape, unparseable JSON, no refreshable OIDC entry) is admitted, at admission and
+before a superseded copy is retired, whenever no refresh fence is set: nothing exists to
+compare it with, so refusing would only block the login. The run proceeds and the worker logs
+a warning whose structured `reason` is `grok_refresh_untracked` (key on the code, never the
+message), at most once per task copy and process; a created or recreated copy forgets that, so
+it can log again after a recopy. Haive's own refresh does not track that credential, and
+sync-back is unchanged. When a fence is set the copy cannot be shown unspent, so it stays
+unknown and retryable (`cli_auth_probe_unknown`, same cap), never a login refusal. The fence
+file keeps the old token's fingerprint after a refresh that rotates the refresh token (only a
+same-token success or an unfenced 4xx writes `none`), so "no fence" holds for volumes Haive
+never rotated; an unreadable file on a rotated volume still refuses. When a moved source is
+unreadable and the task copy is readable, the copy is first kept as the scope's recovery copy
+(same writer drain and one-archive rule as any retirement, reason `unreadable_source_replaced`)
+before the recopy replaces it; an unreadable copy is never archived, so the archive keeps the
+last readable credential. API-key mode prepares its separate empty auth volume and uses the injected key. No original source
+label is relabeled.
+
+Retired volumes carry `haive.auth-retired` with the original task volume, source label and reason.
+There is at most one per current login scope/path index, named `<resolved-user-auth-volume>_retired_copy`.
+After writers drain, a new retirement removes the previous archive (including UUID-named copies
+in that scope) before copying and verifying the new one. A removal refusal retains the original
+and retries admission. A failed archive attempts to remove its partial copy; a worker death or
+failed cleanup leaves that same fixed name for the next attempt, never another UUID volume.
+Sign-out lists and removes that login scope's retired copies even when its primary volume is
+already absent, under its existing auth lock and newer-login guard. Task settlement leaves the
+single recovery copy; the existing owner reaper removes it when its user or isolated provider
+is deleted. No age reaper or new cleanup queue is added.
+
+A newer in-copy login whose source is unchanged continues to be used. A labeled half-built copy
+with no ready marker and credential equal to its source/baseline (or absent) is safe to recreate;
+it never reached a CLI. A missing baseline on a ready copy still requires recovery. A stale copy
+that Docker holds never falls back to continued use: admission releases the auth lock and returns
+`CliAuthRetryableError` with stable code `cli_auth_busy` immediately, without polling under the
+lock. A scope lock still busy after 30 seconds returns the same code. Probe timeouts and exits
+outside 0/1/2/3, and other unverifiable helper failures, use `cli_auth_probe_unknown`. These are
+transient in DAG classification and free in the step, mining and DAG crash-loop budgets.
+Before any of those dispatch paths re-enters, the shared step runner enforces the existing
+30-second delay from the last admission failure. Busy stays uncapped. Unknown failures have a
+separate fixed cap, `MAX_AUTH_PROBE_UNKNOWNS = 20` (injectable through advance parameters),
+counted in waves: distinct 30-second buckets of `created_at` among the step's ended invocation
+rows with the unknown code, including superseded rows, from the later of the step's current
+`started_at` and its newest `step.resume` or `step.retry_ai` event. One wide fan-out that fails
+admission together counts once, since the delay above keeps two waves at least a bucket apart.
+Successful siblings and busy waits cannot erase that attempt's count.
+At the cap the step fails for user action with `cli_auth_probe_exhausted` and Retry guidance;
+no further automatic dispatch or code fix loop occurs. Retry resets the step start/output and
+therefore its allowance. Resume (loop and fan-out arms) and Retry with AI keep `started_at` and
+the old rows but write their event in the transaction that reopens the step, so each starts a
+fresh allowance of invocation-row failures and its first dispatch is not paced by earlier rows.
+No new table, queue or fence is used.
+The direct plugin-install apply has no invocation ledger row: its existing deferred catch
+keeps just its unknown count and retry timestamp in temporary step output, replaced on success
+and cleared by Retry only, not by Resume or Retry with AI. It uses the same cap and delay, parking `waiting_cli` with the idle marker
+between attempts. A missing login keeps its existing inline login hint on both paths.
+Image ensure stays outside the lock. The lock covers only scope/source verification and copy IO,
+never a task-row transaction, an image build or a wait for a sibling's mounted copy.
+
+Controlled Docker measurements on 2026-11-27 used only new throwaway auth volumes, random
+fixture credentials and `node:26-bookworm-slim` for the exact helper scripts. With the scope
+lock and vendor modeled, measured holds were 1,425.72 ms for first admission, 1,637.10 ms
+for refresh, 1,831.60 ms for admission recopy and 1,375.43 ms for reuse. The login fixture's
+credential-write container held its lock for 407.35 ms; a separate fake-clock control held a
+modeled interactive login for 120,000 ms of user time. That is not an actual provider login:
+the real dialog retains its whole-session lock, subject to the session limits documented below. A real-Postgres/fake-Docker
+contention control separately measured refresh at 84.30 ms and the waiting scope's admission
+at 25.39 ms (independent scope: 19.54 ms). These are controlled measurements, not production
+latency guarantees. The busy-timeout control proves free retries when a login outlasts
+admission's 30-second wait. All throwaway Docker volumes were removed after measurement.
+
+Before making a Grok grant, refresh atomically writes `.haive-grok-refresh` in the source
+volume with only the SHA-256 of the refresh token it is about to use. Failure to write it
+makes no vendor request. This uncertainty marker survives worker death, a lost response and
+a failed credential write. Admission refuses when the source still holds that token; a new
+login or a successfully persisted rotated token has a different fingerprint. When the vendor
+keeps the same refresh token, refresh clears the marker only after persisting success.
+Sync-back never promotes the marked token from a copy. The marker contains no credential
+bytes and is never logged. A received HTTP 4xx other than a rejected grant clears the fence
+only if it was not already set at this attempt's entry; a previous ambiguous grant stays fenced.
+Refresh checks that clearing its own fence succeeds. Network loss, timeouts, malformed success and 5xx remain
+possibly consumed and retain the fence. A failed same-token success clear is logged and its
+fenced token is retried on the next usage tick even when the new access token is not due for
+refresh. Only a possibly consumed grant therefore asks for re-login on immediate admission;
+a later successful background refresh can also resolve that hold.
+
+Rollback of fix 9 restores uncapped retries and UUID archive retention. Removed older/partial
+archives cannot be restored by reverting code. No schema rollback is needed; keep fix 7's
+serialization/fence and fix 8's login halt. Pre-fix-9 UUID archives outside a scope that is
+retired again or signed out retain their existing owner-reaper lifecycle.
+
+Rollback of fix 10 is code only, with no schema, data or label change: it restores counting
+from `started_at` alone (a Resume after the cap fails again after one paid run) and the
+refusal of an unreadable Grok `auth.json` even when no fence is set. The
+`grok_refresh_untracked` warning is a log field and nothing persisted depends on it. A recovery
+copy kept for an unreadable moved source (reason `unreadable_source_replaced`) stays until
+recovery, sign-out or removal, like any retired copy; reverting code does not remove it.
+
+Rollback: revert fix 8 to restore fix 7's refusal behavior; its reader ignores the extra login-id
+label field. Retired user-owned volumes remain retained until explicit recovery/removal or user
+deletion, including under the older name parser. Reverting fix 7 restores the earlier
+admission/refresh race; do not downgrade
+while a retained copy or an uncertainty marker still needs recovery. Resolve or explicitly retire
+those copies first. Older workers ignore the marker and cannot refuse a consumed token. Reverting
+the earlier live-copy hold change restores CLI-wide blockage from retained copies. Neither change
+needs a schema migration; credential bytes and removed copies are not restored by code rollback.
+
+Sync's task/user volume probes, credential reads and mtime reads use strict volume existence
+checks. Docker inspect's generic failure exit cannot prove absence: strict checks instead use
+a successful filtered volume listing and compare the exact name. A failed listing, spawn or
+timeout throws, so sync retains the task copy even when Docker recovers before teardown.
+Other volume-existence callers keep their best-effort inspect/false contract.
+Credential reads and mtime reads distinguish a missing file from a failed or timed-out helper:
+transient failures (including Docker exit 125, spawn errors and timeout) retain the copy for a
+later cleanup attempt/boot. Before `cat`, the read helper checks file type: a directory, FIFO or
+symlink (including a dangling link) returns the dedicated non-regular exit code, never credential
+bytes. Sync reports `non_regular_credential_file` once per copy in this worker process, naming
+the offending volume and path with `retained: false`; this is a structural refusal, so terminal
+cleanup disposes of the leftover rather than retrying it on every boot forever. The user volume
+is never modified on that refusal. A genuinely missing or unparseable task credential is an
+ordinary no-copy result. Other poller readers retain their best-effort null-on-helper-failure
+contract, including a non-regular file. No schema or data migration is needed.
+
+`clearTaskAuthPreparationState` forgets applied identities for the selected provider or the
+whole task. It never drops a live preparation lock; `withScopeLock` removes its own tail when
+it settles. All preparation writers, including CLI MCP merges, use the same generic
+`applyAuthPreparationOnce` helper for coalescing, serialization and applied-state tracking.
+CLI MCP failures travel only in the coalesced result to each caller's
+`CliMcpMergeDiagnostics`; the resolver reads that call's failed names. A later surface or
+cache clear cannot replace them. There is no legacy last-merge failure map or reader.
+
+Each sync-back helper writes a UUID-suffixed sibling temporary credential and installs an
+exit trap to remove only that file, on success or shell failure. The atomic rename, sandbox
+ownership, 0600 mode and in-helper mtime check remain unchanged. A SIGKILL can bypass the
+trap. When a credential is about to be copied, the existing copy helper also removes regular
+files matching that credential's `<basename>.haive-tmp-*` prefix in its parent directory only
+when older than ten minutes. This adds no helper per harvest tick. Recent temps, other prefixes
+and links are left alone; leftovers are never read as credentials. A failed sweep logs a warning
+and continues the credential carry. If no copy is needed, temps wait for a later copy.
+Rollback to the pre-label worker means reverting the T543 code series; that worker ignores
+labels. Reverting only the versioned-label change to the earlier exact-string reader makes
+it refuse version-1 copies: retain a compatible reader until those copies have settled or
+been recreated before that partial rollback. No schema/data rollback is needed. Credentials
+already synced remain in user volumes, and removed task copies cannot be restored by
+reverting code. Before downgrading past the retention changes, recover or explicitly retire
+retained unlabeled and unknown-version copies as described above; an older reaper can discard
+them unsynced. The same applies to copies retained after their provider was deleted: recover or
+explicitly retire them before downgrading past that guard. Structural leftovers already disposed
+of cannot be recovered by a code rollback.
+
 **Committed mining views are immutable mounts.** `repo/committed-snapshot.ts` owns the bounded
 resolver. `resolveInvocationRepoMount` chooses a snapshot before repository-less scratch,
 read-only host-folder and integration-worktree branches and reports `workspaceKind: 'snapshot'`.
@@ -970,8 +1262,8 @@ wait minutes, so a login completed in between must survive it. Two pieces do tha
   may run beside an abandoned container. The provider secret migration's destructive drop phase also waits up
   to 30 s for it; its copy phase, which reruns at every worker boot, tries once and leaves a busy
   provider for the next boot. A task's sync-back waits up to 30 s for it; still held,
-  it warns and the task copy is removed with its volume, so a token the task rotated is lost while
-  a login dialog on the same CLI stays open that long (that login replaces it when it succeeds).
+  it warns and retains the task copy for a later summary/boot cleanup attempt, so a rotated
+  token is not discarded solely because the login dialog remained open.
 
 Undo: revert the change; the column is ignored by the older release
 (`ALTER TABLE cli_providers DROP COLUMN IF EXISTS auth_generation` removes it).

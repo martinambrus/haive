@@ -45,3 +45,13 @@ describe('runNeverAnswered', () => {
     ).toBe(false);
   });
 });
+
+it.each(['cli_auth_busy', 'cli_auth_probe_unknown'])('DAG %s spends no retry budget', (code) => {
+  expect(
+    runNeverAnswered({
+      startedAt: new Date(),
+      supersededAt: null,
+      errorMessage: `${code}: admission will retry`,
+    }),
+  ).toBe(true);
+});

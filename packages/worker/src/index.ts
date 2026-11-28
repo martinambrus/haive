@@ -104,11 +104,6 @@ async function main(): Promise<void> {
   // Reap private files left by the prior worker after its container cleanup.
   // A failed removal or listing is logged, but cannot prevent worker recovery.
   await reapPlanChatSnapshotsAtBoot();
-  // Reap CLI auth volumes whose task ended or whose provider or user is gone, among them the
-  // per-task copies a prior worker that died mid-teardown left behind.
-  await reapOrphanedAuthVolumes(getDb()).catch((err) => {
-    logger.warn({ err }, 'orphan auth-volume reap on boot failed');
-  });
   // Reap env templates that never reached 'ready' and have no live task — leftovers
   // from a task that ended before its image built (or a crash mid-build). The 'ready'
   // dockerfile-hash reuse cache is left intact (only repo-delete GCs that).
@@ -165,6 +160,11 @@ async function main(): Promise<void> {
   const bundleWorker = startBundleWorker(bundleStoragePath);
   const taskWorker = startTaskWorker();
   const cliExecWorker = await startCliExecWorker();
+  // Auth sync may wait on Docker helpers: queues must already be consuming work.
+  // Settlement rechecks inside the reaper keep a Retry's live copies intact.
+  void reapOrphanedAuthVolumes(getDb()).catch((err) => {
+    logger.warn({ err }, 'orphan auth-volume reap on boot failed');
+  });
   const globalKbSyncWorker = startGlobalKbSyncWorker();
   // Serves the api's VNC "ensure runtime" requests: brings the task's app +
   // headed-browser desktop back up on demand (e.g. after a worker-boot reap).

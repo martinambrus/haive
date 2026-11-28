@@ -1,3 +1,9 @@
+import {
+  CLI_AUTH_BUSY,
+  CLI_AUTH_PROBE_UNKNOWN,
+  cliAuthStoredPrefix,
+} from '../../sandbox/cli-auth-errors.js';
+
 /* ------------------------------------------------------------------ */
 /* LLM stream failure classification                                   */
 /* ------------------------------------------------------------------ */
@@ -142,7 +148,11 @@ export function isTransientCliFailure(sig: {
   const killedByExit =
     sig.exitCode === null ||
     (typeof sig.exitCode === 'number' && CLI_TERMINATION_EXIT_CODES.has(sig.exitCode));
-  return killedByExit || (!!sig.errorMessage && TRANSIENT_CLI_FAILURE_RE.test(sig.errorMessage));
+  return (
+    killedByExit ||
+    isCliAuthWaitFailure(sig) ||
+    (!!sig.errorMessage && TRANSIENT_CLI_FAILURE_RE.test(sig.errorMessage))
+  );
 }
 
 /** True when an invocation was killed specifically by its own TIMEOUT — the transient
@@ -170,16 +180,25 @@ export function isCliPreemptionFailure(sig: { errorMessage?: string | null }): b
   return !!sig.errorMessage && sig.errorMessage.startsWith(CLI_PREEMPTED_HEADLINE);
 }
 
-/** True when re-running after this run spends no recovery budget: it was preempted, or it never
- *  started, which the handler stamps before anything that can fail, so nothing ran at all. */
+/** Worker-authored code prefixes, never matches embedded CLI output. Auth waits
+ * spend no agent budget; the step entry gate separately paces/bounds admission. */
+export function isCliAuthWaitFailure(run: { errorMessage?: string | null }): boolean {
+  const message = run.errorMessage ?? '';
+  return [CLI_AUTH_BUSY, CLI_AUTH_PROBE_UNKNOWN].some((code) =>
+    message.startsWith(cliAuthStoredPrefix(code)),
+  );
+}
+
+/** Free re-dispatch: preemption, an auth admission wait, or a run that never started.
+ *  Auth waits did no agent work even though the handler already stamped started_at. */
 export function isFreeRedispatch(run: {
   errorMessage: string | null;
   startedAt: Date | null;
 }): boolean {
-  return isCliPreemptionFailure(run) || run.startedAt === null;
+  return isCliPreemptionFailure(run) || isCliAuthWaitFailure(run) || run.startedAt === null;
 }
 
-/** Drop preemption rows from a step's invocation history before any consecutive-failure budget
+/** Drop preemption and auth-admission wait rows before any consecutive-failure budget
  *  scans it. One helper rather than a skip inside each loop, so the rule is stated (and tested)
  *  once instead of three times — and so a fourth budget added later inherits it by using the same
  *  entry point.
@@ -190,7 +209,7 @@ export function isFreeRedispatch(run: {
 export function withoutPreemptions<T extends { errorMessage: string | null }>(
   rows: readonly T[],
 ): T[] {
-  return rows.filter((r) => !isCliPreemptionFailure({ errorMessage: r.errorMessage }));
+  return rows.filter((r) => !isCliPreemptionFailure(r) && !isCliAuthWaitFailure(r));
 }
 
 /** Minutes an invocation was allowed before the timeout killed it, recovered from the

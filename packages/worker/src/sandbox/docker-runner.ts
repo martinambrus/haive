@@ -180,9 +180,20 @@ export interface DockerRunner {
   run(opts: DockerRunOpts): Promise<DockerRunResult>;
   inspect(tag: string): Promise<DockerInspectResult>;
   remove(ref: string, opts?: { force?: boolean }): Promise<DockerRemoveResult>;
-  volumeCreate(name: string): Promise<DockerVolumeOpResult>;
-  volumeExists(name: string): Promise<boolean>;
+  volumeCreate(
+    name: string,
+    labels?: Readonly<Record<string, string>>,
+  ): Promise<DockerVolumeOpResult>;
+  /** Missing label returns null; an inspect failure throws. */
+  volumeLabel?(name: string, key: string): Promise<string | null>;
+  /** Strict callers require a successful listing to prove absence; lookup failures throw.
+   * Other callers keep the historical best-effort inspect/false contract. */
+  volumeExists(name: string, options?: { throwOnFailure?: boolean }): Promise<boolean>;
+  /** Strict listing, rechecked by prefix because Docker name filters match substrings. */
+  volumeList?(prefix: string): Promise<string[]>;
   volumeRemove(name: string): Promise<DockerVolumeOpResult>;
+  /** Strict retirement prerequisite: any container can still pin/write the copy. */
+  volumeHasContainers?(name: string): Promise<boolean>;
   /** Remove only non-running containers that still mount this volume. A worker killed
    *  between `docker create` and `docker start` can otherwise leave a Created helper
    *  container pinning an auth volume forever. Running containers are never selected. */
@@ -580,18 +591,55 @@ export const defaultDockerRunner: DockerRunner = {
     return result;
   },
 
-  async volumeCreate(name) {
-    const result = await spawnAndCollect('docker', ['volume', 'create', name], {
+  async volumeCreate(name, labels = {}) {
+    const args = Object.entries(labels).flatMap(([key, value]) => ['--label', `${key}=${value}`]);
+    const result = await spawnAndCollect('docker', ['volume', 'create', ...args, name], {
       timeoutMs: 15_000,
     });
     return { ok: result.exitCode === 0, stderr: result.stderr, error: result.error };
   },
 
-  async volumeExists(name) {
-    const result = await spawnAndCollect('docker', ['volume', 'inspect', name], {
+  async volumeLabel(name, key) {
+    const result = await spawnAndCollect(
+      'docker',
+      ['volume', 'inspect', '--format', '{{json .Labels}}', name],
+      {
+        timeoutMs: 15_000,
+      },
+    );
+    if (result.exitCode !== 0) throw new Error('auth volume label inspect failed');
+    const labels: unknown = JSON.parse(result.stdout);
+    if (!labels || typeof labels !== 'object') return null;
+    const value = (labels as Record<string, unknown>)[key];
+    return typeof value === 'string' ? value : null;
+  },
+
+  async volumeExists(name, options = {}) {
+    // Inspect's exit 1 conflates not-found and daemon failures. A successful list
+    // proves absence without interpreting Docker's human-readable error wording.
+    const args = options.throwOnFailure
+      ? ['volume', 'ls', '--filter', `name=${name}`, '--format', '{{.Name}}']
+      : ['volume', 'inspect', name];
+    const result = await spawnAndCollect('docker', args, {
       timeoutMs: 15_000,
     });
+    if (options.throwOnFailure) {
+      if (result.exitCode !== 0 || result.timedOut || result.error)
+        throw new Error('auth volume existence lookup failed');
+      return result.stdout.split(/\r?\n/).includes(name);
+    }
     return result.exitCode === 0;
+  },
+
+  async volumeList(prefix) {
+    const result = await spawnAndCollect(
+      'docker',
+      ['volume', 'ls', '-q', '--filter', `name=${prefix}`],
+      { timeoutMs: 15_000 },
+    );
+    if (result.exitCode !== 0 || result.timedOut || result.error)
+      throw new Error('auth volume listing failed');
+    return result.stdout.split(/\r?\n/).filter((name) => name.startsWith(prefix));
   },
 
   async volumeRemove(name) {
@@ -599,6 +647,15 @@ export const defaultDockerRunner: DockerRunner = {
       timeoutMs: 30_000,
     });
     return { ok: result.exitCode === 0, stderr: result.stderr, error: result.error };
+  },
+
+  async volumeHasContainers(name) {
+    const result = await spawnAndCollect('docker', ['ps', '-aq', '--filter', `volume=${name}`], {
+      timeoutMs: 15_000,
+    });
+    if (result.exitCode !== 0 || result.timedOut || result.error)
+      throw new Error('auth volume container lookup failed');
+    return result.stdout.trim().length > 0;
   },
 
   async removeStoppedContainersUsingVolume(name, signal) {

@@ -75,7 +75,6 @@ import { cliAdapterRegistry } from '../../cli-adapters/registry.js';
 import type { CliProviderRecord } from '../../cli-adapters/types.js';
 import {
   ensureTaskAuthVolumes,
-  failedMcpAddNames,
   mergeCliMcpIntoTaskVolume,
   mergeGeminiMcpIntoSettings,
   resolveTaskAuthMounts,
@@ -616,13 +615,16 @@ export async function resolveMcpExtraFiles(
       );
       return { files: serverFiles, extraArgs: [] };
     case 'cli-merge': {
+      const diagnostics = { failedNames: [] as readonly string[] };
       const merged = await mergeCliMcpIntoTaskVolume(
         taskId,
         providerName,
         sandboxImage,
         resolveStdioMcpServers(servers, userServers),
+        undefined,
+        diagnostics,
       );
-      const failed = merged ? [] : failedMcpAddNames(taskId, providerName);
+      const failed = merged ? [] : diagnostics.failedNames;
       requireWritten(
         merged,
         failed.length > 0
@@ -1057,6 +1059,7 @@ export async function resolveAuthMounts(
   provider: CliProviderRecord,
   taskId: string,
   sandboxImage: string | null,
+  invocationId?: string,
 ): Promise<DockerVolumeMount[]> {
   const providerName = provider.name as CliProviderName;
   await assertUserAuthReady(db, provider);
@@ -1069,6 +1072,9 @@ export async function resolveAuthMounts(
       isolateAuth: provider.isolateAuth,
     },
     taskId,
+    undefined,
+    db,
+    invocationId,
   );
 
   // RTK seeding: when this task's repo opted into the token-saving proxy,

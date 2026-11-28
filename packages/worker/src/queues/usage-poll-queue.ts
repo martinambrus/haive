@@ -880,7 +880,7 @@ export function startUsagePollWorker(): Worker {
     safeProcessor(async (_job: Job) => {
       const db = getDb();
       // Ahead of the refresher, because a harvest can only make the user volume FRESHER, and
-      // the refresher's yield rule (some task holds a copy -> do not rotate) is exactly the
+      // the refresher's yield rule (live work holds this credential's copy) is exactly the
       // case a harvest covers. Landing it first also means resolveToken later in this same
       // tick reads the harvested token, so a meter killed by an expired credential recovers
       // on this tick rather than the next — deadUsageFetchToken is keyed on the token string,

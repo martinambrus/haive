@@ -1,7 +1,9 @@
 import { cliAuthScope } from '@haive/shared/cli-auth-state';
-import { and, eq, inArray } from 'drizzle-orm';
+import { and, eq, inArray, isNotNull, isNull } from 'drizzle-orm';
 import {
+  cliAuthIdSlug,
   cliAuthTaskVolumePrefix,
+  cliAuthVolumeOwner,
   logger,
   lockLoginSet,
   resolveCliAuthUserVolumeName,
@@ -19,6 +21,7 @@ import { listTaskAuthVolumes } from '../sandbox/auth-volume-reaper.js';
 import { defaultDockerRunner, type DockerRunner } from '../sandbox/docker-runner.js';
 import { GROK_CREDENTIAL_FILE } from './credential-files.js';
 import { readVolumeFile, writeVolumeFile } from './token-source.js';
+import { GROK_REFRESH_FENCE_FILE, grokRefreshFingerprint } from './grok-refresh-fence.js';
 
 const log = logger.child({ module: 'credential-refresh' });
 
@@ -46,15 +49,85 @@ interface GrokProviderRow {
   isolateAuth: boolean;
 }
 
-/** True when any per-task auth volume for this CLI exists, i.e. some task is holding a
- *  copy of the credential. Pure so the yield rule is testable without docker. */
-export function taskVolumesHoldProvider(
+/** Only copies that live work can still rotate hold background refresh. Labels scope
+ * the hold to the original credential volume, even if a provider's settings moved.
+ * Unknown status/source holds this tick; nothing is cached, so a successful lookup on
+ * a later usage tick releases it once the task and its invocations have settled. */
+export async function taskVolumesHoldProvider(
   volumeNames: string[],
   providerName: CliProviderName,
-): boolean {
-  return volumeNames.some(
+  userVolume: string,
+  db: Database,
+  runner: DockerRunner,
+): Promise<boolean> {
+  const candidates = volumeNames.filter(
     (name) => name.startsWith(cliAuthTaskVolumePrefix()) && name.includes(`_${providerName}_`),
   );
+  if (candidates.length === 0) return false;
+  let tasks: { id: string; status: string }[] | undefined;
+  try {
+    tasks = await db.query.tasks.findMany({ columns: { id: true, status: true } });
+  } catch (err) {
+    log.warn({ err }, 'credential refresh task status lookup failed; retrying next tick');
+  }
+  for (const name of candidates) {
+    const slug = cliAuthVolumeOwner(name)?.slug;
+    const owners = tasks?.filter((task) => cliAuthIdSlug(task.id) === slug);
+    // Missing tasks have no invocation ledger left. Slug collisions hold if ANY owner
+    // can still rotate; do not arbitrarily choose one of the matching tasks.
+    let mayRotate =
+      !owners || owners.some((task) => !['completed', 'failed', 'cancelled'].includes(task.status));
+    if (!mayRotate && owners && owners.length > 0) {
+      try {
+        mayRotate = Boolean(
+          await db.query.cliInvocations.findFirst({
+            where: and(
+              inArray(
+                schema.cliInvocations.taskId,
+                owners.map((task) => task.id),
+              ),
+              isNotNull(schema.cliInvocations.startedAt),
+              isNull(schema.cliInvocations.endedAt),
+              isNull(schema.cliInvocations.supersededAt),
+            ),
+            columns: { id: true },
+          }),
+        );
+      } catch (err) {
+        mayRotate = true;
+        log.warn(
+          { err, volume: name },
+          'credential refresh invocation lookup failed; retrying next tick',
+        );
+      }
+    }
+    if (!mayRotate) continue;
+    try {
+      const label = await runner.volumeLabel?.(name, 'haive.auth-source');
+      if (label === 'none') continue;
+      if (!label) return true; // Legacy or unavailable source: retain the CLI-wide hold.
+      const source: unknown = JSON.parse(label);
+      if (!source || typeof source !== 'object' || Array.isArray(source)) return true;
+      const fields = source as Record<string, unknown>;
+      // The known unversioned v0 and v1 shapes have the same source fields. Unknown
+      // versions cannot prove which credential this live copy holds.
+      if (
+        ('version' in fields && fields.version !== 1) ||
+        typeof fields.userVolume !== 'string' ||
+        (fields.authMode !== 'subscription' && fields.authMode !== 'api_key') ||
+        typeof fields.isolateAuth !== 'boolean'
+      )
+        return true;
+      if (fields.userVolume === userVolume) return true;
+    } catch (err) {
+      log.warn(
+        { err, volume: name },
+        'credential refresh source lookup failed; retrying next tick',
+      );
+      return true;
+    }
+  }
+  return false;
 }
 
 /**
@@ -65,8 +138,8 @@ export function taskVolumesHoldProvider(
  * signed in.
  *
  * Two rules make this safe:
- *  - It YIELDS to running work. A per-task auth volume existing for the CLI means some
- *    task holds a copy of the same credential and may refresh off the same single-use
+ *  - It YIELDS to live work holding a copy of this credential (by source label,
+ *    conservatively CLI-wide for an unknown source). Both may refresh off the same single-use
  *    refresh token; rotating concurrently signs one of the two out mid-run. Waiting costs
  *    a tick, and the task's own teardown sync carries its refresh back anyway.
  *  - It rotates each USER VOLUME once, not each provider row. Several rows of one CLI share
@@ -91,12 +164,6 @@ export async function refreshExpiringCliCredentials(
     columns: { id: true, userId: true, name: true, authMode: true, isolateAuth: true },
   })) as GrokProviderRow[];
   if (rows.length === 0) return;
-
-  const taskVolumes = await listTaskAuthVolumes();
-  if (taskVolumesHoldProvider(taskVolumes, GROK)) {
-    log.debug({ provider: GROK }, 'credential refresh yielded: a task holds a copy');
-    return;
-  }
 
   // One entry per distinct user volume; the rows sharing it all get the same verdict.
   const byVolume = new Map<string, GrokProviderRow[]>();
@@ -125,6 +192,13 @@ export async function refreshExpiringCliCredentials(
         );
         continue;
       }
+      // Admission takes this same lock before adopting or creating a copy. List and
+      // read live state AFTER taking it: an earlier snapshot can miss that admission.
+      const taskVolumes = await listTaskAuthVolumes();
+      if (await taskVolumesHoldProvider(taskVolumes, GROK, vol, db, runner)) {
+        log.debug({ vol }, 'credential refresh yielded: live work may rotate a copy');
+        continue;
+      }
       await refreshGrokVolume(db, vol, sharing, runner, release.assertHeld);
     } catch (err) {
       log.warn({ err, vol }, 'grok credential refresh failed; leaving the stored login as-is');
@@ -145,16 +219,38 @@ async function refreshGrokVolume(
   if (!raw) return; // not signed in, or grok already deleted the file
   const cred = parseGrokAuthFile(raw);
   if (!cred) return;
-  if (!grokTokenNeedsRefresh(cred.expiresAtMs)) return;
+  // A failed same-token fence clear must retry even with a newly renewed access token.
+  // An unreadable fence throws: read as absent, a later 4xx would clear earlier uncertainty.
+  const fence = await readVolumeFile(vol, GROK_REFRESH_FENCE_FILE, runner, {
+    throwOnFailure: true,
+  });
+  const fenced = fence === grokRefreshFingerprint(cred.refreshToken);
+  if (!grokTokenNeedsRefresh(cred.expiresAtMs) && !fenced) return;
   if (deadRefreshToken.get(vol) === cred.refreshToken) return;
 
+  await assertHeld();
+  if (
+    !(await writeVolumeFile(
+      vol,
+      GROK_REFRESH_FENCE_FILE,
+      grokRefreshFingerprint(cred.refreshToken),
+      runner,
+    ))
+  )
+    return; // Do not spend a token without durable evidence for admission.
+  await assertHeld();
   let fresh;
   try {
     fresh = await refreshGrokToken(cred.refreshToken, cred.clientId);
   } catch (err) {
     if (!(err instanceof GrokOauthError && err.code === 'invalid_grant')) {
-      // Transient (network / 5xx). Leave the stored credential untouched and retry next
-      // tick; the access token may still have life left in it.
+      // A received 4xx clears only this attempt's fence, never earlier uncertainty.
+      // Network loss, aborts, malformed success and 5xx remain possibly consumed.
+      if (!fenced && err instanceof GrokOauthError && err.status >= 400 && err.status < 500) {
+        await assertHeld();
+        if (!(await writeVolumeFile(vol, GROK_REFRESH_FENCE_FILE, 'none', runner)))
+          log.warn({ vol }, 'grok unspent-grant fence clear failed; retrying next tick');
+      }
       log.warn({ vol, err }, 'grok token refresh failed (transient); retrying next tick');
       return;
     }
@@ -209,6 +305,15 @@ async function refreshGrokVolume(
     return;
   }
   deadRefreshToken.delete(vol);
+  // A vendor may keep the same refresh token. Its successful credential write is
+  // durable before clearing the uncertainty fence; a crash here safely refuses Retry.
+  if (fresh.refreshToken === cred.refreshToken) {
+    await assertHeld();
+    if (!(await writeVolumeFile(vol, GROK_REFRESH_FENCE_FILE, 'none', runner))) {
+      log.warn({ vol }, 'grok successful same-token fence clear failed; retrying next tick');
+      return;
+    }
+  }
   log.info(
     { vol, expiresAt: new Date(fresh.expiresAtMs).toISOString() },
     'rotated the stored grok credential',

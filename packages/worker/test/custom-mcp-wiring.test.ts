@@ -47,9 +47,10 @@ const writers = vi.hoisted(() => ({
 }));
 vi.mock('../src/sandbox/task-auth-volume.js', async (importOriginal) => ({
   ...(await importOriginal<object>()),
-  failedMcpAddNames: () => writers.failed,
   mergeCliMcpIntoTaskVolume: async (...args: unknown[]) => {
     merged.cli.push(args);
+    const diagnostics = args[5] as { failedNames: readonly string[] } | undefined;
+    if (diagnostics) diagnostics.failedNames = [...writers.failed];
     return writers.landed;
   },
   mergeGeminiMcpIntoSettings: async (...args: unknown[]) => {

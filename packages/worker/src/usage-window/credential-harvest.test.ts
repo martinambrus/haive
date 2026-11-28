@@ -90,8 +90,8 @@ describe('selectHarvestTargets', () => {
   });
 
   // An isolate_auth row mounts its OWN user volume, so the single task volume could hold
-  // either login. Nothing in the volume name says which — refuse rather than guess.
-  it('refuses a task mixing an isolated row with a shared one', () => {
+  // either login. Only the Docker-owned label can disambiguate the source during sync.
+  it('passes mixed isolated and shared scopes to the source-label guard', () => {
     const { targets, ambiguous } = selectHarvestTargets(
       [
         { taskId: TASK_A, provider: provider({ id: 'p-shared' }) },
@@ -99,13 +99,13 @@ describe('selectHarvestTargets', () => {
       ],
       new Set(),
     );
-    expect(targets).toHaveLength(0);
+    expect(targets).toHaveLength(2);
     expect(ambiguous).toEqual([{ taskId: TASK_A, providerName: 'codex' }]);
   });
 
   // Same argument for auth mode: an api_key row and a subscription row are two credentials
   // billing two accounts, and resolveCliAuthUserVolumeName gives them separate volumes.
-  it('refuses a task mixing auth modes on one CLI', () => {
+  it('passes mixed auth modes to the source-label guard', () => {
     const { targets, ambiguous } = selectHarvestTargets(
       [
         { taskId: TASK_A, provider: provider({ id: 'p-sub' }) },
@@ -113,7 +113,7 @@ describe('selectHarvestTargets', () => {
       ],
       new Set(),
     );
-    expect(targets).toHaveLength(0);
+    expect(targets).toHaveLength(2);
     expect(ambiguous).toEqual([{ taskId: TASK_A, providerName: 'codex' }]);
   });
 
@@ -129,7 +129,7 @@ describe('selectHarvestTargets', () => {
       new Set(),
     );
     expect(ambiguous).toEqual([{ taskId: TASK_A, providerName: 'codex' }]);
-    expect(targets.map((t) => t.provider.name)).toEqual(['grok']);
+    expect(targets.map((t) => t.provider.name)).toEqual(['codex', 'codex', 'grok']);
   });
 
   it('returns nothing on an empty input', () => {
@@ -152,5 +152,5 @@ it('harvest retries a busy auth scope next tick instead of waiting', async () =>
   } as unknown as Database;
   const runner = {} as DockerRunner;
   await harvestInTaskCredentials(db, runner);
-  expect(sync).toHaveBeenCalledExactlyOnceWith(TASK_A, chosen, db, runner, 0);
+  expect(sync).toHaveBeenCalledExactlyOnceWith(TASK_A, chosen, db, runner, 0, undefined, true);
 });

@@ -105,6 +105,13 @@ assignment. The runner excludes it beside `StepOutputContractInvalidError` befor
 `StepOutputContractInvalidError` for an oversized reply, missing/invalid raw JSON envelope, version mismatch
 or invalid contract data; even an error-loop hook cannot turn it into an implementation repair.
 
+`CliLoginRequiredError` also bypasses `fixLoopOnError`: the failed step keeps its structured
+inline login hint, including a direct plugin-install apply that uses no CLI invocation handler.
+`CliAuthRetryableError` instead parks that direct path in `waiting_cli` with the normal idle
+marker and queues a same-step advance after 30 seconds. It spends no fix round. Queued CLI,
+mining and DAG admission waits use the free transient-retry policy documented in
+[Sandbox](sandbox.md).
+
 **A round must not be spent on a failure no agent can repair, and that verdict has to be
 reachable without a human.** `08b-test-management` is the worked example. Its fix loop is
 driven by `testsPassed`, and `null` there means "not a defect" — `fixLoop.evaluate` returns

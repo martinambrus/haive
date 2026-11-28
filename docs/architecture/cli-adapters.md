@@ -201,6 +201,18 @@ message reaches the Connect HTTP 400 and the usage poller's warn log, so callers
 throws a fixed `claude oauth: invalid token response`, because the parser's SyntaxError quotes
 the body.
 
+Grok task admission shares that scope lock. A possibly consumed refresh grant or missing login
+throws the existing `CliLoginRequiredError` with `grok_login_required`, flips auth health to
+`unknown` and reaches the inline login affordance. Completed interactive volume-login audits,
+not general auth generations, let admission preserve and replace old copies. Busy locks and
+unknown helper/probe results use paced admission retries, free of agent crash-loop budgets.
+Unknown formats stay retryable, without a login hint. The shared step runner caps unknowns
+at 20 per step attempt, then halts for Retry; busy waits remain uncapped. Received non-grant
+4xx responses clear only a fence newly set by that attempt; prior uncertainty and network/5xx
+outcomes retain it. A failed fence clear
+is checked and retried on the next tick even before access-token expiry. See
+[Sandbox](sandbox.md) for archive retention, lock ordering and the controlled hold measurements.
+
 Claude usage authorization starts and completes only for a `claude-code` row on subscription
 auth; the poller also excludes API-key rows even if they retain a legacy usage grant. Disconnect
 and generic secret deletion can still remove that legacy grant. Manual usage-grant writes on

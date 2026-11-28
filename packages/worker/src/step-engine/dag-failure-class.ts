@@ -48,6 +48,7 @@ const ENVIRONMENT_FAILURE_RE = new RegExp(
     'unable to write',
     'cannot write',
     'no cli provider available',
+    '\\b(?:grok_login_required|cli_login_required):',
   ].join('|'),
   'i',
 );

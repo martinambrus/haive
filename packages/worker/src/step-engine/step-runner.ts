@@ -52,6 +52,7 @@ import {
   desc,
   eq,
   getTableColumns,
+  gte,
   inArray,
   isNotNull,
   isNull,
@@ -139,6 +140,7 @@ import {
   cliTimeoutBudgetMinutes,
   isCliPreemptionFailure,
   isFreeRedispatch,
+  isCliAuthWaitFailure,
   isCliTimeoutFailure,
   isProviderOutage,
   isProviderRefusal,
@@ -148,6 +150,16 @@ import {
 } from '../queues/cli-exec/failure-class.js';
 import { enqueueUsagePollTick } from '../queues/usage-poll-queue.js';
 import { foldCliParkOnResume, markCliParkBegin } from '../queues/cli-park-timing.js';
+import {
+  AUTH_ADMISSION_RETRY_DELAY_MS,
+  CLI_AUTH_BUSY,
+  CLI_AUTH_PROBE_UNKNOWN,
+  MAX_AUTH_PROBE_UNKNOWNS,
+  CliAuthProbeExhaustedError,
+  CliAuthRetryableError,
+  CliLoginRequiredError,
+  cliAuthStoredPrefix,
+} from '../sandbox/cli-auth-errors.js';
 import {
   AdvisedStepError,
   PromptBudgetExceededError,
@@ -403,6 +415,8 @@ export interface WorkerDeps {
 }
 
 export interface AdvanceStepParams {
+  /** Bound automatic unknown admission failures; Retry starts a fresh allowance. */
+  authProbeUnknownLimit?: number;
   db: Database;
   taskId: string;
   userId: string;
@@ -894,7 +908,11 @@ async function resolveLlmPhase(
         // work we know is safe. The sweeper's own guards (min run age, a higher-voted task with
         // real queued demand) are what bound how often this can happen.
         const preempted = isCliPreemptionFailure({ errorMessage: errTrimmed });
-        if (preempted || (await countTrailingOrphans(db, current.id)) < MAX_ORPHAN_REDISPATCH) {
+        if (
+          preempted ||
+          isCliAuthWaitFailure(invocation) ||
+          (await countTrailingOrphans(db, current.id)) < MAX_ORPHAN_REDISPATCH
+        ) {
           ctx.logger.warn(
             { stepId: stepDef.metadata.id, message },
             'cli invocation orphaned/killed; re-dispatching a fresh invocation',
@@ -3774,6 +3792,11 @@ async function recordFinishedUsage(
     });
 }
 
+/** Events written in the transaction that reopens a step without clearing `started_at`: Resume
+ *  (api `routes/tasks/steps.ts` fan-out and loop arms, `scripts/resume-plan-sequence-review.ts`)
+ *  and `retry_ai`. The auth admission gate counts only invocations created after the newest one. */
+const AUTH_LEDGER_RESET_EVENTS = ['step.resume', 'step.retry_ai'] as const;
+
 export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceStepResult> {
   const { db, stepDef, taskId } = params;
   const meta = stepDef.metadata;
@@ -3890,6 +3913,57 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
     }
 
     let current = row;
+    // One gate before every dispatch family (LLM, mining and all DAG roles).
+    // The existing invocation ledger bounds unknown WAVES even after superseding runs.
+    // Retry clears started_at/output, so earlier attempts cannot spend its allowance;
+    // Resume and retry_ai keep started_at, so the newest step.resume/step.retry_ai event
+    // of this step is a second lower bound (AUTH_LEDGER_RESET_EVENTS).
+    if (row.status === 'waiting_cli') {
+      const direct = row.output as { _authProbeUnknowns?: number; _authRetryAt?: number } | null;
+      const unknownPrefix = cliAuthStoredPrefix(CLI_AUTH_PROBE_UNKNOWN);
+      const busyPrefix = cliAuthStoredPrefix(CLI_AUTH_BUSY);
+      const resetEvents = sql.join(
+        AUTH_LEDGER_RESET_EVENTS.map((type) => sql`${type}`),
+        sql`, `,
+      );
+      const [wait] = await db
+        .select({
+          // A wave is one 30 s bucket: the gate paces the next dispatch at least 30 s after
+          // the last end, so two waves never share a bucket and a whole wave created
+          // together (a wide fan-out failing admission at once) counts once.
+          authUnknownCount:
+            sql<number>`count(distinct floor(extract(epoch from ${schema.cliInvocations.createdAt}) / ${AUTH_ADMISSION_RETRY_DELAY_MS / 1000})) filter (where starts_with(${schema.cliInvocations.errorMessage}, ${unknownPrefix}))`.mapWith(
+              Number,
+            ),
+          authLastWaitAt:
+            sql<number>`coalesce(extract(epoch from max(${schema.cliInvocations.endedAt})) * 1000, 0)`.mapWith(
+              Number,
+            ),
+        })
+        .from(schema.cliInvocations)
+        .where(
+          and(
+            eq(schema.cliInvocations.taskStepId, row.id),
+            isNotNull(schema.cliInvocations.endedAt),
+            row.startedAt ? gte(schema.cliInvocations.createdAt, row.startedAt) : undefined,
+            sql`${schema.cliInvocations.createdAt} >= coalesce((select max(${schema.taskEvents.createdAt}) from ${schema.taskEvents} where ${schema.taskEvents.taskId} = ${row.taskId} and ${schema.taskEvents.taskStepId} = ${row.id} and ${schema.taskEvents.eventType} in (${resetEvents})), '-infinity'::timestamp)`,
+            sql`(starts_with(${schema.cliInvocations.errorMessage}, ${unknownPrefix}) or starts_with(${schema.cliInvocations.errorMessage}, ${busyPrefix}))`,
+          ),
+        );
+      if (
+        (wait?.authUnknownCount ?? 0) + (direct?._authProbeUnknowns ?? 0) >=
+        (params.authProbeUnknownLimit ?? MAX_AUTH_PROBE_UNKNOWNS)
+      )
+        throw new CliAuthProbeExhaustedError();
+      const retryAt = Math.max(
+        wait?.authLastWaitAt ? wait.authLastWaitAt + AUTH_ADMISSION_RETRY_DELAY_MS : 0,
+        direct?._authRetryAt ?? 0,
+      );
+      if (retryAt > Date.now()) {
+        await markCliParkBegin(db, row.id);
+        return { status: 'deferred', row, delayMs: retryAt - Date.now() };
+      }
+    }
     if (current.status === 'pending') {
       // Work resumes: close any open runtime-slot park FIRST (fold `now - waiting_started_at`
       // into carried_idle_ms and clear the marker) so the wait stays booked as idle. Without the
@@ -5177,6 +5251,37 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
         block: err.block,
       };
     }
+    // 01b installs plugins directly, outside the CLI invocation handler. Its auth
+    // admission waits need the same recovery without failing a task or fixing code.
+    if (err instanceof CliAuthRetryableError) {
+      const prior = row.output as Record<string, unknown> | null;
+      const unknowns =
+        Number(prior?._authProbeUnknowns ?? 0) + (err.code === CLI_AUTH_PROBE_UNKNOWN ? 1 : 0);
+      if (unknowns >= (params.authProbeUnknownLimit ?? MAX_AUTH_PROBE_UNKNOWNS)) {
+        err = new CliAuthProbeExhaustedError();
+      } else {
+        const patch: UpdatePatch = {
+          status: 'waiting_cli',
+          statusMessage: err.message,
+          output: {
+            ...prior,
+            _authProbeUnknowns: unknowns,
+            _authRetryAt: Date.now() + AUTH_ADMISSION_RETRY_DELAY_MS,
+          },
+        };
+        const parked = await (
+          opened
+            ? updateRow(db, row.id, patch)
+            : openPendingStep(db, taskId, params.epoch, row.id, patch)
+        ).catch((error: unknown) => {
+          if (error instanceof StepSupersededError) return null;
+          throw error;
+        });
+        if (!parked) return supersededPass(row);
+        await markCliParkBegin(db, row.id);
+        return { status: 'deferred', row: parked, delayMs: AUTH_ADMISSION_RETRY_DELAY_MS };
+      }
+    }
     const cancelled = err instanceof TaskCancelledError;
     // A done fix-loop row stores the diagnosis for reclassification on recovery. Preserve
     // it through routing and that write; scrub only failure display copy below.
@@ -5202,6 +5307,8 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
     const routeErrorToFixLoop =
       !(err instanceof StepOutputContractInvalidError) &&
       !(err instanceof DataEdgePlanError) &&
+      !(err instanceof CliLoginRequiredError) &&
+      !(err instanceof CliAuthProbeExhaustedError) &&
       routesErrorToFixLoop(stepDef, errorMessage);
     if (!cancelled && routeErrorToFixLoop) {
       if (meta.id === '08-phase-5-verify')
@@ -5249,6 +5356,7 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
       status: 'failed',
       statusMessage: null,
       errorMessage: storedError,
+      ...(err instanceof CliLoginRequiredError ? { errorHint: err.hint } : {}),
       endedAt: new Date(),
     });
     if (stepDef.agentMining && failed !== row) await releaseStepAgents(db, row.id, storedError);

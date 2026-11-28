@@ -14,6 +14,8 @@ import {
 } from '../src/queues/task-queue.js';
 
 const h = vi.hoisted(() => ({
+  retainAuth: false,
+  authReadThrows: false,
   calls: [] as string[],
   reapError: null as Error | null,
   reapFailures: Infinity,
@@ -72,8 +74,12 @@ vi.mock('../src/sandbox/sandbox-kill.js', async (importOriginal) => ({
 }));
 vi.mock('../src/sandbox/task-auth-volume.js', async (importOriginal) => ({
   ...(await importOriginal<object>()),
-  syncRefreshedAuthToUserVolumes: async (_db: unknown, taskId: string) =>
-    h.seen('syncRefreshedAuthToUserVolumes', taskId),
+  syncRefreshedAuthToUserVolumes: async (_db: unknown, taskId: string) => {
+    h.seen('syncRefreshedAuthToUserVolumes', taskId);
+    if (h.authReadThrows) throw Object.assign(new Error('fixture'), { code: 'EAGAIN' });
+    return { retainTaskCopy: h.retainAuth };
+  },
+  clearTaskAuthPreparationState: () => h.seen('clearTaskAuthPreparationState'),
   findTaskAuthVolumes: async () => [],
   cleanupTaskAuthVolumes: async (taskId: string) => {
     h.seen('cleanupTaskAuthVolumes', taskId);
@@ -163,6 +169,8 @@ vi.mock('../src/step-engine/steps/_global-kb-promote.js', async (importOriginal)
 const job = { name: TASK_JOB_NAMES.CANCEL, data: { taskId: 'task', userId: 'user' } } as Job;
 beforeEach(() => {
   h.calls = [];
+  h.retainAuth = false;
+  h.authReadThrows = false;
   h.reapError = null;
   h.reapFailures = Infinity;
   h.completing = false;
@@ -270,6 +278,20 @@ it('does not read a task without a cleanup journal', async () => {
   expect(read).not.toHaveBeenCalled();
 });
 
+it.each(['retry outcome', 'lookup throws'] as const)(
+  'task-end retains auth after %s while unrelated teardown finishes',
+  async (failure) => {
+    h.retainAuth = failure === 'retry outcome';
+    h.authReadThrows = failure === 'lookup throws';
+    h.journal = [];
+    await processTaskJob(job);
+    expect(h.calls).toContain('syncRefreshedAuthToUserVolumes');
+    expect(h.calls).not.toContain('cleanupTaskAuthVolumes');
+    expect(h.calls).not.toContain('clearTaskAuthPreparationState');
+    expect(h.calls).toContain('cleanupTaskScratchWorkspace');
+    expect(h.calls).toContain('task.cancel_finished');
+  },
+);
 it('retries a terminal reap before worktree removal after a transient outage', async () => {
   vi.useFakeTimers();
   h.journal = [];
