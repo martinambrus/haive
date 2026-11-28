@@ -546,13 +546,18 @@ containing directory are synced before permitting a local delete.
 The journal stays outside the KB/RAG tree. Each entry also records `entryId`, the promotion's
 global entry id, written once the local deletion is committed. Before restoring,
 `findConsumedTaskPromotions` names the entries whose knowledge a live entry holds: a
-`source = 'promoted'` row of the task that is `active`, or `archived` with `superseded_at` set (an
-active successor replaced it). Such an entry is not restored, and its path joins `removedPaths`
+`source = 'promoted'` row of the task that is `active`, or `archived` with a chain of replacements
+that reaches an `active` entry (each row's `supersedes_entry_id` names the row it replaced). The
+archive stamp `superseded_at` is not the proof: it shows a replacement was activated once, and a
+person can archive or delete that replacement later. The walk is the api detail view's recursive
+query, bounded the same way: 20 replacements at most and a visited list against a cycle, so a
+longer chain restores as before. Such an entry is not restored, and its path joins `removedPaths`
 when the file is absent, since step 12 stages deletions from that list. It stays in the journal
 until an apply finishes: step 12 reads only the latest run's output, so a run that fails after the
-lookup must report the path again at the next Retry. A PENDING
-draft is still restored first, because the Retry's purge would otherwise delete the only copy of
-the original, and so is a draft archived by hand (a rejection: nothing live holds it). Only
+lookup must report the path again at the next Retry. A PENDING draft is still restored first,
+because the Retry's purge would otherwise delete the only copy of the original, and so are a draft
+archived by hand and an archived entry whose replacement was archived or deleted (nothing live
+holds them). Only
 uuid-shaped ids reach the lookup, since the journal is untrusted text. An entry without a usable
 id (a journal from before this lookup), a disabled KB and an ordinary lookup failure restore as
 before; a lookup timeout or owner cancellation fails the step before anything is restored or

@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { PgDialect } from 'drizzle-orm/pg-core';
 import { beforeEach, expect, it, vi } from 'vitest';
 import { createFakeDb } from '@haive/database/testing';
 import { GlobalKbDeadlineError, globalKbEntries } from '@haive/shared/global-kb';
@@ -17,16 +18,14 @@ vi.mock('@haive/shared/global-kb', async (importOriginal) => {
 import { findConsumedTaskPromotions } from '../src/step-engine/steps/_global-kb-promote.js';
 
 const TASK = randomUUID();
-const OTHER_TASK = randomUUID();
 const log = { warn: vi.fn(), info: vi.fn() };
 
-type Over = Partial<{ sourceTaskId: string; source: string; status: string; supersededAt: Date }>;
+type Over = Partial<{ sourceTaskId: string; source: string; status: string }>;
 const row = (over: Over = {}) => ({
   id: randomUUID(),
   sourceTaskId: TASK,
   source: 'promoted',
   status: 'draft',
-  supersededAt: null,
   ...over,
 });
 
@@ -45,24 +44,17 @@ function store(rows: ReturnType<typeof row>[]) {
   for (const r of rows) fake.insert(globalKbEntries, r);
 }
 
-it('names only this task promotions whose knowledge a live entry holds', async () => {
-  const pending = row();
-  const active = row({ status: 'active' });
-  // Replaced by an active successor: its knowledge is live there.
-  const superseded = row({ status: 'archived', supersededAt: new Date() });
-  // Archived by hand is a rejection: no live entry holds it, so a Retry restores the file.
-  const rejected = row({ status: 'archived' });
-  const otherTask = row({ sourceTaskId: OTHER_TASK, status: 'active' });
-  const written = row({ source: 'user', status: 'active' });
-  const all = [pending, active, superseded, rejected, otherTask, written];
-  store(all);
-  const got = await findConsumedTaskPromotions(
-    {} as never,
-    TASK,
-    [...all.map((r) => r.id), randomUUID()],
-    log,
-  );
-  expect([...got].sort()).toEqual([active.id, superseded.id].sort());
+// The query itself, a walk of the replacement chain, runs on a real server:
+// global-kb-consumed-promotions-db.test.ts. Here only what the caller hands it.
+it('asks the store once, with every id and the task as bound parameters', async () => {
+  const ids = [randomUUID(), randomUUID(), randomUUID()];
+  const execute = vi.fn(async (_query: unknown) => [{ id: ids[0] }, { id: ids[2] }]);
+  h.gdb = { execute };
+  const got = await findConsumedTaskPromotions({} as never, TASK, ids, log);
+  expect([...got].sort()).toEqual([ids[0], ids[2]].sort());
+  expect(execute).toHaveBeenCalledTimes(1);
+  const { params } = new PgDialect().sqlToQuery(execute.mock.calls[0]![0] as never);
+  expect([...params].sort()).toEqual([...ids, TASK].sort());
 });
 
 it('does not open the store when no id is given or the global KB is off', async () => {
