@@ -19,7 +19,7 @@ import { fileURLToPath } from 'node:url';
 import { isDeepStrictEqual } from 'node:util';
 import postgres from 'postgres';
 import { and, asc, eq, isNull, sql, type SQL } from 'drizzle-orm';
-import { createDatabase, schema, type Database } from '@haive/database';
+import { createDatabase, readLiveRootClaim, schema, type Database } from '@haive/database';
 import {
   buildCliRulesBlock,
   buildRepoCliRulesBlock,
@@ -117,8 +117,10 @@ const gapsChecked = new Set<string>();
 // Snapshot immediately after each sweep, before a later check/mutation can remove its hold.
 // Keep only the latest tick per install; expected holds stay quiet unless a check fails.
 const sweepDiagnostics = new Map<Database, unknown[]>();
-async function sweepDirtyProjectStates(db: Database): Promise<number> {
-  const outcomes = new Map<string, ProjectStateSweepOutcome>();
+async function sweepDirtyProjectStates(
+  db: Database,
+  outcomes = new Map<string, ProjectStateSweepOutcome>(),
+): Promise<number> {
   const written = await runProjectStateSweep(db, outcomes);
   const diagnostics: unknown[] = [];
   for (const [repositoryId, refresh] of outcomes) {
@@ -2805,9 +2807,23 @@ async function main(): Promise<void> {
         iteration: 0,
         previousIterations: [],
       });
-    /** Runs `start` while another session holds the merge lock, and has a sweep rewrite the record
-     *  files once `start` waits for it: a write that lands between the set-aside and the move. */
-    const rewrittenWhileWaiting = async <T>(install: Install, start: () => Promise<T>) => {
+    /** What the project state outbox still owes for an install, and the reason it kept. */
+    const outboxOf = async (install: Install) => {
+      const [row] = await install.db
+        .select({
+          revision: schema.projectStateOutbox.revision,
+          written: schema.projectStateOutbox.writtenRevision,
+          reason: schema.projectStateOutbox.lastError,
+        })
+        .from(schema.projectStateOutbox)
+        .where(eq(schema.projectStateOutbox.repositoryId, install.repositoryId));
+      return { owed: row !== undefined && row.written < row.revision, reason: row?.reason ?? null };
+    };
+    /** Runs `start` while another session holds the merge lock, and has a sweep tick once `start`
+     *  waits for it: the window between its set-aside and its move. Returns what that tick found,
+     *  its outcome for this install, the root claim then live, the files it left modified and what
+     *  the outbox still owed. */
+    const sweptWhileWaiting = async <T>(install: Install, start: () => Promise<T>) => {
       let release!: () => void;
       let held!: () => void;
       const locked = new Promise<void>((r) => (held = r));
@@ -2827,11 +2843,15 @@ async function main(): Promise<void> {
         blocked = 'rows' in waiting && waiting.rows[0]!.n > 0;
         if (!blocked) await new Promise((r) => setTimeout(r, 100));
       }
-      await sweepDirtyProjectStates(install.db);
+      const outcomes = new Map<string, ProjectStateSweepOutcome>();
+      await sweepDirtyProjectStates(install.db, outcomes);
+      const outcome = outcomes.get(install.repositoryId) ?? null;
+      const claim = (await readLiveRootClaim(install.db, install.repositoryId))?.kind ?? null;
       const rewritten = dirtyOn(install);
+      const outbox = await outboxOf(install);
       release();
       await holder;
-      return { blocked, rewritten, result: await running };
+      return { blocked, outcome, claim, rewritten, outbox, result: await running };
     };
 
     // ---- T119: the repository's AGENTS.md rules override rides settings/agent-rules.md (R1-R7) ----
@@ -4139,18 +4159,29 @@ async function main(): Promise<void> {
       );
     }
 
-    // C9: a file Haive rewrites while a Pull waits for the merge lock sends the move round again.
+    // C9: a sweep tick while a Pull waits for the merge lock is held by the Pull's own lease. The Pull
+    // takes its root claim before it sets Haive's files aside and a sweep holds none, so the sweep is
+    // refused until the Pull ends: nothing is rewritten between the set-aside and the move, the record
+    // stays owed meanwhile, and the Pull's own writes leave nothing owed when it ends. C10 is the path
+    // that still has a sweep rewrite a file in that window: 01's confirm takes no root claim, so the
+    // sweep is not held there and its move round runs again.
     {
       const { x, y } = await landing('c9');
       await setRender(y, { lspLanguages: ['php'] });
       await setRender(x, { acceptedAgentIds: ['a', 'b'] });
       const sent = pushFrom(x, 'A: an agent', '.haive-data/state');
-      const waited = await rewrittenWhileWaiting(y, () =>
+      const waited = await sweptWhileWaiting(y, () =>
         attempt(() => pull({ repositoryId: y.repositoryId, userId: y.userId })),
       );
       check(
-        'C9: a sweep rewrote the record file between the Pull setting it aside and moving',
-        waited.blocked && waited.rewritten.includes(RECORD_RENDER),
+        "C9: a sweep tick while the Pull waits is held by the Pull's lease, rewrites nothing and leaves the record owed",
+        waited.blocked &&
+          waited.claim === 'mutation' &&
+          waited.outcome?.outcome === 'held' &&
+          waited.outcome.reason === 'checkout' &&
+          !waited.rewritten.includes(RECORD_RENDER) &&
+          waited.outbox.owed &&
+          waited.outbox.reason !== null,
         waited,
       );
       check(
@@ -4158,9 +4189,16 @@ async function main(): Promise<void> {
         waited.result.error === null && contains(y, sent) && (await holdsBoth(y)),
         { error: waited.result.error, column: await columnOf(y) },
       );
+      const afterPull = await outboxOf(y);
+      check(
+        'C9: and once the Pull has ended nothing is owed and the reason the held tick left is gone',
+        !afterPull.owed && afterPull.reason === null,
+        afterPull,
+      );
     }
 
-    // C10: the same for 01's confirm.
+    // C10: 01's confirm holds no root claim, so a sweep tick while it waits for the merge lock does
+    // rewrite the record file, and the confirm's move round runs again.
     {
       const { x, y } = await landing('c10');
       await setRender(y, { lspLanguages: ['php'] });
@@ -4168,9 +4206,7 @@ async function main(): Promise<void> {
       const sent = pushFrom(x, 'A: an agent', '.haive-data/state');
       const { ctx, detect } = await conversation(y);
       const detected = await detect();
-      const waited = await rewrittenWhileWaiting(y, () =>
-        attempt(async () => confirm(ctx, detected)),
-      );
+      const waited = await sweptWhileWaiting(y, () => attempt(async () => confirm(ctx, detected)));
       check(
         "C10: a sweep rewrote the record file between 01's confirm setting it aside and moving",
         waited.blocked && waited.rewritten.includes(RECORD_RENDER),
