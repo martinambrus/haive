@@ -160,12 +160,12 @@ export function moduleSourceRoutes(): Hono<AppEnv> {
           getModuleSourceQueue().add(
             MODULE_SOURCE_JOB_NAMES.FETCH,
             {
-              sourceId: id,
+              sourceId: source.id,
               moduleId: source.moduleId,
               requestedAt: source.updatedAt.toISOString(),
             },
             {
-              jobId: 'source-' + id + '-' + source.updatedAt.getTime(),
+              jobId: 'source-' + source.id + '-' + source.updatedAt.getTime(),
               removeOnComplete: true,
               removeOnFail: true,
             },

@@ -9,6 +9,7 @@ import {
   type PlanMirrorJobResult,
 } from '@haive/shared';
 import type { HaiveDataSavePayload, HaiveDataSaveResult } from '@haive/shared/haive-data';
+import { canonicalUuid } from '@haive/database';
 import { getPlanMirrorQueue, getPlanMirrorQueueEvents } from '../queues.js';
 
 /** Five seconds for the entire Redis/worker round trip, including enqueue and event readiness.
@@ -66,12 +67,14 @@ export async function enqueueCheckoutSync(repositoryId: string, userId: string):
     logger.warn({ err, repositoryId }, 'checkout sync hint not queued; sweep will retry');
     return;
   }
+  // The worker builds this job id from the database's id, so use that spelling.
+  const id = canonicalUuid(repositoryId);
   await addBestEffort(
     () =>
       getPlanMirrorQueue().add(
         PLAN_MIRROR_JOB_NAMES.SYNC_CHECKOUT,
-        { repositoryId, userId } satisfies PlanMirrorJobPayload,
-        { jobId: `checkout-sync-${repositoryId}`, removeOnComplete: true, removeOnFail: true },
+        { repositoryId: id, userId } satisfies PlanMirrorJobPayload,
+        { jobId: `checkout-sync-${id}`, removeOnComplete: true, removeOnFail: true },
       ),
     'checkout sync hint not queued; sweep will retry',
     { repositoryId },
@@ -85,16 +88,17 @@ export async function enqueuePlanMirrorRefresh(
   repositoryId: string,
   userId: string,
 ): Promise<void> {
+  const id = canonicalUuid(repositoryId);
   await addBestEffort(
     () =>
       getPlanMirrorQueue().add(
         PLAN_MIRROR_JOB_NAMES.REFRESH,
-        { repositoryId, userId } satisfies PlanMirrorJobPayload,
+        { repositoryId: id, userId } satisfies PlanMirrorJobPayload,
         {
           // UUIDs contain no colon (BullMQ reserves it in custom ids). While one
           // refresh is queued/active, later mutations only need to dirty the DB
           // revision; that job or the scheduled sweep will read the newest state.
-          jobId: `plan-mirror-${repositoryId}`,
+          jobId: `plan-mirror-${id}`,
           removeOnComplete: true,
           removeOnFail: true,
         },

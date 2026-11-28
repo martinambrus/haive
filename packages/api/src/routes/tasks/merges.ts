@@ -65,13 +65,14 @@ mergeRoutes.post('/:id/merges/abort', async (c) => {
     throw new HttpError(404, 'No open merge is reported for that directory');
   }
 
+  // Job ids and payloads use the row's id, never the spelling the request carried.
   await addOrRefuse(
     () =>
       getTaskQueue().add(
         TASK_JOB_NAMES.ABORT_LEFT_MERGE,
-        { taskId, userId, dir, mergeHead } satisfies AbortLeftMergePayload,
+        { taskId: task.id, userId, dir, mergeHead } satisfies AbortLeftMergePayload,
         {
-          jobId: `abort-left-merge-${taskId}-${createHash('sha1').update(`${dir}\0${mergeHead}`).digest('hex')}`,
+          jobId: `abort-left-merge-${task.id}-${createHash('sha1').update(`${dir}\0${mergeHead}`).digest('hex')}`,
           attempts: 5,
           backoff: { type: 'exponential', delay: 2000 },
           removeOnComplete: true,
@@ -79,7 +80,7 @@ mergeRoutes.post('/:id/merges/abort', async (c) => {
         },
       ),
     'abort left merge',
-    { taskId },
+    { taskId: task.id },
   );
   return c.json({ queued: true }, 202);
 });
@@ -149,11 +150,11 @@ const undoOrResync =
       () =>
         getTaskQueue().add(
           TASK_JOB_NAMES.UNDO_LEFT_MERGE,
-          { taskId, userId, dir, baseShaAfter } satisfies UndoLeftMergePayload,
+          { taskId: task.id, userId, dir, baseShaAfter } satisfies UndoLeftMergePayload,
           {
             // Retry shares the original Undo id, including its refusal generation. BullMQ
             // coalesces queued/active jobs; terminal jobs are removed so a later Retry can run.
-            jobId: `undo-left-merge-${taskId}-${createHash('sha1').update(`${dir}\0${baseShaAfter}`).digest('hex')}-${target.refused?.count ?? 0}`,
+            jobId: `undo-left-merge-${task.id}-${createHash('sha1').update(`${dir}\0${baseShaAfter}`).digest('hex')}-${target.refused?.count ?? 0}`,
             attempts: UNDO_ATTEMPTS,
             backoff: { type: 'exponential', delay: UNDO_RETRY_DELAY_MS },
             removeOnComplete: true,
@@ -161,7 +162,7 @@ const undoOrResync =
           },
         ),
       'undo left merge',
-      { taskId },
+      { taskId: task.id },
     );
     return c.json({ queued: true }, 202);
   };
