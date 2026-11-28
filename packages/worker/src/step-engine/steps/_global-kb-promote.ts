@@ -765,6 +765,65 @@ export async function clearTaskPromotedDrafts(
   }
 }
 
+/** Which of `ids` are this task's promotions whose knowledge a live entry now holds, so a Retry
+ *  must not put the local original back: the row is active, or archived with a chain of
+ *  replacements (`supersedes_entry_id` names the row a newer one replaced) that reaches an active
+ *  entry. The digest serves `status = 'active'` only, and the archive stamp proves a replacement
+ *  was activated once, not that one still is: a person can archive or delete it afterwards. A
+ *  draft (`clearTaskPromotedDrafts` removes it), an archived row with no live replacement (a
+ *  rejection, or a replacement since archived or deleted), an unknown id, another task's row
+ *  and a person's own entry are never counted. A chain deeper than the bound is not counted
+ *  either, which restores the file, the safe side. Empty when the global KB is disabled; an
+ *  ordinary outage is logged and also yields empty, so the caller restores as before. Timeouts
+ *  and owner cancellation propagate. */
+export async function findConsumedTaskPromotions(
+  db: Database,
+  taskId: string,
+  ids: string[],
+  log: PromoteLogger,
+  opts: GlobalKbCallOptions = {},
+): Promise<Set<string>> {
+  if (ids.length === 0) return new Set();
+  try {
+    const settings = await resolveGlobalKbSettings();
+    if (!settings.enabled) return new Set();
+    return await withGlobalKb(
+      db,
+      async ({ db: gdb }) => {
+        // The api's detail-view chain query (routes/global-kb.ts), run once for every promotion
+        // asked about: `root` is the row asked about and the walk follows the rows that replace
+        // it. Bounded twice, as there: 20 replacements, and a visited list so a cycle ends.
+        const rows = await gdb.execute<{ id: string }>(sql`
+          WITH RECURSIVE chain AS (
+            SELECT e.id AS root, e.id, e.status, 0 AS depth, ARRAY[e.id] AS seen
+              FROM global_kb_entries e
+             WHERE e.id IN (${sql.join(
+               ids.map((id) => sql`${id}`),
+               sql`, `,
+             )})
+               AND e.source_task_id = ${taskId}
+               AND e.source = 'promoted'
+               AND e.status IN ('active', 'archived')
+            UNION ALL
+            SELECT c.root, n.id, n.status, c.depth + 1, c.seen || n.id
+              FROM global_kb_entries n
+              JOIN chain c ON n.supersedes_entry_id = c.id
+             WHERE c.depth < 20 AND NOT (n.id = ANY(c.seen))
+          )
+          SELECT DISTINCT root AS id FROM chain WHERE status = 'active'
+        `);
+        return new Set(rows.map((row) => row.id));
+      },
+      globalKbCallOptions(opts, GLOBAL_KB_STEP_DEADLINE_MS),
+    );
+  } catch (err) {
+    opts.signal?.throwIfAborted();
+    rethrowIfGlobalKbTimeout(err);
+    log.warn({ err, taskId }, 'global KB consumed-promotion lookup failed (skipped)');
+    return new Set();
+  }
+}
+
 // No embedding runs here: 3 s allows remote startup, 10 s covers connect/ensure/write while
 // letting Retry acquire the task row well before the 60 s settlement backstop.
 const KB_TASK_END_STORE_DEADLINE_MS = 10_000;

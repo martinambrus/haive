@@ -528,17 +528,55 @@ replaced as a link, never followed. If the recovery directory slot is a file or 
 cannot be safely written/synced, the step continues without deleting any local source that run;
 promotion may still add a draft. Healthy Retry replaces prior drafts without duplicates. Re-route deadlines remain coded step failures; the uncertain file stays local.
 
+A journal whose complete bytes are unusable content (over the bound, not JSON, not the schema, or
+naming an invalid path) is deterministic, not an IO fault. It is renamed without replacing to
+`<journal>.unusable`, its bytes untouched, a fresh journal starts, and the run may delete local
+sources under the normal rule: a confirmed promotion plus a durable journal write. The draft
+purge stays off while the `.unusable` file exists, since it may hold the only original bodies; a
+person removes it after inspecting it to re-enable draft replacement on Retry. A read fault (a
+link, directory or file in the journal or directory slot, EIO), a taken aside name or a refused
+rename keeps the earlier behavior: no local deletion and the journal bytes untouched, because a
+transient fault must never publish empty state. A confirmed promotion whose journal write was
+refused keeps the file local and logs a warning naming its KB path.
+
 The recovery directory carries its own `*` ignore file (itself ignored), written before a body,
 so an onboarding that initializes Git and stages the full tree cannot commit recovery copies.
 The directory entry in `.haive` is fsynced before publishing a journal; the journal file and its
 containing directory are synced before permitting a local delete.
-The journal stays outside the KB/RAG tree and is retained after successful apply, because a lost
-done write or later explicit Retry still needs it. This costs one original-body copy per re-routed
-file per task, agent-readable under writable `.haive`; it is never staged as an agent body.
-An explicit Retry after success can restore files already consumed by the global KB, leaving
-local/global duplicates; retention and this later Retry behavior remain unchanged. Existing failures that predate the journal cannot be reconstructed from it. Rollback
-must retain this recovery path and journals until affected onboarding tasks no longer need Retry;
-reverting code alone cannot restore already-moved uncommitted sources. No database migration is added.
+The journal stays outside the KB/RAG tree. Each entry also records `entryId`, the promotion's
+global entry id, written once the local deletion is committed. Before restoring,
+`findConsumedTaskPromotions` names the entries whose knowledge a live entry holds: a
+`source = 'promoted'` row of the task that is `active`, or `archived` with a chain of replacements
+that reaches an `active` entry (each row's `supersedes_entry_id` names the row it replaced). The
+archive stamp `superseded_at` is not the proof: it shows a replacement was activated once, and a
+person can archive or delete that replacement later. The walk is the api detail view's recursive
+query, bounded the same way: 20 replacements at most and a visited list against a cycle, so a
+longer chain restores as before. Such an entry is not restored, and its path joins `removedPaths`
+when the file is absent, since step 12 stages deletions from that list. It stays in the journal
+until an apply finishes: step 12 reads only the latest run's output, so a run that fails after the
+lookup must report the path again at the next Retry. A PENDING draft is still restored first,
+because the Retry's purge would otherwise delete the only copy of the original, and so are a draft
+archived by hand and an archived entry whose replacement was archived or deleted (nothing live
+holds them). Only
+uuid-shaped ids reach the lookup, since the journal is untrusted text. An entry without a usable
+id (a journal from before this lookup), a disabled KB and an ordinary lookup failure restore as
+before; a lookup timeout or owner cancellation fails the step before anything is restored or
+purged.
+
+A body is never pruned merely because the promotion and the local deletion succeeded: a Retry
+purges a pending draft, and the body is then the only copy. It is pruned when provably unneeded,
+at the end of a successful apply: for a consumed entry, and for an entry whose file holds the very
+same article again (a deduped or failed promotion kept it, or a Retry restored it and nothing
+re-routed it; a link or directory at the path keeps its entry). The journal file is removed once
+no entry is left. Onboarding reset does not prune it: inside `.haive/` reset owns
+only `.haive/install.json`. The cost is one original-body copy per re-routed file whose draft is
+still pending, agent-readable under writable `.haive`; it is never staged as an agent body.
+Existing failures that predate the journal cannot be reconstructed from it. Rollback must retain
+this recovery path and journals until affected onboarding tasks no longer need Retry; reverting
+code alone cannot restore already-moved uncommitted sources. The older reader strips the unknown
+`entryId` key, ignores a `.unusable` file and reads an absent or emptied journal as empty, so a code
+rollback is safe. No
+database migration is added.
 
 ## Author task failure and cancellation
 

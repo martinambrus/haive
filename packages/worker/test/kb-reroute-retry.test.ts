@@ -219,9 +219,10 @@ it.each([
   expect(await readFile(sentinel, 'utf8')).toBe('private sentinel');
   expect(warn).toHaveBeenCalled();
   expect(JSON.stringify(warn.mock.calls)).not.toContain('private sentinel');
-  // A journal that cannot be read or validated is never overwritten: it may be the only copy.
+  // Unusable content is never overwritten or deleted, since it may hold the only copy: it is
+  // set aside under a fixed name and a fresh journal starts.
   if (['malformed JSON', 'schema mismatch', 'invalid path'].includes(shape))
-    expect(await readFile(journal, 'utf8')).toBe(planted);
+    expect(await readFile(`${journal}.unusable`, 'utf8')).toBe(planted);
   // A directory slot that cannot hold a journal must also preserve a selected source.
   if (shape.startsWith('directory ') || shape === 'journal directory') {
     await knowledgeAcquisitionStep.apply(context, {

@@ -42,6 +42,7 @@ import {
 } from '@haive/shared/global-kb';
 import {
   clearTaskPromotedDrafts,
+  findConsumedTaskPromotions,
   globalKbTopicKey,
   promoteToGlobalKbDraft,
 } from '../_global-kb-promote.js';
@@ -2094,7 +2095,14 @@ export const knowledgeAcquisitionStep: StepDefinition<KnowledgeDetect, Knowledge
     let globalPromoted = 0;
 
     // Restore original local bytes before purging drafts, including after a later apply failure.
-    const recovery = await restoreKbReroutes(ctx.repoPath, ctx.taskId, ctx.logger);
+    const recovery = await restoreKbReroutes(
+      ctx.repoPath,
+      ctx.taskId,
+      ctx.logger,
+      undefined,
+      (ids) =>
+        findConsumedTaskPromotions(ctx.db, ctx.taskId, ids, ctx.logger, { signal: ctx.signal }),
+    );
 
     // Idempotent re-runs (Retry): drop this task's prior promoted drafts ONCE,
     // before any promotion below (placement re-routes AND entry promotes), so a
@@ -2122,6 +2130,10 @@ export const knowledgeAcquisitionStep: StepDefinition<KnowledgeDetect, Knowledge
     /** Legacy pages deleted because an update folded their content into a newer page. */
     const mergedRemoved: string[] = [];
     const removedPaths: string[] = [];
+    for (const p of recovery.consumed) {
+      if ((await lstatNoFollow(ctx.repoPath, `${KB_DIR}/${p}`)) === null)
+        removedPaths.push(`${KB_DIR}/${p}`);
+    }
     for (const u of updates) {
       const src = existingByPath.get(existingKbKey(u.path));
       if (!src) {
@@ -2241,6 +2253,7 @@ export const knowledgeAcquisitionStep: StepDefinition<KnowledgeDetect, Knowledge
             if (promo && !promo.deduped && journaled) {
               await removeNoFollow(ctx.repoPath, `${KB_DIR}/${src.relPath}`);
               removedPaths.push(`${KB_DIR}/${src.relPath}`);
+              await recovery.confirmReroute(src.relPath, promo.id);
               globalPromoted += 1;
               written.push({
                 id: src.relPath,
@@ -2253,6 +2266,11 @@ export const knowledgeAcquisitionStep: StepDefinition<KnowledgeDetect, Knowledge
               ctx.logger.info(
                 { path: src.relPath, existingId: promo.id },
                 'kb re-route deduped (topic already in global KB); kept local copy',
+              );
+            } else if (promo) {
+              ctx.logger.warn(
+                { path: src.relPath },
+                'kb re-route promoted but kept local: the recovery journal is unavailable',
               );
             }
           } catch (err) {
@@ -2503,6 +2521,7 @@ export const knowledgeAcquisitionStep: StepDefinition<KnowledgeDetect, Knowledge
     // that is the one case where the files on disk are the evidence a human needs and a
     // retry re-runs the whole mining pass anyway.
     if (bodyFailures.length === 0) await discardKbDrafts(ctx.repoPath, ctx.logger);
+    await recovery.finish();
 
     if (unknownPaths.length > 0) {
       ctx.logger.warn(

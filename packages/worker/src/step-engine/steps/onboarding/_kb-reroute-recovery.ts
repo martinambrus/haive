@@ -15,18 +15,24 @@ import { sanitizeKbRelPath } from './_kb-write.js';
 
 const recoverySchema = z.object({
   version: z.literal(1),
-  files: z.array(z.object({ path: z.string(), body: z.string() })),
+  files: z.array(z.object({ path: z.string(), body: z.string(), entryId: z.string().optional() })),
 });
 export const KB_REROUTE_JOURNAL_MAX_BYTES = 16 * 1024 * 1024;
 const recoveryDir = '.haive/kb-reroute-recovery';
 
 /** Original bytes survive Retry outside the KB/RAG tree. The retained journal is agent-readable.
- * An unreadable journal keeps drafts; an unwritable one also forbids local deletions this run. */
+ * An unreadable journal keeps drafts; an unwritable one also forbids local deletions this run.
+ * An entry whose promotion is consumed (a live entry holds it) is not restored, and is reported
+ * in `consumed`. It stays in the journal until `finish`: step 12 stages deletions from the latest
+ * run's output only, so a run that fails first must report the path again at the next Retry.
+ * `finish` drops those entries and the ones whose file holds the article again, and removes an
+ * emptied journal. */
 export async function restoreKbReroutes(
   repoPath: string,
   taskId: string,
   log: Pick<typeof logger, 'warn'> = logger,
   maxJournalBytes = KB_REROUTE_JOURNAL_MAX_BYTES,
+  isConsumed?: (ids: string[]) => Promise<ReadonlySet<string>>,
 ) {
   const journal = `${recoveryDir}/${createHash('sha256').update(taskId).digest('hex')}.json`;
   let state: z.infer<typeof recoverySchema> = { version: 1, files: [] };
@@ -41,23 +47,80 @@ export async function restoreKbReroutes(
       'kb: recovery incomplete; keeping promoted drafts and any unjournaled local sources',
     );
   };
+  const consumed: string[] = [];
+  const consumedPaths = new Set<string>();
+  const asideRel = `${journal}.unusable`;
+  let asideCreated = false;
+  let saved: Awaited<ReturnType<typeof readFileNoFollow>> | undefined;
   try {
-    const saved = await readFileNoFollow(repoPath, journal, {
+    saved = await readFileNoFollow(repoPath, journal, {
       strict: true,
       maxBytes: maxJournalBytes,
     });
-    if (saved?.truncated) throw new RangeError('KB recovery journal exceeds its bound');
-    const parsed =
-      saved === null ? state : recoverySchema.parse(JSON.parse(saved.data.toString('utf8')));
-    // Validate everything before restoring anything. Absence returns null, never ENOENT.
-    for (const file of parsed.files) {
-      const safe = sanitizeKbRelPath(file.path);
-      if (!safe.ok || safe.normalized !== file.path)
-        throw new Error('Invalid KB re-route recovery path');
+  } catch (err) {
+    canPurgeDrafts = false;
+    warn(err);
+  }
+  if (saved !== undefined) {
+    try {
+      if (saved?.truncated) throw new RangeError('KB recovery journal exceeds its bound');
+      const parsed =
+        saved === null ? state : recoverySchema.parse(JSON.parse(saved.data.toString('utf8')));
+      // Validate everything before restoring anything. Absence returns null, never ENOENT.
+      for (const file of parsed.files) {
+        const safe = sanitizeKbRelPath(file.path);
+        if (!safe.ok || safe.normalized !== file.path)
+          throw new Error('Invalid KB re-route recovery path');
+      }
+      state = parsed;
+      journalUsable = true;
+    } catch (err) {
+      canPurgeDrafts = false;
+      warn(err);
+      // A content failure is deterministic: set the bytes aside, never overwrite or delete them.
+      try {
+        await renameNoFollow(repoPath, journal, asideRel, { noReplace: true });
+        asideCreated = true;
+        journalUsable = true;
+      } catch (asideErr) {
+        warn(asideErr);
+      }
     }
-    state = parsed;
-    journalUsable = true;
-    for (const file of state.files) {
+  }
+  if (journalUsable) {
+    // A set-aside journal may hold the only original bodies, so drafts stay while it exists.
+    try {
+      if ((await lstatNoFollow(repoPath, asideRel, { strict: true })) !== null) {
+        canPurgeDrafts = false;
+        if (!asideCreated)
+          log.warn(
+            { errorClass: 'JournalSetAside' },
+            'kb: recovery incomplete; keeping promoted drafts and any unjournaled local sources',
+          );
+      }
+    } catch (err) {
+      canPurgeDrafts = false;
+      warn(err);
+    }
+  }
+  if (journalUsable && isConsumed) {
+    // Journal text is untrusted: only a uuid-shaped id may reach the query, or one planted string
+    // would fail the whole lookup. Any other entry restores as before.
+    const ids = state.files.flatMap((file) =>
+      file.entryId && z.uuid().safeParse(file.entryId).success ? [file.entryId] : [],
+    );
+    if (ids.length > 0) {
+      const gone = await isConsumed(ids);
+      for (const file of state.files) {
+        if (!file.entryId || !gone.has(file.entryId)) continue;
+        consumed.push(file.path);
+        consumedPaths.add(file.path);
+      }
+    }
+  }
+  try {
+    for (const file of journalUsable ? state.files : []) {
+      if (consumedPaths.has(file.path)) continue;
       const rel = `${KB_DIR}/${file.path}`;
       const parent = path.posix.dirname(rel);
       const temp = `${parent}/.${path.posix.basename(rel)}.haive-tmp-${process.pid}-${randomUUID()}`;
@@ -128,8 +191,12 @@ export async function restoreKbReroutes(
       if (!safe.ok || safe.normalized !== sourcePath)
         throw new Error('Invalid KB re-route source path');
       const prior = state.files.find((file) => file.path === sourcePath);
-      if (prior) prior.body = body;
-      else state.files.push({ path: sourcePath, body });
+      if (prior) {
+        prior.body = body;
+        delete prior.entryId;
+        // A new promotion, pending: no live entry holds this body yet.
+        consumedPaths.delete(sourcePath);
+      } else state.files.push({ path: sourcePath, body });
       try {
         await save();
         return true;
@@ -137,6 +204,40 @@ export async function restoreKbReroutes(
         canDeleteLocal = false;
         warn(err);
         return false;
+      }
+    },
+    consumed,
+    async confirmReroute(sourcePath: string, entryId: string): Promise<void> {
+      const entry = state.files.find((file) => file.path === sourcePath);
+      if (!entry) return;
+      entry.entryId = entryId;
+      try {
+        await save();
+      } catch (err) {
+        warn(err);
+      }
+    },
+    async finish(): Promise<void> {
+      if (!journalUsable || !canDeleteLocal) return;
+      try {
+        const keep: typeof state.files = [];
+        for (const file of state.files) {
+          if (consumedPaths.has(file.path)) continue;
+          // The body is redundant only while the very same article is on disk. A lenient read folds
+          // a refusal (a link or directory at the path) into null, which keeps the entry.
+          const here = await readFileNoFollow(repoPath, `${KB_DIR}/${file.path}`, {
+            maxBytes: Buffer.byteLength(file.body) + 1,
+          });
+          if (here === null || here.truncated || here.data.toString('utf8') !== file.body)
+            keep.push(file);
+        }
+        if (keep.length === state.files.length && keep.length > 0) return;
+        if (keep.length > 0) {
+          state.files = keep;
+          await save();
+        } else await removeNoFollow(repoPath, journal);
+      } catch (err) {
+        warn(err);
       }
     },
   };
