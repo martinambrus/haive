@@ -119,7 +119,6 @@ export function moduleSourceRoutes(): Hono<AppEnv> {
       actorUserId: c.get('userId'),
       action: 'module_source.fetch',
       targetType: 'module_source',
-      targetId: id,
       metadata: { refresh: body.refresh === true },
     };
     const source = await getDb()
@@ -149,6 +148,7 @@ export function moduleSourceRoutes(): Hono<AppEnv> {
           })
           .where(eq(schema.moduleSources.id, id))
           .returning();
+        event.targetId = row.id;
         await insertAuditEvent(tx, event);
         return queued!;
       })
@@ -273,7 +273,6 @@ export function moduleSourceRoutes(): Hono<AppEnv> {
       actorUserId: c.get('userId'),
       action: 'module_source.delete',
       targetType: 'module_source',
-      targetId: id,
     };
     await getDb()
       .transaction(async (tx) => {
@@ -290,8 +289,9 @@ export function moduleSourceRoutes(): Hono<AppEnv> {
           .where(eq(schema.moduleSources.id, id))
           .returning();
         if (!row) throw new HttpError(404, 'Module source not found');
+        event.targetId = row.id;
         event.metadata = { moduleId: row.moduleId, kind: row.kind };
-        await secretsService.delete(secretKey(id), tx);
+        await secretsService.delete(secretKey(row.id), tx);
         await insertAuditEvent(tx, event);
       })
       .catch(sourceWriteError);
