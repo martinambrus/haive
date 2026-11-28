@@ -119,6 +119,7 @@ async function setup(site: string) {
     userId: USER,
     name: 'fixture',
     source: 'blank',
+    status: 'ready',
     renderContext: { ...REFERENCE_CONTEXT, rtkChoiceRecorded: false },
   });
   fake.insert(schema.tasks, {

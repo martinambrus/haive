@@ -83,6 +83,7 @@ async function setup(
     userId: USER,
     name: 'acme',
     source: 'upload',
+    status: 'ready',
     agentRulesOverride: rules.liveOverride ?? null,
   });
   fake.insert(schema.tasks, {
@@ -905,4 +906,40 @@ it('records bundled skills only at catalog destinations from the stored generati
     .filter((r) => r.templateKind === 'custom-skill')
     .map((r) => r.diskPath);
   expect(skillPaths).toEqual(['.claude/skills/kept/SKILL.md']);
+});
+
+describe('12 while another operation holds the checkout', () => {
+  it.each(['mutation', 'edit'] as const)(
+    'fails the apply to retry when a %s claim holds it, and the retry writes the record',
+    async (kind) => {
+      const s = await setup('none');
+      s.fake.patch(schema.repositories, REPO, { rootClaimedAt: new Date(), rootClaimKind: kind });
+
+      const failure = await s.apply().then(
+        () => null,
+        (err: unknown) => err,
+      );
+
+      expect(failure).toBeInstanceOf(Error);
+      expect((failure as Error).message).toContain('Retry this step');
+      expect(existsSync(join(s.root, RECORD_FORMAT))).toBe(false);
+      expect(existsSync(join(s.root, RECORD_RENDER))).toBe(false);
+      expect(s.syncRows()).toEqual([]);
+      expect(s.column()).toBeNull();
+
+      s.fake.patch(schema.repositories, REPO, { rootClaimedAt: null, rootClaimKind: null });
+      await recordWritten(s.apply());
+
+      expect(existsSync(join(s.root, RECORD_FORMAT))).toBe(true);
+      expect(existsSync(join(s.root, RECORD_RENDER))).toBe(true);
+      expect(s.column()).toMatchObject({
+        framework: 'drupal',
+        acceptedAgentIds: DETECT.acceptedAgentIds,
+        rtkChoiceRecorded: true,
+      });
+      expect(s.syncRows()).toHaveLength(1);
+      const paths = s.liveRows().map((r) => r.diskPath as string);
+      expect(new Set(paths).size).toBe(paths.length);
+    },
+  );
 });

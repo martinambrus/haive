@@ -87,6 +87,7 @@ async function setup(seed: { column?: unknown; base?: unknown } = {}) {
     customBundleItems: schema.customBundleItems,
   });
   fake.insert(schema.repositories, {
+    status: 'ready',
     id: REPO,
     userId: USER,
     name: 'acme',

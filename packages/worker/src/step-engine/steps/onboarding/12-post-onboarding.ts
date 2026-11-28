@@ -38,6 +38,7 @@ import { getOriginUrl, GIT_MAX_BUFFER } from '../../../repo/git-push.js';
 import { initGitWorkspace } from '../../../repo/git-init.js';
 import { writePlanMirror } from '../../../plan/mirror.js';
 import {
+  failIfCheckoutUnavailable,
   failIfColumnStale,
   ProjectStateWriteError,
   renderContextColumnFor,
@@ -884,6 +885,7 @@ export const postOnboardingStep: StepDefinition<PostOnboardingDetect, PostOnboar
           }
         } catch (err) {
           failIfColumnStale(err);
+          failIfCheckoutUnavailable(err);
           recordWrite = 'failed';
           if (err instanceof ProjectStateWriteError) {
             ownFiles.push(...err.written);

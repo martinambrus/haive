@@ -274,9 +274,9 @@ root claim. Explicit `repair` availability also permits an error checkout for ra
 reads, attachment removal and remote configuration repair. Neither admits cloning.
 `preparation` requires the actual renewing `RootClaimHandle`, verified against its private runtime
 registration, repository ID, preparation kind (`rebuild` or `refresh`) and the live row's owner.
-A boolean, copied object, another repository's handle, expired/replaced claim or released handle grants no permission. Plan mirror callers now carry this verified handle through `withRootClaim`, including the private
-restore's nested import or writer. Project-state and legacy preparation callers retain their
-existing implementation and remain follow-up work.
+A boolean, copied object, another repository's handle, expired/replaced claim or released handle grants no permission. Plan mirror and project-state callers carry this verified handle through `withRootClaim`, including the private
+restore's nested import or writer. Legacy preparation imports retain their existing implementation
+and remain follow-up work.
 
 `withCheckoutMutation` acquires a distinct `mutation` root claim **before** attachment/domain/row locks,
 checks availability again after acquisition and releases in `finally`. It retains no connection
@@ -314,6 +314,35 @@ revision is bumped once, a dirty row's is left alone) and records the fixed `che
 reason, so a later sweep retries; a held boot stamp only logs. A held initial import
 cannot be turned into deletion of its incoming mirror on that retry.
 
+Project-state writer phases, journal recovery, the sync and the task-end rules apply the same
+`projection` policy as one plain `SELECT` (`checkoutUnavailable`, `project-state/write.ts`) after the
+repository row is held `FOR NO KEY UPDATE`, inside the locks each already takes (task key where it
+takes one, project-state domain, row). No lock or order is added: a claim acquire, renew or
+release is an autocommit `UPDATE` of that row and waits behind it, and the sync now takes the row before
+its final read instead of after it, so that wait covers the bounded read. The scope is the ambient
+`planCheckoutAccess()`. A caller that holds its own claim carries it (`withRootClaim`, the plan
+mutation lease, Undo's edit claim around both its set-aside and its re-sync); every other caller runs
+`projection` with no owner, which refuses a status other than `ready` and any live root claim.
+Writer phases and the recovery restore throw `ProjectStateCheckoutUnavailableError`, a
+`ProjectStateCheckoutHeldError`, after the open-git-operation and live-reset checks, which keep their
+text and priority. The sync judges the policy before its final read of the checkout, so a foreign
+generation is never read, and answers `{ outcome: 'held', code: 'checkout_unavailable' }`: never
+`deferred`, which `set-aside.ts` counts as synced, and never a throw. With `expectedCheckout` (the
+watcher), `admitWatchedCheckout` runs first, so a foreign claim answers `superseded` instead: the refresh
+stores its `superseded` reason on the outbox row, clean or dirty (pre-existing), and the next pass retries.
+A hold changes no revision,
+journal, base or ledger. `refreshProjectStateOutcome` answers `held` with reason `checkout` and stores one
+fixed reason on a dirty outbox row only, so the sweep retries once the checkout is ready; Haive-data
+Save reads that as `checkout_changed`. A task-end rules reconcile refused the same way writes neither
+`AGENTS.md` nor the rules region and keeps its obligation. Push preparation wraps a hold in its
+"nothing was pushed" error, so the step fails and Retry runs it once the checkout is ready. The foreground
+record writers of steps 02, 04 and 12 fail their step with a retry-this-step text for the same reason
+(`failIfCheckoutUnavailable`), since a hold leaves no dirty outbox row for the sweep. The watcher's
+admission (`admitWatchedCheckout`) already refuses the same set plus holder tasks, so it has no
+separate gate. `completePreparationImports` skips its legacy-mirror fallback after a held sync, which
+would otherwise import legacy files over units the record carries; nothing re-runs the fallback if that
+record later imports as refused.
+
 Explicit plan Save/Pull hold a renewing mutation lease across preparation and the complete
 Git/reconcile/recovery lifetime, acquired before their existing merge/domain/row locks. Nested
 plan operations use that registered owner. The plan push helper accepts only the same verified owner when committing portable state; an
@@ -328,8 +357,10 @@ Git, recovery's included, so a half-done merge stays as an open Git operation un
 See the [plan mirror contract](plan-canvas.md) for the private restore, lock order and retry details.
 
 The remaining independent entries in the T780 analysis are **not yet covered**: independent
-Haive-data Save, project-state sync/writer/journal/rules/metadata recovery, initial detection/legacy
-imports, task file/archive/root resolvers, scope/code previews, onboarding/upgrade/data/snapshot
+Haive-data Save, project-state set-aside, kept-metadata and private-replacement recovery, conflict
+answers (`project-state/resolve.ts`), initial detection/legacy imports (a redelivered
+`completePreparationImports` holds no claim, so a held import waits for the watcher's hash comparison),
+task file/archive/root resolvers, scope/code previews, onboarding/upgrade/data/snapshot
 status, runtime ensure and DDEV control. They still need the same policy at their admission/locked
 boundaries, with task-key → domain → repository-row order and dirty/outbox obligations retained
 on holds. Interactive mount suspension is described below. Do not infer complete checkout exclusion from the
@@ -339,6 +370,10 @@ Rollback: settle active attachment, remote, plan-delete, plan Save/Pull and mirr
 revert the API/shared/database code together and rebuild shared/database from that revision. There
 is no schema migration. Preserve relink intents, dirty/outbox rows and every aside/staging sibling.
 Rollback reopens the covered races; it never moves an aside back automatically.
+
+T780 PR2b-2 rollback: revert its code commits; there is no migration. Dirty outbox rows, write journals
+and their fixed reasons stay and the sweep retries them; nothing is rewritten or moved. Reverting reopens
+the project-state races above.
 
 ## Remote relink reconciliation
 

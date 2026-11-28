@@ -16,7 +16,7 @@ import { dirname, join } from 'node:path';
 import { eq, getTableName, is, SQL, StringChunk } from 'drizzle-orm';
 import type { PgTable } from 'drizzle-orm/pg-core';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { schema, type Database } from '@haive/database';
+import { acquireRootClaim, schema, type Database } from '@haive/database';
 import { createFakeDb, type FakeDbHandle } from '@haive/database/testing';
 import {
   CHECKOUT_HOLDING_TASK_STATUSES,
@@ -36,6 +36,7 @@ import {
   type ProjectRender,
   type ProjectStateRecord,
 } from '@haive/shared/project-state';
+import { withPlanCheckoutAccess } from '../src/repo/checkout-access-scope.js';
 import { refreshProjectState } from '../src/project-state/refresh.js';
 import { resolveRenderContext } from '../src/step-engine/_upgrade-render.js';
 import { writeProjectStateColumn, writeProjectStateRecord } from '../src/project-state/write.js';
@@ -3817,7 +3818,7 @@ describe('syncProjectStateFromCheckout: the record carries artifact claims', () 
     },
   );
 
-  it('defers while a reset holds the root claim, writing nothing', async () => {
+  it('holds while a reset holds the root claim, writing nothing', async () => {
     const s = await setup();
     await s.putRecord(withClaims(claim(GUIDE, H('4'))));
     s.fake.patch(schema.repositories, REPO, { rootClaimedAt: new Date(), rootClaimKind: 'reset' });
@@ -3825,21 +3826,32 @@ describe('syncProjectStateFromCheckout: the record carries artifact claims', () 
 
     const { outcome, trace } = await s.run();
 
-    expect(outcome).toBe('deferred');
+    // The checkout-access policy refuses a claim the caller does not own before the reset check.
+    expect(outcome).toBe('held');
     expect(trace.filter(isWrite)).toEqual([]);
     expect(s.dump()).toEqual(before);
     expect(ledger(s)).toEqual([]);
   });
 
-  it.each(['rebuild', 'refresh'])(
-    'does not defer for the %s claim of the job that calls it',
+  it.each(['rebuild', 'refresh'] as const)(
+    'does not hold for the %s claim of the job that calls it',
     async (kind) => {
       const s = await setup();
       await s.putRecord(withClaims(claim(GUIDE, H('4'))));
-      s.fake.patch(schema.repositories, REPO, { rootClaimedAt: new Date(), rootClaimKind: kind });
+      const owner = await acquireRootClaim(s.fake.db as unknown as Database, REPO, kind);
+      expect(owner).not.toBeNull();
 
-      expect((await s.run()).outcome).toBe('applied');
-      expect(live(s)).toHaveLength(1);
+      try {
+        const { outcome } = await withPlanCheckoutAccess(
+          { mode: 'preparation', owner: owner! },
+          () => s.run(),
+        );
+
+        expect(outcome).toBe('applied');
+        expect(live(s)).toHaveLength(1);
+      } finally {
+        await owner!.release();
+      }
     },
   );
 

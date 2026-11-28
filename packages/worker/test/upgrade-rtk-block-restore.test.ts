@@ -49,6 +49,7 @@ async function setup(agents: string = AGENTS_LEFT, offered: string[] = ['AGENTS.
     userId: USER,
     name: 'acme',
     source: 'blank',
+    status: 'ready',
     rtkEnabled: true,
     renderContext: null,
   });

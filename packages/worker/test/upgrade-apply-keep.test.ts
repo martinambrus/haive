@@ -148,7 +148,13 @@ async function upgrade(paths: string[], templateId = 'agent.old') {
     cliProviders: schema.cliProviders,
     ...RECORD_WRITE_TABLES,
   });
-  fake.insert(schema.repositories, { id: REPO, userId: USER, name: 'acme', source: 'blank' });
+  fake.insert(schema.repositories, {
+    id: REPO,
+    userId: USER,
+    name: 'acme',
+    source: 'blank',
+    status: 'ready',
+  });
   const entries: UpgradePlanEntry[] = [];
   const rows: Record<string, string> = {};
   for (const diskPath of paths) {
@@ -183,6 +189,7 @@ async function upgrade(paths: string[], templateId = 'agent.old') {
   // A real apply owns a live task and an existing repository; these fixtures exercise the same fence.
   if (!fake.rows(schema.repositories).length)
     fake.insert(schema.repositories, {
+      status: 'ready',
       id: REPO,
       userId: USER,
       name: 'acme',

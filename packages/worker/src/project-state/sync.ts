@@ -97,6 +97,7 @@ import { raiseRtkQuestionLocked } from './rtk-conflict.js';
 import {
   loadPendingRenderConflicts,
   loadRecordClaims,
+  checkoutUnavailable,
   lockProjectState,
   overlayRender,
 } from './write.js';
@@ -113,7 +114,7 @@ export type ProjectStateSyncResult =
       reason: string;
     }
   | {
-      code?: 'write_pending' | 'git_operation';
+      code?: 'write_pending' | 'git_operation' | 'checkout_unavailable';
       outcome: ProjectStateSyncOutcome;
       /** Why the record was refused, or what conflicted, worded as `last_error` holds it. */
       reason?: string;
@@ -812,6 +813,16 @@ export async function syncProjectStateLocked(
   if (refuseDuringGitOperation) {
     if (await gitOperationInProgress(repoPath)) return { outcome: 'held', code: 'git_operation' };
   }
+  // The policy is judged under the row before the final read: a checkout that is preparing or
+  // claimed may be mid-replacement.
+  const [lockedRow] = await tx
+    .select({ id: schema.repositories.id })
+    .from(schema.repositories)
+    .where(eq(schema.repositories.id, repositoryId))
+    .for('no key update');
+  if (!lockedRow) return { outcome: 'superseded' };
+  if (await checkoutUnavailable(tx, repositoryId))
+    return { outcome: 'held', code: 'checkout_unavailable' };
   // Every producer must reject an intermediate checkout, including clone scans and moved answers
   // that do not request the git-operation guard. The database base alone cannot see a file move.
   if (checkout.kind === 'record' && !sameValue(checkout, await readCheckout(repoPath, limits))) {

@@ -1,13 +1,17 @@
 import { execFileSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { mkdir, mkdtemp, rm, stat } from 'node:fs/promises';
+import { mkdir, mkdtemp, readdir, rm, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { eq } from 'drizzle-orm';
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
-import { createDatabase, schema, type Database } from '@haive/database';
+import { acquireRootClaim, createDatabase, schema, type Database } from '@haive/database';
 import { logger } from '@haive/shared';
-import { sweepDirtyProjectStates } from '../src/project-state/refresh.js';
+import {
+  refreshProjectStateOutcome,
+  sweepDirtyProjectStates,
+} from '../src/project-state/refresh.js';
+import { withPlanCheckoutAccess } from '../src/repo/checkout-access-scope.js';
 
 const url = process.env.GONE_CHECKOUT_STATE_TEST_URL;
 if (url && !new URL(url).pathname.startsWith('/gone_checkout_state_test')) {
@@ -139,5 +143,109 @@ describe.skipIf(!url)('the project-state sweep when a checkout directory is gone
     await db.delete(schema.repositories).where(eq(schema.repositories.id, gone.id));
 
     expect(await outbox(gone.id)).toBeUndefined();
+  });
+});
+
+describe.skipIf(!url)('the project-state sweep while a rebuild holds the checkout', () => {
+  let db: Database;
+  let root: string;
+  const users: string[] = [];
+
+  beforeAll(async () => {
+    db = createDatabase(url!);
+    root = await mkdtemp(join(tmpdir(), 'held-checkout-state-'));
+  });
+  afterEach(async () => {
+    for (const id of users.splice(0)) await db.delete(schema.users).where(eq(schema.users.id, id));
+  });
+  afterAll(async () => {
+    await rm(root, { recursive: true, force: true });
+    await db.$client.end({ timeout: 5 });
+  });
+
+  /** A dirty repository with a real checkout, at the status a rebuild publishes. */
+  async function rebuilding() {
+    const userId = randomUUID();
+    users.push(userId);
+    await db.insert(schema.users).values({
+      id: userId,
+      emailEncrypted: 'test',
+      emailBlindIndex: userId,
+      passwordHash: 'test',
+    });
+    const storagePath = join(root, userId);
+    await mkdir(storagePath, { recursive: true });
+    git(storagePath, 'init', '-q', '-b', 'main');
+    git(storagePath, 'commit', '--allow-empty', '-qm', 'initial');
+    const [repo] = await db
+      .insert(schema.repositories)
+      .values({
+        userId,
+        name: 'held-checkout',
+        source: 'blank',
+        storagePath,
+        renderContext,
+        status: 'cloning',
+      })
+      .returning({ id: schema.repositories.id });
+    await db
+      .insert(schema.projectStateOutbox)
+      .values({ repositoryId: repo!.id, revision: 1, writtenRevision: 0 });
+    return { id: repo!.id, path: storagePath };
+  }
+  const ready = (id: string) =>
+    db.update(schema.repositories).set({ status: 'ready' }).where(eq(schema.repositories.id, id));
+  const files = async (path: string) => (await readdir(path, { recursive: true })).sort();
+  const outbox = async (repositoryId: string) =>
+    (
+      await db
+        .select()
+        .from(schema.projectStateOutbox)
+        .where(eq(schema.projectStateOutbox.repositoryId, repositoryId))
+    )[0]!;
+
+  it('writes nothing under a live rebuild claim at status cloning, then writes after the release', async () => {
+    const held = await rebuilding();
+    const claim = await acquireRootClaim(db, held.id, 'rebuild');
+    expect(claim).not.toBeNull();
+    const before = await files(held.path);
+    try {
+      expect(await sweepDirtyProjectStates(db)).toBe(0);
+      const first = await outbox(held.id);
+      expect(await sweepDirtyProjectStates(db)).toBe(0);
+      const second = await outbox(held.id);
+
+      expect(await files(held.path)).toEqual(before);
+      expect(first.writtenRevision).toBeLessThan(first.revision);
+      expect(first.writeIntent).toBeNull();
+      expect(first.lastError).not.toBeNull();
+      expect(second.lastError).toBe(first.lastError);
+      expect(second.revision).toBe(first.revision);
+    } finally {
+      await claim!.release();
+    }
+    await ready(held.id);
+
+    expect(await sweepDirtyProjectStates(db)).toBe(1);
+    const done = await outbox(held.id);
+    expect(done.writtenRevision).toBe(done.revision);
+    expect(done.lastError).toBeNull();
+    expect(await files(held.path)).not.toEqual(before);
+  });
+
+  it("writes under the rebuild's own preparation scope at status cloning", async () => {
+    const held = await rebuilding();
+    const claim = await acquireRootClaim(db, held.id, 'rebuild');
+    expect(claim).not.toBeNull();
+    try {
+      const result = await withPlanCheckoutAccess({ mode: 'preparation', owner: claim! }, () =>
+        refreshProjectStateOutcome(db, held.id),
+      );
+      expect(result).toMatchObject({ outcome: 'written' });
+    } finally {
+      await claim!.release();
+    }
+    const done = await outbox(held.id);
+    expect(done.writtenRevision).toBe(done.revision);
   });
 });

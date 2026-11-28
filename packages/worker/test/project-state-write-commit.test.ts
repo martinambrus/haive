@@ -100,7 +100,13 @@ describe('12-post-onboarding: a claim file a person deleted by hand', () => {
       planMirrorState: schema.planMirrorState,
       planNodes: schema.planNodes,
     });
-    fake.insert(schema.repositories, { id: REPO, userId: USER, name: 'acme', source: 'blank' });
+    fake.insert(schema.repositories, {
+      id: REPO,
+      userId: USER,
+      name: 'acme',
+      source: 'blank',
+      status: 'ready',
+    });
     fake.insert(schema.tasks, {
       id: TASK,
       userId: USER,

@@ -65,6 +65,7 @@ async function setup(agents: string | Buffer = AGENTS) {
     userId: USER,
     name: 'acme',
     source: 'blank',
+    status: 'ready',
     rtkEnabled: false,
   });
   seedRollbackSnapshot(fake, {

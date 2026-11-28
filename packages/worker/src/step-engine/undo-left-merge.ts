@@ -856,10 +856,14 @@ async function undoLeftMergeInMove(db: Database, payload: UndoLeftMergePayload):
     if (await attempt()) {
       // Capture commits before files move; no merge-dir or task-creation transaction is held
       // across the helper's own transactions. Re-enter all fences before the actual reset.
-      const aside = await setAsideHaiveProjections(db, task.repositoryId, initial.repoPath, fence, {
-        restore: section,
-        putBack: section,
-      });
+      const aside = await withPlanCheckoutAccess(
+        { mode: 'projection', ...(root ? { owner: root } : {}) },
+        () =>
+          setAsideHaiveProjections(db, task.repositoryId!, initial.repoPath, fence, {
+            restore: section,
+            putBack: section,
+          }),
+      );
       prepared = true;
       if (aside.outcome === 'set-aside') kept = aside.kept;
       if (aside.outcome === 'refused') preparationRefusal = aside.reason;
