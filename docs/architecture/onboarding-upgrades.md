@@ -580,6 +580,7 @@ snapshot its own rows carry rather than to a column it could not move (`writePro
 The step does not fail: it keeps a warning and reports `recordWrite: 'failed'` in its output
 (`'written'`, `'skipped'` when it had nothing to record, or `'deferred'` when an import that
 would move the rules override waits for the task's end, below), which tests read instead of the wording.
+A checkout hold is the exception: it writes and clears nothing, and fails the step (below).
 A fenced write (02's) clears it only while it still holds a context 02 planned against: a sync
 that took the lock after the failed write and before the clear is newer than both, and stays.
 First comes the repository's render context column, whose RTK choice is its stored
@@ -852,8 +853,10 @@ The observer reads the actual named checkout and hashes the complete bounded raw
 pass. It never uses timestamps or the configured repository branch as proof: a different named
 branch may import, while a detached or unborn HEAD, unreadable Git state, no usable Git root of
 its own, an open Git operation, a live root claim or a checkout holder defers observation. A status other than
-`ready` or a live root claim is the shared checkout-access policy's `projection` refusal, so the
-observer needs no gate of its own. It does
+`ready` or a live root claim is refused by the observer's own admission (`admitWatchedRepository`,
+`project-state/watch-admission.ts`, inside `admitWatchedCheckout`), a separate implementation of the same set
+the shared checkout-access `projection` policy refuses, so the observer needs no policy gate of its own and
+the two can drift. It does
 not fetch, switch branches or copy from a folder import's source; those still require Refresh. Each
 pass also records the checkout's current branch in `repositories.checkout_branch` before its own
 config gate; with `PROJECT_STATE_SYNC_ENABLED` off the sweep does not run and only an onboarding
@@ -1003,7 +1006,12 @@ task-end rules reconcile then apply the shared checkout-access `projection` poli
 caller does not hold itself, throws `ProjectStateCheckoutUnavailableError`, a
 `ProjectStateCheckoutHeldError`. The hold itself writes nothing and changes no revision, journal or base (a
 phase 1 already committed before a phase 2 hold leaves its journal for recovery, which waits for the same
-policy). Step 02 fails its apply with a retry-this-step text, not its stale-plan one. The refresh
+policy). A foreground writer fails its apply with a retry-this-step text (`failIfCheckoutUnavailable`,
+`project-state/write.ts`): 02 instead of its stale-plan one, 04 and 12 instead of a `recordWrite: 'failed'`
+warning. The hold leaves no dirty outbox row, so nothing but a retry of the step writes that record. A retry
+re-runs the whole step: 12 supersedes and re-inserts its artifact rows in one transaction, and 04 detects
+again (the rows the held pass already put aside are not listed again) and writes the record from the rows now
+live, so its summary counts only that pass (`onboarding-recorded-membership.test.ts`, gated). The refresh
 keeps the row dirty with one fixed `last_error` (set only on a dirty row) and answers `held` with
 reason `checkout`; the sweep writes once the checkout is ready. A caller's own claim is carried by the
 ambient scope, so a clone, a refresh and the Undo's edit claim are not refused by themselves. A sync refused

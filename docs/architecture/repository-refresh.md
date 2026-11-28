@@ -327,12 +327,17 @@ Writer phases and the recovery restore throw `ProjectStateCheckoutUnavailableErr
 `ProjectStateCheckoutHeldError`, after the open-git-operation and live-reset checks, which keep their
 text and priority. The sync judges the policy before its final read of the checkout, so a foreign
 generation is never read, and answers `{ outcome: 'held', code: 'checkout_unavailable' }`: never
-`deferred`, which `set-aside.ts` counts as synced, and never a throw. A hold changes no revision,
+`deferred`, which `set-aside.ts` counts as synced, and never a throw. With `expectedCheckout` (the
+watcher), `admitWatchedCheckout` runs first, so a foreign claim answers `superseded` instead: the refresh
+stores its `superseded` reason on the outbox row, clean or dirty (pre-existing), and the next pass retries.
+A hold changes no revision,
 journal, base or ledger. `refreshProjectStateOutcome` answers `held` with reason `checkout` and stores one
 fixed reason on a dirty outbox row only, so the sweep retries once the checkout is ready; Haive-data
 Save reads that as `checkout_changed`. A task-end rules reconcile refused the same way writes neither
 `AGENTS.md` nor the rules region and keeps its obligation. Push preparation wraps a hold in its
-"nothing was pushed" error, so the step fails and Retry runs it once the checkout is ready. The watcher's
+"nothing was pushed" error, so the step fails and Retry runs it once the checkout is ready. The foreground
+record writers of steps 02, 04 and 12 fail their step with a retry-this-step text for the same reason
+(`failIfCheckoutUnavailable`), since a hold leaves no dirty outbox row for the sweep. The watcher's
 admission (`admitWatchedCheckout`) already refuses the same set plus holder tasks, so it has no
 separate gate. `completePreparationImports` skips its legacy-mirror fallback after a held sync, which
 would otherwise import legacy files over units the record carries; nothing re-runs the fallback if that
