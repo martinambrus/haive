@@ -90,13 +90,29 @@ no removal goes unrecorded; it does not prove the removal happened), rechecks th
 idle, and removes the immutable container ID with `docker rm -f -v`. An unknown probe or foreign
 runner is kept. An absent runner needs no removal.
 The request waits at most 30 s (`DDEV_REBUILD_WAIT_MS`) for the job. A refusal answers 409 with
-a typed `reason` and `retryable`, and the worker logs it at info. A finished failure answers 500.
+a typed `reason` and `retryable`, and the worker logs it at info. `checkout-unavailable` is the
+refusal of a checkout that is not ready (preparing, or its interactive sessions suspended): the
+worker completes it as a typed result instead of failing the job, because BullMQ hands the api a
+failed job or an expired wait as a message string and never an error class, and the api never keys
+on message text. The dialog shows the refusal's `error`. A finished failure answers 500.
 Success answers 202 with `removed`, false when the runner was already absent. When the wait runs
 out or the outcome is unknown it answers 202 `pending`: the job keeps running, a repeat click
 joins it, and the task's Activity tab shows the request event.
 Recovery is the ordinary ENSURE job, with its existing admission and newest snapshot restore;
 a fresh recovery job ID for each rebuild avoids joining an older ensure that already resolved
 its handle.
+
+**The ddev-control tools answer what happened.** The api relay answers HTTP 200 `{ok, output,
+error?}` for every command, so the MCP shim (`sandbox/ddev-mcp-server.ts`) reads `ok`: an explicit
+`ok: false` is an error result whose text is `error` (else the fixed line `ddev_<action> failed`)
+followed by any output, never an empty success; `ok: true` and a body without `ok` are unchanged.
+`ddev_restart` runs `ddev restart` in place and cold boots (`ensureDdevStarted`) only a runner that
+`requireRunnerPresence` finds absent or stopped, after the checkout re-check. A failed restart in a
+running runner answers `ok: false` with `ddev restart failed (exit N); the runner is up, so it was
+not rebuilt.` and the last 8000 characters of its output, and an unknown probe answers the probe's
+own error. Nothing branches on ddev's wording. A failed restart in a running runner is no longer
+followed by the warm start or rebuild that `ensureDdevStarted` would decide on (a runner whose
+nested dockerd died is recovered by **Rebuild DDEV**, which asks first).
 
 **An HTTP 4xx from the mandatory runtime smoke is UNSURE, not PASS.** The unauthenticated
 probe cannot distinguish a login/access wall from a broken route. `08-phase-5-verify`
