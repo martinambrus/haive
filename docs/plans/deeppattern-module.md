@@ -1,6 +1,6 @@
 # Derived task types, and DeepPattern as a steps-only public module
 
-> **Not implemented; planned 2026-11-14, revised the same day.** Two parts. Part A is a core feature:
+> **Part A shipped (#1190, #1211, #1192); Part B not started.** Planned 2026-11-14, revised the same day. Two parts. Part A is a core feature:
 > a person derives their own task type from a built-in one and replaces or adds a step or two.
 > Part B is DeepPattern's review as a public module that ships only a composable step, used through
 > Part A. Part B's Phase 0 decides whether it is built at all; Part A stands on its own.
@@ -250,8 +250,9 @@ within its budget. Built-in and static-admin semantics remain unchanged througho
 
 ## Part B: DeepPattern as a steps-only public module (only after a go)
 
-Status: paused by owner decision on 2026-11-14 until a full workflow run gives a fresh 08c
-baseline to compare against. The Phase 0 benchmark (precision 24%, recall 3 of 26, no new real
+Status: paused by owner decision on 2026-11-14 until a full workflow run gave a fresh 08c
+baseline to compare against; resumed 2026-11-16 (T680) once two clean real-task 08c baselines
+existed. Owed: the comparison against those baselines and the owner go/no-go. The Phase 0 benchmark (precision 24%, recall 3 of 26, no new real
 findings) puts it at best a report-only second opinion, never a gate. Part A continues.
 ### Module shape
 

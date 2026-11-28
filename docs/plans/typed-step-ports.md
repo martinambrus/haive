@@ -1,6 +1,6 @@
 # Typed step ports: roles in addition to step ids
 
-> Status: approved 2026-11-15; PR1 and PR2 merged; PR3 implements universal v3 per-consumer data-edge pins and its first review fixes. PR4 remains pending. Builds on the review/audit roles from #1211.
+> Status: approved 2026-11-15; core shipped (T685: #1214, #1216, #1220, #1224, #1225, #1226, #1227, #1228, #1229). PR7 (review-lens fan-in, onboarding context DTOs) stays optional, built only when a concrete consumer needs it. Builds on the review/audit roles from #1211.
 
 ## Context
 

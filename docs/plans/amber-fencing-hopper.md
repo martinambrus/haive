@@ -1,11 +1,11 @@
 # Onboarding Scope + LSP + Onboarding-Mirror + Retrieval Refactor
 
-> **Slices 1/2 and retrieval slice 4 implemented; LSP slice 3b remains pending.** Reviewed
+> **Slices 1/2, retrieval slice 4 and the composed-LSP slice 3 implemented.** Reviewed
 > 2026-11-12 at `3426c8c34`: `shared/src/repo/scope-tree.ts`, scope selection and the persisted
 > scope/mirror consumers exist; `_retrieval-guidance.ts` centralizes the discover/ground variants.
-> `ComposeInput` now has optional selected-LSP recipes for all seven server families, but
-> production cache callers do not supply them. Installation cutover is still pending. Slice 3d is
-> unverified live acceptance, not proof of missing code. Read the per-slice record below for the
+> The composed-LSP cutover shipped after that review: `01b1-verify-composed-lsp` #1269, the
+> contract-2 writer #1272 and legacy-template replacement #1288. Slice 3d live acceptance passed
+> 2026-11-18 (T709 rerun 3, plain PHP fixture); only T709's parked lows remain. Read the per-slice record below for the
 > earlier measurements; do not repeat the scope/mirror work. The project-state record now owns
 > portable onboarding state (see `two-install-project-sync.md` and the onboarding topic).
 
