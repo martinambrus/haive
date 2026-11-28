@@ -102,26 +102,22 @@ describe.skipIf(!url)('lock key spelling, on Postgres', () => {
     db.transaction((waiter) =>
       boundedLockWait(waiter, () => lockRepositoryTasksKey(waiter, id), 50).then(() => spelled),
     );
-  it.each([
-    ['uppercase', id.toUpperCase()],
-    ['unhyphenated', id.replaceAll('-', '').toUpperCase()],
-    ['braced', `{${id}}`],
-  ])(
-    'a holder of the %s spelling excludes a waiter on the canonical id',
-    async (_label, spelled) => {
-      let refused: unknown;
-      await db.transaction(async (holder) => {
-        await lockRepositoryTasksKey(holder, spelled);
-        refused = await waitFor(spelled).catch((err: unknown) => err);
-      });
-      // The text of a key is not a row: an unfixed key lets the waiter in beside the holder.
-      expect(
-        isLockNotAvailable(refused),
-        `the waiter was not refused beside the holder of ${spelled}: it took its own key`,
-      ).toBe(true);
-      expect(await waitFor('after')).toBe('after');
-    },
-  );
+  // One representative spelling: the variants are covered by the pure helper's tests
+  // (canonical-uuid.test.ts, lock-key-spelling.test.ts).
+  it('a holder of a noncanonical spelling excludes a waiter on the canonical id', async () => {
+    const spelled = id.replaceAll('-', '').toUpperCase();
+    let refused: unknown;
+    await db.transaction(async (holder) => {
+      await lockRepositoryTasksKey(holder, spelled);
+      refused = await waitFor(spelled).catch((err: unknown) => err);
+    });
+    // The text of a key is not a row: an unfixed key lets the waiter in beside the holder.
+    expect(
+      isLockNotAvailable(refused),
+      `the waiter was not refused beside the holder of ${spelled}: it took its own key`,
+    ).toBe(true);
+    expect(await waitFor('after')).toBe('after');
+  });
   it('a holder of the canonical id excludes a waiter until it commits', async () => {
     let refused: unknown;
     await db.transaction(async (holder) => {
