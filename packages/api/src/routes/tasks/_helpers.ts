@@ -32,6 +32,8 @@ import { RESOURCE_LIMITS, lstatNoFollow, relUnder } from '@haive/shared/fs-safe'
 import { summarizeThroughput, type ThroughputSummary } from '@haive/shared/stats';
 import {
   providerBreakdownWhere,
+  outputTokensSumSql,
+  outputUnknownRunsSql,
   realCostUsdSql,
   type TaskProviderUsage,
 } from '@haive/shared/stats-server';
@@ -927,7 +929,7 @@ export async function enrichStepsWithCliStats<T extends { id: string }>(
     ragQueryCount: number;
     attemptCount: number;
     rejectedReplyCount: number;
-    tokenUsage: CliTokenUsage | null;
+    tokenUsage: TaskTokenUsage | null;
     throughput: ThroughputSummary;
     summaryError: StepSummaryFailure | null;
   })[]
@@ -963,7 +965,8 @@ export async function enrichStepsWithCliStats<T extends { id: string }>(
             and ${schema.taskEvents.taskStepId} = ${schema.cliInvocations.taskStepId}
             and ${schema.taskEvents.eventType} = 'step.reply_rejected'))::int`,
       inputTokens: sql<number>`coalesce(sum((${tu} ->> 'inputTokens')::numeric), 0)::int`,
-      outputTokens: sql<number>`coalesce(sum((${tu} ->> 'outputTokens')::numeric), 0)::int`,
+      outputTokens: outputTokensSumSql(tu),
+      outputUnknownRuns: outputUnknownRunsSql(tu),
       totalTokens: sql<number>`coalesce(sum((${tu} ->> 'totalTokens')::numeric), 0)::int`,
       cacheReadTokens: sql<number>`coalesce(sum((${tu} ->> 'cacheReadTokens')::numeric), 0)::int`,
       cacheCreationTokens: sql<number>`coalesce(sum((${tu} ->> 'cacheCreationTokens')::numeric), 0)::int`,
@@ -999,7 +1002,7 @@ export async function enrichStepsWithCliStats<T extends { id: string }>(
       count: number;
       attemptCount: number;
       rejectedReplyCount: number;
-      tokenUsage: CliTokenUsage | null;
+      tokenUsage: TaskTokenUsage | null;
       throughput: ThroughputSummary;
       summaryError: StepSummaryFailure | null;
     }
@@ -1007,17 +1010,19 @@ export async function enrichStepsWithCliStats<T extends { id: string }>(
   for (const row of rows) {
     if (!row.stepId) continue;
     const inputTokens = Number(row.inputTokens) || 0;
-    const outputTokens = Number(row.outputTokens) || 0;
+    const outputTokens = row.outputTokens === null ? null : Number(row.outputTokens);
+    const outputUnknownRuns = Number(row.outputUnknownRuns) || 0;
     const totalTokens = Number(row.totalTokens) || 0;
     const cacheReadTokens = Number(row.cacheReadTokens) || 0;
     const cacheCreationTokens = Number(row.cacheCreationTokens) || 0;
     const costUsd = Number(row.costUsd) || 0;
-    const hasTokens = totalTokens > 0 || inputTokens > 0 || outputTokens > 0 || costUsd > 0;
-    const tokenUsage: CliTokenUsage | null = hasTokens
+    const hasTokens = totalTokens > 0 || inputTokens > 0 || (outputTokens ?? 0) > 0 || costUsd > 0;
+    const tokenUsage: TaskTokenUsage | null = hasTokens
       ? {
           inputTokens,
           outputTokens,
           totalTokens,
+          ...(outputUnknownRuns > 0 ? { outputUnknownRuns } : {}),
           ...(cacheReadTokens > 0 ? { cacheReadTokens } : {}),
           ...(cacheCreationTokens > 0 ? { cacheCreationTokens } : {}),
           ...(costUsd > 0 ? { costUsd } : {}),
@@ -1065,6 +1070,10 @@ export async function loadTaskTypeLabels(
   return new Map(rows.map((r) => [r.slug, r.displayName]));
 }
 
+/** The DTO `CliTokenUsage`: `outputUnknownRuns` is present only when some run never reported
+ *  its output, in which case `outputTokens` is the sum of the others (null when none did). */
+export type TaskTokenUsage = CliTokenUsage & { outputUnknownRuns?: number };
+
 /** Sum each task's CLI token usage for the listing (GET /tasks). One GROUP BY
  *  over the whole page keeps it a single round-trip regardless of task count.
  *  Uses the same `supersededAt IS NULL` filter as the per-step stats, plus the same
@@ -1078,15 +1087,16 @@ export async function loadTaskTypeLabels(
 export async function sumTaskTokens(
   db: ReturnType<typeof getDb>,
   taskIds: string[],
-): Promise<Map<string, CliTokenUsage>> {
-  const out = new Map<string, CliTokenUsage>();
+): Promise<Map<string, TaskTokenUsage>> {
+  const out = new Map<string, TaskTokenUsage>();
   if (taskIds.length === 0) return out;
   const tu = schema.cliInvocations.tokenUsage;
   const rows = await db
     .select({
       taskId: schema.cliInvocations.taskId,
       inputTokens: sql<number>`coalesce(sum((${tu} ->> 'inputTokens')::numeric), 0)::int`,
-      outputTokens: sql<number>`coalesce(sum((${tu} ->> 'outputTokens')::numeric), 0)::int`,
+      outputTokens: outputTokensSumSql(tu),
+      outputUnknownRuns: outputUnknownRunsSql(tu),
       totalTokens: sql<number>`coalesce(sum((${tu} ->> 'totalTokens')::numeric), 0)::int`,
       cacheReadTokens: sql<number>`coalesce(sum((${tu} ->> 'cacheReadTokens')::numeric), 0)::int`,
       cacheCreationTokens: sql<number>`coalesce(sum((${tu} ->> 'cacheCreationTokens')::numeric), 0)::int`,
@@ -1109,17 +1119,19 @@ export async function sumTaskTokens(
     .groupBy(schema.cliInvocations.taskId);
   for (const row of rows) {
     const inputTokens = Number(row.inputTokens) || 0;
-    const outputTokens = Number(row.outputTokens) || 0;
+    const outputTokens = row.outputTokens === null ? null : Number(row.outputTokens);
+    const outputUnknownRuns = Number(row.outputUnknownRuns) || 0;
     const totalTokens = Number(row.totalTokens) || 0;
     const cacheReadTokens = Number(row.cacheReadTokens) || 0;
     const cacheCreationTokens = Number(row.cacheCreationTokens) || 0;
     const costUsd = Number(row.costUsd) || 0;
-    const hasTokens = totalTokens > 0 || inputTokens > 0 || outputTokens > 0 || costUsd > 0;
+    const hasTokens = totalTokens > 0 || inputTokens > 0 || (outputTokens ?? 0) > 0 || costUsd > 0;
     if (!hasTokens) continue;
     out.set(row.taskId, {
       inputTokens,
       outputTokens,
       totalTokens,
+      ...(outputUnknownRuns > 0 ? { outputUnknownRuns } : {}),
       ...(cacheReadTokens > 0 ? { cacheReadTokens } : {}),
       ...(cacheCreationTokens > 0 ? { cacheCreationTokens } : {}),
       ...(costUsd > 0 ? { costUsd } : {}),

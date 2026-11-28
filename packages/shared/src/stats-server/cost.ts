@@ -1,5 +1,6 @@
 import { and, desc, eq, isNotNull, isNull, or, sql, type SQL } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
+import { outputTokensSumSql, outputUnknownRunsSql } from './output-tokens.js';
 import { COST_METERED_PROVIDERS, resolveCostBasis } from '../cli-providers/catalog.js';
 import type { AuthMode, CliProviderName } from '../types/index.js';
 
@@ -110,7 +111,10 @@ export interface TaskProviderUsage {
   costBasis: string;
   invocations: number;
   inputTokens: number;
-  outputTokens: number;
+  /** null when no invocation in the group reported an output (killed before its result). */
+  outputTokens: number | null;
+  /** Invocations in the group whose output was never reported; above 0 the sum is "at least". */
+  outputUnknownRuns: number;
   cacheReadTokens: number;
   cacheCreationTokens: number;
   /** Real dollars, by the shared rule in realCostUsdSql. */
@@ -274,7 +278,8 @@ export async function providerBreakdownWhere(
       authMode: schema.cliProviders.authMode,
       invocations: sql<number>`count(*)::int`,
       inputTokens: sql<number>`coalesce(sum((${tu} ->> 'inputTokens')::numeric), 0)::int`,
-      outputTokens: sql<number>`coalesce(sum((${tu} ->> 'outputTokens')::numeric), 0)::int`,
+      outputTokens: outputTokensSumSql(tu),
+      outputUnknownRuns: outputUnknownRunsSql(tu),
       cacheReadTokens: sql<number>`coalesce(sum((${tu} ->> 'cacheReadTokens')::numeric), 0)::int`,
       cacheCreationTokens: sql<number>`coalesce(sum((${tu} ->> 'cacheCreationTokens')::numeric), 0)::int`,
       costUsd: realCostUsdSql(),
@@ -318,15 +323,16 @@ export async function providerBreakdownWhere(
     const authMode = (row.authMode ?? 'subscription') as AuthMode;
     const basis = resolveCostBasis(name, authMode);
     const inputTokens = Number(row.inputTokens) || 0;
-    const outputTokens = Number(row.outputTokens) || 0;
+    const outputTokens = row.outputTokens === null ? null : Number(row.outputTokens);
     const invocations = Number(row.invocations) || 0;
-    if (inputTokens === 0 && outputTokens === 0 && invocations === 0) continue;
+    if (inputTokens === 0 && (outputTokens ?? 0) === 0 && invocations === 0) continue;
     out.push({
       provider: name,
       costBasis: basis,
       invocations,
       inputTokens,
       outputTokens,
+      outputUnknownRuns: Number(row.outputUnknownRuns) || 0,
       cacheReadTokens: Number(row.cacheReadTokens) || 0,
       cacheCreationTokens: Number(row.cacheCreationTokens) || 0,
       // No basis gate here any more: realCostUsdSql already applied the billable
@@ -344,5 +350,7 @@ export async function providerBreakdownWhere(
         : {}),
     });
   }
-  return out.sort((a, b) => b.inputTokens + b.outputTokens - (a.inputTokens + a.outputTokens));
+  return out.sort(
+    (a, b) => b.inputTokens + (b.outputTokens ?? 0) - (a.inputTokens + (a.outputTokens ?? 0)),
+  );
 }

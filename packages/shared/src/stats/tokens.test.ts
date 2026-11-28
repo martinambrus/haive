@@ -159,3 +159,53 @@ describe('sumNormalizedTokens', () => {
     expect(combined.cacheWriteShare!).toBeLessThan(normalizeTokens(CLAUDE).cacheWriteShare!);
   });
 });
+
+describe('unknown output tokens', () => {
+  const base = {
+    provider: 'claude-code',
+    inputTokens: 10,
+    cacheReadTokens: 20,
+    cacheCreationTokens: 30,
+  };
+
+  it('keeps a null output null and counts the unknown runs', () => {
+    const n = normalizeTokens({ ...base, outputTokens: null, outputUnknownRuns: 2 });
+    expect(n.outputTokens).toBeNull();
+    expect(n.outputUnknownRuns).toBe(2);
+    expect(n.totalTokens).toBe(10 + 20 + 30);
+  });
+
+  it('counts no unknown runs when none were given', () => {
+    expect(normalizeTokens({ ...base, outputTokens: 7 }).outputUnknownRuns).toBe(0);
+  });
+
+  it('sums the known rows and the unknown run counts', () => {
+    const rows = [
+      { ...base, outputTokens: null, outputUnknownRuns: 2 },
+      { ...base, outputTokens: 500, outputUnknownRuns: 1 },
+    ];
+    const forward = sumNormalizedTokens(rows);
+    expect(forward.outputTokens).toBe(500);
+    expect(forward.outputUnknownRuns).toBe(3);
+    expect(forward.totalTokens).toBe(2 * 60 + 500);
+    expect(sumNormalizedTokens([...rows].reverse())).toEqual(forward);
+  });
+
+  it('is null only when every reporting row is unknown', () => {
+    const n = sumNormalizedTokens([
+      { ...base, outputTokens: null, outputUnknownRuns: 2 },
+      { ...base, outputTokens: null, outputUnknownRuns: 1 },
+    ]);
+    expect(n.outputTokens).toBeNull();
+    expect(n.outputUnknownRuns).toBe(3);
+  });
+
+  it('keeps an empty list and a known zero at zero', () => {
+    const empty = sumNormalizedTokens([]);
+    expect(empty.outputTokens).toBe(0);
+    expect(empty.outputUnknownRuns).toBe(0);
+    const zero = sumNormalizedTokens([{ ...base, outputTokens: 0, outputUnknownRuns: 0 }]);
+    expect(zero.outputTokens).toBe(0);
+    expect(zero.outputUnknownRuns).toBe(0);
+  });
+});
