@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 const h = vi.hoisted(() => ({
   db: undefined as unknown,
   add: vi.fn(async (..._args: unknown[]) => undefined),
+  eventFails: false,
 }));
 
 vi.mock('../src/db.js', () => ({ getDb: () => h.db }));
@@ -10,6 +11,17 @@ vi.mock('../src/queues.js', () => ({ getTaskQueue: () => ({ add: h.add }) }));
 vi.mock('../src/lib/sandbox-kill.js', () => ({
   killTaskSandboxes: vi.fn(async () => ({ killed: 0, killConfirmed: true })),
 }));
+vi.mock('../src/lib/task-events.js', async (importOriginal) => {
+  const original = await importOriginal<typeof import('../src/lib/task-events.js')>();
+  return {
+    ...original,
+    appendTaskEvent: async (...args: Parameters<typeof original.appendTaskEvent>) => {
+      if (h.eventFails && args[3] === 'step.cli_provider_preference_changed')
+        throw new Error('event refused');
+      return original.appendTaskEvent(...args);
+    },
+  };
+});
 
 import { Hono } from 'hono';
 import { schema } from '@haive/database';
@@ -80,7 +92,10 @@ async function pick(stepId: string, body: Record<string, unknown>): Promise<numb
 }
 
 describe("a step's CLI picked on a task", () => {
-  beforeEach(() => h.add.mockClear());
+  beforeEach(() => {
+    h.add.mockClear();
+    h.eventFails = false;
+  });
 
   it("stays this task's, and leaves the saved preference alone", async () => {
     const fake = setup();
@@ -115,8 +130,25 @@ describe("a step's CLI picked on a task", () => {
     expect(fake.rows(schema.taskStepCliChoices)).toMatchObject([{ cliProviderId: CLI }]);
     expect(fake.rows(schema.userStepCliPreferences)).toEqual([]);
     expect(fake.rows(schema.taskEvents)).toMatchObject([
-      { eventType: 'step.cli_provider_preference_changed', payload: { remembered: false } },
+      {
+        eventType: 'step.cli_provider_preference_changed',
+        taskStepId: STEP_ROW,
+        payload: { remembered: false },
+      },
     ]);
+  });
+
+  it('takes the re-run back when its event cannot be written', async () => {
+    // The event is what reopens the row's auth admission allowance (the step runner counts its
+    // old waves until the newest one), so it must commit with the re-run or not at all: a row
+    // re-run without it is failed again after its first paid run.
+    const fake = setup('07b-phase-4-validate');
+    const before = { ...fake.rows(schema.taskSteps)[0] };
+    h.eventFails = true;
+    expect(await pick('07b-phase-4-validate', { cliProviderId: CLI, round: 0 })).toBe(500);
+    expect(fake.rows(schema.taskSteps)[0]).toEqual(before);
+    expect(fake.rows(schema.taskStepCliChoices)).toEqual([]);
+    expect(fake.rows(schema.taskEvents)).toEqual([]);
   });
 
   it('clears the slot for this task, and from the saved preferences only when asked', async () => {
