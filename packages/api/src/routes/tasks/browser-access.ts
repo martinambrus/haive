@@ -34,13 +34,15 @@ const DDEV_CA_PATH = process.env.DDEV_CA_PATH || '/var/lib/haive/ddev-ca/rootCA.
 const ACCESS_ENSURE_TIMEOUT_MS = 180_000;
 /** Wait only for removal and recovery enqueue, never for the cold boot. */
 const DDEV_REBUILD_WAIT_MS = 30_000;
-async function requireOwnedTask(taskId: string, userId: string): Promise<void> {
+// Returns the row's id: the only spelling a queue job id or payload may carry.
+async function requireOwnedTask(taskId: string, userId: string): Promise<string> {
   const db = getDb();
   const row = await db.query.tasks.findFirst({
     where: and(eq(schema.tasks.id, taskId), eq(schema.tasks.userId, userId)),
     columns: { id: true },
   });
   if (!row) throw new HttpError(404, 'Task not found');
+  return row.id;
 }
 
 /** Direct-access URLs for a task: ensures the runtime is up (same coalesced ensure
@@ -50,8 +52,7 @@ async function requireOwnedTask(taskId: string, userId: string): Promise<void> {
  *  ensure is still running — the client should retry. */
 browserAccessRoutes.post('/:id/access-urls', async (c) => {
   const userId = c.get('userId');
-  const taskId = c.req.param('id');
-  await requireOwnedTask(taskId, userId);
+  const taskId = await requireOwnedTask(c.req.param('id'), userId);
 
   const enabled = await configService.getBoolean(CONFIG_KEYS.BROWSER_DIRECT_ACCESS, true);
   if (!enabled) return c.json({ enabled: false, accessUrls: [] as TaskAccessEndpoint[] });
@@ -81,8 +82,7 @@ browserAccessRoutes.post('/:id/access-urls', async (c) => {
  *  running; the client retries. */
 browserAccessRoutes.post('/:id/db-access', async (c) => {
   const userId = c.get('userId');
-  const taskId = c.req.param('id');
-  await requireOwnedTask(taskId, userId);
+  const taskId = await requireOwnedTask(c.req.param('id'), userId);
 
   const enabled = await configService.getBoolean(CONFIG_KEYS.DB_DIRECT_ACCESS, true);
   if (!enabled) return c.json({ enabled: false, accessUrls: [] as TaskAccessEndpoint[] });
@@ -118,8 +118,7 @@ browserAccessRoutes.post('/:id/db-access', async (c) => {
  *  none); 202 `pending` means the runtime is still coming up and the client should retry. */
 browserAccessRoutes.post('/:id/open-mailpit', async (c) => {
   const userId = c.get('userId');
-  const taskId = c.req.param('id');
-  await requireOwnedTask(taskId, userId);
+  const taskId = await requireOwnedTask(c.req.param('id'), userId);
 
   try {
     const job = await boundedAdd(() =>
@@ -144,8 +143,7 @@ browserAccessRoutes.post('/:id/open-mailpit', async (c) => {
  * worker rechecks activity under its runner fence before removing anything. */
 browserAccessRoutes.post('/:id/ddev/rebuild', async (c) => {
   const userId = c.get('userId');
-  const taskId = c.req.param('id');
-  await requireOwnedTask(taskId, userId);
+  const taskId = await requireOwnedTask(c.req.param('id'), userId);
   const db = getDb();
   const step = await db.query.taskSteps.findFirst({
     where: and(

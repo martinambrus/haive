@@ -11,6 +11,7 @@ import {
   symlink,
   writeFile,
 } from 'node:fs/promises';
+import { randomUUID } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { eq } from 'drizzle-orm';
@@ -1495,6 +1496,63 @@ describe('task attachment routes', () => {
       expect(await readFile(path.join(outside, 'a.md'), 'utf8')).toBe('a');
       expect(await readFile(path.join(outside, 'old', 'b.md'), 'utf8')).toBe('b');
       expect(filenames()).toEqual(['a.md', 'old/b.md']);
+    });
+  });
+
+  describe('a task addressed by another uuid spelling', () => {
+    const canonical = randomUUID();
+    const upper = canonical.toUpperCase();
+    const own = (rel = ''): string => path.join(repo, '.haive', 'task-uploads', canonical, rel);
+
+    beforeEach(() => {
+      expect(upper).not.toBe(canonical);
+      fake.insert(schema.tasks, {
+        id: canonical,
+        userId: USER,
+        repositoryId: REPO,
+        type: 'workflow',
+        title: 'task',
+      });
+    });
+
+    const seedOwn = async (filename: string, content: string): Promise<Row> => {
+      await mkdir(path.dirname(own(filename)), { recursive: true });
+      await writeFile(own(filename), content);
+      return fake.insert(schema.taskAttachments, {
+        taskId: canonical,
+        userId: USER,
+        filename,
+        storedPath: own(filename),
+        sizeBytes: Buffer.byteLength(content),
+      });
+    };
+
+    it('stores an upload under the task row’s id', async () => {
+      expect((await upload('a.md', 'bytes', { task: upper })).status).toBe(201);
+      expect(await readFile(own('a.md'), 'utf8')).toBe('bytes');
+      expect(await listing(path.join(repo, '.haive', 'task-uploads'))).toEqual([canonical]);
+      const row = fake.rows(schema.taskAttachments)[0]!;
+      expect((row.storedPath as string).endsWith(`/.haive/task-uploads/${canonical}/a.md`)).toBe(
+        true,
+      );
+    });
+
+    it('serves a canonical upload to the other spelling', async () => {
+      const row = await seedOwn('a.md', 'bytes');
+      const raw = await download(row.id as string, { task: upper });
+      expect(raw.status).toBe(200);
+      expect(raw.bytes.toString()).toBe('bytes');
+    });
+
+    it('deletes one attachment and a folder under the other spelling', async () => {
+      const one = await seedOwn('a.md', 'a');
+      await seedOwn('docs/b.md', 'b');
+      expect((await send('DELETE', `/${upper}/attachments/${one.id as string}`)).status).toBe(200);
+      expect(await exists(own('a.md'))).toBe(false);
+      expect(filenames()).toEqual(['docs/b.md']);
+      expect((await send('DELETE', `/${upper}/attachments?prefix=docs`)).status).toBe(200);
+      expect(await exists(own('docs/b.md'))).toBe(false);
+      expect(filenames()).toEqual([]);
     });
   });
 });

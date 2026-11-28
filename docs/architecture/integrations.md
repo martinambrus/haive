@@ -863,8 +863,19 @@ and two writers each believe they hold the exclusion. The sinks: `remoteRelinkKe
 text it keyed before, so old and new processes share one key during a rollout. A new key built from
 an id a client can spell takes the same step. Keys built from names, paths or constants are not
 uuids, and keys built from an id read from the database or a signed token already hold the printed
-form; both are untouched. Redis keys (job ids, the `haive:rag-sync:` lock) and filesystem paths
-built from a spelling are not covered.
+form; both are untouched.
+
+The same step covers what a spelling reaches outside an advisory key. `ragSyncLockKey`
+(`@haive/shared/rag`, the `haive:rag-sync:` lock) canonicalizes, since the api holds a route
+parameter and the worker a database id. A route that already read the row builds from `row.id`
+(PostgreSQL prints the lowercase form), never from the parameter: the task attachment routes'
+uploads directory and stored paths (`requireOwnedTask`, `resolveTaskUploadsDir`), and the job ids and
+payloads of the browser-access, merge abort/undo/resync and module-source fetch routes.
+`enqueueCheckoutSync` and `enqueuePlanMirrorRefresh` take a route parameter or a body id from many
+callers, so they use `canonicalUuid` in the helper. An attachment row stored under another spelling
+before this stays refused (404, or 409 "not in a recognised layout" on delete), as it already was
+under the canonical one. Other ids built from a spelling, such as the `ensure-ide-` job id
+(`ideTarget`, `lib/ide-target.ts`), are not covered.
 
 Lock order: mutation-lease acquisition/release uses separate short row-update transactions;
 none holds a row while acquiring a key. Relink/intent/repair and gate-4 origin persistence use

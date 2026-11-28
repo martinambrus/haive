@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { Hono } from 'hono';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { AppEnv } from '../src/context.js';
@@ -308,5 +309,70 @@ describe('POST /tasks/:id/merges/undo', () => {
       401,
     );
     expect(state.added).toEqual([]);
+  });
+});
+
+describe('the queue job carries the task row id, not the requested spelling', () => {
+  const canonical = randomUUID();
+  const spellings = [canonical.toUpperCase(), canonical.replaceAll('-', '')];
+  const undoPayload = {
+    dir: DIR,
+    repoPath: DIR,
+    landedOn: 'main',
+    landedAt: '2026-11-11T00:00:00Z',
+    baseShaBefore: 'a'.repeat(40),
+    baseShaAfter: 'b'.repeat(40),
+  };
+  const post = (spelling: string, path: string, body: unknown) =>
+    app.request(`/tasks/${spelling}/merges/${path}`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+  const undoBodyOf = { dir: DIR, baseShaAfter: undoPayload.baseShaAfter };
+  beforeEach(() => {
+    state.task = { id: canonical, status: 'cancelled' };
+  });
+
+  it.each(spellings)('abort under %s queues the canonical id', async (spelling) => {
+    expect(spelling).not.toBe(canonical);
+    expect((await post(spelling, 'abort', { dir: DIR, mergeHead: 'm1' })).status).toBe(202);
+    expect(state.added[0]![1]).toMatchObject({ taskId: canonical });
+    expect((state.added[0]![2] as { jobId: string }).jobId).toMatch(
+      new RegExp(`^abort-left-merge-${canonical}-`),
+    );
+  });
+
+  it.each(['undo', 'resync'])('%s under every spelling queues the canonical id', async (route) => {
+    state.events = [
+      { eventType: 'merge.left_committed', payload: undoPayload },
+      { eventType: 'task.cancel_finished', payload: {} },
+      ...(route === 'resync'
+        ? [
+            {
+              eventType: 'merge.left_committed_settled',
+              payload: { ...undoPayload, outcome: 'undone' },
+            },
+          ]
+        : []),
+    ];
+    const ids: string[] = [];
+    for (const spelling of spellings) {
+      expect(spelling).not.toBe(canonical);
+      expect((await post(spelling, route, undoBodyOf)).status).toBe(202);
+      const call = state.added.at(-1)!;
+      expect(call[1]).toMatchObject({ taskId: canonical });
+      const jobId = (call[2] as { jobId: string }).jobId;
+      expect(jobId).toMatch(new RegExp(`^undo-left-merge-${canonical}-`));
+      ids.push(jobId);
+    }
+    expect(new Set(ids).size).toBe(1);
+  });
+
+  it('abort under two spellings shares one job id', async () => {
+    for (const spelling of spellings) await post(spelling, 'abort', { dir: DIR, mergeHead: 'm1' });
+    const ids = state.added.map((a) => (a[2] as { jobId: string }).jobId);
+    expect(ids).toHaveLength(2);
+    expect(ids[0]).toBe(ids[1]);
   });
 });

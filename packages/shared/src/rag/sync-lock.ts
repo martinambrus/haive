@@ -1,5 +1,6 @@
 import { REDIS_UNAVAILABLE_CODE } from '../constants/index.js';
 import { randomUUID } from 'node:crypto';
+import { canonicalUuid } from '@haive/database';
 import type { Redis } from 'ioredis';
 import { logger } from '../logger/index.js';
 
@@ -80,8 +81,10 @@ export interface AcquireRagSyncLockOptions extends RagSyncLockTuning {
   onWait?: (reason: 'held' | typeof REDIS_UNAVAILABLE_CODE) => void;
 }
 
+/** One key per repository however the caller spells its id: the api holds a route parameter, the
+ *  worker a database id, and PostgreSQL reads both as the same row. */
 export function ragSyncLockKey(repositoryId: string): string {
-  return `haive:rag-sync:${repositoryId}`;
+  return `haive:rag-sync:${canonicalUuid(repositoryId)}`;
 }
 
 function bounded<T>(op: Promise<T>, timeoutMs: number, signal?: AbortSignal): Promise<T> {
