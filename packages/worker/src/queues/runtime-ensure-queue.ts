@@ -1,4 +1,4 @@
-import { requireCheckoutAccess } from '@haive/shared/checkout-access';
+import { CheckoutUnavailableError, requireCheckoutAccess } from '@haive/shared/checkout-access';
 import { withInteractiveCheckout } from '../repo/interactive-checkout.js';
 import { randomUUID } from 'node:crypto';
 import { safeProcessor } from './safe-processor.js';
@@ -263,6 +263,20 @@ export function startRuntimeEnsureWorker(): Worker<RuntimeEnsurePayload, Runtime
         const result = await ensureRuntimeForTask(job.data.taskId);
         await check();
         return result;
+      }).catch((error: unknown) => {
+        // BullMQ hands the api a failed job as a message string, never its class, so the api could
+        // only mistake this refusal of an explicit rebuild for an outcome-unknown wait. It comes
+        // from the opens' checks, before anything is removed, and completes as a typed result.
+        if (
+          job.name === RUNTIME_ENSURE_JOB_NAMES.REBUILD_DDEV &&
+          error instanceof CheckoutUnavailableError
+        )
+          return refuseDdevRebuild(job.data.taskId, 'none', {
+            reason: 'checkout-unavailable',
+            message: error.message,
+            retryable: true,
+          });
+        throw error;
       });
     }),
     { connection: getBullRedis(), concurrency: 3 },
