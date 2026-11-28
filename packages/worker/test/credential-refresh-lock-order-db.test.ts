@@ -770,15 +770,29 @@ describe.skipIf(!url)(
         await expectDispatched(f);
       });
 
-      // The same for Retry. A row at the cap that a press does not re-run stays failed and is never
-      // dispatched, so reopening its allowance costs nothing, and only a user's press writes these
-      // events: any over-reopen is bounded by presses.
+      // The same for Retry. A row at the cap that a press does not re-run stays failed, so reopening
+      // its allowance costs nothing, and only a user's press writes these events: any over-reopen is
+      // bounded by presses.
       it('a step.retry of another step reopens a row its cascade re-runs', async () => {
         const f = await mkAtCap();
         await expectExhausted(f);
         await f.addEvent('step.retry', f.other.id, at(1000 + 2 * WAVE_GAP));
         await expectDispatched(f);
       });
+
+      // The other two presses are task-wide as well. The task-level Retry at its stopped step resets
+      // that step and every row below it in place (api `retryTaskAtStep`) and names only the target
+      // row; Retry with AI re-runs the failed row and resets the rows the task leaves active
+      // elsewhere, which carry no event of their own.
+      it.each(['task.retried', 'step.retry_ai'])(
+        'a %s of another step reopens a row it resets without an event of its own',
+        async (eventType) => {
+          const f = await mkAtCap();
+          await expectExhausted(f);
+          await f.addEvent(eventType, f.other.id, at(1000 + 2 * WAVE_GAP));
+          await expectDispatched(f);
+        },
+      );
 
       // The cascade as a user meets it: the row below an upstream step exhausts after an earlier press
       // on that step, and a second press re-runs it in place. The newest press decides, so the older
@@ -808,8 +822,8 @@ describe.skipIf(!url)(
         await expectExhausted(f);
       });
 
-      // A CLI switch re-runs only the row it names, so unlike the presses above its event bounds that
-      // row alone.
+      // A CLI switch's event bounds only the row it names, unlike the presses above: the rows a switch
+      // also resets (those the task leaves active elsewhere) carry no event and keep counting.
       it('a CLI switch of another step does not reopen', async () => {
         const f = await mkAtCap();
         await f.addEvent(

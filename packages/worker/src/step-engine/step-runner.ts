@@ -3798,8 +3798,8 @@ async function recordFinishedUsage(
  *  Resume of a degraded fan-out step also re-run every row below it in place, and those rows carry
  *  no event of their own, so one bounds the window of every row of the task, not only the row it
  *  names. With no step id (the START retry of a task that never reached a step) it re-runs no row
- *  and bounds nothing. A row at the cap that a press leaves alone stays failed and is never
- *  dispatched, and only a user's press writes these, so an over-reopen is bounded by presses.
+ *  and bounds nothing. A row at the cap that a press leaves alone stays failed, and only a user's
+ *  press writes these, so an over-reopen is bounded by presses.
  *  `started_at` is no bound: a park or requeue clears it and the next claim stamps it, which would
  *  reopen the allowance with no one pressing anything. Recovery writes none of these
  *  (`task.auto_resumed`, `task.revived`), so it keeps counting, as does a worker-side in-place
@@ -3810,8 +3810,9 @@ const AUTH_LEDGER_PRESS_EVENTS = [
   'step.resume',
   'step.retry_ai',
 ] as const;
-/** A CLI switch re-runs only the row it names, so its event bounds that row alone. With no step id
- *  (a pick for an upcoming step) there is no row. */
+/** A CLI switch's event bounds only the row it names; the rows it also resets (those the task leaves
+ *  active elsewhere) carry no event of their own and keep counting. With no step id (a pick for an
+ *  upcoming step) there is no row. */
 const AUTH_LEDGER_SWITCH_EVENT = 'step.cli_provider_preference_changed';
 
 export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceStepResult> {

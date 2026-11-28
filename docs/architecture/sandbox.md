@@ -192,11 +192,12 @@ rows with the unknown code, including superseded rows, from the task's newest us
 `step.cli_provider_preference_changed` (a CLI switch) naming this step; with none, from its first
 row. Retry, the task-level Retry and a Resume of a degraded fan-out step re-run every row below
 the step they name in place, and those rows carry no event of their own, so the four presses bound
-every row of the task, not only the row they name. A CLI switch re-runs only the row it names. An
-event with no step id (a CLI pick for an upcoming step, the START retry of a task that never
-reached a step) re-runs no row and opens no allowance. A row at the cap that a press leaves alone
-stays failed and is never dispatched, and only a user's press writes these events, so an
-over-reopen is bounded by presses. `started_at` is no bound: a runtime-slot or
+every row of the task, not only the row they name. A CLI switch's event bounds only the row it
+names; the rows it also resets, which the task leaves active elsewhere, keep counting. An event
+with no step id (a CLI pick for an upcoming step, the START retry of a task that never reached a
+step) re-runs no row and opens no allowance. A row at the cap that a press leaves alone stays
+failed, and only a user's press writes these events, so an over-reopen is bounded by presses.
+`started_at` is no bound: a runtime-slot or
 integration park, a pause re-offer and an orphan requeue clear it and the next claim stamps it, so
 a bound on it would let a park reopen the allowance with no one pressing anything. Recovery
 writes none of those events (`task.auto_resumed`, `task.revived`) and keeps counting, as does a

@@ -1660,9 +1660,10 @@ ended auth failures for this step created since the task's newest user press: `s
 `step.cli_provider_preference_changed` (a CLI switch) naming this step (none: from its first row).
 Retry, the task-level Retry and a Resume of a degraded fan-out step re-run every row below the step
 they name in place, and those rows carry no event of their own, so the four presses bound every row
-of the task. A CLI switch re-runs only the row it names, and an event with no step id re-runs no row
-and opens nothing. A row at the cap that a press leaves alone stays failed, and only a user's press
-writes these, so an over-reopen is bounded by presses. `started_at` is no bound, since a park or a
+of the task. A CLI switch's event bounds only the row it names (the rows it also resets, which the
+task leaves active elsewhere, keep counting), and an event with no step id re-runs no row and opens
+nothing. A row at the cap that a press leaves alone stays failed, and only a user's press writes
+these, so an over-reopen is bounded by presses. `started_at` is no bound, since a park or a
 requeue clears it and the next claim stamps it; recovery (`task.auto_resumed`, `task.revived`)
 writes none of them and keeps counting, as does a worker-side in-place reset (insight
 continuation, a learning self-revise, a recheck into rows that exist). Superseding an unknown
