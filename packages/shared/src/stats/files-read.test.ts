@@ -91,6 +91,26 @@ describe('buildFilesRead files ranking', () => {
     ]);
   });
 
+  it('breaks a tie by code point, not by UTF-16 code unit', () => {
+    // U+FF5E is one UTF-16 unit above the surrogate range; U+1F600 is a surrogate pair that `<`
+    // would sort first. Code point (and UTF-8 byte) order puts U+FF5E first.
+    const tied = ['\u{1F600}.ts', '\uFF5E.ts', 'a.ts', 'B.ts', '\u{10000}.ts', '\uE000.ts'];
+    const out = buildFilesRead(
+      rollup(
+        tied.map((p) => row(p)),
+        groups,
+      ),
+    );
+    expect(out.files.rows.map((r) => r.path)).toEqual([
+      'B.ts',
+      'a.ts',
+      '\uE000.ts',
+      '\uFF5E.ts',
+      '\u{10000}.ts',
+      '\u{1F600}.ts',
+    ]);
+  });
+
   it('does not depend on input order and does not mutate the input', () => {
     const input = rollup(rows, groups);
     const before = JSON.stringify(input);

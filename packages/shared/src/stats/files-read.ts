@@ -165,7 +165,20 @@ export interface FilesReadReport {
   steps: { rows: FilesReadStepRow[]; count: number; truncated: boolean };
 }
 
-const byCodePoint = (a: string, b: string): number => (a < b ? -1 : a > b ? 1 : 0);
+/** Code point order, the order `COLLATE "C"` gives on UTF-8. `<` compares UTF-16 code units, which
+ *  puts an astral character (a surrogate pair) before U+E000..U+FFFF. */
+const byCodePoint = (a: string, b: string): number => {
+  let i = 0;
+  let j = 0;
+  while (i < a.length && j < b.length) {
+    const x = a.codePointAt(i)!;
+    const y = b.codePointAt(j)!;
+    if (x !== y) return x < y ? -1 : 1;
+    i += x > 0xffff ? 2 : 1;
+    j += y > 0xffff ? 2 : 1;
+  }
+  return Math.sign(a.length - i - (b.length - j));
+};
 
 const providerOrder = (a: string | null, b: string | null): number => {
   if (a === b) return 0;
