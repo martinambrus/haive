@@ -332,6 +332,8 @@ it('Retry after a completed rotation recopies an unchanged snapshot', async () =
   await f.adopt();
   expect(f.credential(f.taskVol) === f.credential(f.userVol)).toBe(true);
   expect(f.credential(f.taskVol) === f.initial).toBe(false);
+  // A readable moved source is a rotation, not a loss: nothing is archived for it.
+  expect([...f.dirs.keys()].some((name) => name.includes('_retired_'))).toBe(false);
 });
 
 it('preserves a newer in-task login when the source also rotated', async () => {
@@ -805,14 +807,44 @@ it.each(
     await f.adopt();
     expect(untracked()).toHaveLength(1);
     expect(f.statusWrite).not.toHaveBeenCalled();
-    if (login) {
-      const retired = [...f.dirs.keys()].filter((name) => name.includes('_retired_'));
-      expect(retired).toHaveLength(1);
-      expect(f.credential(retired[0]!)).toBe(previous);
-      expect(f.credential(f.taskVol)).toBe(f.credential(f.userVol));
-    }
+    // A readable task copy is kept before an unreadable source replaces it, login or not.
+    const retired = [...f.dirs.keys()].filter((name) => name.includes('_retired_'));
+    expect(retired).toHaveLength(1);
+    expect(f.credential(retired[0]!)).toBe(previous);
+    expect(f.credential(f.taskVol)).toBe(f.credential(f.userVol));
   },
 );
+
+it('never archives an unreadable copy: a second unreadable source keeps the original readable one', async () => {
+  const f = fixture();
+  const original = f.credential(f.taskVol);
+  const [u1, u2] = unreadable.map(([, make]) => make());
+  writeFileSync(join(f.dirs.get(f.userVol)!, 'auth.json'), u1!);
+  await f.adopt();
+  writeFileSync(join(f.dirs.get(f.userVol)!, 'auth.json'), u2!);
+  await f.adopt();
+  const retired = [...f.dirs.keys()].filter((name) => name.includes('_retired_'));
+  expect(retired).toHaveLength(1);
+  expect(f.credential(retired[0]!)).toBe(original);
+  expect(f.credential(f.taskVol)).toBe(u2);
+});
+
+it('a live writer blocks keeping the readable copy before an unreadable source replaces it', async () => {
+  const f = fixture();
+  const previous = f.credential(f.taskVol);
+  const [, make] = unreadable[0]!;
+  writeFileSync(join(f.dirs.get(f.userVol)!, 'auth.json'), make());
+  vi.mocked(f.db.query.cliInvocations.findFirst).mockResolvedValueOnce({
+    id: randomUUID(),
+  } as never);
+  await expect(f.adopt()).rejects.toMatchObject({ code: 'cli_auth_busy' });
+  expect([...f.dirs.keys()].filter((name) => name.includes('_retired_'))).toHaveLength(0);
+  expect(f.credential(f.taskVol)).toBe(previous);
+  await f.adopt();
+  const retired = [...f.dirs.keys()].filter((name) => name.includes('_retired_'));
+  expect(retired).toHaveLength(1);
+  expect(f.credential(retired[0]!)).toBe(previous);
+});
 
 it.each(
   unreadable.flatMap(([name, make]) =>

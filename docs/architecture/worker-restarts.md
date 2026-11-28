@@ -1524,12 +1524,13 @@ Unknowns stop at `MAX_AUTH_PROBE_UNKNOWNS` (20, injectable) distinct waves, a wa
 fails with named reason `cli_auth_probe_exhausted` and Retry guidance before any further
 dispatch. This is user action, never a code fix loop. Retry clears `started_at`; Resume and
 Retry with AI keep it and the old rows, but write their event in the transaction that reopens
-the step, so either starts a fresh allowance (a Resume after the cap no longer fails again
-after one paid run). Busy stays uncapped and free of crash-loop budgets. The two stored code
+the step, so either starts a fresh allowance of invocation-row failures (a Resume after the cap
+no longer fails again after one paid run). Busy stays uncapped and free of crash-loop budgets. The two stored code
 prefixes are `CLI_AUTH_BUSY` and `CLI_AUTH_PROBE_UNKNOWN` in `sandbox/cli-auth-errors.ts`; the
 error class, `isCliAuthWaitFailure` and the gate query all derive from them, and their values
 are persisted in `cli_invocations.error_message`, so a rename must never be done there. Direct
 applies use the same delay/cap with a small temporary count/timestamp in existing step output,
-since they have no invocation. Retry clears start/output and gives a fresh allowance; a failed
-row cannot automatically reopen. No new state machine, table, queue or fence is introduced.
+since they have no invocation; Resume and Retry with AI keep that output, so only Retry clears
+it. Retry clears start/output and gives a fresh allowance; a failed row cannot automatically
+reopen. No new state machine, table, queue or fence is introduced.
 Existing login refusals, auth-lock serialization and settlement guards are unchanged.

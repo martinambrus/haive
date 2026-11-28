@@ -674,6 +674,7 @@ async function retireGrokCopy(
   idx: number,
   label: string | null | undefined,
   runner: DockerRunner,
+  reason = 'superseded_login_or_scope',
 ): Promise<void> {
   const prefix = `${userVolumeForCtx(ctx, idx)}_retired_`;
   if (!runner.volumeList) throw new CliAuthRetryableError('cli_auth_probe_unknown');
@@ -689,7 +690,7 @@ async function retireGrokCopy(
       'haive.auth-retired': JSON.stringify({
         taskVol,
         source: label ?? null,
-        reason: 'superseded_login_or_scope',
+        reason,
       }),
     });
     if (!created.ok) throw new CliAuthRetryableError('cli_auth_probe_unknown');
@@ -785,6 +786,26 @@ async function ensureTaskAuthVolumesUnlocked(
             preserveGrokCopy,
           );
       if (readiness === 'recovery_required') throw new GrokCopyRecoveryError(ctx);
+      if (
+        readiness === 'source_moved' &&
+        preserveGrokCopy &&
+        !retired &&
+        ctx.authMode === 'subscription'
+      ) {
+        // A readable credential is never replaced by an unreadable one without keeping it first.
+        const source = await readVolumeFile(userVol, credRelPath!, runner, {
+          throwOnFailure: true,
+        });
+        if (source && !parseGrokAuthFile(source)) {
+          const copy = await readVolumeFile(taskVol, credRelPath!, runner, {
+            throwOnFailure: true,
+          });
+          if (copy && parseGrokAuthFile(copy)) {
+            await assertGrokCopyQuiescent(db!, ctx, taskId, taskVol, runner);
+            await retireGrokCopy(ctx, taskVol, idx, label, runner, 'unreadable_source_replaced');
+          }
+        }
+      }
       if (readiness === 'ready') {
         continue;
       }

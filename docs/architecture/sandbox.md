@@ -149,11 +149,18 @@ mode requires a nonempty source credential. A nonempty `auth.json` the parser ca
 (unknown shape, unparseable JSON, no refreshable OIDC entry) is admitted, at admission and
 before a superseded copy is retired, whenever no refresh fence is set: nothing exists to
 compare it with, so refusing would only block the login. The run proceeds and the worker logs
-one warning per task copy and process whose structured `reason` is `grok_refresh_untracked`
-(key on the code, never the message): Haive's own refresh does not track that credential, and
+a warning whose structured `reason` is `grok_refresh_untracked` (key on the code, never the
+message), at most once per task copy and process; a created or recreated copy forgets that, so
+it can log again after a recopy. Haive's own refresh does not track that credential, and
 sync-back is unchanged. When a fence is set the copy cannot be shown unspent, so it stays
-unknown and retryable (`cli_auth_probe_unknown`, same cap), never a login refusal. API-key
-mode prepares its separate empty auth volume and uses the injected key. No original source
+unknown and retryable (`cli_auth_probe_unknown`, same cap), never a login refusal. The fence
+file keeps the old token's fingerprint after a refresh that rotates the refresh token (only a
+same-token success or an unfenced 4xx writes `none`), so "no fence" holds for volumes Haive
+never rotated; an unreadable file on a rotated volume still refuses. When a moved source is
+unreadable and the task copy is readable, the copy is first kept as the scope's recovery copy
+(same writer drain and one-archive rule as any retirement, reason `unreadable_source_replaced`)
+before the recopy replaces it; an unreadable copy is never archived, so the archive keeps the
+last readable credential. API-key mode prepares its separate empty auth volume and uses the injected key. No original source
 label is relabeled.
 
 Retired volumes carry `haive.auth-retired` with the original task volume, source label and reason.
@@ -187,11 +194,11 @@ At the cap the step fails for user action with `cli_auth_probe_exhausted` and Re
 no further automatic dispatch or code fix loop occurs. Retry resets the step start/output and
 therefore its allowance. Resume (loop and fan-out arms) and Retry with AI keep `started_at` and
 the old rows but write their event in the transaction that reopens the step, so each starts a
-fresh allowance and its first dispatch is not paced by earlier rows. No new table, queue or
-fence is used.
+fresh allowance of invocation-row failures and its first dispatch is not paced by earlier rows.
+No new table, queue or fence is used.
 The direct plugin-install apply has no invocation ledger row: its existing deferred catch
 keeps just its unknown count and retry timestamp in temporary step output, replaced on success
-and cleared by Retry. It uses the same cap and delay, parking `waiting_cli` with the idle marker
+and cleared by Retry only, not by Resume or Retry with AI. It uses the same cap and delay, parking `waiting_cli` with the idle marker
 between attempts. A missing login keeps its existing inline login hint on both paths.
 Image ensure stays outside the lock. The lock covers only scope/source verification and copy IO,
 never a task-row transaction, an image build or a wait for a sibling's mounted copy.
@@ -231,7 +238,9 @@ retired again or signed out retain their existing owner-reaper lifecycle.
 Rollback of fix 10 is code only, with no schema, data or label change: it restores counting
 from `started_at` alone (a Resume after the cap fails again after one paid run) and the
 refusal of an unreadable Grok `auth.json` even when no fence is set. The
-`grok_refresh_untracked` warning is a log field and nothing persisted depends on it.
+`grok_refresh_untracked` warning is a log field and nothing persisted depends on it. A recovery
+copy kept for an unreadable moved source (reason `unreadable_source_replaced`) stays until
+recovery, sign-out or removal, like any retired copy; reverting code does not remove it.
 
 Rollback: revert fix 8 to restore fix 7's refusal behavior; its reader ignores the extra login-id
 label field. Retired user-owned volumes remain retained until explicit recovery/removal or user
