@@ -2267,6 +2267,11 @@ export const knowledgeAcquisitionStep: StepDefinition<KnowledgeDetect, Knowledge
                 { path: src.relPath, existingId: promo.id },
                 'kb re-route deduped (topic already in global KB); kept local copy',
               );
+            } else if (promo) {
+              ctx.logger.warn(
+                { path: src.relPath },
+                'kb re-route promoted but kept local: the recovery journal is unavailable',
+              );
             }
           } catch (err) {
             ctx.signal?.throwIfAborted();

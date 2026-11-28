@@ -77,8 +77,11 @@ it('bounds journal reads without accepting a truncated valid prefix', async () =
   const warn = vi.fn();
   const result = await restoreKbReroutes(repo, 'task', { warn }, Buffer.byteLength(valid));
   expect(result.canPurgeDrafts).toBe(false);
-  // An unread journal may hold the only original bodies: keep its bytes, move nothing.
-  expect(result.canDeleteLocal).toBe(false);
+  // Over the bound is deterministic content, not an IO fault: the bytes may hold the only
+  // original bodies, so they are set aside untouched and a fresh journal lets this run move files.
+  expect(result.canDeleteLocal).toBe(true);
   expect(warn).toHaveBeenCalledWith({ errorClass: 'RangeError' }, expect.any(String));
-  expect(await readFile(journal, 'utf8')).toBe(valid + ' invalid private trailing data');
+  expect(await readFile(`${journal}.unusable`, 'utf8')).toBe(
+    valid + ' invalid private trailing data',
+  );
 });

@@ -45,25 +45,59 @@ export async function restoreKbReroutes(
     );
   };
   const consumed: string[] = [];
+  const asideRel = `${journal}.unusable`;
+  let asideCreated = false;
+  let saved: Awaited<ReturnType<typeof readFileNoFollow>> | undefined;
   try {
-    const saved = await readFileNoFollow(repoPath, journal, {
+    saved = await readFileNoFollow(repoPath, journal, {
       strict: true,
       maxBytes: maxJournalBytes,
     });
-    if (saved?.truncated) throw new RangeError('KB recovery journal exceeds its bound');
-    const parsed =
-      saved === null ? state : recoverySchema.parse(JSON.parse(saved.data.toString('utf8')));
-    // Validate everything before restoring anything. Absence returns null, never ENOENT.
-    for (const file of parsed.files) {
-      const safe = sanitizeKbRelPath(file.path);
-      if (!safe.ok || safe.normalized !== file.path)
-        throw new Error('Invalid KB re-route recovery path');
-    }
-    state = parsed;
-    journalUsable = true;
   } catch (err) {
     canPurgeDrafts = false;
     warn(err);
+  }
+  if (saved !== undefined) {
+    try {
+      if (saved?.truncated) throw new RangeError('KB recovery journal exceeds its bound');
+      const parsed =
+        saved === null ? state : recoverySchema.parse(JSON.parse(saved.data.toString('utf8')));
+      // Validate everything before restoring anything. Absence returns null, never ENOENT.
+      for (const file of parsed.files) {
+        const safe = sanitizeKbRelPath(file.path);
+        if (!safe.ok || safe.normalized !== file.path)
+          throw new Error('Invalid KB re-route recovery path');
+      }
+      state = parsed;
+      journalUsable = true;
+    } catch (err) {
+      canPurgeDrafts = false;
+      warn(err);
+      // A content failure is deterministic: set the bytes aside, never overwrite or delete them.
+      try {
+        await renameNoFollow(repoPath, journal, asideRel, { noReplace: true });
+        asideCreated = true;
+        journalUsable = true;
+      } catch (asideErr) {
+        warn(asideErr);
+      }
+    }
+  }
+  if (journalUsable) {
+    // A set-aside journal may hold the only original bodies, so drafts stay while it exists.
+    try {
+      if ((await lstatNoFollow(repoPath, asideRel, { strict: true })) !== null) {
+        canPurgeDrafts = false;
+        if (!asideCreated)
+          log.warn(
+            { errorClass: 'JournalSetAside' },
+            'kb: recovery incomplete; keeping promoted drafts and any unjournaled local sources',
+          );
+      }
+    } catch (err) {
+      canPurgeDrafts = false;
+      warn(err);
+    }
   }
   if (journalUsable && isConsumed) {
     const ids = state.files.flatMap((file) => (file.entryId ? [file.entryId] : []));

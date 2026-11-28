@@ -528,6 +528,17 @@ replaced as a link, never followed. If the recovery directory slot is a file or 
 cannot be safely written/synced, the step continues without deleting any local source that run;
 promotion may still add a draft. Healthy Retry replaces prior drafts without duplicates. Re-route deadlines remain coded step failures; the uncertain file stays local.
 
+A journal whose complete bytes are unusable content (over the bound, not JSON, not the schema, or
+naming an invalid path) is deterministic, not an IO fault. It is renamed without replacing to
+`<journal>.unusable`, its bytes untouched, a fresh journal starts, and the run may delete local
+sources under the normal rule: a confirmed promotion plus a durable journal write. The draft
+purge stays off while the `.unusable` file exists, since it may hold the only original bodies; a
+person removes it after inspecting it to re-enable draft replacement on Retry. A read fault (a
+link, directory or file in the journal or directory slot, EIO), a taken aside name or a refused
+rename keeps the earlier behavior: no local deletion and the journal bytes untouched, because a
+transient fault must never publish empty state. A confirmed promotion whose journal write was
+refused keeps the file local and logs a warning naming its KB path.
+
 The recovery directory carries its own `*` ignore file (itself ignored), written before a body,
 so an onboarding that initializes Git and stages the full tree cannot commit recovery copies.
 The directory entry in `.haive` is fsynced before publishing a journal; the journal file and its
@@ -553,7 +564,8 @@ still pending, agent-readable under writable `.haive`; it is never staged as an 
 Existing failures that predate the journal cannot be reconstructed from it. Rollback must retain
 this recovery path and journals until affected onboarding tasks no longer need Retry; reverting
 code alone cannot restore already-moved uncommitted sources. The older reader strips the unknown
-`entryId` key and reads an absent or emptied journal as empty, so a code rollback is safe. No
+`entryId` key, ignores a `.unusable` file and reads an absent or emptied journal as empty, so a code
+rollback is safe. No
 database migration is added.
 
 ## Author task failure and cancellation
