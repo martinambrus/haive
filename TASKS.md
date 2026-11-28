@@ -1228,6 +1228,19 @@ In `martinambrus/haive-module-translator`. The owner's English-to-Slovak run fai
 
 1. Accept a declined form (same stem, up to 2 trailing letters changed on words of 5+ letters) at every keep-term check; a translated name still fails; codes and short words stay exact. Then the owner Retries the step.
 
+### T797 · FNF[T794] · Log in on an idle-image row, and raw image text in the login modal
+
+status: open · kind: fix (UX) · found: T794 review 2026-11-28 · priority: P3
+
+1. A row whose image is `idle` refuses Log in (`packages/worker/src/sandbox/login-container.ts` ~:53) while Test builds the image inline. Boot reconcile turns `building` into `idle` after a worker restart, so a login can fail with no build running. Recommended: Log in builds inline like Test, and the list shows that build.
+2. The login modal shows raw `sandbox image not ready (status=...)` text when its entry point has no provider row to read the state from. Give the refusal a stable error code and map it to the shared reason text.
+
+### T796 · CLI provider cards overflow a 360 px screen, Actions half off-screen
+
+status: in progress 2026-11-28 (session, web-only PR) · kind: fix (UX) · found: T794 live check 2026-11-28 · priority: P3
+
+Measured at 360 px (`/cli-providers`, 289 px main column): every card's narrowest layout is about 322 px (title column, 16 px gap, a 99 px Actions button and padding side by side), so main scrolls sideways and Actions sits half off-screen. T794's badges widen it: the nowrap "Rebuilding sandbox image · <version>" badge took the card to 400 px (`truncate` does not lower a flex item's min-content), and "Image build failed" to 291 px. Fix: stack Actions under the title below `sm`, and let both image badges wrap. Simulated with inline styles: main scroll width 482 px to 289 px (none). Control: browser check at 360/768/1280 after merge.
+
 ### T795 · Files read headline shows "≈0" estimated tokens when only unweighted runs read files
 
 status: parked 2026-11-28 (session triage, low: honest by the report's rules, misleading at a glance) · resume at the next change to the Files read report or on a user report · kind: fix (UX) · found: #1409 live browser check 2026-11-28 · priority: P4
@@ -1236,7 +1249,7 @@ Live check of #1409 (`/m/statistics?tab=tools`, repository T300-S 20261112-1927,
 
 ### T794 · CLI provider list shows no sandbox image rebuild, so Test and Log in run into it
 
-status: open · kind: bug (UX) · found: owner report 2026-11-28 while upgrading CLIs · priority: P2
+status: done 2026-11-28, #1413 (c43df98a4, web hot reload): each row shows the build from `sandbox_image_build_status` (building: spinner badge with the version; failed: the stored error and Rebuild image), the list polls every 3 s while a row builds (paused in a hidden tab), Test and Log in are disabled with one shared reason, Upgrade / Upgrade All say a rebuild started and the notice shows only while a row builds (Greptile P2). Live check at 1280/768 with a client-side response fixture, no owner-row action: passed; 360 px card overflow went to T796, found-not-fixed to T797 · kind: bug (UX) · found: owner report 2026-11-28 while upgrading CLIs · priority: P2
 
 Owner: upgrading CLIs rebuilds their sandbox images with no indicator anywhere; clicking Test then errors that the image is still being built. Verified in code: the list page `packages/web/src/app/(app)/cli-providers/page.tsx` Upgrade (`handleUpgrade` ~:211, and Upgrade All) PATCHes `cliVersion`, the api flags image inputs changed and sets `cli_providers.sandbox_image_build_status = 'building'`, the page reloads once and never reads that status (no `sandboxImageBuildStatus` in the page) nor polls while a build runs; the row's Test (~:574) stays offered and Log in fails in the worker with `sandbox image not ready (status=building)` (`worker/src/sandbox/login-container.ts:53`). The edit form already gates its probe on the column (`components/cli-provider-form.tsx` `TEST_BLOCK_BUILDING` ~:70, status at ~:223). Fix: (1) each list row shows the build state from the structural column (building: a "Rebuilding sandbox image" badge with spinner; failed: the stored build error with the existing rebuild action `POST /cli-providers/:id/sandbox-image/build`), never from message copy (AGENTS.md message-column rule); (2) the list polls, bounded, while any row is building and stops when none is; (3) Test and Log in on a building row are disabled with the reason (one shared constant with the form's text), and Upgrade / Upgrade All say a rebuild started; (4) cross-check every other surface that offers a CLI action against a building image (login dialog, task step CLI picker, usage reconnect) and gate or explain it the same way. Controls: web tests for each state and the poll stop; browser check at 360/768/1280.
 
