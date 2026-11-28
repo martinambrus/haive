@@ -303,23 +303,27 @@ One `--drain-timeout` covers the first wait and every re-wait: past it, work sti
 admissions still reopened stop the upgrade with an error, or with `--force` enter maintenance
 anyway. The journal (`upgrade_runs.phase`) reads `draining` during a re-wait and `maintenance` again
 on entry. Then the updater takes the snapshot. Live work (`liveWorkCount`) is a live task or a
-background job a route queued: a repository `cloning` or with `refresh_pending` set, a bundle `syncing`, a CLI provider whose
-sandbox image is `building` or whose model is `provisioning`. `GET /admin/maintenance/blocking` and
-the admin maintenance page list both, so what the page shows is what the updater waits for; a job
-row stuck in its in-progress status holds the drain until the deadline, and `--force` passes it.
+background job a route queued: a repository `cloning`, with `refresh_pending` set or holding a live
+root claim of any kind, a bundle `syncing`, a CLI provider whose
+sandbox image is `building` or whose model is `provisioning`. A claim is live while its
+`root_claimed_at` is newer than `ROOT_CLAIM_STALE_MS`; both counters compare against a cutoff built
+from the caller's clock and never against `now()`, because the column is a UTC wall clock without a
+zone and a session time zone would skew the window. `GET /admin/maintenance/blocking` and
+the admin maintenance page list both, so what the page shows is what the updater waits for; a
+repository listed only for its claim reads `checkout in use (<operation>)`, with `cloning` and
+`pending preparation` keeping precedence. A job
+row stuck in its in-progress status holds the drain until the deadline, and `--force` passes it. A
+claim whose holder died goes stale within `ROOT_CLAIM_STALE_MS` of its last renewal, inside the
+default 30-minute `--drain-timeout`.
 
-**Known drain gap (T780 PR2 L6, found-not-fixed):** API-held root claims for streamed attachments,
+**Known drain gap (T780 PR2 L6, narrowed by PR2b-3):** the count and the list include API-held root
+claims, so a drain waits for a request that holds one. The admissions of streamed attachments,
 attachment removal, remote relink/reconciliation and plan removal (`root_claim_kind = 'mutation'`)
-are neither counted by `liveWorkCount` nor listed by `/admin/maintenance/blocking`. Their admissions
-also do not take the new-work fence, so a zero count does not prove those requests finished.
-Before starting an upgrade, let those requests finish and prevent new attachment/relink/plan-delete
-requests throughout the drain and service replacement. Read the repository claim rows as an
-additional check: `root_claimed_at > now() - interval '15 minutes'` must return no live holds.
-A lease renews while the API is alive, with no duration cap. Stopping it mid-request leaves its
+do not yet take the new-work fence, so a request admitted after a zero count is not refused. A
+lease renews while the API is alive, with no duration cap. Stopping it mid-request leaves its
 last stamp live for up to `ROOT_CLAIM_STALE_MS` (15 minutes after the last renewal); new preparations
 wait for that expiry, preserving ready and their pending marker. This bound describes abandoned
-claims only, not a safe deadline for interrupting a live upload. Full repair needs both counted
-claims and mutation admission under the maintenance fence; this PR does not claim that fix.
+claims only, not a safe deadline for interrupting a live upload.
 
 Which tasks count depends on the state in force (`drainTaskStatuses`, in `@haive/shared`). Over
 `normal` or `draining` they are `queued`, `running`, `paused`, `waiting_user` and `waiting_pr`: the
@@ -417,7 +421,10 @@ Draining runs against the source release's schema before migration. The counter 
 `tasks.dead_at` in the catalog and excludes dead tasks only when that column exists (0197); older
 schemas count every task in the selected live statuses. It also detects `repositories.refresh_pending`
 (0250) in the catalog before counting that marker beside `cloning`, so a ready checkout being
-refreshed still holds the drain. Older source schemas retain the cloning-only count. Deploy the
+refreshed still holds the drain, and `repositories.root_claimed_at` (0162) before counting a live
+root claim beside them. The released v0.2.0 schema ends at 0155, so the updater of the target
+release meets a source schema without either column; the API and worker always read their own
+migrated schema and need no such check. Older source schemas retain the cloning-only count. Deploy the
 marker-aware updater with the API/worker that set it; before downgrading, settle pending refreshes
 and retain the additive column and migration. Its other repositories, bundles and provider
 columns all exist in the first release baseline. If configuration boot needs its encrypted-row

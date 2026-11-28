@@ -345,8 +345,8 @@ export default function MaintenancePage() {
           <div className="space-y-2">
             <h3 className="text-sm font-medium text-neutral-300">Background jobs</h3>
             <p className="text-xs text-neutral-500">
-              Repository imports, bundle syncs, sandbox image builds and model downloads. They end
-              on their own and cannot be paused here.
+              Repository imports and file operations, bundle syncs, sandbox image builds and model
+              downloads. They end on their own and cannot be paused here.
             </p>
             {blocking.jobs.map((j) => (
               <div

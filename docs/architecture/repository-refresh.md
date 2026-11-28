@@ -244,7 +244,9 @@ The ordinary stranded-preparation sweep also
 releases an old marker whose queue has no live job, preserving any repair code. A `ready` row
 without a repair code keeps its status and display copy: the sweep clears only the stale marker
 and logs that release once. The maintenance blocking list labels every marked job `pending preparation`, including initial
-preparation and its post-ready imports. Root claims, holding tasks and
+preparation and its post-ready imports, and a repository held only by a live root claim
+`checkout in use (<operation>)`: reset, rebuild, refresh, file save, file change or check, with a
+claim of no recorded kind read as reset. Root claims, holding tasks and
 live queue jobs remain temporary route refusals and do not hide Retry. An older list response
 without capability fields keeps the Retry action for compatibility. Repository archives use
 the chunked API: `POST /repos/upload/init`, `PUT /repos/upload/:id/chunk` with `Content-Range: bytes start-end/total`,
