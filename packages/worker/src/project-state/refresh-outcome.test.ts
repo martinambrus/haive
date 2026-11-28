@@ -239,3 +239,26 @@ it.each(['written', 'held', 'blocked', 'error'] as const)(
     expect(mocks.sync).toHaveBeenCalledTimes(outcome === 'error' ? 0 : 1);
   },
 );
+it('maps a sync held by the checkout policy to a checkout hold and records why', async () => {
+  mocks.sync.mockResolvedValue({ outcome: 'held', code: 'checkout_unavailable' });
+  const sets: Record<string, unknown>[] = [];
+  const base = db() as unknown as { select: unknown };
+  const recording = {
+    select: base.select,
+    update: () => ({
+      set: (values: Record<string, unknown>) => {
+        sets.push(values);
+        return { where: async () => [] };
+      },
+    }),
+  } as unknown as Database;
+
+  const result = await refreshProjectStateOutcome(recording, 'repo');
+
+  expect(result).toEqual({ outcome: 'held', reason: 'checkout' });
+  expect(mocks.write).not.toHaveBeenCalled();
+  const reasons = sets.map((values) => values.lastError);
+  expect(reasons).toHaveLength(1);
+  expect(typeof reasons[0]).toBe('string');
+  expect((reasons[0] as string).length).toBeGreaterThan(0);
+});
