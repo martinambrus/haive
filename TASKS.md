@@ -1262,9 +1262,20 @@ status: open · kind: fix · found: T144/T147 driver 2026-11-28 · priority: P4
 3. The committed rag-eval fixture holds 0.33% duplicated chunks (the real repository 8.3%), so identical-body changes cannot be evaluated on it; its 72-query held-out split needs about 4 net rescued golds to clear the CI rule; the harness stores no per-hit ranks; the negatives diagnostic (`rag-eval-report.ts` ~:179) reads only the page's top dense similarity, so lexical changes barely register there.
 4. If collapse is revived: knowledge-reserve extras that duplicate each other are not deduplicated.
 
+### T801 · FNF[T797] · login image build edges
+
+status: open · kind: fix (UX) · found: T797 driver and its xhigh review 2026-11-28 · priority: P3
+
+1. A first image build can outlast the login dialog's 2-minute start limit: the user sees "Login took too long to start. Retry the login." while the build continues, and a retry is refused as building until it ends. Show build progress in the modal and extend the start limit while the row's own build runs.
+2. A superseded, not-found or removed build result is coded `failed` (needs a structural field on `SandboxImageBuildResult`); rare race, the list shows the true state.
+3. The cache-hit `claim()` and `removeReplaced` in `handleBuildSandboxImageJob` sit outside its `try`; a throw there strands `building` until boot reconcile. PRE-EXISTING, shared with Test, Upgrade and dispatch.
+4. The edit-page Test card does not poll for a login-started build.
+5. `LOGIN_CREATE` is not requeued at boot, so a job stalled by a crash waits out its 30-minute lock (the lease guard now ends it early once its api session is gone). PRE-EXISTING.
+6. No control for Login beside a forced Upgrade build (covered indirectly by the building-row refusal and join controls).
+
 ### T797 · FNF[T794] · Log in on an idle-image row, and raw image text in the login modal
 
-status: open · kind: fix (UX) · found: T794 review 2026-11-28 · priority: P3
+status: done 2026-11-28, #1417 (35a60b221, `pnpm docker libs`, worker reloaded, 0 errors): Log in calls Test's own `ensureProviderSandboxImage` before creating the login container (shared single-flight and per-tag lock; a `building` row with no image is refused at once), the providers list polls while the login dialog is open, a login job whose session ended stops before the build and the container create (`loginLeaseHeld`), and the refusal carries a stable `code` mapped to the list's reason text; found-not-fixed went to T801 · kind: fix (UX) · found: T794 review 2026-11-28 · priority: P3
 
 1. A row whose image is `idle` refuses Log in (`packages/worker/src/sandbox/login-container.ts` ~:53) while Test builds the image inline. Boot reconcile turns `building` into `idle` after a worker restart, so a login can fail with no build running. Recommended: Log in builds inline like Test, and the list shows that build.
 2. The login modal shows raw `sandbox image not ready (status=...)` text when its entry point has no provider row to read the state from. Give the refusal a stable error code and map it to the shared reason text.
