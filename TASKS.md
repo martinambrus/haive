@@ -1249,7 +1249,7 @@ status: open · kind: fix · found: T665 driver and its xhigh review 2026-11-28 
 4. A killed amp run's output is now null; that amp's assistant usage is real rests on the adapter comment and one recorded test shape (no retained amp logs). The codex app-server running total for a killed turn is a floor.
 5. `tool-usage.ts` ~:460 sets `resultSeen` on any result event while `stream.ts` ~:338 requires a top-level one.
 6. About 160 historic dev rows (63 ollama, about 101 claude-code fallbacks) keep fabricated output; a data migration could target output 0 with prompt above 0, no `costUsd`, exit 137/143/null and a retained stream log without a result event.
-7. The statistics module's SQL wiring is tested only against a mocked db (the fragments are DB-tested through the api); no render test of the task page's `StepTokens` and `TaskTotalTime` null branches (not checked live; only the statistics page's unknown-output marks were, with a client-side fixture, 2026-11-28).
+7. The statistics module's SQL wiring is tested only against a mocked db (the fragments are DB-tested through the api); no render test of the task page's `StepTokens` and `TaskTotalTime` null branches (checked live 2026-11-28 with a client-side fixture on a test-repo task: 10 of 10 step badges `≥`, total `≥ 1.1M`, provider row `out —`, no crash or console error; the statistics page marks too).
 8. `sum(numeric)::int` aggregates overflow past about 2.1B tokens. PRE-EXISTING, not worsened.
 9. Dead: `files-read-rollup.ts` ~:131 `share_output_tokens` is carried and never used; `tiered-cost.ts` ~:41's guard is unreachable from the top level.
 
