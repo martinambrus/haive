@@ -7,13 +7,14 @@ import type { DbTx } from './task-attachments-lock.js';
 export async function withSettledTransaction<T>(
   handle: Database | DbTx,
   work: (tx: DbTx) => Promise<T>,
+  config?: Parameters<Database['transaction']>[1],
 ): Promise<T> {
   let section: Promise<T> | undefined;
   try {
     return await (handle as Database).transaction((tx) => {
       section = work(tx);
       return section;
-    });
+    }, config);
   } finally {
     await section?.catch(() => undefined);
   }

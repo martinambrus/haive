@@ -29,9 +29,14 @@ export function planCheckoutDatabase(db: Database): Database {
   const wrapped = new Proxy(db, {
     get(target, key) {
       if (key === 'transaction')
-        return (work: (tx: DbTx) => Promise<unknown>) =>
-          withSettledTransaction(target, (tx) =>
-            work(planCheckoutDatabase(tx as unknown as Database) as unknown as DbTx),
+        return (
+          work: (tx: DbTx) => Promise<unknown>,
+          config?: Parameters<Database['transaction']>[1],
+        ) =>
+          withSettledTransaction(
+            target,
+            (tx) => work(planCheckoutDatabase(tx as unknown as Database) as unknown as DbTx),
+            config,
           );
       const member = Reflect.get(target, key, target);
       return typeof member === 'function' ? member.bind(target) : member;
