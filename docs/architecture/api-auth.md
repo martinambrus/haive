@@ -463,7 +463,8 @@ five-character error code (a SQLSTATE, or an errno such as `EPIPE`), never the a
 
 A readable blind-index match gets a reset link at its stored address only while the user is active;
 a deactivated match sends nothing. A claim is allowed only after a `config.discard_unreadable_secrets`
-audit row exists, and only when exactly one active user whose email fails `tryDecryptEmail` has a
+audit row exists (a boot with no key and a boot with a key that reads nothing both write it; see
+[Error diagnostics](error-diagnostics.md)), and only when exactly one active user whose email fails `tryDecryptEmail` has a
 plaintext `git_email` equal to the typed one (trimmed,
 case-insensitive). The typed address is stored encrypted on the reset row and the link goes to it.
 Zero or several matches send nothing; those rows are relinked by an administrator.

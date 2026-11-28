@@ -599,7 +599,10 @@ jobs:
           PG_CONTAINER: ${{ job.services.postgres.id }}
           PGVECTOR_CONTAINER: ${{ job.services.pgvector.id }}
           # This job owns its Redis service: gated databases 11-14, job default 0. Rows run one at a
-          # time, so advance-epochs shares database 11 under its own random queue name.
+          # time, so advance-epochs shares database 11 under its own random queue name, and the
+          # encryption-key race test shares database 14: it writes and deletes only the two keys that
+          # name the install's key, which no other row touches.
+          ENCRYPTION_KEY_BOOT_RACE_REDIS_URL: redis://localhost:6379/14
           INTEGRATIONS_BROKER_TEST_REDIS_URL: redis://localhost:6379/13
           MODULE_PURGE_API_TEST_REDIS_URL: redis://localhost:6379/12
           INTEGRATIONS_AUDIT_TEST_REDIS_URL: redis://localhost:6379/11

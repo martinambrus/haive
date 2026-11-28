@@ -178,6 +178,8 @@ describe('retired system secrets on boot', () => {
     removed = [];
     failDelete = false;
     db = {
+      // The boot key check reads the stored secrets; this fake holds none to read.
+      execute: async () => [],
       delete: () => ({
         where: (where: SQL) => ({
           returning: async () => {

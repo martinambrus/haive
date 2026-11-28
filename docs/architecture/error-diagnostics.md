@@ -154,6 +154,70 @@ succeeds. Concurrent boots and a crash between commit and publish reuse one Redi
 and audit id; the reserve and publish Lua scripts run against a real Redis in CI
 (`encryption-key-boot-redis.test.ts`). A boot with a usable env key, and the fallback recovery, seed that key only while no pending exists: a pending younger than 10 minutes (`PENDING_ENCRYPTION_KEY_WAIT_MS`, timed by its `reservedAt`) is a discard in progress, so boot waits and retries; an older one, or one without a readable `reservedAt`, is a discard a crash interrupted, and boot exits naming Redis key `bootstrap:pendingEncryptionKey` with the two ways out: restart without `CONFIG_ENCRYPTION_KEY` and with the override to finish it, or, when `audit_events` holds no `config.discard_unreadable_secrets` row whose id is the pending JSON's `id` (the discard did not commit), delete that key and restart to keep the secrets. The updater gives boot its own short-lived one-connection client, since Drizzle rewrites the codecs of the postgres.js client it wraps and the updater's journal needs its own.
 
+**A key that cannot read the stored secrets is refused too, in every environment.** Outside
+production `SecretsService.get` used to answer `null` for a `system_secrets` row its key could not
+decrypt, and `getMasterKek`, `getJwtSecret` and `getEmailBlindIndexPepper` read `null` as absent:
+they generated a new value and upserted it over the stored row. A wrong key (a Redis wiped and
+reseeded from a different `CONFIG_ENCRYPTION_KEY`, or a stale key kept in Redis) therefore orphaned
+every envelope, user field and pepper-derived login index without a word. `get` now throws
+`SecretUnreadableError` (`config/secret-unreadable.ts`; `secretKeys` names the rows, never a value)
+for any stored row that `tryDecrypt` cannot read, in every `NODE_ENV`; only an absent row generates,
+and a caller decides on the class, never the message. `SecretsService.initialize` also refuses before
+any write: `assertKeyReadsSystemSecrets` (`encryption-key-boot.ts`) reads the table and passes when it
+is empty (a first install), absent (the updater can boot before the schema exists) or readable by at
+least one row; a table in which every row is unreadable is the wrong key. The refusal exits boot 1
+(not a `ConfigUnavailableError`, so it never retries) and names where the key came from, the rows and
+both ways out: restore the original key (`CONFIG_ENCRYPTION_KEY` only seeds an empty Redis, so delete
+a different key stored under `bootstrap:encryptionKey` first), or `HAIVE_DISCARD_UNREADABLE_SECRETS=1`,
+the same audited override, now for a present key too. That discard takes
+`LOCK TABLE system_secrets IN SHARE ROW EXCLUSIVE MODE`, reads the table again under the lock (a peer
+that already discarded and regenerated is left alone, and api and worker booting together record one
+audit row), then writes the same `config.discard_unreadable_secrets` audit row (random id,
+`keyPresent: true`, the same counts) and deletes the system secrets in that one transaction, so the
+recovery claim gates read it as they read the no-key discard. A table with only some unreadable rows,
+which the old behaviour could already have left behind, does not refuse boot, and the override does
+not apply to it: it fires only when the key reads none of the rows, so it can never delete a readable
+`master_kek`. Each unreadable row throws `SecretUnreadableError` at its reader instead of being
+replaced. The optional rows (`mail_smtp_password` behind `GET /admin/mail`,
+`global_kb_connection_string` behind every global KB reader and its config route, a
+`module_source:<id>:token`) then fail at their readers, as they already did in production, and now
+outside it too. When the unreadable row is one boot reads (`master_kek`, `jwt_secret`,
+`email_blind_index_pepper`), the service that reads it exits at boot with the row's name, and the log
+line before it points here. Restore the key that wrote that row. If that key is lost, delete that one
+row (`DELETE FROM system_secrets WHERE key = '<name>'`). A boot row is then generated again by a
+restart, accepting what depended on it: a new `master_kek` orphans every envelope the old one
+wrapped, a new `email_blind_index_pepper` breaks every email login lookup, a new `jwt_secret` signs
+everyone out. An optional row is entered again in its admin page.
+`recover-admin` reports a refusal as "does not decrypt the stored system secrets" and never offers the
+override. The `./haive` helper and its PowerShell fallback forward only `DATABASE_URL`, `REDIS_URL`
+and `CONFIG_ENCRYPTION_KEY`, so they cannot discard; the `docker exec` form below runs inside the api
+container and inherits its `HAIVE_DISCARD_UNREADABLE_SECRETS`, so keep that at 0 when running it.
+
+**An environment key is checked before it seeds Redis.** `ConfigService.ensureEncryptionKey` seeded
+`CONFIG_ENCRYPTION_KEY` into an empty Redis without asking whether it reads what the database holds,
+so a wiped Redis plus a different key reached the generators above as a first install. It now runs
+the same `assertKeyReadsSystemSecrets` before the seed whenever the caller passed a database (api,
+worker and its scripts, the updater and `recover-admin` all do; a caller without one has nothing to
+check against and is unchanged). A key that reads none of the rows is refused with Redis untouched,
+so a refusal never leaves a wrong key behind. The override is ordered the other way round from the
+no-key discard: Redis decides which key is the install's, and another process may have seeded it
+since this one read Redis empty, so a discard first seeds set-if-absent, reads Redis again and
+deletes only if Redis holds this key. A process whose key lost that race deletes nothing and meets the
+existing mismatch check (production refuses boot, other environments warn and use the stored key). A
+crash between that seed and the commit leaves this key in Redis and every row in place: the next boot
+reaches the same discard through `SecretsService.initialize` while the override is set, and refuses
+once it is removed. No row is deleted without its audit row in the same transaction. The no-key
+discard needs no such step, since its pending reservation is atomic with the key's absence and
+precedes the delete. MEASURED on throwaway PostgreSQL 18 and Redis 8 through the real api
+`bootstrap()` (one fresh process per phase, evidence by SHA-256 of each stored row): with Redis wiped
+and a different `CONFIG_ENCRYPTION_KEY`, the base commit booted and changed the stored system secrets
+(the row hashes differ); now boot refuses with every row unchanged and no key seeded, the original
+key then boots unchanged, and the override writes one audit row. MEASURED with two forked boots on the
+same stores (`encryption-key-boot-db.test.ts`, R1 to R4): a process holding a different key and the
+override, held right after its empty Redis read while the original key seeded Redis, deleted all
+three system secrets under the previous order; now it deletes nothing, and a process that wins the
+race has its key in Redis before the delete opens.
+
 **Recover an administrator after key loss.** First let boot finish with the discard override, then
 remove the override. New installations created with this release have the recovery subcommand.
 The installer writes the helper once; upgrades do not refresh it, so an older installation's

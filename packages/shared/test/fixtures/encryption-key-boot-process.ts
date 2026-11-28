@@ -10,10 +10,13 @@ let commit: (() => void) | undefined;
 let discarded = false;
 const db = {
   execute: async (query: SQL) => {
+    const text = new PgDialect().sqlToQuery(query).sql;
     // Capability discovery must not consume the inventory barrier used by the parent.
-    if (new PgDialect().sqlToQuery(query).sql.includes('to_regclass')) {
+    if (text.includes('to_regclass')) {
       return [{ providers: true, connections: true }];
     }
+    // The environment key's check against the stored system secrets: this install holds none.
+    if (text.includes('encrypted_value')) return [];
     await new Promise<void>((resolve) => {
       reserve = resolve;
       process.send!({ event: 'inventory' });
