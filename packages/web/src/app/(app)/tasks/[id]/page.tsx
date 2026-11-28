@@ -3095,9 +3095,9 @@ function StepTokens({
     costUsd,
   } = tokenUsage;
   const title =
-    `CLI tokens (provider-native, incl. any summary pass): in ${inputTokens.toLocaleString()} / out ${outputTokens === null ? 'unknown' : fullTokens(outputTokens, outputUnknownRuns ?? 0)} / total ${totalTokens.toLocaleString()}` +
+    `CLI tokens (provider-native, incl. any summary pass): in ${inputTokens.toLocaleString()} / out ${fullTokens(outputTokens, outputUnknownRuns ?? 0)} / total ${totalTokens.toLocaleString()}` +
     (outputTokens === null
-      ? ' (output unknown: the run was killed before it reported it, so the total leaves it out)'
+      ? ' (output unknown: not reported yet, or the run was killed before its result; the total leaves it out)'
       : '') +
     (cacheReadTokens ? `, cache read ${cacheReadTokens.toLocaleString()}` : '') +
     (cacheCreationTokens ? `, cache write ${cacheCreationTokens.toLocaleString()}` : '') +

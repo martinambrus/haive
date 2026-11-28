@@ -526,7 +526,7 @@ function InvocationPanel({
                 className="rounded border border-neutral-700 bg-neutral-800/40 px-1.5 py-0.5 text-sky-300"
                 title={
                   `Token usage (provider-native): in ${tu.inputTokens.toLocaleString()}` +
-                  ` / out ${tu.outputTokens === null ? 'unknown' : fullTokens(tu.outputTokens)}` +
+                  ` / out ${fullTokens(tu.outputTokens)}` +
                   (tu.cacheReadTokens
                     ? ` / cache read ${tu.cacheReadTokens.toLocaleString()}`
                     : '') +

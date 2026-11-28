@@ -236,6 +236,21 @@ describe('statistics overview page', () => {
       expect(summary.spend.byProvider[0].outputUnknownRuns).toBe(2);
     });
 
+    it('marks the tokens KPI as a lower bound only when runs are unknown', async () => {
+      h.providerOutput = { outputTokens: null, outputUnknownRuns: 2 };
+      const app = buildApp();
+      const summary = await get(app, '/m/statistics/summary');
+      const unknownBody = await get(app, KPI.tokens);
+      expect(unknownBody.unit).toBe('at least');
+      expect(unknownBody.value).toBe(summary.tokens.totalTokens);
+      expect(() => widgetResponseSchema('kpi').parse(unknownBody)).not.toThrow();
+
+      h.providerOutput = { outputTokens: 200, outputUnknownRuns: 0 };
+      const knownBody = await get(app, KPI.tokens);
+      expect('unit' in knownBody).toBe(false);
+      expect(() => widgetResponseSchema('kpi').parse(knownBody)).not.toThrow();
+    });
+
     it('carries the counts through /steps', async () => {
       h.stepTokenRows = [
         {

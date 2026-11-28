@@ -981,7 +981,12 @@ export default function createStatsRoutes(ctx: ModuleRouteContext): Hono<AppEnv>
       ctx.db,
       invocationWindowFilter(q, c.get('userId'), new Date(q.fromMs), new Date(q.toMs)),
     );
-    return c.json({ value: normalizeBreakdown(breakdown).totalTokens });
+    const tokens = normalizeBreakdown(breakdown);
+    return c.json(
+      tokens.outputUnknownRuns > 0
+        ? { value: tokens.totalTokens, unit: 'at least' }
+        : { value: tokens.totalTokens },
+    );
   });
 
   statsRoutes.get('/overview/activity', async (c) => {

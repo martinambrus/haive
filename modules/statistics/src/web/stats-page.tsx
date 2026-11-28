@@ -832,10 +832,10 @@ function StatsPageInner({ moduleId, api, MarkdownView }: Omit<ModulePageProps, '
                 </div>
               </div>
               {summary.tokens.outputUnknownRuns > 0 && (
-                <p className="text-[11px] text-neutral-500">
-                  Output was never reported by {summary.tokens.outputUnknownRuns}{' '}
-                  {summary.tokens.outputUnknownRuns === 1 ? 'run' : 'runs'} (killed before their
-                  result), so the token figures above leave it out.
+                <p className="text-[11px] text-neutral-400">
+                  Output has not been reported by {summary.tokens.outputUnknownRuns}{' '}
+                  {summary.tokens.outputUnknownRuns === 1 ? 'run' : 'runs'} (still running, or
+                  killed before their result), so the token figures above leave it out.
                 </p>
               )}
 

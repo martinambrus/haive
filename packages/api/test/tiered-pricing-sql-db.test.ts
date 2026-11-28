@@ -179,19 +179,20 @@ describe.skipIf(!url)('tier inventories and spend queries on migrated PostgreSQL
         { inputTokens: 10, outputTokens: null, totalTokens: 10 },
         { inputTokens: 10, outputTokens: 40, totalTokens: 50 },
         { inputTokens: 10, outputTokens: null, totalTokens: 10 },
+        { inputTokens: 10, totalTokens: 10 },
         null,
       ]);
       const [mixedCard] = await sumProviderBreakdownWhere(
         scoped,
         eq(schema.tasks.id, mixed.task.id),
       );
-      expect(mixedCard).toMatchObject({ outputTokens: 40, outputUnknownRuns: 2 });
+      expect(mixedCard).toMatchObject({ outputTokens: 40, outputUnknownRuns: 3 });
       const mixedTotals = (await sumTaskTokens(scoped, [mixed.task.id])).get(mixed.task.id);
-      expect(mixedTotals).toMatchObject({ outputTokens: 40, outputUnknownRuns: 2 });
+      expect(mixedTotals).toMatchObject({ outputTokens: 40, outputUnknownRuns: 3 });
       const [mixedStep] = await enrichStepsWithCliStats(scoped, mixed.task.id, [
         { id: mixed.step.id },
       ]);
-      expect(mixedStep!.tokenUsage).toMatchObject({ outputTokens: 40, outputUnknownRuns: 2 });
+      expect(mixedStep!.tokenUsage).toMatchObject({ outputTokens: 40, outputUnknownRuns: 3 });
 
       const allUnknown = await makeTask('all unknown');
       await seed(allUnknown, [
