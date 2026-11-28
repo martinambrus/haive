@@ -371,7 +371,8 @@ async function removeBaseWorktree(repoPath: string, worktreePath: string): Promi
 
 /** The tip the feature merge starts from, with the base at `head`: the tip recorded ahead of an earlier
  *  pass's merge while `head` is that merge landed and holds the whole feature (a stop before its state
- *  was saved, so the merge below is a no-op), else `head`. */
+ *  was saved, so the merge below is a no-op), else `head`. A git error in the proof throws, leaving the
+ *  record for the next retry. */
 async function mergeStartTip(state: MergeResolveState, head: string): Promise<string> {
   const recorded = state.preMergeBaseSha;
   return recorded &&
@@ -380,6 +381,17 @@ async function mergeStartTip(state: MergeResolveState, head: string): Promise<st
     (await isCommitAncestor(state.mergeDir, `${state.featureBranch}^{commit}`, head))
     ? recorded
     : head;
+}
+
+/** `state` without the tip recorded ahead of its feature merge, when a halt merged nothing and the base is
+ *  still at that tip: no merge of this step is left for it to describe, so one a person makes on it before
+ *  the retry must not read as this step's. Null when there is nothing to drop; the record is read only
+ *  while `baseShaBefore` is unset, so a state that has one has none to drop. */
+async function withoutUnmergedTip(state: MergeResolveState): Promise<MergeResolveState | null> {
+  if (!state.preMergeBaseSha || state.baseShaBefore) return null;
+  return (await revParse(state.mergeDir, 'HEAD')) === state.preMergeBaseSha
+    ? { ...state, preMergeBaseSha: undefined }
+    : null;
 }
 
 async function taskRepositoryId(db: Database, taskId: string): Promise<string | null> {
@@ -1092,7 +1104,8 @@ function haltRefused(
   );
 }
 
-/** 12 only; skipped in a base-sync round and with the feature's merge open, whose tip must not move. */
+/** 12 only; skipped in a base-sync round and with the feature's merge open, whose tip must not move.
+ *  `beforeHalt` runs in the halt's own transaction, ahead of the status write. */
 async function putBackBeforeFeatureMerge(
   db: Database,
   spec: MergeResolveSpec,
@@ -1101,6 +1114,7 @@ async function putBackBeforeFeatureMerge(
   ctx: StepContext,
   state: MergeResolveState,
   worktreePath: string | null,
+  beforeHalt?: (tx: DbHandle) => Promise<void>,
 ): Promise<{ current: TaskStepRow } | { halted: MergeResolved }> {
   if (!spec.putBackBeforeMerge || (state.mergeStage ?? 'feature') !== 'feature') return { current };
   let notes: string[];
@@ -1119,7 +1133,15 @@ async function putBackBeforeFeatureMerge(
     );
     const message = `Nothing was merged: ${safeErrorMessage(err)}`;
     return {
-      halted: await haltFailed(db, current, params, state, message, 'haive files not put back'),
+      halted: await haltFailed(
+        db,
+        current,
+        params,
+        state,
+        message,
+        'haive files not put back',
+        beforeHalt,
+      ),
     };
   }
   let updated = current;
@@ -1355,6 +1377,15 @@ async function resolveMergePhaseInMove(
     await saveMergeState(db, current.id, state);
   }
 
+  /** A halt's `beforeRecord` that drops the tip recorded ahead of the merge (see `withoutUnmergedTip`), in the
+   *  halt's own transaction: its status write fences out every write of this pass that follows it. */
+  const forgetTipBeforeHalt =
+    (from: MergeResolveState) =>
+    async (tx: DbHandle): Promise<void> => {
+      const cleared = await withoutUnmergedTip(from);
+      if (cleared) await saveMergeState(tx, current.id, cleared);
+    };
+
   if (state.phase !== 'done') {
     const claim = await claimMergeDir(db, {
       mergeDir: state.mergeDir,
@@ -1370,6 +1401,7 @@ async function resolveMergePhaseInMove(
         null,
         `Task "${claim.holder.title}" (${claim.holder.id}) is still merging into ${state.baseBranch} in ${state.mergeDir}; retry once it finishes.`,
         'merge dir in use',
+        forgetTipBeforeHalt(state),
       );
     }
   }
@@ -1385,16 +1417,28 @@ async function resolveMergePhaseInMove(
       ctx,
       pending,
       worktreePath,
+      forgetTipBeforeHalt(pending),
     );
     if ('halted' in putBackFirst) return putBackFirst.halted;
     current = putBackFirst.current;
     const repositoryId =
       pending.mode === 'same-branch' ? await taskRepositoryId(db, params.taskId) : null;
+    // A halt that merged nothing, with the base still at the recorded tip, leaves no merge of this step for
+    // that tip to describe: a merge a person makes on it before the retry must not read as this step's.
+    const forgetUnmergedTip = async (): Promise<void> => {
+      const cleared = await withoutUnmergedTip(pending);
+      if (!cleared) return;
+      pending = cleared;
+      await mergeSection(repositoryId, cleared.mergeDir, (tx) =>
+        saveMergeState(tx, current.id, cleared),
+      );
+    };
     // A plan row stamped before 0196 takes its base from the checkout before the merge moves it.
     if (repositoryId && !(await peekOpenMerge(pending.mergeDir))) {
       try {
         await seedPlanBaseFromCheckout(db, repositoryId, pending.mergeDir);
       } catch (err) {
+        await forgetUnmergedTip();
         await settleGivenUp(db, current, params, pending);
         return haltFailed(
           db,
@@ -1407,6 +1451,7 @@ async function resolveMergePhaseInMove(
       }
       const stopped = await setAside(repositoryId, pending.mergeDir);
       if (stopped !== null) {
+        await forgetUnmergedTip();
         await settleGivenUp(db, current, params, pending);
         return haltFailed(db, current, params, state, asideHalt(stopped), 'haive files changed');
       }
@@ -1507,21 +1552,6 @@ async function resolveMergePhaseInMove(
         return recorded;
       });
     }
-    // A halt that merged nothing, with the base still at the recorded tip, leaves no merge of this step for
-    // that tip to describe: a merge a person makes on it before the retry must not read as this step's.
-    const forgetUnmergedTip = async (): Promise<void> => {
-      if (
-        !pending.preMergeBaseSha ||
-        (await revParse(pending.mergeDir, 'HEAD')) !== pending.preMergeBaseSha
-      ) {
-        return;
-      }
-      const forgotten = { ...pending, preMergeBaseSha: undefined };
-      pending = forgotten;
-      await mergeSection(repositoryId, forgotten.mergeDir, (tx) =>
-        saveMergeState(tx, current.id, forgotten),
-      );
-    };
     let attempt = await mergeSection(repositoryId, pending.mergeDir, openPending);
     pending = adoptKept(pending, attempt.adopted);
     // A file Haive rewrote since the set-aside sends it round again.

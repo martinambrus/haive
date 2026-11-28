@@ -17,17 +17,25 @@ import type { AdvanceStepParams, TaskStepRow } from './step-runner.js';
 const h = vi.hoisted(() => ({
   crashAfterMerge: false,
   crashBeforeMerge: false,
+  /** The next git call this matches answers with a failed exit, once: a transient read error. */
+  failRead: null as ((argv: string[]) => boolean) | null,
   pushes: [] as Array<{ branch: string; sha?: string }>,
 }));
-// The set-aside seams a task with a repository row goes through; a task without one never calls them.
-const aside = vi.hoisted(() => ({ setAside: vi.fn(), restore: vi.fn() }));
+// The seams a task with a repository row goes through (a task without one never calls them), and the
+// step's own put-back hook.
+const aside = vi.hoisted(() => ({
+  setAside: vi.fn(),
+  restore: vi.fn(),
+  seed: vi.fn(),
+  putBack: vi.fn(),
+}));
 vi.mock('@haive/database', async (original) => ({
   ...(await original<typeof import('@haive/database')>()),
   lockRepositoryTasksKey: async () => {},
 }));
 vi.mock('../plan/mirror.js', async (original) => ({
   ...(await original<typeof import('../plan/mirror.js')>()),
-  seedPlanBaseFromCheckout: async () => {},
+  seedPlanBaseFromCheckout: aside.seed,
 }));
 vi.mock('../repo/refresh.js', async (original) => ({
   ...(await original<typeof import('../repo/refresh.js')>()),
@@ -53,6 +61,10 @@ vi.mock('../repo/git-push.js', async (original) => {
       return { pushed: true as const, remote: 'origin' as const, branch: args.branch };
     },
     gitRun: async (...args: Parameters<typeof actual.gitRun>) => {
+      if (h.failRead?.(args[1])) {
+        h.failRead = null;
+        return { stdout: '', stderr: 'injected git failure', code: 128 };
+      }
       if (h.crashBeforeMerge && args[1][0] === 'merge' && args[1].includes('--no-ff')) {
         h.crashBeforeMerge = false;
         throw new Error('worker died before the merge');
@@ -102,6 +114,8 @@ interface Config {
   otherStep?: boolean;
   /** The task has a repository row, so the merge sets Haive's project files aside first. */
   repository?: boolean;
+  /** The step puts Haive's files back before its feature merge, as 12 does. */
+  putBack?: boolean;
 }
 type Fixture = Awaited<ReturnType<typeof setup>>;
 
@@ -109,8 +123,11 @@ async function setup(cfg: Config) {
   claimFake.reset();
   h.pushes = [];
   h.crashBeforeMerge = false;
+  h.failRead = null;
   aside.setAside.mockReset().mockResolvedValue({ outcome: 'clean' });
   aside.restore.mockReset().mockResolvedValue({ outcome: 'clean' });
+  aside.seed.mockReset().mockResolvedValue(undefined);
+  aside.putBack.mockReset().mockResolvedValue([]);
   const { dir, data } = await template.copy();
   const fake = createFakeDb({
     taskSteps: schema.taskSteps,
@@ -158,7 +175,11 @@ async function setup(cfg: Config) {
   const db = fake.db as unknown as Database;
   const step = {
     metadata: { id: cfg.otherStep ? '00a-sync-base' : '12-worktree-cleanup' },
-    mergeResolve: { selectedMerge: () => true, ...(cfg.otherStep ? {} : { squashable: true }) },
+    mergeResolve: {
+      selectedMerge: () => true,
+      ...(cfg.otherStep ? {} : { squashable: true }),
+      ...(cfg.putBack ? { putBackBeforeMerge: aside.putBack } : {}),
+    },
   } as unknown as StepDefinition;
   const ctx: StepContext = {
     userId,
@@ -491,6 +512,170 @@ describe('T785 replay after a clean merge landed before its state was saved', ()
     expect(f.stored().phase).toBe('done');
     expect(f.stored().squashCommitSha ?? null).toBeNull();
     expect(f.landedEvents()).toEqual([]);
+  });
+
+  // A git error reading the proof gives no answer. Taken for "not this step's merge" it measured the tip
+  // afresh and overwrote the recorded one with the landed merge, so no later retry could squash the
+  // feature or record its landing. Each read fails once after a landed merge: the retry fails with the
+  // record kept, and the next retry finishes as an uninterrupted run would.
+  it.each([
+    ['the parents of the tip', (argv: string[]) => argv[0] === 'rev-list'],
+    [
+      'the feature tip',
+      (argv: string[]) => argv[0] === 'rev-parse' && argv.includes('feature^{commit}'),
+    ],
+    ['whether the feature is in the tip', (argv: string[]) => argv[0] === 'merge-base'],
+  ])(
+    'a git error reading %s after a landed merge fails the retry and keeps the recorded tip',
+    async (_read, fails) => {
+      const cfg = { squash: true, push: false };
+      const f = await setup(cfg);
+      const { landed, tree } = await stopAfterLanding(f);
+      h.failRead = fails;
+      await expect(f.run()).rejects.toThrow();
+      expect(h.failRead).toBeNull();
+      expect(f.stored().preMergeBaseSha).toBe(f.data.before);
+      expect(f.stored().baseShaBefore).toBeUndefined();
+      expect(f.stored().phase).toBe('pending');
+      expect(await git(f.dir, 'rev-parse', 'main')).toBe(landed);
+      expect((await f.run()).resolved).toBe(true);
+      await expectLandedOnce(f, cfg, tree, landed);
+    },
+  );
+
+  // A retry that halts before its merge section merged nothing: with the base still at the recorded tip,
+  // a merge a person makes on it afterwards is not this step's.
+  const earlyHalts: Array<{
+    halt: string;
+    config: Partial<Config>;
+    /** Makes the next attempt halt; returns what shows it halted there. */
+    arrange: (f: Fixture) => () => void;
+  }> = [
+    {
+      halt: "Haive's files could not be put back",
+      config: { putBack: true },
+      arrange: () => {
+        aside.putBack.mockRejectedValueOnce(new Error('put back failed'));
+        return () => expect(aside.putBack).toHaveBeenCalledTimes(2);
+      },
+    },
+    {
+      halt: "the plan's base could not be read",
+      config: { repository: true },
+      arrange: () => {
+        aside.seed.mockRejectedValueOnce(new Error('plan base unreadable'));
+        return () => {
+          expect(aside.seed).toHaveBeenCalledTimes(2);
+          expect(aside.setAside).toHaveBeenCalledTimes(1);
+        };
+      },
+    },
+    {
+      halt: "Haive's files could not be set aside",
+      config: { repository: true },
+      arrange: () => {
+        aside.setAside.mockResolvedValueOnce({
+          outcome: 'refused',
+          file: 'x',
+          reason: 'a local change',
+          code: 'git_operation',
+        });
+        return () => expect(aside.setAside).toHaveBeenCalledTimes(2);
+      },
+    },
+    {
+      halt: 'another task works in the checkout',
+      config: { repository: true },
+      arrange: () => {
+        aside.setAside.mockResolvedValueOnce({ outcome: 'held', holding: 1 });
+        return () => expect(aside.setAside).toHaveBeenCalledTimes(2);
+      },
+    },
+    {
+      halt: 'another task holds the merge directory',
+      config: { putBack: true },
+      arrange: (f) => {
+        const holder = randomUUID();
+        claimFake.claims.set(f.dir, { taskId: holder, stepId: randomUUID(), title: 'Other task' });
+        return () => {
+          expect(f.fake.rows(schema.taskSteps)[0]?.errorMessage).toContain(holder);
+          expect(aside.putBack).toHaveBeenCalledTimes(1);
+        };
+      },
+    },
+  ];
+  it.each(earlyHalts)(
+    'a thrown exit, then a retry that halts because $halt, leaves a later hand merge on the tip alone',
+    async ({ config, arrange }) => {
+      const f = await setup({ squash: true, push: false, ...config });
+      h.crashBeforeMerge = true;
+      await expect(f.run()).rejects.toThrow('worker died before the merge');
+      expect(f.stored().preMergeBaseSha).toBe(f.data.before);
+      const haltedThere = arrange(f);
+      await retry(f);
+      await f.run();
+      expect(f.fake.rows(schema.taskSteps)[0]?.status).toBe('failed');
+      haltedThere();
+      expect(f.stored().phase).toBe('pending');
+      expect(f.stored().preMergeBaseSha).toBeUndefined();
+      claimFake.claims.delete(f.dir);
+      await git(f.dir, 'merge', '--no-ff', 'feature', '-m', 'by hand');
+      const head = await git(f.dir, 'rev-parse', 'main');
+      const reflog = await git(f.dir, 'reflog', '--format=%H %gs');
+      await retry(f);
+      expect((await f.run()).resolved).toBe(true);
+      expect(await git(f.dir, 'rev-parse', 'main')).toBe(head);
+      expect(await git(f.dir, 'reflog', '--format=%H %gs')).toBe(reflog);
+      expect(f.stored().phase).toBe('done');
+      expect(f.stored().squashCommitSha ?? null).toBeNull();
+      expect(f.landedEvents()).toEqual([]);
+    },
+  );
+
+  // The same halts after a stop that did land the merge: the base is no longer at the recorded tip, which
+  // stays for the retry that squashes the landed merge and records its landing.
+  it('a stop after a landed merge, then a retry that halts before its merge section, keeps the recorded tip', async () => {
+    const cfg = { squash: true, push: false, repository: true };
+    const f = await setup(cfg);
+    const { landed, tree } = await stopAfterLanding(f);
+    aside.setAside.mockResolvedValueOnce({
+      outcome: 'refused',
+      file: 'x',
+      reason: 'a local change',
+      code: 'git_operation',
+    });
+    await retry(f);
+    await f.run();
+    expect(f.fake.rows(schema.taskSteps)[0]?.status).toBe('failed');
+    expect(aside.setAside).toHaveBeenCalledTimes(2);
+    expect(f.stored().preMergeBaseSha).toBe(f.data.before);
+    await retry(f);
+    expect((await f.run()).resolved).toBe(true);
+    await expectLandedOnce(f, cfg, tree, landed);
+  });
+
+  it('a halt on a state that has measured its base leaves the recorded tip as it is', async () => {
+    const f = await setup({ squash: true, push: false });
+    await f.db
+      .update(schema.taskSteps)
+      .set({
+        mergeResolveState: {
+          ...f.stored(),
+          phase: 'resolving',
+          baseShaBefore: f.data.before,
+          preMergeBaseSha: f.data.before,
+        },
+      })
+      .where(eq(schema.taskSteps.id, f.stepId));
+    claimFake.claims.set(f.dir, {
+      taskId: randomUUID(),
+      stepId: randomUUID(),
+      title: 'Other task',
+    });
+    await f.run();
+    expect(f.fake.rows(schema.taskSteps)[0]?.status).toBe('failed');
+    expect(f.stored().phase).toBe('resolving');
+    expect(f.stored().preMergeBaseSha).toBe(f.data.before);
   });
 
   // Pins a limitation the docs name: by parents alone a merge of the feature on exactly the saved tip

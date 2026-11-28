@@ -127,15 +127,19 @@ left. The following rules keep it that way, each MEASURED on git 2.43 and 2.54:
   Any other tip (a person's commit on top, a hand merge, a feature that moved on) is measured
   afresh, as before; when a recorded tip differs from it, it already holds the feature and a squash
   was asked for, the history is kept and `squashSkipReason` says why (a first pass has no record, so
-  a tip that moved before it is judged as it always was). A halt that merged nothing (refused, set
-  aside, held, unaborted) while HEAD is still the recorded tip drops the record, so a merge a person
+  a tip that moved before it is judged as it always was). Only a read that shows another tip measures
+  afresh: a git error in the proof (the parents of HEAD, the feature tip, the ancestry) throws and
+  keeps the record, since measuring the landed merge as the base would lose the true one for every
+  later retry. Every halt that merged nothing (refused, set aside, held, unaborted, files not put
+  back, plan base unread, merge directory held by another task, the early ones included) drops the
+  record while HEAD is still the recorded tip, ahead of its own status write, so a merge a person
   makes on that tip before the retry is never read as this step's. One case cannot be told apart: a
   merge of the feature on exactly the recorded tip that this step did not make looks like its own and
-  is squashed as asked. It arises from a person's hand merge after a thrown exit between the record
-  and the merge (an error in the merge section, a section refused as superseded, Stop, cancel), and
-  from a merge made on the forge and fast-forwarded in. No content is lost and the push is not
-  forced. The other merge steps record nothing. Controls: `merge-base-recovery.test.ts`, the
-  limitation included.
+  is squashed as asked. It arises from a person's hand merge between a thrown exit that left the
+  record (an error in the merge section or in the proof, a section refused as superseded, Stop,
+  cancel) and the very next attempt, and from a merge made on the forge and fast-forwarded in. No
+  content is lost and the push is not forced. The other merge steps record nothing. Controls:
+  `merge-base-recovery.test.ts`, the limitation included.
   After a squash, cleanup deletes a feature or DAG issue branch only when its current tip is
   contained in the recorded merge's second parent, using compare-and-delete against that tip.
   A moved or unreadable branch, missing recorded evidence, a symbolic ref, a checkout holder or a
