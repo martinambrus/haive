@@ -18,6 +18,11 @@ import { isFreeRedispatch } from '../src/queues/cli-exec/failure-class.js';
 import { refreshExpiringCliCredentials } from '../src/usage-window/credential-refresh.js';
 import type { DockerRunner, DockerRunOpts } from '../src/sandbox/docker-runner.js';
 
+const logs = vi.hoisted(() => ({ warn: vi.fn(), info: vi.fn(), debug: vi.fn(), error: vi.fn() }));
+vi.mock('@haive/shared', async (original) => ({
+  ...(await original<typeof import('@haive/shared')>()),
+  logger: { child: () => logs },
+}));
 const locks = vi.hoisted(() => ({ acquire: vi.fn() }));
 const listing = vi.hoisted(() => ({ list: vi.fn() }));
 vi.mock('@haive/database', async (original) => ({
@@ -30,6 +35,7 @@ vi.mock('../src/sandbox/sandbox-core-image.js', () => ({ ensureSandboxCoreImage:
 const roots: string[] = [];
 const held = new Set<string>();
 beforeEach(() => {
+  Object.values(logs).forEach((fn) => fn.mockClear());
   held.clear();
   locks.acquire.mockReset().mockImplementation(async (_db, scope: string) => {
     if (held.has(scope)) return null;
@@ -770,20 +776,72 @@ it('a failed archive leaves no second volume, including on retry', async () => {
   }
 });
 
-it.each([false, true])(
-  'an unrecognized credential remains unknown after fresh login=%s',
-  async (login) => {
+const untracked = () =>
+  logs.warn.mock.calls.filter(([fields]) => fields.reason === 'grok_refresh_untracked');
+const unreadable: [string, () => string][] = [
+  ['unknown shape', () => JSON.stringify({ future: randomBytes(24).toString('hex') })],
+  [
+    'truncated JSON',
+    () => `{"issuer::client": {"refresh_token": "${randomBytes(8).toString('hex')}`,
+  ],
+];
+const fenceFile = (f: { dirs: Map<string, string>; userVol: string }) =>
+  join(f.dirs.get(f.userVol)!, '.haive-grok-refresh');
+
+it.each(
+  unreadable.flatMap(([name, make]) =>
+    [undefined, 'none'].flatMap((fence) =>
+      [false, true].map((login) => ({ name, make, fence: fence ?? 'absent', login })),
+    ),
+  ),
+)(
+  'an unreadable credential ($name, fence $fence) is admitted with a coded warning, login=$login',
+  async ({ make, fence, login }) => {
     const f = fixture();
+    const previous = f.credential(f.taskVol);
     if (login) f.freshLogin();
-    writeFileSync(
-      join(f.dirs.get(f.userVol)!, 'auth.json'),
-      JSON.stringify({ future: randomBytes(24).toString('hex') }),
-    );
-    await expect(f.adopt()).rejects.toMatchObject({ code: 'cli_auth_probe_unknown' });
+    writeFileSync(join(f.dirs.get(f.userVol)!, 'auth.json'), make());
+    if (fence !== 'absent') writeFileSync(fenceFile(f), fence);
+    await f.adopt();
+    expect(untracked()).toHaveLength(1);
     expect(f.statusWrite).not.toHaveBeenCalled();
-    expect(f.removed).toEqual([]);
+    if (login) {
+      const retired = [...f.dirs.keys()].filter((name) => name.includes('_retired_'));
+      expect(retired).toHaveLength(1);
+      expect(f.credential(retired[0]!)).toBe(previous);
+      expect(f.credential(f.taskVol)).toBe(f.credential(f.userVol));
+    }
   },
 );
+
+it.each(
+  unreadable.flatMap(([name, make]) =>
+    [randomBytes(32).toString('hex'), 'not-a-fingerprint'].flatMap((fence) =>
+      [false, true].map((login) => ({ name, make, fence, login })),
+    ),
+  ),
+)(
+  'an unreadable credential ($name) with a fence set stays unknown, login=$login',
+  async ({ make, fence, login }) => {
+    const f = fixture();
+    if (login) f.freshLogin();
+    writeFileSync(join(f.dirs.get(f.userVol)!, 'auth.json'), make());
+    writeFileSync(fenceFile(f), fence);
+    await expect(f.adopt()).rejects.toMatchObject({ code: 'cli_auth_probe_unknown' });
+    expect(untracked()).toHaveLength(0);
+    expect(f.statusWrite).not.toHaveBeenCalled();
+    expect(f.removed).toEqual([]);
+    expect([...f.dirs.keys()].filter((name) => name.includes('_retired_'))).toHaveLength(0);
+  },
+);
+
+it('a recognized credential is admitted without the untracked-refresh warning', async () => {
+  const f = fixture();
+  f.freshLogin();
+  await f.adopt();
+  expect(untracked()).toHaveLength(0);
+  expect([...f.dirs.keys()].filter((name) => name.includes('_retired_'))).toHaveLength(1);
+});
 
 it.each([400, 401, 403, 429])(
   'HTTP %s cannot clear uncertainty from a previous grant',

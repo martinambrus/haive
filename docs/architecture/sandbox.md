@@ -145,9 +145,16 @@ is released. A strict container listing also refuses a still-mounted ended/super
 Stopped helpers are removed first through the existing stopped-only cleanup, so a helper left
 Created by a worker death cannot pin recovery forever. Unknown lookups retain the original and
 retry; a busy writer creates no archive. A failed preservation keeps the original. Subscription
-mode requires a nonempty source credential; an unrecognized parser shape stays unknown and
-retryable, never a login refusal. API-key mode prepares its separate empty auth volume and
-uses the injected key. No original source label is relabeled.
+mode requires a nonempty source credential. A nonempty `auth.json` the parser cannot read
+(unknown shape, unparseable JSON, no refreshable OIDC entry) is admitted, at admission and
+before a superseded copy is retired, whenever no refresh fence is set: nothing exists to
+compare it with, so refusing would only block the login. The run proceeds and the worker logs
+one warning per task copy and process whose structured `reason` is `grok_refresh_untracked`
+(key on the code, never the message): Haive's own refresh does not track that credential, and
+sync-back is unchanged. When a fence is set the copy cannot be shown unspent, so it stays
+unknown and retryable (`cli_auth_probe_unknown`, same cap), never a login refusal. API-key
+mode prepares its separate empty auth volume and uses the injected key. No original source
+label is relabeled.
 
 Retired volumes carry `haive.auth-retired` with the original task volume, source label and reason.
 There is at most one per current login scope/path index, named `<resolved-user-auth-volume>_retired_copy`.
@@ -220,6 +227,11 @@ Rollback of fix 9 restores uncapped retries and UUID archive retention. Removed 
 archives cannot be restored by reverting code. No schema rollback is needed; keep fix 7's
 serialization/fence and fix 8's login halt. Pre-fix-9 UUID archives outside a scope that is
 retired again or signed out retain their existing owner-reaper lifecycle.
+
+Rollback of fix 10 is code only, with no schema, data or label change: it restores counting
+from `started_at` alone (a Resume after the cap fails again after one paid run) and the
+refusal of an unreadable Grok `auth.json` even when no fence is set. The
+`grok_refresh_untracked` warning is a log field and nothing persisted depends on it.
 
 Rollback: revert fix 8 to restore fix 7's refusal behavior; its reader ignores the extra login-id
 label field. Retired user-owned volumes remain retained until explicit recovery/removal or user

@@ -181,6 +181,32 @@ const NO_SOURCE_SENTINEL = 'none';
  *  fault: a half-built volume versus credentials that have since been refreshed. */
 type VolumeReadiness = 'ready' | 'not_ready' | 'source_moved' | 'recovery_required';
 
+/** Stable code of the warning for a Grok auth.json that cannot be read while no refresh fence
+ *  is set. Consumers key on this code, never on the message. */
+const GROK_REFRESH_UNTRACKED = 'grok_refresh_untracked';
+
+/** Called only when `parseGrokAuthFile` returned null for the user volume's auth.json. With no
+ *  fence there is nothing the copy could be compared with, so refusing protects nothing and
+ *  only blocks the login; with a fence the copy cannot be shown unspent, so it stays refused. */
+async function admitUnreadableGrokCredential(
+  ctx: ProviderAuthCtx,
+  taskId: string,
+  userVol: string,
+  taskVol: string,
+  runner: DockerRunner,
+): Promise<void> {
+  const fence = await readVolumeFile(userVol, GROK_REFRESH_FENCE_FILE, runner, {
+    throwOnFailure: true,
+  });
+  if (fence && fence !== 'none') throw new CliAuthRetryableError('cli_auth_probe_unknown');
+  warnAuthCopyOnce(
+    taskVol,
+    GROK_REFRESH_UNTRACKED,
+    { taskId, providerId: ctx.providerId },
+    'Grok credential file is unreadable; token refresh is not tracked for this copy',
+  );
+}
+
 class GrokCopyRecoveryError extends CliLoginRequiredError {
   constructor(ctx: ProviderAuthCtx) {
     super(
@@ -469,17 +495,26 @@ export function ensureTaskAuthVolumes(
             });
             const credential = raw ? parseGrokAuthFile(raw) : null;
             if (!raw) throw new GrokCopyRecoveryError(ctx);
-            if (!credential) throw new CliAuthRetryableError('cli_auth_probe_unknown');
-            const fence = await readVolumeFile(userVol, GROK_REFRESH_FENCE_FILE, runner, {
-              throwOnFailure: true,
-            });
-            if (
-              fence &&
-              fence !== 'none' &&
-              (!/^[a-f0-9]{64}$/.test(fence) ||
-                fence === grokRefreshFingerprint(credential.refreshToken))
-            )
-              throw new GrokCopyRecoveryError(ctx);
+            if (!credential) {
+              await admitUnreadableGrokCredential(
+                ctx,
+                taskId,
+                userVol,
+                cliAuthTaskVolumeName(taskId, ctx.providerName, 0),
+                runner,
+              );
+            } else {
+              const fence = await readVolumeFile(userVol, GROK_REFRESH_FENCE_FILE, runner, {
+                throwOnFailure: true,
+              });
+              if (
+                fence &&
+                fence !== 'none' &&
+                (!/^[a-f0-9]{64}$/.test(fence) ||
+                  fence === grokRefreshFingerprint(credential.refreshToken))
+              )
+                throw new GrokCopyRecoveryError(ctx);
+            }
           }
           await release.assertHeld();
           await ensureTaskAuthVolumesUnlocked(
@@ -727,7 +762,8 @@ async function ensureTaskAuthVolumesUnlocked(
         if (ctx.authMode === 'subscription') {
           const raw = await readVolumeFile(userVol, credRelPath!, runner, { throwOnFailure: true });
           if (!raw) throw new GrokCopyRecoveryError(ctx);
-          if (!parseGrokAuthFile(raw)) throw new CliAuthRetryableError('cli_auth_probe_unknown');
+          if (!parseGrokAuthFile(raw))
+            await admitUnreadableGrokCredential(ctx, taskId, userVol, taskVol, runner);
         }
         await assertGrokCopyQuiescent(db!, ctx, taskId, taskVol, runner);
         await retireGrokCopy(ctx, taskVol, idx, label, runner);
