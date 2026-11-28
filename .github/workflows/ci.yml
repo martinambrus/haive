@@ -712,6 +712,7 @@ jobs:
           api test/task-list-dead.test.ts TASK_LIST_DEAD_TEST_URL task_list_dead_test pg
           api test/integrations-broker.test.ts INTEGRATIONS_BROKER_TEST_URL integrations_broker_test pg
           api test/custom-mcp-db.test.ts CUSTOM_MCP_TEST_URL custom_mcp_test pg
+          api test/files-read-route-db.test.ts FILES_READ_TEST_URL files_read_test pg
           shared test/create-database-race.test.ts RACE_PG_URL create_database_race_test pg
           shared test/module-db-abandoned-waiter.test.ts MODULE_DB_WAITER_TEST_URL module_db_waiter_test pg
           shared test/integrations-refresh-db.test.ts INTEGRATIONS_REFRESH_TEST_URL integrations_refresh_test pg
