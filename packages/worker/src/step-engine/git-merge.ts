@@ -1461,6 +1461,21 @@ export async function completeMergeHostSide(
   return mergeCommitted(worktreePath, branch);
 }
 
+/** HEAD when it is a merge of the feature onto exactly `base`: two parents, the first `base`, the
+ *  second inside the feature's tip. Parents and ancestry only, never the message. */
+export async function landedFeatureMerge(
+  dir: string,
+  base: string,
+  featureRef: string,
+): Promise<string | null> {
+  const parents = await gitRun(dir, ['rev-list', '--parents', '-n', '1', 'HEAD']);
+  const commits = parents.stdout.trim().split(/\s+/);
+  if (parents.code !== 0 || commits.length !== 3 || commits[1] !== base) return null;
+  const feature = await revParse(dir, `${featureRef}^{commit}`);
+  if (feature === null || !(await isCommitAncestor(dir, commits[2]!, feature))) return null;
+  return commits[0]!;
+}
+
 /** Collapse only the feature merge's own first-parent edge; resume a reset only when the
  *  recorded merge (ORIG_HEAD for legacy rows) and staged tree prove it. A live merge is left to its fixer.
  *  git merge --squash never writes MERGE_HEAD, which the conflict resolver needs. */

@@ -41,6 +41,7 @@ import {
   completeMergeHostSide,
   fixerIndexHeldNote,
   fixerLeftoversWarning,
+  landedFeatureMerge,
   mergeCommitted,
   mergeOpenFor,
   openMerge,
@@ -368,6 +369,19 @@ async function removeBaseWorktree(repoPath: string, worktreePath: string): Promi
   return (res.stderr || res.stdout).trim().split('\n')[0] || 'git gave no reason';
 }
 
+/** The tip the feature merge starts from, with the base at `head`: the tip recorded ahead of an earlier
+ *  pass's merge while `head` is that merge landed and holds the whole feature (a stop before its state
+ *  was saved, so the merge below is a no-op), else `head`. */
+async function mergeStartTip(state: MergeResolveState, head: string): Promise<string> {
+  const recorded = state.preMergeBaseSha;
+  return recorded &&
+    head !== recorded &&
+    (await landedFeatureMerge(state.mergeDir, recorded, state.featureBranch)) &&
+    (await isCommitAncestor(state.mergeDir, `${state.featureBranch}^{commit}`, head))
+    ? recorded
+    : head;
+}
+
 async function taskRepositoryId(db: Database, taskId: string): Promise<string | null> {
   const task = await db.query.tasks.findFirst({
     where: eq(schema.tasks.id, taskId),
@@ -641,24 +655,12 @@ async function squashFeatureMerge(
   // Committed ahead of the reset, so a crash between the reset and the commit re-enters here.
   await inMergeDir(db, current, params, squashing.mergeDir, async (tx) => {
     if (!squashing.squashMergeSha) {
-      const parents = await gitRun(squashing.mergeDir, [
-        'rev-list',
-        '--parents',
-        '-n',
-        '1',
-        'HEAD',
-      ]);
-      const commits = parents.stdout.trim().split(/\s+/);
-      const feature = await revParse(squashing.mergeDir, `${squashing.featureBranch}^{commit}`);
-      if (
-        parents.code === 0 &&
-        commits.length === 3 &&
-        commits[1] === baseShaBefore &&
-        feature !== null &&
-        (await isCommitAncestor(squashing.mergeDir, commits[2]!, feature))
-      ) {
-        squashing = { ...squashing, squashMergeSha: commits[0] };
-      }
+      const landed = await landedFeatureMerge(
+        squashing.mergeDir,
+        baseShaBefore,
+        squashing.featureBranch,
+      );
+      if (landed) squashing = { ...squashing, squashMergeSha: landed };
     }
     await saveMergeState(tx, current.id, squashing);
   });
@@ -1421,7 +1423,7 @@ async function resolveMergePhaseInMove(
       let armed = withKept(pending);
       if (!armed.baseShaBefore) {
         const baseHead = await revParse(armed.mergeDir, 'HEAD');
-        if (baseHead) armed = { ...armed, baseShaBefore: baseHead };
+        if (baseHead) armed = { ...armed, baseShaBefore: await mergeStartTip(armed, baseHead) };
       }
       // This pass has opened no merge yet, so a merge open here is an earlier attempt's.
       const staleOpen = await peekOpenMerge(armed.mergeDir);
@@ -1474,6 +1476,37 @@ async function resolveMergePhaseInMove(
         adopted,
       };
     };
+    // A stop after git landed a clean merge and before its section saved would lose the tip the squash
+    // resets to and the landed event's undo point, so the tip is committed ahead of the merge. A tip that
+    // is neither the recorded one nor its landed merge is measured afresh; one that already holds the
+    // feature cannot be shown to hold this step's merge, so the history is kept and the reason said.
+    if (spec.squashable && !pending.baseShaBefore) {
+      const from = pending;
+      pending = await mergeSection(repositoryId, from.mergeDir, async (tx) => {
+        if (from.mode === 'cross-branch') {
+          await ensureBaseWorktree(ctx, from.mergeDir, from.baseBranch);
+        }
+        const head = await revParse(from.mergeDir, 'HEAD');
+        if (!head || (await mergeStartTip(from, head)) === from.preMergeBaseSha) return from;
+        let recorded: MergeResolveState = { ...from, preMergeBaseSha: head };
+        const feature =
+          from.preMergeBaseSha && from.squashAfterMerge
+            ? await revParse(from.mergeDir, `${from.featureBranch}^{commit}`)
+            : null;
+        if (feature && (await isCommitAncestor(from.mergeDir, feature, head))) {
+          const note = `Squash skipped; merge history kept: the base tip is not the one recorded before this step's merge and already holds ${from.featureBranch}, so that merge cannot be shown to be this step's.`;
+          ctx.logger.warn(
+            { featureBranch: from.featureBranch, baseBranch: from.baseBranch, head },
+            note,
+          );
+          current = await appendStepWarning(tx, current.id, note);
+          await updateOwnedStep(tx, current.id, { statusMessage: note });
+          recorded = { ...recorded, squashAfterMerge: false, squashSkipReason: note };
+        }
+        await saveMergeState(tx, current.id, recorded);
+        return recorded;
+      });
+    }
     let attempt = await mergeSection(repositoryId, pending.mergeDir, openPending);
     pending = adoptKept(pending, attempt.adopted);
     // A file Haive rewrote since the set-aside sends it round again.
