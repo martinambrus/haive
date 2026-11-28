@@ -622,7 +622,9 @@ export default function CliProvidersPage() {
                   const image = cliImageBuild(p);
                   return (
                     <Card key={p.id}>
-                      <div className="flex items-start justify-between gap-4">
+                      {/* Stacked below sm: a 360 px screen cannot fit the title column, the gap and
+                          the Actions button side by side, so the button sat half off-screen. */}
+                      <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between sm:gap-4">
                         <div className="min-w-0">
                           <div className="flex flex-wrap items-center gap-2">
                             <h3 className="text-lg font-semibold text-neutral-50">{p.label}</h3>
@@ -647,13 +649,13 @@ export default function CliProvidersPage() {
                               <Badge
                                 variant="warning"
                                 title={image.reason}
-                                className="max-w-full gap-1"
+                                className="max-w-full gap-1 whitespace-normal"
                               >
                                 <LoaderCircle
                                   className="h-3 w-3 flex-shrink-0 animate-spin"
                                   aria-hidden="true"
                                 />
-                                <span className="truncate">
+                                <span className="min-w-0 break-words">
                                   {image.version
                                     ? `Rebuilding sandbox image · ${image.version}`
                                     : 'Rebuilding sandbox image'}
@@ -661,7 +663,11 @@ export default function CliProvidersPage() {
                               </Badge>
                             )}
                             {image?.state === 'failed' && (
-                              <Badge variant="error" title={image.reason}>
+                              <Badge
+                                variant="error"
+                                title={image.reason}
+                                className="whitespace-normal"
+                              >
                                 Image build failed
                               </Badge>
                             )}
