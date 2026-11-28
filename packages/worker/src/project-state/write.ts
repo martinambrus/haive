@@ -170,7 +170,13 @@ export class ProjectStateMovedError extends Error {
 export class ProjectStateCheckoutHeldError extends ProjectStateMovedError {}
 
 /** The shared checkout-access policy refused: another operation holds the checkout, or it is preparing or in error. */
-export class ProjectStateCheckoutUnavailableError extends ProjectStateCheckoutHeldError {}
+export class ProjectStateCheckoutUnavailableError extends ProjectStateCheckoutHeldError {
+  constructor() {
+    super(
+      'The repository checkout is preparing or in use by another operation, so nothing was written',
+    );
+  }
+}
 
 /** The incoming record stays on disk for the task-end reconciliation. No column, base, audit
  *  row or record file was changed, so this deferral must neither clear the column nor re-plan 02. */

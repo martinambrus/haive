@@ -335,7 +335,8 @@ Save reads that as `checkout_changed`. A task-end rules reconcile refused the sa
 "nothing was pushed" error, so the step fails and Retry runs it once the checkout is ready. The watcher's
 admission (`admitWatchedCheckout`) already refuses the same set plus holder tasks, so it has no
 separate gate. `completePreparationImports` skips its legacy-mirror fallback after a held sync, which
-would otherwise import legacy files over units the record carries.
+would otherwise import legacy files over units the record carries; nothing re-runs the fallback if that
+record later imports as refused.
 
 Explicit plan Save/Pull hold a renewing mutation lease across preparation and the complete
 Git/reconcile/recovery lifetime, acquired before their existing merge/domain/row locks. Nested

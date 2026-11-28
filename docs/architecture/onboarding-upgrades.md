@@ -1001,7 +1001,9 @@ holder or reset also appeared; both writer phases classify a live reset as an ad
 task-end rules reconcile then apply the shared checkout-access `projection` policy under that row lock
 ([Repository refresh](repository-refresh.md)): a status other than `ready`, or a live root claim the
 caller does not hold itself, throws `ProjectStateCheckoutUnavailableError`, a
-`ProjectStateCheckoutHeldError`. It writes nothing and changes no revision, journal or base. The refresh
+`ProjectStateCheckoutHeldError`. The hold itself writes nothing and changes no revision, journal or base (a
+phase 1 already committed before a phase 2 hold leaves its journal for recovery, which waits for the same
+policy). Step 02 fails its apply with a retry-this-step text, not its stale-plan one. The refresh
 keeps the row dirty with one fixed `last_error` (set only on a dirty row) and answers `held` with
 reason `checkout`; the sweep writes once the checkout is ready. A caller's own claim is carried by the
 ambient scope, so a clone, a refresh and the Undo's edit claim are not refused by themselves. A sync refused

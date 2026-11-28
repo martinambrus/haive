@@ -410,11 +410,13 @@ hold one of these or read a tree it made.
 Preparation carries its actual renewing handle through the plan-only asynchronous scope in
 `withRootClaim`. The policy verifies that handle's repository, owner, preparation kind and live
 stamp before admitting a private restore while public status is cloning. The publication
-transaction/savepoints and project-state restore implementation are unchanged; there is no
-boolean bypass. Other independent project-state and legacy imports remain separate follow-ups.
+transaction/savepoints and project-state restore implementation are unchanged, and the project-state
+writer and sync they call apply the same policy under that handle ([Repository refresh](repository-refresh.md));
+there is no boolean bypass. Legacy imports remain a separate follow-up.
 Any other holder of a live root claim that re-syncs the plan carries its handle the same way
 (`withPlanCheckoutAccess({ mode: 'projection', owner })`): the Undo of a left committed merge
-re-syncs under its own edit claim, which the policy would otherwise refuse as a foreign owner.
+sets the project files aside and re-syncs under its own edit claim, which the policy would otherwise
+refuse as a foreign owner.
 
 Rollback: settle plan saves, pulls, mirror sections and preparations, then revert worker/shared
 code together and rebuild shared. Preserve dirty rows, incoming mirrors and all aside/staging
