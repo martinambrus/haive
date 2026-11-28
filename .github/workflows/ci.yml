@@ -117,7 +117,7 @@ jobs:
     env:
       # Keep the bridge's toolchain identical to its extension image build. Dependabot bumps only the
       # Dockerfile; copy its new reference here when ci-desktop-bridge.test.mjs reports the mismatch.
-      GO_IMAGE: golang:1.25-alpine@sha256:1ae0735f00daffa3aaf1363a5184c0d2dc55c78e3db4ec70241cdac97bf84b59
+      GO_IMAGE: golang:1.27-alpine@sha256:70bd7ddea8b6cbe5d6943cde279d6b67feb10cc924fb9100d1d8757c1575b280
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         timeout-minutes: 2
