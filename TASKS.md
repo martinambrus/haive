@@ -1228,6 +1228,18 @@ In `martinambrus/haive-module-translator`. The owner's English-to-Slovak run fai
 
 1. Accept a declined form (same stem, up to 2 trailing letters changed on words of 5+ letters) at every keep-term check; a translated name still fails; codes and short words stay exact. Then the owner Retries the step.
 
+### T791 · FNF[uuid-route-spelling] · non-advisory keys built from a route's uuid spelling (+5)
+
+status: open · kind: fix · found: T790 item 3 driver (#1397) 2026-11-28 · priority: P3
+
+PostgreSQL accepts a uuid in any case, braced, unhyphenated or regrouped, and finds the same row; a key, path or job id built from the spelling a client sent then differs from the one built from the database's id. Only a hand-written request sends a non-canonical spelling (the web app uses the ids the api returns), and every route below is owner-scoped. Fix direction: build from the row the route already read, or `canonicalUuid` (`@haive/database`, #1397). All PRE-EXISTING.
+
+1. Redis lock `haive:rag-sync:<repo>` (`packages/shared/src/rag/sync-lock.ts` ~:83): the api keys the route spelling (`api/src/routes/tooling-upgrades.ts` ~:775, ~:862), worker holders key database ids (`10-rag-populate.ts` ~:697, `_rag-index.ts` ~:484), so a sync and a populate can run at once. One `canonicalUuid` call in `ragSyncLockKey`.
+2. `api/src/routes/tasks/attachments.ts` ~:140 (also ~:595, ~:600) builds the uploads directory from the route `taskId` although `task.id` is read at ~:122: an upload under another spelling lands in a directory the worker never reads.
+3. BullMQ job ids built from a route spelling lose their dedupe: `tasks/browser-access.ts` ~:64, ~:95, ~:182; `lib/plan-mirror.ts` ~:74, ~:97 with `worker/src/queues/plan-mirror-queue.ts` ~:91; `modules/sources.ts` ~:168 against `worker/src/modules/source-jobs.ts` ~:110; `tasks/merges.ts` ~:74, ~:156. The database lock behind each is canonical since #1397.
+4. `api/src/routes/browser-vnc.ts` ~:241-243, ~:254-260 builds runner names and `ensure-<taskId>` from the WebSocket URL's task id; its origin is not traced.
+5. (related) `tooling-upgrades.ts` ~:1134-1150 takes both advisory keys before its owner-scoped select at ~:1150, so a non-owner who knows a repository id queues on them (bounded wait).
+
 ### T790 · FNF[relink-hold-leftovers] · leftovers of the T516 relink row hold
 
 status: open · kind: fix · found: T516 review 1 and PR gates (#1392) 2026-11-27 · priority: P3
