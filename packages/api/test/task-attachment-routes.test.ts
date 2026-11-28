@@ -280,6 +280,7 @@ describe('task attachment routes', () => {
     vi.spyOn(configService, 'getNumber').mockImplementation(async (key, fallback = 0) =>
       key === CONFIG_KEYS.TASK_ATTACHMENT_MAX_BYTES ? cap : fallback,
     );
+    vi.spyOn(configService, 'getFresh').mockResolvedValue('normal');
   });
 
   afterEach(async () => {
@@ -287,6 +288,29 @@ describe('task attachment routes', () => {
     await rm(storage, { recursive: true, force: true });
     await rm(outside, { recursive: true, force: true });
   });
+
+  it.each(['draining', 'maintenance'])(
+    'answers 503 to an upload and a delete while %s, with no claim and no file touched',
+    async (state) => {
+      const row = await seedFile('spec.md', 'old');
+      vi.spyOn(configService, 'getFresh').mockResolvedValue(state);
+      let repositoryWrites = 0;
+      fake.hooks.beforeUpdate = (table) => {
+        if (table === schema.repositories) repositoryWrites += 1;
+      };
+      for (const response of [
+        await upload('new.md'),
+        await send('DELETE', `/${TASK}/attachments/${row.id}`),
+        await send('DELETE', `/${TASK}/attachments?prefix=docs`),
+      ]) {
+        expect(response.status).toBe(503);
+      }
+      expect(repositoryWrites).toBe(0);
+      expect(await listing(up())).toEqual(['spec.md']);
+      expect(await readFile(up('spec.md'), 'utf8')).toBe('old');
+      expect(filenames()).toEqual(['spec.md']);
+    },
+  );
 
   it('refuses new disk access while cloning but keeps the DB list available', async () => {
     const row = await seedFile('spec.md', 'old');

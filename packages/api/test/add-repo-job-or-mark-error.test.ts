@@ -1,7 +1,8 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { schema } from '@haive/database';
 import { createFakeDb } from '@haive/database/testing';
 import { addRepoJobOrMarkError } from '../src/routes/repos.js';
+import { QUEUE_ADD_WAIT_MS, QueueOutcomeUnknownError } from '../src/lib/queue-bounded.js';
 
 /**
  * The enqueue half of "a repository cannot strand at `cloning`".
@@ -31,6 +32,35 @@ function makeDb(recorded: RecordedUpdate[], updateThrows = false) {
 }
 
 describe('addRepoJobOrMarkError', () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('leaves the row alone and answers outcome unknown when the add never settles', async () => {
+    vi.useFakeTimers();
+    const recorded: RecordedUpdate[] = [];
+    let outcome: unknown;
+    let settled = false;
+    void addRepoJobOrMarkError(
+      makeDb(recorded),
+      'repo-1',
+      () => new Promise(() => undefined),
+      null,
+      'initial-job',
+    ).then(
+      () => (settled = true),
+      (err: unknown) => {
+        settled = true;
+        outcome = err;
+      },
+    );
+    await vi.advanceTimersByTimeAsync(QUEUE_ADD_WAIT_MS);
+    expect(settled, 'the helper is still waiting for the add').toBe(true);
+    expect(outcome).toBeInstanceOf(QueueOutcomeUnknownError);
+    expect(outcome).toMatchObject({ status: 503, code: 'queue_outcome_unknown' });
+    expect(recorded).toHaveLength(0);
+  });
+
   it('writes nothing when the enqueue succeeds', async () => {
     const recorded: RecordedUpdate[] = [];
 

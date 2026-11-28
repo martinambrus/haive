@@ -1,7 +1,6 @@
 import {
   assertCheckoutMutationOwner,
   CheckoutUnavailableError,
-  withCheckoutMutation,
 } from '@haive/shared/checkout-access';
 import type { RootClaimHandle, DbTx } from '@haive/database';
 import { DerivedRunPlanError, pinnedTaskStepIds } from '@haive/shared/modularity';
@@ -53,6 +52,7 @@ import {
   writeFileNoFollow,
   type ReadResult,
 } from '@haive/shared/fs-safe';
+import { withAdmittedCheckoutMutation } from '../lib/admitted-checkout-mutation.js';
 import { containmentHttpError } from '../lib/fs-http.js';
 import { writeBodyToHeld } from '../lib/held-write.js';
 import { withUploadChunkLock } from '../lib/upload-chunk-lock.js';
@@ -139,6 +139,11 @@ import {
 import { insertAuditEvent, logAuditEvent, type AuditEvent } from '../lib/audit.js';
 import { summarizeScopeChange } from '@haive/shared/audit';
 import { getRepoQueue, type RepoJobPayload } from '../queues.js';
+import {
+  boundedAdd,
+  QueueAddTimeoutError,
+  QueueOutcomeUnknownError,
+} from '../lib/queue-bounded.js';
 import { requireAuth } from '../middleware/auth.js';
 import { enqueueCheckoutSync, observeCheckoutBranchForReset } from '../lib/plan-mirror.js';
 import {
@@ -235,6 +240,10 @@ function deriveTopLevelPaths(fileTree: string[] | null): string[] {
   return Array.from(set).sort();
 }
 
+/** A repeat of a create makes a second repository, so the default "safe to retry" would mislead. */
+const REPO_OUTCOME_UNKNOWN_MESSAGE =
+  "The repository's job may still start. Reload the repositories list before trying again: adding it again creates a second repository.";
+
 /** Enqueue a repository job, and mark the row `error` if the ENQUEUE itself fails.
  *
  *  The row is committed at `cloning` or with refreshPending before these calls run, so a throwing `queue.add` —
@@ -244,6 +253,9 @@ function deriveTopLevelPaths(fileTree: string[] | null): string[] {
  *  indistinguishable from one whose enqueue is still in flight. So it is closed here, where the
  *  failure actually happens. All enqueue failures compare the admission
  *  job id too, since a lost acknowledgement can outlive that job and a newer admission.
+ *
+ *  A deadline on the add leaves its outcome unknown: the job can still land, so the row stays as
+ *  admitted for that job, or for the stranded-preparation sweep, and the request answers 503.
  *
  *  Rethrows, because the caller's request really did fail and must say so. The status write is
  *  best-effort: if the database is unreachable too there is nothing to be done, and masking the
@@ -256,8 +268,12 @@ export async function addRepoJobOrMarkError(
   refreshJobId: string,
 ): Promise<void> {
   try {
-    await add();
+    await boundedAdd(add);
   } catch (err) {
+    if (err instanceof QueueAddTimeoutError) {
+      logger.warn({ err, repositoryId }, 'repository job enqueue outcome unknown');
+      throw new QueueOutcomeUnknownError(REPO_OUTCOME_UNKNOWN_MESSAGE);
+    }
     await db
       .update(schema.repositories)
       .set({
@@ -2760,7 +2776,7 @@ const remoteCheckoutAccess: MiddlewareHandler<AppEnv> = async (c, next) => {
     columns: { id: true },
   });
   if (!repo) throw new HttpError(404, 'Repository not found');
-  await withCheckoutMutation(
+  await withAdmittedCheckoutMutation(
     db,
     id,
     userId,

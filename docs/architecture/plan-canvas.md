@@ -453,7 +453,8 @@ Plan-page attention uses the shared presence clock and a page-owned pending regi
 no additional overview or node-detail polls. Its reporter rules, cached-state bound and
 repository/hour delivery are documented in [Human active time](human-time.md#plan-page-delivery).
 
-Whole-plan deletion takes the renewing checkout mutation claim before `applyPlanPatch`, retaining
+Whole-plan deletion takes the renewing checkout mutation claim (through `withAdmittedCheckoutMutation`,
+so a draining system answers 503) before `applyPlanPatch`, retaining
 it through both physical mirror removals and cleanup. Cloning or a foreign root claim refuses with
 409 `checkout_unavailable` before deleting plan rows. Existing plan confirmation/task refusals
 remain first, and database-only node edits/list/detail remain available. The plan sweep/importer and explicit Save/Pull use the replacement exclusion described in the

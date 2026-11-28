@@ -244,7 +244,9 @@ The ordinary stranded-preparation sweep also
 releases an old marker whose queue has no live job, preserving any repair code. A `ready` row
 without a repair code keeps its status and display copy: the sweep clears only the stale marker
 and logs that release once. The maintenance blocking list labels every marked job `pending preparation`, including initial
-preparation and its post-ready imports. Root claims, holding tasks and
+preparation and its post-ready imports, and a repository held only by a live root claim
+`checkout in use (<operation>)`: reset, rebuild, refresh, file save, file change or check, with a
+claim of no recorded kind read as reset. Root claims, holding tasks and
 live queue jobs remain temporary route refusals and do not hide Retry. An older list response
 without capability fields keeps the Retry action for compatibility. Repository archives use
 the chunked API: `POST /repos/upload/init`, `PUT /repos/upload/:id/chunk` with `Content-Range: bytes start-end/total`,
@@ -279,7 +281,10 @@ restore's nested import or writer. Legacy preparation imports retain their exist
 and remain follow-up work.
 
 `withCheckoutMutation` acquires a distinct `mutation` root claim **before** attachment/domain/row locks,
-checks availability again after acquisition and releases in `finally`. It retains no connection
+checks availability again after acquisition and releases in `finally`. The API reaches it through
+`withAdmittedCheckoutMutation` (`lib/admitted-checkout-mutation.ts`): a fresh maintenance-state check,
+the claim, the shared new-work fence in its own short transaction, then the caller's locks; a refusal
+releases the claim, and the worker's plan mirror calls `withCheckoutMutation` directly. It retains no connection
 across an upload body or subprocess. A claim collision answers 409 `checkout_unavailable`;
 concurrent independent mutations in the same repository must retry, with copy naming the held
 kind. A preparation queued after an admitted mutation waits: `withRootClaim` raises

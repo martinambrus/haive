@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const USER = vi.hoisted(() => '00000000-0000-4000-8000-0000000000a1');
 const h = vi.hoisted(() => ({
@@ -25,10 +25,14 @@ import { schema } from '@haive/database';
 import { createFakeDb } from '@haive/database/testing';
 import { configService, REPO_JOB_NAMES } from '@haive/shared';
 import { repoRoutes } from '../src/routes/repos.js';
+import { QUEUE_ADD_WAIT_MS } from '../src/lib/queue-bounded.js';
 import { errorHandler } from '../src/middleware/error-handler.js';
 import type { AppEnv } from '../src/context.js';
 
 const REPO = '00000000-0000-4000-8000-0000000000b1';
+/** A repeat of a create makes a second repository, so this answer must not call a retry safe. */
+const REPO_OUTCOME_UNKNOWN =
+  "The repository's job may still start. Reload the repositories list before trying again: adding it again creates a second repository.";
 
 const app = new Hono<AppEnv>();
 app.route('/', repoRoutes);
@@ -615,5 +619,53 @@ it('a late enqueue rejection cannot clear a newer admission', async () => {
     status: 'ready',
     refreshPending: true,
     refreshJobId: newerJobId,
+  });
+});
+
+describe('a refresh whose add never settles', () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it.each([
+    ['refresh-tree', `/${REPO}/refresh-tree`],
+    ['recover-checkout', `/${REPO}/recover-checkout`],
+  ])('%s keeps the admitted row and answers 503 after the add deadline', async (_name, url) => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const recovery = url.endsWith('recover-checkout');
+    const fake = setup({
+      source: 'git_https',
+      remoteUrl: 'https://example.com/r.git',
+      ...(recovery ? { status: 'error', errorCode: 'checkout_repair_needed' } : {}),
+    });
+    let reached!: () => void;
+    const called = new Promise<void>((resolve) => {
+      reached = resolve;
+    });
+    h.add.mockImplementation(() => {
+      reached();
+      return new Promise(() => undefined);
+    });
+    let res: Response | undefined;
+    const settled = Promise.resolve(app.request(url, { method: 'POST' })).then((r) => (res = r));
+    await Promise.race([called, settled]);
+    expect(h.add, 'the route never reached the add').toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(QUEUE_ADD_WAIT_MS);
+    for (const start = Date.now(); !res && Date.now() - start < 2_000;)
+      await new Promise((resolve) => setImmediate(resolve));
+    expect(res, 'the request is still waiting for the add').toBeDefined();
+    expect(res!.status).toBe(503);
+    const body = (await res!.json()) as { code: string; error: string };
+    expect(body.code).toBe('queue_outcome_unknown');
+    expect(body.error).toBe(REPO_OUTCOME_UNKNOWN);
+    expect(body.error).not.toMatch(/safe to retry/i);
+    const row = fake.rows(schema.repositories)[0]!;
+    expect(row).toMatchObject({
+      status: recovery ? 'cloning' : 'ready',
+      refreshPending: true,
+    });
+    expect(row.refreshJobId).toEqual(expect.any(String));
+    expect(row.rootClaimedAt ?? null).toBeNull();
+    expect(h.add.mock.calls[0]![2]).toMatchObject({ jobId: row.refreshJobId });
   });
 });

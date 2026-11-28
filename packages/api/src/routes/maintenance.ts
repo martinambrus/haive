@@ -4,8 +4,8 @@ import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { Hono } from 'hono';
 import { z } from 'zod';
-import { and, desc, eq, inArray, isNotNull, isNull, or } from 'drizzle-orm';
-import { schema } from '@haive/database';
+import { and, desc, eq, gt, inArray, isNotNull, isNull, or } from 'drizzle-orm';
+import { ROOT_CLAIM_STALE_MS, schema, type RootClaimKind } from '@haive/database';
 import { CHANNEL_PATTERN, REGISTRY_PREFIX_PATTERN } from '@haive/shared/release';
 import {
   CONFIG_KEYS,
@@ -106,6 +106,15 @@ const jobOwner = {
   ownerEmailEncrypted: schema.users.emailEncrypted,
 };
 
+const CLAIM_WORD: Record<RootClaimKind, string> = {
+  reset: 'reset',
+  rebuild: 'rebuild',
+  refresh: 'refresh',
+  edit: 'file save',
+  mutation: 'file change',
+  verify: 'check',
+};
+
 /** The background jobs the updater counts beside the tasks; a provider with two in progress is one row. */
 export async function listBlockingJobs(db: ReturnType<typeof getDb>) {
   const [repositories, bundles, providers] = await Promise.all([
@@ -115,13 +124,18 @@ export async function listBlockingJobs(db: ReturnType<typeof getDb>) {
         name: schema.repositories.name,
         status: schema.repositories.status,
         refreshPending: schema.repositories.refreshPending,
+        rootClaimKind: schema.repositories.rootClaimKind,
         updatedAt: schema.repositories.updatedAt,
         ...jobOwner,
       })
       .from(schema.repositories)
       .leftJoin(schema.users, eq(schema.users.id, schema.repositories.userId))
       .where(
-        or(eq(schema.repositories.status, 'cloning'), eq(schema.repositories.refreshPending, true)),
+        or(
+          eq(schema.repositories.status, 'cloning'),
+          eq(schema.repositories.refreshPending, true),
+          gt(schema.repositories.rootClaimedAt, new Date(Date.now() - ROOT_CLAIM_STALE_MS)),
+        ),
       )
       .orderBy(desc(schema.repositories.updatedAt))
       .limit(BLOCKING_LIST_CAP + 1),
@@ -159,10 +173,14 @@ export async function listBlockingJobs(db: ReturnType<typeof getDb>) {
       .limit(BLOCKING_LIST_CAP + 1),
   ]);
   const listed = [
-    ...repositories.map(({ refreshPending, ...r }) => ({
+    ...repositories.map(({ refreshPending, rootClaimKind, ...r }) => ({
       kind: 'repository' as const,
       ...r,
-      status: refreshPending ? 'pending preparation' : r.status,
+      status: refreshPending
+        ? 'pending preparation'
+        : r.status === 'cloning'
+          ? r.status
+          : `checkout in use (${CLAIM_WORD[(rootClaimKind ?? 'reset') as RootClaimKind] ?? CLAIM_WORD.reset})`,
     })),
     ...bundles.map((r) => ({ kind: 'bundle' as const, ...r })),
     ...providers.map(({ building, provisioning, ...r }) => ({

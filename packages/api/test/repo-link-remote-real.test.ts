@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { afterEach, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 const h = vi.hoisted(() => ({ db: undefined as unknown, freshDb: undefined as unknown }));
 const USER = '00000000-0000-4000-8000-0000000000a1';
 const REPO = '00000000-0000-4000-8000-0000000000b1';
@@ -18,7 +18,7 @@ vi.mock('../src/middleware/auth.js', () => ({
   },
 }));
 import { Hono } from 'hono';
-import { logger } from '@haive/shared';
+import { configService, logger } from '@haive/shared';
 import { serializeError } from '@haive/shared/logger';
 import { schema } from '@haive/database';
 import { createFakeDb } from '@haive/database/testing';
@@ -29,6 +29,9 @@ import { errorHandler } from '../src/middleware/error-handler.js';
 import type { AppEnv } from '../src/context.js';
 const exec = promisify(execFile);
 const dirs: string[] = [];
+beforeEach(() => {
+  vi.spyOn(configService, 'getFresh').mockResolvedValue('normal');
+});
 afterEach(async () => {
   for (const dir of dirs.splice(0)) await rm(dir, { recursive: true, force: true });
 });

@@ -2,7 +2,6 @@ import {
   CheckoutUnavailableError,
   assertCheckoutMutationOwner,
   requireCheckoutAccess,
-  withCheckoutMutation,
 } from '@haive/shared/checkout-access';
 import type { DbTx, RootClaimHandle } from '@haive/database';
 import { randomUUID } from 'node:crypto';
@@ -12,6 +11,8 @@ import { linkRepoRemoteRequestSchema, logger } from '@haive/shared';
 import { redactEditableGitUrl } from '@haive/shared/schemas';
 import { getDb, withFreshDatabase } from '../db.js';
 import { HttpError } from '../context.js';
+import { NewWorkRefused } from '../middleware/maintenance.js';
+import { withAdmittedCheckoutMutation } from './admitted-checkout-mutation.js';
 import { boundedLockWait } from './repository-busy.js';
 import { gitFailureText, relinkGit, verifyRelinkCheckout } from './relink-git.js';
 
@@ -135,7 +136,7 @@ export async function reconcileRemote(
   id: string,
   userId: string,
   { skipLocked = false, owner }: { skipLocked?: boolean; owner?: RootClaimHandle } = {},
-): Promise<'locked' | 'fenced' | 'checkout' | undefined> {
+): Promise<'locked' | 'fenced' | 'checkout' | 'maintenance' | undefined> {
   const run = async (checkoutOwner: RootClaimHandle) =>
     withFreshDatabase(async (db) => {
       return withSettledTransaction(db, async (tx) => {
@@ -243,9 +244,10 @@ export async function reconcileRemote(
   });
   if (!repo) return;
   try {
-    return await withCheckoutMutation(getDb(), id, userId, run, 'repair');
+    return await withAdmittedCheckoutMutation(getDb(), id, userId, run, 'repair');
   } catch (err) {
     if (skipLocked && err instanceof CheckoutUnavailableError) return 'checkout';
+    if (skipLocked && err instanceof NewWorkRefused) return 'maintenance';
     throw err;
   }
 }

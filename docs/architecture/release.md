@@ -303,23 +303,29 @@ One `--drain-timeout` covers the first wait and every re-wait: past it, work sti
 admissions still reopened stop the upgrade with an error, or with `--force` enter maintenance
 anyway. The journal (`upgrade_runs.phase`) reads `draining` during a re-wait and `maintenance` again
 on entry. Then the updater takes the snapshot. Live work (`liveWorkCount`) is a live task or a
-background job a route queued: a repository `cloning` or with `refresh_pending` set, a bundle `syncing`, a CLI provider whose
-sandbox image is `building` or whose model is `provisioning`. `GET /admin/maintenance/blocking` and
-the admin maintenance page list both, so what the page shows is what the updater waits for; a job
-row stuck in its in-progress status holds the drain until the deadline, and `--force` passes it.
+background job a route queued: a repository `cloning`, with `refresh_pending` set or holding a live
+root claim of any kind, a bundle `syncing`, a CLI provider whose
+sandbox image is `building` or whose model is `provisioning`. A claim is live while its
+`root_claimed_at` is newer than `ROOT_CLAIM_STALE_MS`; both counters compare against a cutoff built
+from the caller's clock and never against `now()`, because the column is a UTC wall clock without a
+zone and a session time zone would skew the window. `GET /admin/maintenance/blocking` and
+the admin maintenance page list both, so what the page shows is what the updater waits for; a
+repository listed only for its claim reads `checkout in use (<operation>)`, with `cloning` and
+`pending preparation` keeping precedence. A job
+row stuck in its in-progress status holds the drain until the deadline, and `--force` passes it. A
+claim whose holder died goes stale within `ROOT_CLAIM_STALE_MS` of its last renewal, inside the
+default 30-minute `--drain-timeout`.
 
-**Known drain gap (T780 PR2 L6, found-not-fixed):** API-held root claims for streamed attachments,
-attachment removal, remote relink/reconciliation and plan removal (`root_claim_kind = 'mutation'`)
-are neither counted by `liveWorkCount` nor listed by `/admin/maintenance/blocking`. Their admissions
-also do not take the new-work fence, so a zero count does not prove those requests finished.
-Before starting an upgrade, let those requests finish and prevent new attachment/relink/plan-delete
-requests throughout the drain and service replacement. Read the repository claim rows as an
-additional check: `root_claimed_at > now() - interval '15 minutes'` must return no live holds.
-A lease renews while the API is alive, with no duration cap. Stopping it mid-request leaves its
+**Remaining drain gap (T780 PR2 L6, narrowed by PR2b-3):** the count and the list include every live
+root claim, and attachment, relink/reconciliation and whole-plan-removal requests are admitted under
+the fence. Not admitted: the file-editor save (`PUT /tasks/:id/files/content`, kind `edit`),
+mark-onboarded (`POST /repos/:id/mark-onboarded`, `verify`), the onboarding-artifacts reset
+(`DELETE /repos/:id/onboarding-artifacts`, `reset`), and the plan snapshot Save and Pull, whose
+claim the worker holds. A request of those kinds that starts after the last zero count is not
+refused, so an upgrade can interrupt it. A lease renews while the API is alive, with no duration cap. Stopping it mid-request leaves its
 last stamp live for up to `ROOT_CLAIM_STALE_MS` (15 minutes after the last renewal); new preparations
 wait for that expiry, preserving ready and their pending marker. This bound describes abandoned
-claims only, not a safe deadline for interrupting a live upload. Full repair needs both counted
-claims and mutation admission under the maintenance fence; this PR does not claim that fix.
+claims only, not a safe deadline for interrupting a live upload.
 
 Which tasks count depends on the state in force (`drainTaskStatuses`, in `@haive/shared`). Over
 `normal` or `draining` they are `queued`, `running`, `paused`, `waiting_user` and `waiting_pr`: the
@@ -341,16 +347,24 @@ updater never waits for it. It does not filter by owner role: an administrator's
 passes the gate and could still answer it) is listed there too, though it is not waited for. A page
 newer than its api reads a response without `parked` as an empty list.
 Every api route that starts such work refuses with 503 while the state is `draining` or
-`maintenance`: the task routes, and every route that writes a job's in-progress status (repository
+`maintenance`: the task routes, every route that writes a job's in-progress status (repository
 create, upload and refresh, bundle create, upload, replace and sync, provider create, clone and image
-build, and a provider edit that rebuilds the image or downloads a model). Not fenced and not counted,
+build, and a provider edit that rebuilds the image or downloads a model), and each request that takes
+a `mutation` root claim for new work (a task attachment write or removal, a remote relink and its
+reconciliation, whole-plan removal). Not fenced and not counted,
 since none holds a window open: interactive runtimes (IDE, browser, DDEV control, terminal and login
 containers), cleanup, the plan mirror outbox (it resumes) and the price refresh. The refusal's
 authority is `admitNewWork`: a read of the state past ConfigService's 30 s cache inside the
 transaction that records the work, under a shared
 database fence (`lockNewWorkFenceShared`, an advisory lock on `NEW_WORK_FENCE_KEY`); most routes
 also answer an early 503 from the same fresh read before they start (`assertNewWorkAllowed`). A state that cannot be read within the bounded
-wait refuses new work with a retryable 503 rather than admitting it. An
+wait refuses new work with a retryable 503 rather than admitting it. A claim-taking request
+(`withAdmittedCheckoutMutation`) reads the state once before it claims, so a refused request never
+reaches the live-work count; it then takes the claim, then the fence in its own short transaction,
+released before the work starts and ahead of the work's own locks. An updater that counts after that
+transaction commits sees the claim; one that holds the fence first makes the request read the new
+state and release its claim. The remote reconciliation sweep reads that refusal as `maintenance` and
+skips the repository quietly. An
 upload complete makes that read once more right before it claims its session, since the claim is a
 write, so a drain that began after the early check refuses with the session untouched. Every
 updater state write (`draining`, the recount's `maintenance`, and the return to the state it found
@@ -417,7 +431,10 @@ Draining runs against the source release's schema before migration. The counter 
 `tasks.dead_at` in the catalog and excludes dead tasks only when that column exists (0197); older
 schemas count every task in the selected live statuses. It also detects `repositories.refresh_pending`
 (0250) in the catalog before counting that marker beside `cloning`, so a ready checkout being
-refreshed still holds the drain. Older source schemas retain the cloning-only count. Deploy the
+refreshed still holds the drain, and `repositories.root_claimed_at` (0162) before counting a live
+root claim beside them. The released v0.2.0 schema ends at 0155, so the updater of the target
+release meets a source schema without either column; the API and worker always read their own
+migrated schema and need no such check. Older source schemas retain the cloning-only count. Deploy the
 marker-aware updater with the API/worker that set it; before downgrading, settle pending refreshes
 and retain the additive column and migration. Its other repositories, bundles and provider
 columns all exist in the first release baseline. If configuration boot needs its encrypted-row

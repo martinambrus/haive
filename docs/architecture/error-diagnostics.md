@@ -334,8 +334,9 @@ work must be idempotent or guarded by the worker. `QueueAddTimeoutError` identif
 unknown enqueue outcome by class. Sign-out and module teardown keep their committed launch audit
 on that timeout, since the job may still land; a known rejection still removes only that launch's
 audit. Both timeout responses use 503 `queue_outcome_unknown`: the action may still complete
-and is safe to retry; rejections keep their existing response. The web maps that code to the same
-unknown-outcome guidance. Bundle queue lookups (including replacement job state) share a five-second
+and is safe to retry; rejections keep their existing response. `QueueOutcomeUnknownError` takes an
+optional message for a site where a repeat is not safe. The web shows the response's own text for that
+code, and the same unknown-outcome sentence when it has none. Bundle queue lookups (including replacement job state) share a five-second
 read deadline and answer 503 rather than interpreting a failed lookup as an absent job. ZIP replacement
 imports answer a timeout with 503 `queue_outcome_unknown` and keep the promoted source for a late ingest.
 A known rejection keeps the existing failure response and compensates the owned syncing row,
@@ -352,11 +353,20 @@ compensation when only a model save overlaps it. Saving model or Modelfile field
 provider retries failed model provisioning even with unchanged inputs, through the same pull policy
 and maintenance admission checks. Disabling or editing metadata alone does not retry provisioning,
 including a form save that echoes unchanged model fields alongside a metadata change.
+Repository create, upload complete and refresh or recover enqueue through `addRepoJobOrMarkError`
+(`routes/repos.ts`): a rejection marks the admitted row `error` (fenced by its job id) and rethrows,
+as before; a deadline is an unknown outcome, so the row stays `cloning` or pending with its job id for
+a late job or for the stranded-preparation sweep (`reconcileStrandedCloningRepos`, at boot and every 60
+s, only for rows older than 5 minutes whose job is not queued and that hold no live root claim), and the
+request answers 503 `queue_outcome_unknown` with the repository message (reload the list; adding it
+again creates a second repository), not the default "safe to retry". No API claim is held across these
+adds, so none is left behind. A repeat of a refresh then meets its pending marker (409), a repeat of an
+upload complete meets the completed session (409), and a repeat of a create makes a second repository.
 Runtime access keeps its 202 pending response, VNC its starting refusal, and plan/data Save and Pull their existing refusal
 contracts. Optional wake-ups (plan/project-state sweeps, module-source outbox, global-KB pending
 embeds and usage polls) are best effort. The API queue-add ratchet resolves the called BullMQ method declaration
-across routes, libraries and modules; `routes/repos.ts` remains explicitly excluded for its
-separate enqueue work (exactly three sites, pinned until T780 changes them). Optional chaining,
+across routes, libraries and modules, `routes/repos.ts` included: `addRepoJobOrMarkError` is trusted at
+argument index 2 like `addBundleJobOrMarkFailed`, and a source assertion pins its `await boundedAdd(add`. Optional chaining,
 subclasses, mapped types and queue-returning wrappers are covered; any-typed add receivers fail, and
 bounding helpers are recognized by declaration rather than identifier spelling. `addBestEffort` never throws and returns a boolean:
 use it when committed state already records the work (step actions, cancel, task start, stop-settle).

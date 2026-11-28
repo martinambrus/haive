@@ -286,7 +286,10 @@ describe('T487: explicit replacement mode', () => {
       await vi.advanceTimersByTimeAsync(2000);
       const response = await pending;
       expect(response.status).toBe(503);
-      expect(await response.json()).toMatchObject({ code: 'queue_outcome_unknown' });
+      expect(await response.json()).toMatchObject({
+        code: 'queue_outcome_unknown',
+        error: 'The action may still complete. It is safe to retry.',
+      });
       expect(fake.rows(schema.customBundles)[0]).toMatchObject({
         status: 'syncing',
         archivePath: path.join(dir, `source.${REPLACE}.zip`),

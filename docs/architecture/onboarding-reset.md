@@ -347,7 +347,8 @@ hold is one file write long, and a per-file lock would not exclude the reset, wh
 by nature. A task with no repository takes nothing, since there is no root to protect.
 
 Uploads, attachment removals, remote relinks/reconciliation and whole-plan removal hold a separate
-`mutation` claim (`withCheckoutMutation`), often for minutes across a streamed body or Git.
+`mutation` claim (`withCheckoutMutation`, reached through `withAdmittedCheckoutMutation`, which
+answers 503 while the system drains), often for minutes across a streamed body or Git.
 Their refusal says the repository is being changed by another file or configuration operation,
 never that a knowledge file is being saved; the HTTP code remains `checkout_unavailable`.
 New independent mutations refuse while `refresh_pending` is set or the checkout is not ready
@@ -364,9 +365,9 @@ not its arrival time. Renewal keeps running after this write refusal, preserving
 uncapped renewal and observable-loss policy; a later confirmed renewal can admit writes again.
 Loss is logged at release. Upload take-back removes only its own pinned inode;
 a retained aside is left alone when the public name no longer identifies that file. No connection
-spans a body or subprocess. Maintenance counting of these API holds remains a documented gap
+spans a body or subprocess. The maintenance drain counts a live claim of any kind
 ([release drain](release.md#the-drain-an-upgrade-runs-first)); a killed API's claim can remain live
-for fifteen minutes after its last renewal.
+for fifteen minutes after its last renewal and holds the drain until it goes stale.
 
 A lock must be HELD across the work it protects, and both places to hold one cost more than the
 race: the repo worker and the task worker run in ONE process on ONE `max: 10` pool, so a repo job
