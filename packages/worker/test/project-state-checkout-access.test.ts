@@ -1,8 +1,7 @@
 import { execFileSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { mkdirSync, writeFileSync } from 'node:fs';
-import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { mkdir, readFile, readdir, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { eq } from 'drizzle-orm';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -41,15 +40,30 @@ import {
   writeProjectStateColumn,
   writeProjectStateRecord,
 } from '../src/project-state/write.js';
+import { gitTemplate } from './support/git-template.js';
 
 const STATE_DIR = '.haive-data/state';
 
-const dirs: string[] = [];
+const emptyRepository = gitTemplate(async (dir) => {
+  execFileSync('git', ['init', '-q', '-b', 'main'], { cwd: dir });
+});
+const committedRepository = gitTemplate(async (dir) => {
+  execFileSync('git', ['init', '-q', '-b', 'main'], { cwd: dir });
+  execFileSync('git', ['commit', '--allow-empty', '-qm', 'initial'], {
+    cwd: dir,
+    env: {
+      ...process.env,
+      GIT_AUTHOR_NAME: 'fixture',
+      GIT_AUTHOR_EMAIL: 'fixture@local',
+      GIT_COMMITTER_NAME: 'fixture',
+      GIT_COMMITTER_EMAIL: 'fixture@local',
+    },
+  });
+});
 const claims: RootClaimHandle[] = [];
 afterEach(async () => {
   vi.restoreAllMocks();
   for (const claim of claims.splice(0)) await claim.release().catch(() => undefined);
-  await Promise.all(dirs.splice(0).map((d) => rm(d, { recursive: true, force: true })));
 });
 
 /** The fake keeps an upsert's SQL expressions unevaluated in its rows; they are not data. */
@@ -141,10 +155,8 @@ const FIRST = render();
 const SECOND = render({ framework: 'drupal11', lspLanguages: ['css', 'php-extended', 'twig'] });
 const record = (r: ProjectRender): ProjectStateRecord => ({ ...emptyProjectState(), render: r });
 
-async function setup() {
-  const root = await mkdtemp(join(tmpdir(), 'project-state-checkout-access-'));
-  dirs.push(root);
-  execFileSync('git', ['init', '-q', '-b', 'main'], { cwd: root });
+async function setup(repository = emptyRepository) {
+  const { dir: root } = await repository.copy();
   const id = randomUUID();
   const userId = randomUUID();
   const fake = createFakeDb({
@@ -646,15 +658,7 @@ describe('member 3: the imported rules reconcile under a held checkout', () => {
 
 describe('member 3: the checkout watcher already admits through the root claim', () => {
   async function watched() {
-    const s = await setup();
-    const env = {
-      ...process.env,
-      GIT_AUTHOR_NAME: 'fixture',
-      GIT_AUTHOR_EMAIL: 'fixture@local',
-      GIT_COMMITTER_NAME: 'fixture',
-      GIT_COMMITTER_EMAIL: 'fixture@local',
-    };
-    execFileSync('git', ['commit', '--allow-empty', '-qm', 'initial'], { cwd: s.root, env });
+    const s = await setup(committedRepository);
     s.putRecordSync(record(FIRST));
     vi.spyOn(configService, 'getBoolean').mockResolvedValue(true);
     // The fake cannot evaluate the branch update's column-to-column filter; it is not under test.

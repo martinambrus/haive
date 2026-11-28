@@ -1,11 +1,9 @@
 import { execFileSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { mkdirSync, writeFileSync } from 'node:fs';
-import { mkdtemp, rm } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { eq } from 'drizzle-orm';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { schema, type Database } from '@haive/database';
 import { createFakeDb } from '@haive/database/testing';
 import {
@@ -30,13 +28,13 @@ import { prepareProjectStatePush } from '../src/project-state/push.js';
 import { resyncWithKeptMetadata } from '../src/project-state/set-aside.js';
 import { writeProjectStateRecord } from '../src/project-state/write.js';
 import { save } from '../src/queues/plan-mirror-queue.js';
+import { gitTemplate } from './support/git-template.js';
 
 const STATE_DIR = '.haive-data/state';
 const SENTINEL = 'probe done';
 
-const dirs: string[] = [];
-afterEach(async () => {
-  await Promise.all(dirs.splice(0).map((d) => rm(d, { recursive: true, force: true })));
+const emptyRepository = gitTemplate(async (dir) => {
+  execFileSync('git', ['init', '-q', '-b', 'main'], { cwd: dir });
 });
 
 const context = (name: string): Record<string, unknown> => ({
@@ -51,9 +49,7 @@ const context = (name: string): Record<string, unknown> => ({
 });
 
 async function setup() {
-  const root = await mkdtemp(join(tmpdir(), 'project-state-plan-lease-'));
-  dirs.push(root);
-  execFileSync('git', ['init', '-q', '-b', 'main'], { cwd: root });
+  const { dir: root } = await emptyRepository.copy();
   const id = randomUUID();
   const userId = randomUUID();
   const fake = createFakeDb({
@@ -105,9 +101,7 @@ describe('the plan Save lease passes the project state writer and the sync', () 
       context: context('acme') as never,
       rtkChoiceRecorded: true,
     });
-    const before = execFileSync('cat', [join(s.root, STATE_DIR, 'project/render.json')], {
-      encoding: 'utf8',
-    });
+    const before = readFileSync(join(s.root, STATE_DIR, 'project/render.json'), 'utf8');
     const changed = structuredClone(s.repoRow().renderContext) as Record<string, unknown>;
     changed.projectInfo = { ...(changed.projectInfo as object), name: 'acme-renamed' };
     await s.fake.db
@@ -123,9 +117,7 @@ describe('the plan Save lease passes the project state writer and the sync', () 
       prepareProjectStatePush(scoped, { repositoryId: s.id, sourcePath: s.root }),
     );
 
-    const after = execFileSync('cat', [join(s.root, STATE_DIR, 'project/render.json')], {
-      encoding: 'utf8',
-    });
+    const after = readFileSync(join(s.root, STATE_DIR, 'project/render.json'), 'utf8');
     expect(after).not.toBe(before);
     expect(after).toContain('acme-renamed');
     const outbox = s.fake.rows(schema.projectStateOutbox)[0]!;
