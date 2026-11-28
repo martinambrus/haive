@@ -22,8 +22,11 @@ const recoveryDir = '.haive/kb-reroute-recovery';
 
 /** Original bytes survive Retry outside the KB/RAG tree. The retained journal is agent-readable.
  * An unreadable journal keeps drafts; an unwritable one also forbids local deletions this run.
- * An entry whose promotion is consumed (activated or archived) is not restored and is pruned;
- * `finish` drops entries whose file exists again and removes an emptied journal. */
+ * An entry whose promotion is consumed (a live entry holds it) is not restored, and is reported
+ * in `consumed`. It stays in the journal until `finish`: step 12 stages deletions from the latest
+ * run's output only, so a run that fails first must report the path again at the next Retry.
+ * `finish` drops those entries and the ones whose file holds the article again, and removes an
+ * emptied journal. */
 export async function restoreKbReroutes(
   repoPath: string,
   taskId: string,
@@ -45,6 +48,7 @@ export async function restoreKbReroutes(
     );
   };
   const consumed: string[] = [];
+  const consumedPaths = new Set<string>();
   const asideRel = `${journal}.unusable`;
   let asideCreated = false;
   let saved: Awaited<ReturnType<typeof readFileNoFollow>> | undefined;
@@ -107,15 +111,16 @@ export async function restoreKbReroutes(
     );
     if (ids.length > 0) {
       const gone = await isConsumed(ids);
-      state.files = state.files.filter((file) => {
-        if (!file.entryId || !gone.has(file.entryId)) return true;
+      for (const file of state.files) {
+        if (!file.entryId || !gone.has(file.entryId)) continue;
         consumed.push(file.path);
-        return false;
-      });
+        consumedPaths.add(file.path);
+      }
     }
   }
   try {
     for (const file of journalUsable ? state.files : []) {
+      if (consumedPaths.has(file.path)) continue;
       const rel = `${KB_DIR}/${file.path}`;
       const parent = path.posix.dirname(rel);
       const temp = `${parent}/.${path.posix.basename(rel)}.haive-tmp-${process.pid}-${randomUUID()}`;
@@ -189,6 +194,8 @@ export async function restoreKbReroutes(
       if (prior) {
         prior.body = body;
         delete prior.entryId;
+        // A new promotion, pending: no live entry holds this body yet.
+        consumedPaths.delete(sourcePath);
       } else state.files.push({ path: sourcePath, body });
       try {
         await save();
@@ -215,6 +222,7 @@ export async function restoreKbReroutes(
       try {
         const keep: typeof state.files = [];
         for (const file of state.files) {
+          if (consumedPaths.has(file.path)) continue;
           // The body is redundant only while the very same article is on disk. A lenient read folds
           // a refusal (a link or directory at the path) into null, which keeps the entry.
           const here = await readFileNoFollow(repoPath, `${KB_DIR}/${file.path}`, {

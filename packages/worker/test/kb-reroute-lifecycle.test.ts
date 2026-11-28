@@ -13,6 +13,7 @@ import type { StepContext } from '../src/step-engine/step-definition.js';
 // probe that names which journalled entries a purge cannot remove.
 const h = vi.hoisted(() => ({
   promote: vi.fn(),
+  clear: vi.fn(),
   consumed: vi.fn(),
   durable: new Set<string>(),
 }));
@@ -22,7 +23,7 @@ vi.mock('../src/step-engine/steps/_global-kb-promote.js', async (importOriginal)
     await importOriginal<typeof import('../src/step-engine/steps/_global-kb-promote.js')>();
   return {
     ...actual,
-    clearTaskPromotedDrafts: async () => 0,
+    clearTaskPromotedDrafts: h.clear,
     promoteToGlobalKbDraft: h.promote,
     findConsumedTaskPromotions: h.consumed,
   };
@@ -57,6 +58,8 @@ beforeEach(async () => {
   taskId = randomUUID();
   h.durable.clear();
   h.promote.mockReset();
+  h.clear.mockReset();
+  h.clear.mockResolvedValue(0);
   h.consumed.mockReset();
   h.consumed.mockImplementation(async (_db: unknown, _task: string, ids: Iterable<string>) => {
     return new Set([...ids].filter((id) => h.durable.has(id)));
@@ -148,6 +151,19 @@ it('a Retry restores nothing a purge cannot remove, and still reports its remova
   expect(retry.removedPaths, 'step 12 would never stage the deletion').toEqual([removed]);
 });
 
+// Review of #1408: step 12 reads only the latest output, so a run that fails after the lookup
+// must not take the path out of the next run's `removedPaths`.
+it('reports a consumed path again when the run that found it failed before finishing', async () => {
+  await rerouteThenActivate();
+  h.clear.mockRejectedValueOnce(new GlobalKbDeadlineError(12));
+  await expect(run()).rejects.toThrow(GlobalKbDeadlineError);
+  expect((await readJournal())?.files, 'kept until an apply finishes').toHaveLength(1);
+  const retry = await run();
+  expect(retry.removedPaths, 'step 12 would never stage the deletion').toEqual([removed]);
+  expect(await present(kbFile())).toBe(false);
+  expect(await readJournal(), 'pruned by the apply that finished').toBeNull();
+});
+
 it('restores only the files whose entries are not durable', async () => {
   const [a, b] = ['ANTI_PATTERNS/a.md', 'ANTI_PATTERNS/b.md'] as const;
   const ids = { [a]: randomUUID(), [b]: randomUUID() };
@@ -163,7 +179,8 @@ it('restores only the files whose entries are not durable', async () => {
   await expect(run([a, b])).rejects.toThrow();
   expect(await present(kbFile(a)), 'a is durable').toBe(false);
   expect(await readFile(kbFile(b), 'utf8')).toBe(bodyOf(b));
-  expect((await readJournal())?.files.map((f) => f.path)).toEqual([b]);
+  // The consumed entry stays until an apply finishes; b is pending.
+  expect((await readJournal())?.files.map((f) => f.path)).toEqual([a, b]);
 });
 
 it('a probe that times out fails the step before anything is restored', async () => {
@@ -250,6 +267,27 @@ it('keeps a body while a different file holds its path, and drops it once the fi
   await writeFile(kbFile(), bodyOf(rel));
   await recovery.finish();
   expect(await readJournal()).toBeNull();
+});
+
+it('keeps the entry of a consumed path that the same run re-routes again', async () => {
+  const { restoreKbReroutes } =
+    await import('../src/step-engine/steps/onboarding/_kb-reroute-recovery.js');
+  const first = await restoreKbReroutes(repo, taskId);
+  await first.rememberReroute(rel, bodyOf(rel));
+  await first.confirmReroute(rel, randomUUID());
+  const recovery = await restoreKbReroutes(
+    repo,
+    taskId,
+    undefined,
+    undefined,
+    async (ids) => new Set(ids),
+  );
+  expect(recovery.consumed).toEqual([rel]);
+  // A person put the article back and chose it again: a new promotion, pending this time.
+  await recovery.rememberReroute(rel, bodyOf(rel));
+  await recovery.confirmReroute(rel, randomUUID());
+  await recovery.finish();
+  expect((await readJournal())?.files).toMatchObject([{ path: rel, body: bodyOf(rel) }]);
 });
 
 it('keeps an entry whose path is a directory or a link and still drops a matching one', async () => {
