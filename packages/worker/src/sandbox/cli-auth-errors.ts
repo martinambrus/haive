@@ -36,7 +36,7 @@ export class CliAuthRetryableError extends Error {
 export class CliAuthProbeExhaustedError extends Error {
   constructor() {
     super(
-      'cli_auth_probe_exhausted: Authentication could not be verified. Check Docker and the stored login, then Retry.',
+      'cli_auth_probe_exhausted: Authentication could not be verified. Check Docker and the stored login, then Retry or, where the step offers it, Resume.',
     );
     this.name = 'CliAuthProbeExhaustedError';
   }

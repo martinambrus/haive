@@ -3750,6 +3750,8 @@ describe('bounded auth admission', () => {
       expect(result.status).toBe('failed');
       expect(state.taskStepRow.errorMessage).toContain('cli_auth_probe_exhausted:');
       expect(state.taskStepRow.errorMessage).toContain('Retry');
+      // Resume reopens the allowance too, on the steps that offer it.
+      expect(state.taskStepRow.errorMessage).toContain('Resume');
       expect(enqueueCliInvocation).not.toHaveBeenCalled();
       expect(state.inserts.filter((entry) => entry.table === 'cli_invocations')).toEqual([]);
     },
