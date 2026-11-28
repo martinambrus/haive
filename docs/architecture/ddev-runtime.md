@@ -110,6 +110,8 @@ its handle.
 error?}` for every command, so the MCP shim (`sandbox/ddev-mcp-server.ts`) reads `ok`: an explicit
 `ok: false` is an error result whose text is `error` (else the fixed line `ddev_<action> failed`)
 followed by any output, never an empty success; `ok: true` and a body without `ok` are unchanged.
+That mapping is `relayResult`, kept as source text (`DDEV_RELAY_RESULT_JS`) that the script embeds and
+its unit test evaluates, so both run one definition and only the transport needs a real child.
 `ddev_restart` runs `ddev restart` in place. After a non-zero exit and the checkout re-check it
 asks `probeDdevRecovery`, the probe `ensureDdevStarted` itself decides on (container presence,
 workspace label, the project's structured status and the nested dockerd, never ddev's wording),

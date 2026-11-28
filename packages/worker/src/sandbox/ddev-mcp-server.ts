@@ -7,6 +7,20 @@
  *  so a task's agent can only inspect/recover its own DDEV. Clone of rag-mcp-server.ts. */
 export const DDEV_MCP_SERVER_PATH = '/haive/haive-ddev-mcp.mjs';
 
+/** What the agent is told for the relay's parsed answer: the one part of the script below that decides
+ *  it. Source text, embedded once in the script and evaluated by its unit test, so both run this one
+ *  definition (a function's toString() is the transpiler's output, which may call helpers the
+ *  standalone script lacks). Plain JavaScript that refers to nothing outside itself. */
+export const DDEV_RELAY_RESULT_JS = String.raw`function relayResult(action, data) {
+  const output = typeof data?.output === 'string' ? data.output : null;
+  // The relay answers HTTP 200 even for a failed command: ok:false is the failure, however little it printed.
+  if (data?.ok === false) {
+    const why = typeof data.error === 'string' && data.error ? data.error : 'ddev_' + action + ' failed';
+    return { isError: true, text: output && output !== why ? why + '\n' + output : why };
+  }
+  return { isError: false, text: output ?? JSON.stringify(data) };
+}`;
+
 export const DDEV_MCP_SERVER_JS = String.raw`#!/usr/bin/env node
 // Haive DDEV-control MCP server (auto-generated, do not edit). Dependency-free stdio
 // MCP proxy: exposes ddev_status / ddev_logs / ddev_restart, each forwarding to the
@@ -54,6 +68,8 @@ const TOOLS = [
   },
 ];
 
+${DDEV_RELAY_RESULT_JS}
+
 async function callApi(action, body) {
   if (!API_URL || !TOKEN) {
     return { isError: true, text: 'ddev-control not configured (missing API URL or token).' };
@@ -74,13 +90,7 @@ async function callApi(action, body) {
     return { isError: true, text: 'ddev_' + action + ' HTTP ' + resp.status + ': ' + t.slice(0, 400) };
   }
   const data = await resp.json().catch(() => ({}));
-  const output = typeof data?.output === 'string' ? data.output : null;
-  // The relay answers HTTP 200 even for a failed command: ok:false is the failure, however little it printed.
-  if (data?.ok === false) {
-    const why = typeof data.error === 'string' && data.error ? data.error : 'ddev_' + action + ' failed';
-    return { isError: true, text: output && output !== why ? why + '\n' + output : why };
-  }
-  return { isError: false, text: output ?? JSON.stringify(data) };
+  return relayResult(action, data);
 }
 
 async function callTool(name, args) {
