@@ -871,11 +871,11 @@ parameter and the worker a database id. A route that already read the row builds
 (PostgreSQL prints the lowercase form), never from the parameter: the task attachment routes'
 uploads directory and stored paths (`requireOwnedTask`, `resolveTaskUploadsDir`), and the job ids and
 payloads of the browser-access, merge abort/undo/resync and module-source fetch routes.
-`enqueueCheckoutSync` and `enqueuePlanMirrorRefresh` have callers with no row and use
-`canonicalUuid`. An attachment row stored under another spelling before this stays refused (404, or
-409 "not in a recognised layout" on delete), as it already was under the canonical one. Other ids
-built from a spelling, such as the `ensure-ide-` job id (`ideTarget`, `lib/ide-target.ts`), are not
-covered.
+`enqueueCheckoutSync` and `enqueuePlanMirrorRefresh` take a route parameter or a body id from many
+callers, so they use `canonicalUuid` in the helper. An attachment row stored under another spelling
+before this stays refused (404, or 409 "not in a recognised layout" on delete), as it already was
+under the canonical one. Other ids built from a spelling, such as the `ensure-ide-` job id
+(`ideTarget`, `lib/ide-target.ts`), are not covered.
 
 Lock order: mutation-lease acquisition/release uses separate short row-update transactions;
 none holds a row while acquiring a key. Relink/intent/repair and gate-4 origin persistence use
