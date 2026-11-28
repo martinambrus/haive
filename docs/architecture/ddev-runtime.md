@@ -118,10 +118,13 @@ answers `ok: false` with `ddev restart failed (exit N); the project is still ser
 was recovered.` and the last 8000 characters of ddev's output. `warm-start` (runner and nested
 dockerd alive, project down) and `cold-boot` (runner gone, stopped or labelled for another
 workspace, or dockerd down) run `ensureDdevStarted`, with its snapshot restore, and answer
-`ok: true` with the restart output and a closing note that names the answer: `[ddev restart
-failed (exit N); the project was down: started in place]` or `[...; the runner or its dockerd was
-not usable: rebuilt by a cold boot]`. A probe with no answer, or a throw from `ensureDdevStarted`,
-answers `ok: false` with its own error.
+`ok: true` with the restart output and a closing note that names what the first probe saw and
+the outcome, never the action: `ensureDdevStarted` probes again and can rebuild the runner for
+a changed browser choice (`reconcileDdevAccess`), so "started in place" could be false. The
+note is `[ddev restart failed (exit N); the project was down; the runtime recovery brought it
+back]` for `warm-start` and `[...; the runner or its dockerd was not usable; the runtime
+recovery brought it back]` for `cold-boot`. A probe with no answer, or a throw from
+`ensureDdevStarted`, answers `ok: false` with its own error.
 
 **An HTTP 4xx from the mandatory runtime smoke is UNSURE, not PASS.** The unauthenticated
 probe cannot distinguish a login/access wall from a broken route. `08-phase-5-verify`

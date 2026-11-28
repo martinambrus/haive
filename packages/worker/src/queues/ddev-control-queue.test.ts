@@ -51,6 +51,9 @@ import { runDdevControl } from './ddev-control-queue.js';
 
 const MSG = new CheckoutUnavailableError().message;
 const REFUSAL = { ok: false, output: MSG, error: MSG };
+// ensureDdevStarted probes again and may rebuild the runner (a changed browser choice), so the
+// note may say what the first probe saw and that the project came back, never which action ran.
+const NAMES_THE_ACTION = /in place|cold boot|rebuilt|warm/i;
 const taskId = randomUUID();
 let repositoryId = randomUUID();
 let repoSubpath = `${randomUUID()}/${repositoryId}`;
@@ -130,34 +133,32 @@ describe('ddev restart gate', () => {
     expect(h.ensure).not.toHaveBeenCalled();
   });
 
-  it('cold boots a failed restart when the recovery probe says cold-boot, and says so', async () => {
+  it('recovers a failed restart when the probe says cold-boot, naming what it saw and the outcome', async () => {
     h.exec.mockResolvedValue({ exitCode: 1, output: 'gone' });
     h.recovery.mockResolvedValue('cold-boot');
     const result = await restart();
     expect(result).toEqual({
       ok: true,
-      output: expect.stringMatching(
-        /^gone\n\[ddev restart failed \(exit 1\); .*rebuilt by a cold boot\]$/,
-      ),
+      output:
+        'gone\n[ddev restart failed (exit 1); the runner or its dockerd was not usable; the runtime recovery brought it back]',
     });
-    expect(result.output).not.toContain('started in place');
+    expect(result.output).not.toMatch(NAMES_THE_ACTION);
     expect(h.recovery).toHaveBeenCalledExactlyOnceWith(handle, repoSubpath);
     expect(h.ensure).toHaveBeenCalledExactlyOnceWith(taskId, repoSubpath, {
       onProgress: expect.any(Function),
     });
   });
 
-  it('starts a failed restart in place when the recovery probe says warm-start, and says so', async () => {
+  it('recovers a failed restart when the probe says warm-start, naming what it saw and the outcome', async () => {
     h.exec.mockResolvedValue({ exitCode: 75, output: 'port busy' });
     h.recovery.mockResolvedValue('warm-start');
     const result = await restart();
     expect(result).toEqual({
       ok: true,
-      output: expect.stringMatching(
-        /^port busy\n\[ddev restart failed \(exit 75\); .*started in place\]$/,
-      ),
+      output:
+        'port busy\n[ddev restart failed (exit 75); the project was down; the runtime recovery brought it back]',
     });
-    expect(result.output).not.toContain('cold boot');
+    expect(result.output).not.toMatch(NAMES_THE_ACTION);
     expect(h.recovery).toHaveBeenCalledExactlyOnceWith(handle, repoSubpath);
     expect(h.ensure).toHaveBeenCalledExactlyOnceWith(taskId, repoSubpath, {
       onProgress: expect.any(Function),
@@ -172,7 +173,7 @@ describe('ddev restart gate', () => {
       const result = await restart();
       expect(result.ok).toBe(true);
       expect(result.output).toHaveLength(8000);
-      expect(result.output).toMatch(/\[ddev restart failed \(exit 1\); .*\]$/);
+      expect(result.output).toMatch(/\[ddev restart failed \(exit 1\); .*brought it back\]$/);
     },
   );
 

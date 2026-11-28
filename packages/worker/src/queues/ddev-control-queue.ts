@@ -127,14 +127,14 @@ export async function runDdevControl(payload: DdevControlPayload): Promise<DdevC
         await ensureDdevStarted(payload.taskId, ws.repoSubpath, {
           onProgress: (line) => log.debug({ taskId: payload.taskId }, line),
         });
-        const done =
+        // The note names what the first probe saw and the outcome, never the action: ensureDdevStarted
+        // probes again and may rebuild the runner for a changed browser choice (reconcileDdevAccess).
+        const seen =
           recovery === 'warm-start'
-            ? 'the project was down: started in place'
-            : 'the runner or its dockerd was not usable: rebuilt by a cold boot';
-        return {
-          ok: true,
-          output: `${r.output}\n[ddev restart failed (exit ${r.exitCode}); ${done}]`.slice(-8000),
-        };
+            ? 'the project was down'
+            : 'the runner or its dockerd was not usable';
+        const note = `[ddev restart failed (exit ${r.exitCode}); ${seen}; the runtime recovery brought it back]`;
+        return { ok: true, output: `${r.output}\n${note}`.slice(-8000) };
       });
     }
     return { ok: false, output: '', error: `unknown action: ${String(payload.action)}` };
