@@ -215,9 +215,9 @@ export async function restoreKbReroutes(
       try {
         const keep: typeof state.files = [];
         for (const file of state.files) {
-          // The body is redundant only while the very same article is on disk.
+          // The body is redundant only while the very same article is on disk. A lenient read folds
+          // a refusal (a link or directory at the path) into null, which keeps the entry.
           const here = await readFileNoFollow(repoPath, `${KB_DIR}/${file.path}`, {
-            strict: true,
             maxBytes: Buffer.byteLength(file.body) + 1,
           });
           if (here === null || here.truncated || here.data.toString('utf8') !== file.body)

@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
@@ -250,4 +250,19 @@ it('keeps a body while a different file holds its path, and drops it once the fi
   await writeFile(kbFile(), bodyOf(rel));
   await recovery.finish();
   expect(await readJournal()).toBeNull();
+});
+
+it('keeps an entry whose path is a directory or a link and still drops a matching one', async () => {
+  const { restoreKbReroutes } =
+    await import('../src/step-engine/steps/onboarding/_kb-reroute-recovery.js');
+  const [dir, link, same] = ['ANTI_PATTERNS/dir.md', 'ANTI_PATTERNS/link.md', rel] as const;
+  const recovery = await restoreKbReroutes(repo, taskId);
+  for (const p of [dir, link, same]) await recovery.rememberReroute(p, bodyOf(p));
+  await mkdir(kbFile(dir), { recursive: true });
+  await writeFile(path.join(repo, 'elsewhere.md'), bodyOf(link));
+  await symlink(path.join(repo, 'elsewhere.md'), kbFile(link));
+  await writeFile(kbFile(same), bodyOf(same));
+  // One odd path (an agent can make either) must not stop the others from being pruned.
+  await recovery.finish();
+  expect((await readJournal())?.files.map((f) => f.path).sort()).toEqual([dir, link].sort());
 });

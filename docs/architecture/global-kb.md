@@ -560,7 +560,8 @@ A body is never pruned merely because the promotion and the local deletion succe
 purges a pending draft, and the body is then the only copy. It is pruned when provably unneeded:
 at the next run for a consumed entry; at the end of a successful apply for an entry whose file
 holds the very same article again (a deduped or failed promotion kept it, or a Retry restored it
-and nothing re-routed it); and the journal file is removed once no entry is left. Onboarding reset does not prune it: inside `.haive/` reset owns
+and nothing re-routed it; a link or directory at the path keeps its entry); and the journal file is
+removed once no entry is left. Onboarding reset does not prune it: inside `.haive/` reset owns
 only `.haive/install.json`. The cost is one original-body copy per re-routed file whose draft is
 still pending, agent-readable under writable `.haive`; it is never staged as an agent body.
 Existing failures that predate the journal cannot be reconstructed from it. Rollback must retain
