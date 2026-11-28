@@ -503,7 +503,8 @@ for (const contract of [fixed, { version: 99 }]) {
   );
 }
 /** `reopens`: the press re-runs the step, so its event is one the step runner's auth admission
- *  window starts from (`AUTH_LEDGER_RESET_EVENTS`) and must name the step row it re-runs. */
+ *  window starts from (`AUTH_LEDGER_PRESS_EVENTS`, or `AUTH_LEDGER_SWITCH_EVENT` for the switch) and
+ *  must name the step row it re-runs: with no step id the gate ignores it. */
 const effects: Record<string, { event: string; job: boolean; kill: boolean; reopens?: true }> = {
   'task Retry at a step': { event: 'task.retried', job: true, kill: true, reopens: true },
   'step retry': { event: 'step.retry', job: true, kill: true, reopens: true },
