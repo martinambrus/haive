@@ -15,8 +15,12 @@ import { getDb } from '../db.js';
 import { getBullRedis } from '../redis.js';
 import { withInteractiveCheckout } from '../repo/interactive-checkout.js';
 import { resolveDdevWorkspace } from '../step-engine/steps/workflow/_task-meta.js';
-import { ddevExec, runnerHandleForTask, ensureDdevStarted } from '../sandbox/ddev-runner.js';
-import { requireRunnerPresence } from '../sandbox/runner-probe.js';
+import {
+  ddevExec,
+  runnerHandleForTask,
+  ensureDdevStarted,
+  probeDdevRecovery,
+} from '../sandbox/ddev-runner.js';
 
 // Worker side of the ddev-control MCP. The api enqueues a job here when a task's AI
 // CLI calls ddev_status / ddev_logs / ddev_restart; the worker resolves the per-task
@@ -45,9 +49,9 @@ async function resolveTaskRepo(
 
 /** Run one ddev-control action against the task's runner. Read actions (status/logs)
  *  use a handle to the already-running runner (no boot); restart runs `ddev restart` in
- *  place and cold-boots (ensureDdevStarted) only a runner that is gone or stopped, any
- *  other failed restart is reported as it is. Never throws — a failure is returned as
- *  { ok:false, error } so the api relays it to the agent. */
+ *  place and cold-boots (ensureDdevStarted) only when the recovery probe says the runner
+ *  or its nested dockerd is gone, any other failed restart is reported as it is. Never
+ *  throws — a failure is returned as { ok:false, error } so the api relays it to the agent. */
 export async function runDdevControl(payload: DdevControlPayload): Promise<DdevControlResult> {
   const db = getDb();
   const repo = await resolveTaskRepo(db, payload.taskId);
@@ -88,8 +92,8 @@ export async function runDdevControl(payload: DdevControlPayload): Promise<DdevC
       // status/logs only exec into a runner that already exists and stay ungated.
       return await withInteractiveCheckout(db, repo.repositoryId, async (check) => {
         // Fast path: restart in place (works whether the project is serving, wedged, or
-        // stopped). If the runner CONTAINER is gone or stopped, `ddev restart` fails fast
-        // (docker exec on it errors immediately) — recover that one with a full cold boot.
+        // stopped). If the runner CONTAINER is gone or stopped, or its nested dockerd died,
+        // `ddev restart` fails fast — recover that one with a full cold boot.
         // Avoids the redundant cold-boot-then-restart of doing ensureDdevStarted first.
         const r = await ddevExec(handle, 'restart', {
           timeoutMs: 900_000,
@@ -98,14 +102,15 @@ export async function runDdevControl(payload: DdevControlPayload): Promise<DdevC
         if (r.exitCode === 0) return { ok: true, output: r.output };
         // The failure may be the rebuild having removed the runner: do not boot a new one onto it.
         await check();
-        // Only the container's presence says a cold boot is the recovery, never ddev's wording;
-        // an unknown answer throws, since a rebuild is not guessed at. Any other failure is the
-        // restart's own: report it with its output rather than a recovery that did not happen.
-        const presence = await requireRunnerPresence(handle.container);
-        if (presence.state === 'present' && presence.running) {
+        // Ask the probe ensureDdevStarted itself decides on, never ddev's wording: only `cold-boot`
+        // (runner or nested dockerd gone) is healed by a cold boot, and an unknown answer throws,
+        // since a rebuild is not guessed at. Any other failure is the restart's own: report it with
+        // its output rather than a recovery that did not happen.
+        const recovery = await probeDdevRecovery(handle, ws.repoSubpath);
+        if (recovery !== 'cold-boot') {
           log.info(
-            { taskId: payload.taskId, exitCode: r.exitCode },
-            'ddev restart failed in a running runner; not cold booting',
+            { taskId: payload.taskId, exitCode: r.exitCode, recovery },
+            'ddev restart failed in a usable runner; not cold booting',
           );
           return {
             ok: false,
