@@ -6,7 +6,15 @@ import { join } from 'node:path';
 import { eq, sql } from 'drizzle-orm';
 import { PgDialect } from 'drizzle-orm/pg-core';
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
-import { createDatabase, hasPgCode, schema, type Database } from '@haive/database';
+import {
+  acquireRootClaim,
+  claimRepositoryRoot,
+  releaseRepositoryRoot,
+  createDatabase,
+  hasPgCode,
+  schema,
+  type Database,
+} from '@haive/database';
 import { HAIVE_DATA_FILES, logger } from '@haive/shared';
 import * as fsSafe from '@haive/shared/fs-safe';
 import { applyPlanPatch, lockPlanPatch, markPlanMirrorDirty } from '@haive/shared/plan';
@@ -14,15 +22,21 @@ import {
   writePlanMirror,
   reconcilePlanFromCheckout,
   importPlanMirror,
+  stampPlanMirrorHashesAtBoot,
   PlanMirrorHeldError,
 } from '../src/plan/mirror.js';
+import * as gitPush from '../src/repo/git-push.js';
+import * as planMerge from '../src/plan/merge.js';
+import { restoreProjectData, withRootClaim } from '../src/repo/clone.js';
 import * as gitExec from '../src/repo/git-exec.js';
 import { readNamedCheckout } from '../src/repo/checkout-head.js';
 
 const h = vi.hoisted(() => ({ db: null as unknown }));
 vi.mock('../src/db.js', () => ({ getDb: () => h.db }));
 
-const { sweepDirtyPlanMirrors } = await import('../src/queues/plan-mirror-queue.js');
+vi.mock('../src/secrets/user-git-identity.js', () => ({ resolveGitEnv: async () => ({}) }));
+
+const { sweepDirtyPlanMirrors, save, pull } = await import('../src/queues/plan-mirror-queue.js');
 
 const url = process.env.GONE_CHECKOUT_PLAN_TEST_URL;
 if (url && !new URL(url).pathname.startsWith('/gone_checkout_plan_test')) {
@@ -77,7 +91,7 @@ describe.skipIf(!url)('the plan sweep when a checkout directory is gone', () => 
     const storagePath = join(root, userId);
     const [repo] = await db
       .insert(schema.repositories)
-      .values({ userId, name: 'gone-checkout', source: 'blank', storagePath })
+      .values({ userId, name: 'gone-checkout', source: 'blank', status: 'ready', storagePath })
       .returning({ id: schema.repositories.id });
     const repositoryId = repo!.id;
     if (opts.plan) {
@@ -114,6 +128,217 @@ describe.skipIf(!url)('the plan sweep when a checkout directory is gone', () => 
         .from(schema.planMirrorState)
         .where(eq(schema.planMirrorState.repositoryId, repositoryId))
     )[0];
+
+  it('holds the multi-file sweep during a foreign rebuild and retries once ready', async () => {
+    const repo = await dirtyRepository({ plan: true, updatedAt: new Date() });
+    await createCheckout(repo.path);
+    const owner = await acquireRootClaim(db, repo.id, 'rebuild');
+    await db
+      .update(schema.repositories)
+      .set({ status: 'cloning' })
+      .where(eq(schema.repositories.id, repo.id));
+    try {
+      expect(await sweepDirtyPlanMirrors()).toBe(0);
+      const state = (await mirror(repo.id))!;
+      expect(state.writtenRevision).toBeLessThan(state.revision);
+      expect(state.lastError).toContain('checkout is preparing or unavailable');
+      await expect(readFile(join(repo.path, HAIVE_DATA_FILES.plan))).rejects.toMatchObject({
+        code: 'ENOENT',
+      });
+      await expect(readFile(join(repo.path, HAIVE_DATA_FILES.planMarkdown))).rejects.toMatchObject({
+        code: 'ENOENT',
+      });
+    } finally {
+      await owner!.release();
+    }
+    await db
+      .update(schema.repositories)
+      .set({ status: 'ready' })
+      .where(eq(schema.repositories.id, repo.id));
+    expect(await sweepDirtyPlanMirrors()).toBe(1);
+    expect((await mirror(repo.id))!.lastError).toBeNull();
+  });
+
+  /** The state a foreign rebuild leaves: a live claim and a cloning checkout. */
+  async function foreignRebuild(repositoryId: string) {
+    const owner = (await acquireRootClaim(db, repositoryId, 'rebuild'))!;
+    await db
+      .update(schema.repositories)
+      .set({ status: 'cloning' })
+      .where(eq(schema.repositories.id, repositoryId));
+    return owner;
+  }
+
+  it('leaves the revision of a dirty row alone while a foreign rebuild holds it tick after tick', async () => {
+    const repo = await dirtyRepository({ plan: true, updatedAt: new Date() });
+    await createCheckout(repo.path);
+    const owner = await foreignRebuild(repo.id);
+    try {
+      for (let tick = 0; tick < 3; tick++) expect(await sweepDirtyPlanMirrors()).toBe(0);
+      expect(await mirror(repo.id)).toMatchObject({ revision: 1, writtenRevision: 0 });
+      expect((await mirror(repo.id))!.lastError).toContain('checkout is preparing or unavailable');
+    } finally {
+      await owner.release();
+    }
+  });
+
+  it('makes a clean row dirty when a hold refuses its import, so the sweep retries it', async () => {
+    const repo = await dirtyRepository({ plan: true, updatedAt: new Date() });
+    await createCheckout(repo.path);
+    await writePlanMirror(db, repo.id, repo.path);
+    const clean = (await mirror(repo.id))!;
+    expect(clean.writtenRevision).toBe(clean.revision);
+    const owner = await foreignRebuild(repo.id);
+    try {
+      await expect(importPlanMirror(db, repo.id, repo.path)).rejects.toMatchObject({
+        holdReason: 'checkout_unavailable',
+      });
+      expect(await mirror(repo.id)).toMatchObject({
+        revision: clean.revision + 1,
+        writtenRevision: clean.writtenRevision,
+      });
+    } finally {
+      await owner.release();
+    }
+    await db
+      .update(schema.repositories)
+      .set({ status: 'ready' })
+      .where(eq(schema.repositories.id, repo.id));
+    expect(await sweepDirtyPlanMirrors()).toBe(1);
+    const retried = (await mirror(repo.id))!;
+    expect(retried.writtenRevision).toBe(retried.revision);
+    expect(retried.lastError).toBeNull();
+  });
+
+  it('writes nothing for a held boot stamp, so a clean unstamped row stays clean', async () => {
+    const repo = await dirtyRepository({ plan: true, updatedAt: new Date() });
+    await createCheckout(repo.path);
+    await writePlanMirror(db, repo.id, repo.path);
+    await db
+      .update(schema.planMirrorState)
+      .set({ syncedHash: null })
+      .where(eq(schema.planMirrorState.repositoryId, repo.id));
+    const clean = (await mirror(repo.id))!;
+    const owner = await foreignRebuild(repo.id);
+    try {
+      expect(await stampPlanMirrorHashesAtBoot(db)).toBe(0);
+    } finally {
+      await owner.release();
+    }
+    expect(await mirror(repo.id)).toMatchObject({
+      revision: clean.revision,
+      writtenRevision: clean.writtenRevision,
+      syncedHash: null,
+      lastError: null,
+    });
+  });
+
+  it('retries a held first import without deleting the unverified incoming plan', async () => {
+    const repo = await emptyIncomingRepo();
+    const incoming = await readFile(join(repo.path, HAIVE_DATA_FILES.plan));
+    const owner = (await acquireRootClaim(db, repo.id, 'rebuild'))!;
+    await db
+      .update(schema.repositories)
+      .set({ status: 'cloning' })
+      .where(eq(schema.repositories.id, repo.id));
+    try {
+      await expect(importPlanMirror(db, repo.id, repo.path)).rejects.toMatchObject({
+        holdReason: 'checkout_unavailable',
+      });
+      expect(await readFile(join(repo.path, HAIVE_DATA_FILES.plan))).toEqual(incoming);
+      expect((await mirror(repo.id))!.writtenRevision).toBeLessThan(
+        (await mirror(repo.id))!.revision,
+      );
+    } finally {
+      await owner.release();
+    }
+    await db
+      .update(schema.repositories)
+      .set({ status: 'ready' })
+      .where(eq(schema.repositories.id, repo.id));
+    expect(await sweepDirtyPlanMirrors()).toBe(1);
+    expect(
+      await db.query.planNodes.findFirst({ where: eq(schema.planNodes.repositoryId, repo.id) }),
+    ).toMatchObject({ title: 'Imported' });
+    expect(await readFile(join(repo.path, HAIVE_DATA_FILES.plan), 'utf8')).toContain('Imported');
+    expect((await mirror(repo.id))!.lastError).toBeNull();
+  });
+
+  it.each(['save', 'pull'] as const)(
+    'retains the real root lease across %s Git and failure recovery',
+    async (mode) => {
+      const repo = await dirtyRepository({ plan: true, updatedAt: new Date() });
+      await createCheckout(repo.path);
+      await writePlanMirror(db, repo.id, repo.path);
+      git(repo.path, 'remote', 'add', 'origin', 'https://fixture.invalid/repository');
+      const row = (await db.query.repositories.findFirst({
+        where: eq(schema.repositories.id, repo.id),
+      }))!;
+      const peer = createDatabase(url!);
+      let reached = false;
+      vi.spyOn(planMerge, 'fetchOrigin').mockImplementationOnce(async () => {
+        reached = true;
+        const rival = await acquireRootClaim(peer, repo.id, 'rebuild');
+        try {
+          expect(rival).toBeNull();
+        } finally {
+          await rival?.release();
+        }
+        throw new Error('lease boundary checked');
+      });
+      try {
+        await expect(
+          (mode === 'save' ? save : pull)({
+            repositoryId: repo.id,
+            userId: row.userId,
+            push: true,
+          }),
+        ).rejects.toThrow('lease boundary checked');
+        expect(reached).toBe(true);
+        const after = (await db.query.repositories.findFirst({
+          where: eq(schema.repositories.id, repo.id),
+        }))!;
+        expect(after.rootClaimOwner).toBeNull();
+        expect(await readFile(join(repo.path, HAIVE_DATA_FILES.plan), 'utf8')).toContain('Product');
+      } finally {
+        await peer.$client.end({ timeout: 5 });
+      }
+    },
+  );
+
+  it('allows plan Save to commit portable state under its own verified mutation lease', async () => {
+    const repo = await dirtyRepository({ plan: true, updatedAt: new Date() });
+    await createCheckout(repo.path);
+    git(repo.path, 'remote', 'add', 'origin', 'https://fixture.invalid/repository');
+    const row = (await db.query.repositories.findFirst({
+      where: eq(schema.repositories.id, repo.id),
+    }))!;
+    vi.spyOn(planMerge, 'fetchOrigin').mockResolvedValue('absent');
+    const push = vi.spyOn(gitPush, 'pushBranch').mockImplementation(async () => {
+      const held = (await db.query.repositories.findFirst({
+        where: eq(schema.repositories.id, repo.id),
+      }))!;
+      expect(held.rootClaimKind).toBe('mutation');
+      return { pushed: true, remote: 'origin', branch: 'main' };
+    });
+    await expect(
+      save({ repositoryId: repo.id, userId: row.userId, push: true }),
+    ).resolves.toMatchObject({ pushed: true });
+    expect(push).toHaveBeenCalledOnce();
+  });
+
+  it('keeps the verified preparation private restore available while public cloning', async () => {
+    const repo = await dirtyRepository({ plan: true, updatedAt: new Date() });
+    const replacement = join(root, randomUUID());
+    await createCheckout(replacement);
+    await db
+      .update(schema.repositories)
+      .set({ status: 'cloning' })
+      .where(eq(schema.repositories.id, repo.id));
+    await withRootClaim(db, repo.id, () => restoreProjectData(db, repo.id, replacement));
+    expect(await readFile(join(replacement, HAIVE_DATA_FILES.plan), 'utf8')).toContain('Product');
+    expect((await mirror(repo.id))!.writtenRevision).toBe((await mirror(repo.id))!.revision);
+  });
 
   it('flushes a 4106-node plan while another connection holds P without recording a snapshot error', async () => {
     const repo = await dirtyRepository({ plan: true, updatedAt: new Date() });
@@ -215,6 +440,46 @@ describe.skipIf(!url)('the plan sweep when a checkout directory is gone', () => 
     });
     return { db: wrapped, pid: () => pid };
   }
+
+  it('holds the row against a rebuild claim between JSON and markdown writes', async () => {
+    const repo = await dirtyRepository({ plan: true, updatedAt: new Date() });
+    await createCheckout(repo.path);
+    const observed = observeStatements(db, async () => {});
+    const peer = createDatabase(url!);
+    const atMarkdown = Promise.withResolvers<void>();
+    const release = Promise.withResolvers<void>();
+    const write = fsSafe.writeFileNoFollow;
+    vi.spyOn(fsSafe, 'writeFileNoFollow').mockImplementation(async (...args) => {
+      if (args[1] === HAIVE_DATA_FILES.planMarkdown) {
+        atMarkdown.resolve();
+        await release.promise;
+      }
+      return write(...args);
+    });
+    const flush = writePlanMirror(observed.db, repo.id, repo.path);
+    let claimant: ReturnType<typeof claimRepositoryRoot> | undefined;
+    try {
+      await atMarkdown.promise;
+      claimant = claimRepositoryRoot(peer, repo.id, 'rebuild');
+      await vi.waitFor(
+        async () => {
+          const [row] = await db.execute<{ blocked: boolean }>(sql`
+          select exists(select 1 from pg_stat_activity where datname = current_database()
+            and ${observed.pid()}::int = any(pg_blocking_pids(pid))) as blocked
+        `);
+          expect(row?.blocked).toBe(true);
+        },
+        { timeout: 5000, interval: 10 },
+      );
+    } finally {
+      release.resolve();
+      await flush;
+      const claim = await claimant;
+      if (claim) await releaseRepositoryRoot(peer, repo.id, claim.claimedAt, claim.owner);
+      await peer.$client.end({ timeout: 5 });
+    }
+    expect((await mirror(repo.id))!.writtenRevision).toBe((await mirror(repo.id))!.revision);
+  });
 
   const settle = <T>(promise: Promise<T>) =>
     promise.then(

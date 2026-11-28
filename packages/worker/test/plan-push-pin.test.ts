@@ -1,3 +1,10 @@
+import {
+  createPlanCheckoutDb,
+  PLAN_REPO_ID,
+  PLAN_STEP_ID,
+  PLAN_TASK_ID,
+  PLAN_USER_ID,
+} from './support/plan-checkout-db.js';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { StepContext } from '../src/step-engine/step-definition.js';
 
@@ -126,16 +133,7 @@ beforeEach(() => {
   h.detectOrigin.mockReset().mockResolvedValue(true);
   h.recordError.mockResolvedValue(undefined);
   h.push.mockResolvedValue({});
-  const db = {
-    query: {
-      repositories: { findFirst: async () => ({ id: 'r1', storagePath: '/repo' }) },
-      planMirrorState: { findFirst: async () => ({ revision: 1, writtenRevision: 1 }) },
-    },
-    execute: async () => {},
-    transaction: async (fn: (conn: unknown) => Promise<unknown>) => fn(db),
-    insert: () => ({ values: async () => {} }),
-  };
-  h.db = db;
+  h.db = createPlanCheckoutDb();
 });
 
 describe('#280 fix2 plan pushes require a pinned sha', () => {
@@ -148,12 +146,12 @@ describe('#280 fix2 plan pushes require a pinned sha', () => {
       const ctx = {
         db: h.db,
         repoPath: '/repo',
-        taskId: 't1',
-        taskStepId: 's1',
-        userId: 'u1',
+        taskId: PLAN_TASK_ID,
+        taskStepId: PLAN_STEP_ID,
+        userId: PLAN_USER_ID,
       } as StepContext;
       const detected = {
-        repositoryId: 'r1',
+        repositoryId: PLAN_REPO_ID,
         branch: 'main',
         worktreePath: '/repo/merge',
         worktreeRelPath: 'merge',
@@ -186,15 +184,15 @@ describe('#280 fix2 plan pushes require a pinned sha', () => {
     async (kind) => {
       h.fail = kind === 'exit failure';
       h.empty = kind === 'empty output';
-      await expect(save({ repositoryId: 'r1', userId: 'u1', push: true })).rejects.toThrow(
-        'could not read branch tip',
-      );
+      await expect(
+        save({ repositoryId: PLAN_REPO_ID, userId: PLAN_USER_ID, push: true }),
+      ).rejects.toThrow('could not read branch tip');
       expect(h.headReads).toBe(2);
       expect(h.push).not.toHaveBeenCalled();
       expect(h.advance).not.toHaveBeenCalled();
       expect(h.recordError).toHaveBeenCalledWith(
         h.db,
-        'r1',
+        PLAN_REPO_ID,
         expect.objectContaining({
           message: 'could not read branch tip; the plan commit is saved locally, retry the push',
         }),
@@ -206,11 +204,11 @@ describe('#280 fix2 plan pushes require a pinned sha', () => {
 describe('#280 fix5 plan pushes pin the destination branch after a checkout switch', () => {
   it('plan mirror pushes the destination sha and advances its base with that same sha', async () => {
     h.switched = true;
-    const result = await save({ repositoryId: 'r1', userId: 'u1', push: true });
+    const result = await save({ repositoryId: PLAN_REPO_ID, userId: PLAN_USER_ID, push: true });
     expect(result.pushed).toBe(true);
     expect(h.headReads).toBeGreaterThanOrEqual(2);
     expect(h.push).toHaveBeenCalledWith(expect.objectContaining({ sha: h.sha, branch: 'main' }));
-    expect(h.advance).toHaveBeenCalledWith(h.db, 'r1', '/repo', h.sha, 'main');
+    expect(h.advance).toHaveBeenCalledWith(h.db, PLAN_REPO_ID, '/repo', h.sha, 'main');
   });
 
   it('plan merge pushes the destination sha and advances its base with that same sha', async () => {
@@ -219,12 +217,12 @@ describe('#280 fix5 plan pushes pin the destination branch after a checkout swit
     const ctx = {
       db: h.db,
       repoPath: '/repo',
-      taskId: 't1',
-      taskStepId: 's1',
-      userId: 'u1',
+      taskId: PLAN_TASK_ID,
+      taskStepId: PLAN_STEP_ID,
+      userId: PLAN_USER_ID,
     } as StepContext;
     const detected = {
-      repositoryId: 'r1',
+      repositoryId: PLAN_REPO_ID,
       branch: 'main',
       worktreePath: '/repo/merge',
       worktreeRelPath: 'merge',
@@ -246,36 +244,37 @@ describe('#280 fix5 plan pushes pin the destination branch after a checkout swit
     expect(result.pushed).toBe(true);
     expect(h.headReads).toBeGreaterThanOrEqual(2);
     expect(h.push).toHaveBeenCalledWith(expect.objectContaining({ sha: h.sha, branch: 'main' }));
-    expect(h.advance).toHaveBeenCalledWith(h.db, 'r1', '/repo', h.sha, 'main');
+    expect(h.advance).toHaveBeenCalledWith(h.db, PLAN_REPO_ID, '/repo', h.sha, 'main');
   });
 });
 
 describe('plan save reads the current branch', () => {
   it('rejects a failed branch read when pushing', async () => {
     h.branch = { code: 128, stdout: '', stderr: 'fatal: simulated branch failure' };
-    await expect(save({ repositoryId: 'r1', userId: 'u1', push: true })).rejects.toThrow(
-      'git branch failed in /repo: fatal: simulated branch failure',
-    );
+    await expect(
+      save({ repositoryId: PLAN_REPO_ID, userId: PLAN_USER_ID, push: true }),
+    ).rejects.toThrow('git branch failed in /repo: fatal: simulated branch failure');
     expect(h.push).not.toHaveBeenCalled();
   });
 
   it('keeps a saved commit when the branch read fails without a push', async () => {
     h.branch = { code: 128, stdout: '', stderr: 'fatal: simulated branch failure' };
-    const result = await save({ repositoryId: 'r1', userId: 'u1', push: false });
+    const result = await save({ repositoryId: PLAN_REPO_ID, userId: PLAN_USER_ID, push: false });
     expect(result).toMatchObject({ pushed: false, branch: null });
     expect(h.push).not.toHaveBeenCalled();
   });
 
   it('still calls an empty answer a detached HEAD', async () => {
     h.branch = { code: 0, stdout: '', stderr: '' };
-    await expect(save({ repositoryId: 'r1', userId: 'u1', push: true })).rejects.toThrow(
-      'cannot push a plan snapshot from a detached HEAD',
-    );
+    await expect(
+      save({ repositoryId: PLAN_REPO_ID, userId: PLAN_USER_ID, push: true }),
+    ).rejects.toThrow('cannot push a plan snapshot from a detached HEAD');
   });
 });
 
 describe('plan save reads the origin remote', () => {
-  const saveIt = (push: boolean) => save({ repositoryId: 'r1', userId: 'u1', push });
+  const saveIt = (push: boolean) =>
+    save({ repositoryId: PLAN_REPO_ID, userId: PLAN_USER_ID, push });
 
   it('rejects with the origin read error and pushes nothing', async () => {
     const message = 'git remote get-url origin failed in /repo: boom';
@@ -284,7 +283,11 @@ describe('plan save reads the origin remote', () => {
     await expect(saveIt(true)).rejects.toThrow(new RegExp(`^${message}$`));
 
     expect(h.recordError).toHaveBeenCalledTimes(1);
-    expect(h.recordError).toHaveBeenCalledWith(h.db, 'r1', expect.objectContaining({ message }));
+    expect(h.recordError).toHaveBeenCalledWith(
+      h.db,
+      PLAN_REPO_ID,
+      expect.objectContaining({ message }),
+    );
     expect(h.push).not.toHaveBeenCalled();
   });
 
@@ -320,7 +323,7 @@ describe('plan save and confirm read git before they act', () => {
     'save rejects a failed work-tree probe (%i), not a missing checkout',
     async (code) => {
       h.probe = { code, stdout: '', stderr: 'boom' };
-      const err = await save({ repositoryId: 'r1', userId: 'u1', push: true }).then(
+      const err = await save({ repositoryId: PLAN_REPO_ID, userId: PLAN_USER_ID, push: true }).then(
         () => null,
         (e: unknown) => e as Error,
       );
@@ -332,16 +335,16 @@ describe('plan save and confirm read git before they act', () => {
 
   it('save keeps the old message when git answers false', async () => {
     h.probe = { code: 0, stdout: 'false', stderr: '' };
-    await expect(save({ repositoryId: 'r1', userId: 'u1', push: true })).rejects.toThrow(
-      'repository snapshot cannot be committed because this is not a Git checkout',
-    );
+    await expect(
+      save({ repositoryId: PLAN_REPO_ID, userId: PLAN_USER_ID, push: true }),
+    ).rejects.toThrow('repository snapshot cannot be committed because this is not a Git checkout');
   });
 
   it('save rejects a failed before read and pushes nothing', async () => {
     h.failRead = 1;
-    await expect(save({ repositoryId: 'r1', userId: 'u1', push: true })).rejects.toThrow(
-      /git rev-parse HEAD failed in \/repo/,
-    );
+    await expect(
+      save({ repositoryId: PLAN_REPO_ID, userId: PLAN_USER_ID, push: true }),
+    ).rejects.toThrow(/git rev-parse HEAD failed in \/repo/);
     expect(h.push).not.toHaveBeenCalled();
   });
 
@@ -351,12 +354,12 @@ describe('plan save and confirm read git before they act', () => {
     const ctx = {
       db: h.db,
       repoPath: '/repo',
-      taskId: 't1',
-      taskStepId: 's1',
-      userId: 'u1',
+      taskId: PLAN_TASK_ID,
+      taskStepId: PLAN_STEP_ID,
+      userId: PLAN_USER_ID,
     } as StepContext;
     const detected = {
-      repositoryId: 'r1',
+      repositoryId: PLAN_REPO_ID,
       branch: 'main',
       worktreePath: '/repo/merge',
       worktreeRelPath: 'merge',
