@@ -13,6 +13,10 @@ import { cliAuthScope } from '@haive/shared/cli-auth-state';
 import { advanceStep } from '../src/step-engine/step-runner.js';
 import { ensureTaskAuthVolumes } from '../src/sandbox/task-auth-volume.js';
 import type { DockerRunner } from '../src/sandbox/docker-runner.js';
+import {
+  AUTH_ADMISSION_RETRY_DELAY_MS,
+  CliAuthRetryableError,
+} from '../src/sandbox/cli-auth-errors.js';
 import { refreshExpiringCliCredentials } from '../src/usage-window/credential-refresh.js';
 import { readVolumeFile, writeVolumeFile } from '../src/usage-window/token-source.js';
 import { GROK_REFRESH_FENCE_FILE } from '../src/usage-window/grok-refresh-fence.js';
@@ -524,7 +528,7 @@ describe.skipIf(!url)(
           status: 'running',
         })
         .returning();
-      const start = new Date(Date.now() - 5000);
+      const start = new Date(Date.now() - 2 * AUTH_ADMISSION_RETRY_DELAY_MS);
       const [step] = await db
         .insert(schema.taskSteps)
         .values({
@@ -536,7 +540,10 @@ describe.skipIf(!url)(
           startedAt: start,
         })
         .returning();
-      const addRun = async (code: string | null, createdAt: Date) =>
+      const addRun = async (
+        code: 'cli_auth_probe_unknown' | 'cli_auth_busy' | null,
+        createdAt: Date,
+      ) =>
         db.insert(schema.cliInvocations).values({
           taskId: task!.id,
           taskStepId: step!.id,
@@ -546,17 +553,19 @@ describe.skipIf(!url)(
           startedAt: createdAt,
           endedAt: new Date(),
           exitCode: code ? -1 : 0,
-          errorMessage: code ? `${code}: fixture` : null,
+          errorMessage: code ? new CliAuthRetryableError(code).message : null,
           supersededAt: code === 'cli_auth_probe_unknown' ? new Date() : null,
         });
+      // Waves, not rows, are counted: the two unknown rows after the start are one
+      // delay apart, so they are two waves.
       await addRun('cli_auth_probe_unknown', new Date(start.getTime() - 1000));
-      for (const code of [
-        'cli_auth_probe_unknown',
-        'cli_auth_busy',
-        null,
-        'cli_auth_probe_unknown',
-      ])
-        await addRun(code, new Date(start.getTime() + 1000));
+      for (const [code, offset] of [
+        ['cli_auth_probe_unknown', 1000],
+        ['cli_auth_busy', 1000],
+        [null, 1000],
+        ['cli_auth_probe_unknown', 1000 + AUTH_ADMISSION_RETRY_DELAY_MS + 1000],
+      ] as const)
+        await addRun(code, new Date(start.getTime() + offset));
       const apply = vi.fn(async () => ({}));
       const enqueueCliInvocation = vi.fn();
       const params = {
@@ -604,6 +613,148 @@ describe.skipIf(!url)(
       if (paced.status === 'deferred') expect(paced.delayMs).toBeGreaterThan(0);
       expect(apply).not.toHaveBeenCalled();
       expect(enqueueCliInvocation).not.toHaveBeenCalled();
+    });
+
+    describe('step admission ledger boundaries on real SQL', () => {
+      type Code = 'cli_auth_probe_unknown' | 'cli_auth_busy';
+      const WAVE_GAP = AUTH_ADMISSION_RETRY_DELAY_MS + 1000;
+      // Every fixture row was created in the past; its end is now, as a just-failed admission is.
+      const T0 = Date.now() - 30 * WAVE_GAP;
+      const at = (ms: number) => new Date(T0 + ms);
+      const mkStep = async (limit: number | undefined) => {
+        const [task] = await db
+          .insert(schema.tasks)
+          .values({ userId, type: 'workflow', title: 'throwaway ledger', status: 'running' })
+          .returning();
+        const mk = async (stepId: string) => {
+          const [row] = await db
+            .insert(schema.taskSteps)
+            .values({
+              taskId: task!.id,
+              stepId,
+              stepIndex: 0,
+              title: 'fixture',
+              status: 'waiting_cli',
+              startedAt: at(0),
+            })
+            .returning();
+          return row!;
+        };
+        const step = await mk('auth-ledger-fixture');
+        const other = await mk('auth-ledger-other');
+        const addRun = async (code: Code | null, createdAt: Date) =>
+          db.insert(schema.cliInvocations).values({
+            taskId: task!.id,
+            taskStepId: step.id,
+            mode: 'cli',
+            prompt: 'fixture',
+            createdAt,
+            startedAt: createdAt,
+            endedAt: new Date(),
+            exitCode: code ? -1 : 0,
+            errorMessage: code ? new CliAuthRetryableError(code).message : null,
+          });
+        const addEvent = async (eventType: string, stepId: string, createdAt: Date) =>
+          db
+            .insert(schema.taskEvents)
+            .values({ taskId: task!.id, taskStepId: stepId, eventType, createdAt });
+        const apply = vi.fn(async () => ({}));
+        const enqueueCliInvocation = vi.fn();
+        const params = {
+          db,
+          taskId: task!.id,
+          userId,
+          repoPath: '/tmp',
+          workspacePath: '/tmp',
+          cliProviderId: null,
+          ...(limit === undefined ? {} : { authProbeUnknownLimit: limit }),
+          moduleDeactivation: null,
+          stepDef: {
+            metadata: {
+              id: 'auth-ledger-fixture',
+              workflowType: 'workflow' as const,
+              index: 0,
+              title: 'fixture',
+              description: 'fixture',
+              requiresCli: true,
+            },
+            apply,
+          },
+          deps: { enqueueCliInvocation },
+        };
+        const reopen = () =>
+          db
+            .update(schema.taskSteps)
+            .set({ status: 'waiting_cli', endedAt: null, errorMessage: null })
+            .where(eq(schema.taskSteps.id, step.id));
+        return { step, other, addRun, addEvent, params, reopen, apply, enqueueCliInvocation };
+      };
+      const expectExhausted = async (f: Awaited<ReturnType<typeof mkStep>>) => {
+        const res = await advanceStep(f.params);
+        expect(res.status).toBe('failed');
+        expect(res.row.errorMessage).toContain('cli_auth_probe_exhausted:');
+        expect(f.apply).not.toHaveBeenCalled();
+        expect(f.enqueueCliInvocation).not.toHaveBeenCalled();
+      };
+      const expectPaced = async (f: Awaited<ReturnType<typeof mkStep>>) => {
+        const res = await advanceStep(f.params);
+        expect(res.status).toBe('deferred');
+        expect(f.apply).not.toHaveBeenCalled();
+      };
+
+      it.each(['step.resume', 'step.retry_ai'])(
+        'a %s event reopens the allowance, which is then bounded again',
+        async (eventType) => {
+          const f = await mkStep(2);
+          await f.addRun('cli_auth_probe_unknown', at(1000));
+          await f.addRun('cli_auth_probe_unknown', at(1000 + WAVE_GAP));
+          await expectExhausted(f);
+          const eventAt = at(1000 + 2 * WAVE_GAP);
+          await f.addEvent(eventType, f.step.id, eventAt);
+          // A successful run after the event: nothing in the set is left to pace on,
+          // so the pass is not failed and not exhausted (it is dispatched, not deferred).
+          await f.addRun(null, new Date(eventAt.getTime() + 1000));
+          await f.reopen();
+          const res = await advanceStep(f.params);
+          expect(res.status).not.toBe('failed');
+          expect(res.row.errorMessage ?? '').not.toContain('cli_auth_probe_exhausted:');
+          f.apply.mockClear();
+          // Two NEW waves after the event spend the fresh allowance.
+          await f.addRun('cli_auth_probe_unknown', new Date(eventAt.getTime() + 2000));
+          await f.addRun('cli_auth_probe_unknown', new Date(eventAt.getTime() + 2000 + WAVE_GAP));
+          await f.reopen();
+          await expectExhausted(f);
+        },
+      );
+
+      it.each([
+        ['a step.resume of another step', 'step.resume', 'other'],
+        ['a step.skip of this step', 'step.skip', 'step'],
+      ] as const)('%s does not reset the count', async (_label, eventType, which) => {
+        const f = await mkStep(2);
+        await f.addRun('cli_auth_probe_unknown', at(1000));
+        await f.addRun('cli_auth_probe_unknown', at(1000 + WAVE_GAP));
+        await f.addEvent(eventType, f[which].id, at(1000 + 2 * WAVE_GAP));
+        await expectExhausted(f);
+      });
+
+      it('counts distinct waves: one wide wave counts once, twenty waves exhaust the default cap', async () => {
+        const wide = await mkStep(undefined);
+        for (let i = 0; i < 13; i++) await wide.addRun('cli_auth_probe_unknown', at(1000));
+        for (let i = 0; i < 13; i++)
+          await wide.addRun('cli_auth_probe_unknown', at(1000 + WAVE_GAP));
+        await expectPaced(wide);
+
+        const nineteen = await mkStep(undefined);
+        for (let i = 0; i < 19; i++)
+          await nineteen.addRun('cli_auth_probe_unknown', at(1000 + i * WAVE_GAP));
+        await expectPaced(nineteen);
+
+        const twenty = await mkStep(undefined);
+        for (let i = 0; i < 20; i++)
+          await twenty.addRun('cli_auth_probe_unknown', at(1000 + i * WAVE_GAP));
+        await expectExhausted(twenty);
+      });
     });
 
     it(

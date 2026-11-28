@@ -1,3 +1,9 @@
+import {
+  CLI_AUTH_BUSY,
+  CLI_AUTH_PROBE_UNKNOWN,
+  cliAuthStoredPrefix,
+} from '../../sandbox/cli-auth-errors.js';
+
 /* ------------------------------------------------------------------ */
 /* LLM stream failure classification                                   */
 /* ------------------------------------------------------------------ */
@@ -177,7 +183,10 @@ export function isCliPreemptionFailure(sig: { errorMessage?: string | null }): b
 /** Worker-authored code prefixes, never matches embedded CLI output. Auth waits
  * spend no agent budget; the step entry gate separately paces/bounds admission. */
 export function isCliAuthWaitFailure(run: { errorMessage?: string | null }): boolean {
-  return /^(?:cli_auth_busy|cli_auth_probe_unknown):/.test(run.errorMessage ?? '');
+  const message = run.errorMessage ?? '';
+  return [CLI_AUTH_BUSY, CLI_AUTH_PROBE_UNKNOWN].some((code) =>
+    message.startsWith(cliAuthStoredPrefix(code)),
+  );
 }
 
 /** Free re-dispatch: preemption, an auth admission wait, or a run that never started.

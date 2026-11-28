@@ -171,11 +171,17 @@ transient in DAG classification and free in the step, mining and DAG crash-loop 
 Before any of those dispatch paths re-enters, the shared step runner enforces the existing
 30-second delay from the last admission failure. Busy stays uncapped. Unknown failures have a
 separate fixed cap, `MAX_AUTH_PROBE_UNKNOWNS = 20` (injectable through advance parameters),
-counted from existing ended invocation rows since the step's current `started_at`, including
-superseded rows. Successful siblings and busy waits cannot erase that attempt's count.
+counted in waves: distinct 30-second buckets of `created_at` among the step's ended invocation
+rows with the unknown code, including superseded rows, from the later of the step's current
+`started_at` and its newest `step.resume` or `step.retry_ai` event. One wide fan-out that fails
+admission together counts once, since the delay above keeps two waves at least a bucket apart.
+Successful siblings and busy waits cannot erase that attempt's count.
 At the cap the step fails for user action with `cli_auth_probe_exhausted` and Retry guidance;
 no further automatic dispatch or code fix loop occurs. Retry resets the step start/output and
-therefore its allowance. No new table, queue or fence is used.
+therefore its allowance. Resume (loop and fan-out arms) and Retry with AI keep `started_at` and
+the old rows but write their event in the transaction that reopens the step, so each starts a
+fresh allowance and its first dispatch is not paced by earlier rows. No new table, queue or
+fence is used.
 The direct plugin-install apply has no invocation ledger row: its existing deferred catch
 keeps just its unknown count and retry timestamp in temporary step output, replaced on success
 and cleared by Retry. It uses the same cap and delay, parking `waiting_cli` with the idle marker

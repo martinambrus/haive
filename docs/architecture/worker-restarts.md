@@ -1516,12 +1516,20 @@ an explicit fs-safe mutation. Generic parks retain their age policy. Details and
 ## Bounded auth admission retries
 
 Before re-entering ordinary LLM, mining or any DAG dispatch, the step runner reads existing
-ended auth failures for this step since its current `started_at`. Superseding an unknown
-failure does not erase it. Every busy/unknown retry waits 30 seconds from the last ended auth
-failure. Unknowns stop at `MAX_AUTH_PROBE_UNKNOWNS` (20, injectable), failing with named reason
-`cli_auth_probe_exhausted` and Retry guidance before any further dispatch. This is user action,
-never a code fix loop. Busy stays uncapped and free of crash-loop budgets. Direct applies use
-the same delay/cap with a small temporary count/timestamp in existing step output, since they
-have no invocation. Retry clears start/output and gives a fresh allowance; a failed row cannot
-automatically reopen. No new state machine, table, queue or fence is introduced. Existing login
-refusals, auth-lock serialization and settlement guards are unchanged.
+ended auth failures for this step created since the later of its current `started_at` and its
+newest `step.resume` or `step.retry_ai` event. Superseding an unknown failure does not erase
+it. Every busy/unknown retry waits 30 seconds from the last ended auth failure in that window.
+Unknowns stop at `MAX_AUTH_PROBE_UNKNOWNS` (20, injectable) distinct waves, a wave being one
+30-second bucket of `created_at`, so one wide fan-out failing together counts once. The cap
+fails with named reason `cli_auth_probe_exhausted` and Retry guidance before any further
+dispatch. This is user action, never a code fix loop. Retry clears `started_at`; Resume and
+Retry with AI keep it and the old rows, but write their event in the transaction that reopens
+the step, so either starts a fresh allowance (a Resume after the cap no longer fails again
+after one paid run). Busy stays uncapped and free of crash-loop budgets. The two stored code
+prefixes are `CLI_AUTH_BUSY` and `CLI_AUTH_PROBE_UNKNOWN` in `sandbox/cli-auth-errors.ts`; the
+error class, `isCliAuthWaitFailure` and the gate query all derive from them, and their values
+are persisted in `cli_invocations.error_message`, so a rename must never be done there. Direct
+applies use the same delay/cap with a small temporary count/timestamp in existing step output,
+since they have no invocation. Retry clears start/output and gives a fresh allowance; a failed
+row cannot automatically reopen. No new state machine, table, queue or fence is introduced.
+Existing login refusals, auth-lock serialization and settlement guards are unchanged.

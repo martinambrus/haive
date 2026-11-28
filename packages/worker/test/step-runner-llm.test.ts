@@ -140,9 +140,14 @@ function makeMockDb(state: MockState, opts: MockDbOptions = {}, inTransaction = 
                 );
                 return [
                   {
-                    authUnknownCount: rows.filter((run) =>
-                      String(run.errorMessage).startsWith('cli_auth_probe_unknown:'),
-                    ).length,
+                    // Distinct 30 s buckets of createdAt: a wave counts once.
+                    authUnknownCount: new Set(
+                      rows
+                        .filter((run) =>
+                          String(run.errorMessage).startsWith('cli_auth_probe_unknown:'),
+                        )
+                        .map((run) => Math.floor((run.createdAt as Date).getTime() / 30_000)),
+                    ).size,
                     authLastWaitAt: Math.max(
                       0,
                       ...rows.map((run) => (run.endedAt as Date).getTime()),
@@ -3672,7 +3677,8 @@ describe('bounded auth admission', () => {
       state.cliInvocationHistory = [1, 2].map((id) => ({
         id: `auth-${id}`,
         startedAt: new Date(2),
-        createdAt: new Date(2),
+        // Two waves: one pacing delay (plus a second) apart.
+        createdAt: new Date(2 + (id - 1) * 31_000),
         endedAt: new Date(),
         errorMessage: 'cli_auth_probe_unknown: fixture',
         exitCode: -1,

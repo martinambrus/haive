@@ -1,4 +1,5 @@
 import { describe, it, expect } from 'vitest';
+import { CliAuthRetryableError } from '../../sandbox/cli-auth-errors.js';
 import { shouldRerollMiningAgent } from '../../step-engine/mining-failure.js';
 import {
   capabilityClassFromMessage,
@@ -10,6 +11,7 @@ import {
   CODEX_APP_SERVER_FAILED_HEADLINE,
   cliTimeoutBudgetMinutes,
   fatalClassFromMessage,
+  isCliAuthWaitFailure,
   isCliPreemptionFailure,
   isCliTimeoutFailure,
   isFatalProviderFailure,
@@ -682,5 +684,20 @@ it.each(['cli_auth_busy', 'cli_auth_probe_unknown'])(
       isTransientCliFailure({ exitCode: 1, errorMessage: `vendor output mentions ${code}: text` }),
     ).toBe(false);
     expect(isTransientCliFailure({ exitCode: 1, errorMessage: `${code}: text` })).toBe(true);
+  },
+);
+
+// The code strings are persisted in cli_invocations.error_message, and the step-entry gate and
+// the handler read old rows back, so a rename would silently stop matching rows already stored.
+it.each(['cli_auth_busy', 'cli_auth_probe_unknown'] as const)(
+  'the stored message of %s is an auth wait failure',
+  (code) => {
+    expect(new CliAuthRetryableError(code).code).toBe(code);
+    expect(isCliAuthWaitFailure({ errorMessage: new CliAuthRetryableError(code).message })).toBe(
+      true,
+    );
+    expect(isCliAuthWaitFailure({ errorMessage: `vendor output mentions ${code}: text` })).toBe(
+      false,
+    );
   },
 );

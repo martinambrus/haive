@@ -151,10 +151,13 @@ import { enqueueUsagePollTick } from '../queues/usage-poll-queue.js';
 import { foldCliParkOnResume, markCliParkBegin } from '../queues/cli-park-timing.js';
 import {
   AUTH_ADMISSION_RETRY_DELAY_MS,
+  CLI_AUTH_BUSY,
+  CLI_AUTH_PROBE_UNKNOWN,
   MAX_AUTH_PROBE_UNKNOWNS,
   CliAuthProbeExhaustedError,
   CliAuthRetryableError,
   CliLoginRequiredError,
+  cliAuthStoredPrefix,
 } from '../sandbox/cli-auth-errors.js';
 import {
   AdvisedStepError,
@@ -3788,6 +3791,11 @@ async function recordFinishedUsage(
     });
 }
 
+/** Events written in the transaction that reopens a step without clearing `started_at`: Resume
+ *  (api `routes/tasks/steps.ts` fan-out and loop arms, `scripts/resume-plan-sequence-review.ts`)
+ *  and `retry_ai`. The auth admission gate counts only invocations created after the newest one. */
+const AUTH_LEDGER_RESET_EVENTS = ['step.resume', 'step.retry_ai'] as const;
+
 export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceStepResult> {
   const { db, stepDef, taskId } = params;
   const meta = stepDef.metadata;
@@ -3905,14 +3913,25 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
 
     let current = row;
     // One gate before every dispatch family (LLM, mining and all DAG roles).
-    // The existing invocation ledger bounds unknowns even after superseding runs.
-    // Retry clears started_at/output, so earlier attempts cannot spend its allowance.
+    // The existing invocation ledger bounds unknown WAVES even after superseding runs.
+    // Retry clears started_at/output, so earlier attempts cannot spend its allowance;
+    // Resume and retry_ai keep started_at, so the newest step.resume/step.retry_ai event
+    // of this step is a second lower bound (AUTH_LEDGER_RESET_EVENTS).
     if (row.status === 'waiting_cli') {
       const direct = row.output as { _authProbeUnknowns?: number; _authRetryAt?: number } | null;
+      const unknownPrefix = cliAuthStoredPrefix(CLI_AUTH_PROBE_UNKNOWN);
+      const busyPrefix = cliAuthStoredPrefix(CLI_AUTH_BUSY);
+      const resetEvents = sql.join(
+        AUTH_LEDGER_RESET_EVENTS.map((type) => sql`${type}`),
+        sql`, `,
+      );
       const [wait] = await db
         .select({
+          // A wave is one 30 s bucket: the gate paces the next dispatch at least 30 s after
+          // the last end, so two waves never share a bucket and a whole wave created
+          // together (a wide fan-out failing admission at once) counts once.
           authUnknownCount:
-            sql<number>`count(*) filter (where starts_with(${schema.cliInvocations.errorMessage}, 'cli_auth_probe_unknown:'))`.mapWith(
+            sql<number>`count(distinct floor(extract(epoch from ${schema.cliInvocations.createdAt}) / ${AUTH_ADMISSION_RETRY_DELAY_MS / 1000})) filter (where starts_with(${schema.cliInvocations.errorMessage}, ${unknownPrefix}))`.mapWith(
               Number,
             ),
           authLastWaitAt:
@@ -3926,7 +3945,8 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
             eq(schema.cliInvocations.taskStepId, row.id),
             isNotNull(schema.cliInvocations.endedAt),
             row.startedAt ? gte(schema.cliInvocations.createdAt, row.startedAt) : undefined,
-            sql`(starts_with(${schema.cliInvocations.errorMessage}, 'cli_auth_probe_unknown:') or starts_with(${schema.cliInvocations.errorMessage}, 'cli_auth_busy:'))`,
+            sql`${schema.cliInvocations.createdAt} >= coalesce((select max(${schema.taskEvents.createdAt}) from ${schema.taskEvents} where ${schema.taskEvents.taskId} = ${row.taskId} and ${schema.taskEvents.taskStepId} = ${row.id} and ${schema.taskEvents.eventType} in (${resetEvents})), '-infinity'::timestamp)`,
+            sql`(starts_with(${schema.cliInvocations.errorMessage}, ${unknownPrefix}) or starts_with(${schema.cliInvocations.errorMessage}, ${busyPrefix}))`,
           ),
         );
       if (
@@ -5210,7 +5230,7 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
     if (err instanceof CliAuthRetryableError) {
       const prior = row.output as Record<string, unknown> | null;
       const unknowns =
-        Number(prior?._authProbeUnknowns ?? 0) + (err.code === 'cli_auth_probe_unknown' ? 1 : 0);
+        Number(prior?._authProbeUnknowns ?? 0) + (err.code === CLI_AUTH_PROBE_UNKNOWN ? 1 : 0);
       if (unknowns >= (params.authProbeUnknownLimit ?? MAX_AUTH_PROBE_UNKNOWNS)) {
         err = new CliAuthProbeExhaustedError();
       } else {
