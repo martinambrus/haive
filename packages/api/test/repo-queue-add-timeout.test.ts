@@ -115,9 +115,16 @@ const admitted = () => {
   return row!;
 };
 
+/** A repeat of a create makes a second repository, so this answer must not call a retry safe. */
+const REPO_OUTCOME_UNKNOWN =
+  "The repository's job may still start. Reload the repositories list before trying again: adding it again creates a second repository.";
+
 async function expectOutcomeUnknownWithAdmittedRow(res: Response) {
   expect(res.status).toBe(503);
-  expect(((await res.json()) as { code: string }).code).toBe('queue_outcome_unknown');
+  const body = (await res.json()) as { code: string; error: string };
+  expect(body.code).toBe('queue_outcome_unknown');
+  expect(body.error).toBe(REPO_OUTCOME_UNKNOWN);
+  expect(body.error).not.toMatch(/safe to retry/i);
   const row = admitted();
   expect(row).toMatchObject({ status: 'cloning', refreshPending: true });
   expect(row.refreshJobId).toEqual(expect.any(String));

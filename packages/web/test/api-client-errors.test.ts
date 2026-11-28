@@ -50,8 +50,17 @@ describe('api error message', () => {
     },
   );
 
-  it('explains an unknown queue outcome by code rather than server wording', async () => {
-    failWith(503, { code: 'queue_outcome_unknown', error: 'arbitrary server wording' });
+  it('shows the server wording for an unknown queue outcome', async () => {
+    failWith(503, { code: 'queue_outcome_unknown', error: 'A second attempt makes a second one.' });
+    await expect(api.post('/modules/alpha/teardown')).rejects.toMatchObject({
+      status: 503,
+      code: 'queue_outcome_unknown',
+      message: 'A second attempt makes a second one.',
+    });
+  });
+
+  it('falls back to the safe-to-retry sentence for an unknown queue outcome without wording', async () => {
+    failWith(503, { code: 'queue_outcome_unknown' });
     await expect(api.post('/modules/alpha/teardown')).rejects.toMatchObject({
       status: 503,
       code: 'queue_outcome_unknown',

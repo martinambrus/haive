@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { HttpError } from '../src/context.js';
 import {
   QUEUE_ADD_WAIT_MS,
+  QueueOutcomeUnknownError,
   QueueUnavailableError,
   addBestEffort,
   addOrRefuse,
@@ -96,6 +97,19 @@ describe('queue-bounded', () => {
     expect((err as Error).message).not.toContain('ECONNREFUSED');
     await expect(addOrRefuse(never, 'thing', undefined, 20)).rejects.toMatchObject({
       status: 503,
+    });
+  });
+
+  it('QueueOutcomeUnknownError says a retry is safe unless a site gives its own message', () => {
+    expect(new QueueOutcomeUnknownError()).toMatchObject({
+      status: 503,
+      code: 'queue_outcome_unknown',
+      message: 'The action may still complete. It is safe to retry.',
+    });
+    expect(new QueueOutcomeUnknownError('A retry makes a second one.')).toMatchObject({
+      status: 503,
+      code: 'queue_outcome_unknown',
+      message: 'A retry makes a second one.',
     });
   });
 });

@@ -30,6 +30,9 @@ import { errorHandler } from '../src/middleware/error-handler.js';
 import type { AppEnv } from '../src/context.js';
 
 const REPO = '00000000-0000-4000-8000-0000000000b1';
+/** A repeat of a create makes a second repository, so this answer must not call a retry safe. */
+const REPO_OUTCOME_UNKNOWN =
+  "The repository's job may still start. Reload the repositories list before trying again: adding it again creates a second repository.";
 
 const app = new Hono<AppEnv>();
 app.route('/', repoRoutes);
@@ -652,7 +655,10 @@ describe('a refresh whose add never settles', () => {
       await new Promise((resolve) => setImmediate(resolve));
     expect(res, 'the request is still waiting for the add').toBeDefined();
     expect(res!.status).toBe(503);
-    expect(((await res!.json()) as { code: string }).code).toBe('queue_outcome_unknown');
+    const body = (await res!.json()) as { code: string; error: string };
+    expect(body.code).toBe('queue_outcome_unknown');
+    expect(body.error).toBe(REPO_OUTCOME_UNKNOWN);
+    expect(body.error).not.toMatch(/safe to retry/i);
     const row = fake.rows(schema.repositories)[0]!;
     expect(row).toMatchObject({
       status: recovery ? 'cloning' : 'ready',

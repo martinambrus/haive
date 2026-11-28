@@ -240,6 +240,10 @@ function deriveTopLevelPaths(fileTree: string[] | null): string[] {
   return Array.from(set).sort();
 }
 
+/** A repeat of a create makes a second repository, so the default "safe to retry" would mislead. */
+const REPO_OUTCOME_UNKNOWN_MESSAGE =
+  "The repository's job may still start. Reload the repositories list before trying again: adding it again creates a second repository.";
+
 /** Enqueue a repository job, and mark the row `error` if the ENQUEUE itself fails.
  *
  *  The row is committed at `cloning` or with refreshPending before these calls run, so a throwing `queue.add` —
@@ -268,7 +272,7 @@ export async function addRepoJobOrMarkError(
   } catch (err) {
     if (err instanceof QueueAddTimeoutError) {
       logger.warn({ err, repositoryId }, 'repository job enqueue outcome unknown');
-      throw new QueueOutcomeUnknownError();
+      throw new QueueOutcomeUnknownError(REPO_OUTCOME_UNKNOWN_MESSAGE);
     }
     await db
       .update(schema.repositories)
