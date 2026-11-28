@@ -1228,6 +1228,22 @@ In `martinambrus/haive-module-translator`. The owner's English-to-Slovak run fai
 
 1. Accept a declined form (same stem, up to 2 trailing letters changed on words of 5+ letters) at every keep-term check; a translated name still fails; codes and short words stay exact. Then the owner Retries the step.
 
+### T792 · FNF[merge-replay-followups] · leftovers of the T785 merge crash replay (+7)
+
+status: open · kind: fix · found: T785 driver and reviews 2026-11-28 · priority: P4
+
+Step 12 merge replay leftovers after #1399, all in `merge-resolver.ts` / `git-merge.ts` / `landed-merge.ts`:
+
+1. PRE-EXISTING: `git-merge.ts` (~:1535 at #1399) returns null with no skip reason when the feature is already in `baseShaBefore`, so a ticked squash is dropped silently on a no-op merge. A reason there would warn on every no-op merge; decide the wording first.
+2. PRE-EXISTING: a feature that moved on after the stop leaves the first landed merge unsquashed and makes it the undo point (control `merge-base-recovery.test.ts` "feature moved on").
+3. Transitional: rows saved before #1399 carry no `preMergeBaseSha` and replay as before; the tip is recorded going forward only.
+4. REGRESSION (accepted, documented in merge-conflicts.md, pinned by the `LIMITATION:` control): a hand merge of the same feature on exactly the saved tip between a thrown exit and the very next attempt, or a forge merge fast-forwarded in, is squashed as this step's (no loss; push not forced). Optional hardening: refuse the record's proof when HEAD is already contained in a remote-tracking ref (feasibility unverified).
+5. PRE-EXISTING: `squashMergeCommit`'s own `rev-list` reads (`git-merge.ts` ~:1491, ~:1509, ~:1564) treat a nonzero exit as "not the recorded merge" (skip with a reason, or throw on a reset resume); safe for history, but a transient read error skips a squash.
+6. Nit: two discriminators decide the same feature, `spec.squashable` (`merge-resolver.ts` ~:1483) and the step-key check (`landed-merge.ts:24`).
+7. Test gaps: the merge-dir claim fake runs sections without a transaction (`merge-dir-claim-fake.ts:54`), so no rollback is modelled; the keep branch of the halt drop is not driven (needs a failing `git merge --abort`); landings through `settleOwnFiles` have no control; negative controls are same-branch only; the cancel path of `recordLandedMerge` (`landed-merge.ts` ~:78, swallows `StepSupersededError` after the event) followed by a replay is untested; early-halt controls run without kept set-aside files (`settleGivenUp` interplay argued, not driven).
+
+Evidence: `.claude/tmp/codex-run/T785-S/ledger.md`, `review-x.md`.
+
 ### T791 · FNF[uuid-route-spelling] · non-advisory keys built from a route's uuid spelling (+5)
 
 status: open · kind: fix · found: T790 item 3 driver (#1397) 2026-11-28 · priority: P3
@@ -1285,7 +1301,7 @@ All minor; none loses a write. 1. The 5 s ordinary wait is the default of `apply
 
 ### T785 · FNF[merge-crash-replay] · a crash between a clean merge landing and its state save replays without the squash, the landed event or the right undo point
 
-status: open · kind: fix · found: T316 review 1 (member 5, parked under the T316 fence) 2026-11-27 · priority: P3
+status: done 2026-11-28, merged #1399 (28a7f129a) and live (libs deployed): step 12 saves the pre-merge base tip (`preMergeBaseSha`, optional jsonb key, no migration) in its own section before the merge; a replay keeps it only when HEAD is that tip or a merge whose first parent is that tip, second parent inside the feature and whole feature in HEAD (parents and ancestry only), then finishes the squash, writes `merge.landed` once and keeps the true undo point; any other tip is measured afresh and an unprovable squash keeps history with `squashSkipReason` plus a step warning; a git error in the proof throws and keeps the record; every halt that merged nothing (before and after the merge) drops the record while HEAD is still the saved tip, before its status write. 25 real-git controls (red on main), 21 mutations killed; reviews: high (1 regression fixed), xhigh (1 medium fixed), Greptile 2 P1s fixed then 5/5; no Codex review (out). Leftovers in T792 · kind: fix · found: T316 review 1 (member 5, parked under the T316 fence) 2026-11-27 · priority: P3
 
 PRE-EXISTING. In step 12 (`merge-resolver.ts` ~:1422-1465), a worker crash after git lands a clean merge and before the resolver saves its state replays to the same HEAD, tree and reflog (nothing lost or double-applied), but: (1) the squash the user ticked is omitted with no skip reason, and the unsquashed history is pushed when push is on; (2) no `merge.landed` event is written, since `landed-merge.ts` ~:30 sees the tip equal to `baseShaBefore`; (3) `baseShaBefore` becomes the merge commit itself, so the documented undo point is wrong. The T316 member-5 control pins today's unsquashed outcome. Fix direction: persist the pre-merge base before the merge runs (or derive it from the merge's first parent on replay) and let the replay finish the squash and the landed event; red control first.
 
