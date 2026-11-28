@@ -13,6 +13,7 @@ import { usePendingCliCopy } from '@/lib/use-pending-cli-copy';
 import { describeSlotHolders } from '@/components/cli-slot-wait';
 import { CLI_LOGIN_CLOSE_CODES } from '@haive/shared/constants';
 import { runCliProbe } from '@/lib/cli-jobs';
+import { loginRefusalReason } from '@/lib/cli-image-build';
 
 interface CliAuthBannerModalProps {
   open: boolean;
@@ -219,7 +220,10 @@ export function CliAuthBannerModal({
         }
         case 'error':
           changePhase('error');
-          setError(typeof msg.message === 'string' ? msg.message : 'Login failed');
+          setError(
+            loginRefusalReason(msg.code) ??
+              (typeof msg.message === 'string' ? msg.message : 'Login failed'),
+          );
           break;
         case 'exit':
           if (

@@ -117,7 +117,7 @@ export default function CliProvidersPage() {
    *  the per-row buttons for both the single and the bulk path. */
   const [bulkBusy, setBulkBusy] = useState(false);
   const [bulkProgress, setBulkProgress] = useState<string | null>(null);
-  const { requireCliLogin } = useCliLogin();
+  const { requireCliLogin, request: loginRequest } = useCliLogin();
 
   const upgradeGroups = useMemo(
     () => (providers && catalog ? groupUpgradable(providers, catalog) : []),
@@ -189,13 +189,16 @@ export default function CliProvidersPage() {
   }, []);
 
   const anyBuilding = providers ? anyImageBuilding(providers) : false;
+  // A login on a row whose image is missing builds it, after this list was read.
+  const loginOpen = Boolean(loginRequest);
+  const pollWanted = anyBuilding || loginOpen;
   // A rebuild notice describes a build the list still shows. A cached or quick build can finish
   // before the reload after an Upgrade, and then no poll starts that would clear it.
   useEffect(() => {
     if (notice && !anyBuilding) setNotice(null);
   }, [notice, anyBuilding]);
   useEffect(() => {
-    if (!anyBuilding) return;
+    if (!pollWanted) return;
     const controller = new AbortController();
     let timer: ReturnType<typeof setTimeout> | undefined;
     let inFlight = false;
@@ -235,7 +238,13 @@ export default function CliProvidersPage() {
       clearTimeout(timer);
       document.removeEventListener('visibilitychange', onVisibility);
     };
-  }, [anyBuilding]);
+  }, [pollWanted]);
+  // One read when the login closes: a build that began after the last poll still shows.
+  const loginWasOpen = useRef(false);
+  useEffect(() => {
+    if (loginWasOpen.current && !loginOpen) void load();
+    loginWasOpen.current = loginOpen;
+  }, [loginOpen]);
 
   async function handleDelete(id: string) {
     if (!confirm('Delete this CLI provider configuration?')) return;

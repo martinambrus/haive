@@ -1,3 +1,4 @@
+import { CLI_LOGIN_REFUSAL_CODES } from '@haive/shared/constants';
 import type { CliProvider } from './api-client';
 
 export const IMAGE_BUILDING_REASON =
@@ -29,4 +30,12 @@ export function cliImageBuild(
 
 export function anyImageBuilding(rows: readonly Parameters<typeof cliImageBuild>[0][]): boolean {
   return rows.some((r) => cliImageBuild(r)?.state === 'building');
+}
+
+/** The reason the list shows for the image state a login refusal code names. Null for any other
+ *  code or none: the login dialog then shows the worker's own message. */
+export function loginRefusalReason(code: unknown): string | null {
+  if (code === CLI_LOGIN_REFUSAL_CODES.SANDBOX_IMAGE_BUILDING) return IMAGE_BUILDING_REASON;
+  if (code === CLI_LOGIN_REFUSAL_CODES.SANDBOX_IMAGE_FAILED) return IMAGE_FAILED_REASON;
+  return null;
 }
