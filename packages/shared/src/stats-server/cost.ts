@@ -111,9 +111,9 @@ export interface TaskProviderUsage {
   costBasis: string;
   invocations: number;
   inputTokens: number;
-  /** null when no invocation in the group reported an output (killed before its result). */
+  /** null when no invocation in the group reported an output (killed or still running). */
   outputTokens: number | null;
-  /** Invocations in the group whose output was never reported; above 0 the sum is "at least". */
+  /** Invocations in the group whose output is not reported; above 0 the sum is "at least". */
   outputUnknownRuns: number;
   cacheReadTokens: number;
   cacheCreationTokens: number;
