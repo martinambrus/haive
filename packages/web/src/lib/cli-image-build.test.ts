@@ -3,6 +3,7 @@ import {
   IMAGE_BUILDING_REASON,
   IMAGE_BUILD_POLL_MS,
   IMAGE_FAILED_REASON,
+  anyImageBuilding,
   cliImageBuild,
 } from './cli-image-build';
 
@@ -51,5 +52,11 @@ describe('cliImageBuild', () => {
 
   it('L4 polls every three seconds', () => {
     expect(IMAGE_BUILD_POLL_MS).toBe(3000);
+  });
+
+  it('L5 anyImageBuilding is true only when some row is building', () => {
+    expect(anyImageBuilding([])).toBe(false);
+    expect(anyImageBuilding([row('ready'), row('idle'), row('failed', 'x')])).toBe(false);
+    expect(anyImageBuilding([row('ready'), row('building'), row('failed')])).toBe(true);
   });
 });

@@ -38,7 +38,7 @@ import { ActionMenu } from '@/components/action-menu';
 import { LOGIN_SET_NOTE } from '@/components/claude-usage-auth';
 import { CliUpgradeAll } from '@/components/cli-upgrade-all';
 import { cliUpgradeLatest, groupUpgradable } from '@/components/cli-upgrade-selection';
-import { IMAGE_BUILD_POLL_MS, cliImageBuild } from '@/lib/cli-image-build';
+import { IMAGE_BUILD_POLL_MS, anyImageBuilding, cliImageBuild } from '@/lib/cli-image-build';
 import { runCliProbe, runCliSignOut, signOutSummary, type QueuedJobPhase } from '@/lib/cli-jobs';
 import { useCliLogin } from '@/lib/use-cli-login';
 import { usePageTitle } from '@/lib/use-page-title';
@@ -110,6 +110,8 @@ export default function CliProvidersPage() {
   const [cloningIds, setCloningIds] = useState<Record<string, boolean>>({});
   const [rebuildingIds, setRebuildingIds] = useState<Record<string, boolean>>({});
   const [notice, setNotice] = useState<string | null>(null);
+  /** Bumped by every load(): a poll read issued before it must not overwrite what it fetched. */
+  const loadSeq = useRef(0);
   const [upgradingIds, setUpgradingIds] = useState<Record<string, boolean>>({});
   /** Bulk ("Upgrade All") run state — separate from upgradingIds, which drives
    *  the per-row buttons for both the single and the bulk path. */
@@ -141,6 +143,7 @@ export default function CliProvidersPage() {
   }
 
   async function load() {
+    loadSeq.current += 1;
     try {
       const [providersData, catalogData] = await Promise.all([
         api.get<{ providers: CliProvider[] }>('/cli-providers'),
@@ -185,7 +188,7 @@ export default function CliProvidersPage() {
     void load();
   }, []);
 
-  const anyBuilding = providers?.some((p) => cliImageBuild(p)?.state === 'building') ?? false;
+  const anyBuilding = providers ? anyImageBuilding(providers) : false;
   useEffect(() => {
     if (!anyBuilding) return;
     const controller = new AbortController();
@@ -196,12 +199,16 @@ export default function CliProvidersPage() {
       if (controller.signal.aborted || document.hidden || inFlight) return;
       inFlight = true;
       clearTimeout(timer);
+      const seq = loadSeq.current;
       try {
         const res = await api.get<{ providers: CliProvider[] }>(
           '/cli-providers',
           controller.signal,
         );
-        if (!controller.signal.aborted) setProviders(res.providers);
+        if (!controller.signal.aborted && seq === loadSeq.current) {
+          setProviders(res.providers);
+          if (!anyImageBuilding(res.providers)) setNotice(null);
+        }
       } catch {
         // Keep polling: one failed read must not leave a stale "rebuilding" badge.
       } finally {
@@ -276,9 +283,13 @@ export default function CliProvidersPage() {
     try {
       // PATCH cliVersion → the API flags imageInputsChanged and rebuilds the
       // provider's sandbox image automatically.
-      await api.patch(`/cli-providers/${p.id}`, { cliVersion: latest });
+      const { provider: saved } = await api.patch<{ provider: CliProvider }>(
+        `/cli-providers/${p.id}`,
+        { cliVersion: latest },
+      );
       await load();
-      setNotice(`${p.label} is pinned to ${latest}; its sandbox image rebuild has started.`);
+      if (saved.sandboxImageBuildStatus === 'building')
+        setNotice(`${p.label} is pinned to ${latest}; its sandbox image rebuild has started.`);
     } catch (err) {
       setError((err as Error).message ?? 'Failed to upgrade CLI version');
     } finally {
@@ -320,11 +331,16 @@ export default function CliProvidersPage() {
 
     const failed: { label: string; message: string }[] = [];
     let upgraded = 0;
+    let started = 0;
     for (const [i, { p, latest }] of targets.entries()) {
       setBulkProgress(`Upgrading ${i + 1} of ${targets.length}...`);
       try {
-        await api.patch(`/cli-providers/${p.id}`, { cliVersion: latest });
+        const { provider: saved } = await api.patch<{ provider: CliProvider }>(
+          `/cli-providers/${p.id}`,
+          { cliVersion: latest },
+        );
         upgraded++;
+        if (saved.sandboxImageBuildStatus === 'building') started++;
       } catch (err) {
         failed.push({ label: p.label, message: (err as Error).message ?? 'Upgrade failed' });
       }
@@ -340,9 +356,9 @@ export default function CliProvidersPage() {
     });
     setBulkProgress(null);
     setBulkBusy(false);
-    if (upgraded > 0)
+    if (started > 0)
       setNotice(
-        `${upgraded} sandbox image ${upgraded === 1 ? 'rebuild has' : 'rebuilds have'} started.`,
+        `${started} sandbox image ${started === 1 ? 'rebuild has' : 'rebuilds have'} started.`,
       );
     if (failed.length > 0) {
       setError(
@@ -602,7 +618,7 @@ export default function CliProvidersPage() {
                   return (
                     <Card key={p.id}>
                       <div className="flex items-start justify-between gap-4">
-                        <div>
+                        <div className="min-w-0">
                           <div className="flex flex-wrap items-center gap-2">
                             <h3 className="text-lg font-semibold text-neutral-50">{p.label}</h3>
                             <Badge>{p.name}</Badge>
@@ -623,11 +639,20 @@ export default function CliProvidersPage() {
                               </Badge>
                             )}
                             {image?.state === 'building' && (
-                              <Badge variant="warning" title={image.reason} className="gap-1">
-                                <LoaderCircle className="h-3 w-3 animate-spin" aria-hidden="true" />
-                                {image.version
-                                  ? `Rebuilding sandbox image · ${image.version}`
-                                  : 'Rebuilding sandbox image'}
+                              <Badge
+                                variant="warning"
+                                title={image.reason}
+                                className="max-w-full gap-1"
+                              >
+                                <LoaderCircle
+                                  className="h-3 w-3 flex-shrink-0 animate-spin"
+                                  aria-hidden="true"
+                                />
+                                <span className="truncate">
+                                  {image.version
+                                    ? `Rebuilding sandbox image · ${image.version}`
+                                    : 'Rebuilding sandbox image'}
+                                </span>
                               </Badge>
                             )}
                             {image?.state === 'failed' && (

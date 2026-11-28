@@ -257,7 +257,10 @@ reads `sandbox_image_build_status` alone (`cliImageBuild`, `web/src/lib/cli-imag
 error column is display copy, so a `ready` row holding old error text shows nothing): `building`
 shows a "Rebuilding sandbox image" badge, `failed` shows the stored error with a Rebuild image
 button, and while any row is `building` the page re-reads `GET /cli-providers` every
-`IMAGE_BUILD_POLL_MS` (paused in a hidden tab, stopped when none is). Test and Log in are disabled
+`IMAGE_BUILD_POLL_MS` (paused in a hidden tab, stopped when none is; a reload an action starts
+supersedes a read issued before it, so a late answer cannot undo it). Upgrade and Upgrade All
+announce a rebuild only when the PATCH answer reports `building` (the api forces that status into
+the answer when the change starts a build), and a read that finds none building clears the notice. Test and Log in are disabled
 with `IMAGE_BUILDING_REASON` or `IMAGE_FAILED_REASON` as their title, the constants the edit form
 uses too; the edit page's Log in follows the form's live build state, not its dirty state, because
 a login reads no unsaved configuration. Only those two need a gate. The probe passes no wait

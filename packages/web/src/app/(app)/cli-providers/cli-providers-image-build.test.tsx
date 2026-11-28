@@ -23,7 +23,6 @@ vi.mock('lucide-react', async (original) => ({
 vi.mock('next/link', () => ({ default: ({ children }: { children: unknown }) => children }));
 vi.mock('@/lib/use-page-title', () => ({ usePageTitle() {} }));
 vi.mock('@/lib/use-cli-login', () => ({ useCliLogin: () => ({ requireCliLogin() {} }) }));
-vi.mock('@/components/markdown/markdown-view', () => ({ MarkdownView: () => null }));
 vi.mock('@/components/cli-upgrade-all', () => ({
   CliUpgradeAll: ({ onUpgrade }: { onUpgrade: (ids: string[]) => void }) =>
     createElement('button', { onClick: () => onUpgrade(['p']) }, 'Upgrade everything'),
@@ -66,7 +65,12 @@ vi.mock('@/lib/cli-jobs', async (original) => ({
 }));
 
 type Status = 'idle' | 'building' | 'ready' | 'failed';
-const state = { status: 'ready' as Status, error: null as string | null, authStatus: 'ok' };
+const state = {
+  status: 'ready' as Status,
+  error: null as string | null,
+  authStatus: 'ok',
+  version: '1.0',
+};
 
 function provider() {
   return {
@@ -80,7 +84,7 @@ function provider() {
     isolateAuth: false,
     envVars: {},
     cliArgs: [],
-    cliVersion: '1.0',
+    cliVersion: state.version,
     sandboxImageBuildStatus: state.status,
     sandboxImageBuildError: state.error,
   };
@@ -133,6 +137,7 @@ beforeEach(() => {
   state.status = 'ready';
   state.error = null;
   state.authStatus = 'ok';
+  state.version = '1.0';
   h.get.mockImplementation(async (path: string) => {
     if (path === '/cli-providers') return { providers: [provider()] };
     if (path === '/cli-providers/catalog') return catalog;
@@ -313,7 +318,7 @@ describe('image build state on the providers list', () => {
     fakeDocument();
     h.patch.mockImplementation(async () => {
       state.status = 'building';
-      return {};
+      return { provider: { ...provider(), sandboxImageBuildStatus: 'building' } };
     });
     const view = await mount();
     fire.click(menuButton(view.tree(), /^upgrade$/i));
@@ -329,7 +334,7 @@ describe('image build state on the providers list', () => {
     fakeDocument();
     h.patch.mockImplementation(async () => {
       state.status = 'building';
-      return {};
+      return { provider: { ...provider(), sandboxImageBuildStatus: 'building' } };
     });
     const view = await mount();
     fire.click(buttons(view.tree(), /^upgrade everything$/i)[0]!);
@@ -338,5 +343,105 @@ describe('image build state on the providers list', () => {
     expect(textOf(view.tree())).toContain('Rebuilding sandbox image');
     const notice = findAll(view.tree(), (n) => n.props.role === 'status').map((n) => textOf(n));
     expect(notice).toEqual(['1 sandbox image rebuild has started.']);
+  });
+
+  it('P11 stops reading while the tab is hidden mid-chain and reads at once on return', async () => {
+    const doc = fakeDocument();
+    state.status = 'building';
+    await mount();
+    await vi.advanceTimersByTimeAsync(3000);
+    expect(pollCalls()).toHaveLength(1);
+    doc.hidden = true;
+    for (const listener of doc.listeners) listener();
+    await vi.advanceTimersByTimeAsync(20_000);
+    expect(pollCalls()).toHaveLength(1);
+    doc.hidden = false;
+    for (const listener of doc.listeners) listener();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(pollCalls()).toHaveLength(2);
+  });
+
+  it('P12 a failed poll read does not end the chain', async () => {
+    fakeDocument();
+    state.status = 'building';
+    let polls = 0;
+    h.get.mockImplementation(async (path: string, signal?: AbortSignal) => {
+      if (path === '/cli-providers') {
+        if (signal === undefined) return { providers: [provider()] };
+        polls++;
+        if (polls === 1) throw new Error('network down');
+        state.status = 'ready';
+        return { providers: [provider()] };
+      }
+      if (path === '/cli-providers/catalog') return catalog;
+      if (path === '/usage-window') return { snapshots: [] };
+      return { connected: false };
+    });
+    const view = await mount();
+    await vi.advanceTimersByTimeAsync(3000);
+    view.draw();
+    expect(textOf(view.tree())).toContain('Rebuilding sandbox image');
+    await vi.advanceTimersByTimeAsync(3000);
+    view.draw();
+    expect(polls).toBe(2);
+    expect(textOf(view.tree())).not.toContain('Rebuilding sandbox image');
+  });
+
+  it('P13 a poll response held from before an Upgrade cannot undo its reload', async () => {
+    fakeDocument();
+    state.status = 'building';
+    let release!: (v: { providers: unknown[] }) => void;
+    h.get.mockImplementation(async (path: string, signal?: AbortSignal) => {
+      if (path === '/cli-providers') {
+        if (signal === undefined) return { providers: [provider()] };
+        return new Promise((resolve) => {
+          release = resolve;
+        });
+      }
+      if (path === '/cli-providers/catalog') return catalog;
+      if (path === '/usage-window') return { snapshots: [] };
+      return { connected: false };
+    });
+    h.patch.mockImplementation(async () => {
+      state.version = '2.0';
+      state.status = 'building';
+      return { provider: provider() };
+    });
+    const view = await mount();
+    await vi.advanceTimersByTimeAsync(3000);
+    expect(pollCalls()).toHaveLength(1);
+    const stale = { providers: [{ ...provider(), sandboxImageBuildStatus: 'ready' }] };
+    fire.click(menuButton(view.tree(), /^upgrade$/i));
+    await vi.advanceTimersByTimeAsync(0);
+    view.draw();
+    expect(textOf(view.tree())).toContain('Rebuilding sandbox image · 2.0');
+    release(stale);
+    await vi.advanceTimersByTimeAsync(0);
+    view.draw();
+    expect(textOf(view.tree())).toContain('Rebuilding sandbox image · 2.0');
+  });
+
+  it('P14 the notice follows the PATCH response, and clears once the poll sees ready', async () => {
+    fakeDocument();
+    h.patch.mockImplementation(async () => ({ provider: provider() }));
+    const view = await mount();
+    fire.click(menuButton(view.tree(), /^upgrade$/i));
+    await vi.advanceTimersByTimeAsync(0);
+    view.draw();
+    const notices = () =>
+      findAll(view.tree(), (n) => n.props.role === 'status').map((n) => textOf(n));
+    expect(notices()).toEqual([]);
+    h.patch.mockImplementation(async () => {
+      state.status = 'building';
+      return { provider: provider() };
+    });
+    fire.click(menuButton(view.tree(), /^upgrade$/i));
+    await vi.advanceTimersByTimeAsync(0);
+    view.draw();
+    expect(notices()).toEqual(['Codex is pinned to 2.0; its sandbox image rebuild has started.']);
+    state.status = 'ready';
+    await vi.advanceTimersByTimeAsync(3000);
+    view.draw();
+    expect(notices()).toEqual([]);
   });
 });

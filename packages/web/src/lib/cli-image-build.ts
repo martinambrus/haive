@@ -26,3 +26,7 @@ export function cliImageBuild(
     };
   return null;
 }
+
+export function anyImageBuilding(rows: readonly Parameters<typeof cliImageBuild>[0][]): boolean {
+  return rows.some((r) => cliImageBuild(r)?.state === 'building');
+}
