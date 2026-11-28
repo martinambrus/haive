@@ -186,35 +186,46 @@ async function lockPlanCheckoutSection(tx: PlanMirrorTx, repositoryId: string): 
   await lockPlanMirror(tx, repositoryId);
 }
 
-/** Diagnostic/outbox writes must not wait indefinitely on the holder we just refused. */
+/** Diagnostic/outbox writes must not wait indefinitely on the holder we just refused. A clean row
+ *  is made dirty, which is what makes the sweep retry a held import or reconcile; a row that is
+ *  already dirty keeps its revision, so a repository stuck unavailable is not rewritten every tick. */
 async function recordPlanCheckoutHold(db: Database, repositoryId: string): Promise<void> {
   await withSettledTransaction(db, (tx) =>
     boundedLockWait(
       tx,
       async () => {
-        const set = {
-          revision: sql`${schema.planMirrorState.revision} + 1`,
-          lastError: planMirrorErrorsSuppressed() ? undefined : HELD_CHECKOUT_UNAVAILABLE,
-          updatedAt: new Date(),
-        };
+        const lastError = planMirrorErrorsSuppressed() ? undefined : HELD_CHECKOUT_UNAVAILABLE;
+        const updatedAt = new Date();
+        const bump = sql`${schema.planMirrorState.revision} + 1`;
+        // Locked, so the clean/dirty judgement is the one the write below acts on.
+        const [state] = await tx
+          .select({
+            revision: schema.planMirrorState.revision,
+            writtenRevision: schema.planMirrorState.writtenRevision,
+          })
+          .from(schema.planMirrorState)
+          .where(eq(schema.planMirrorState.repositoryId, repositoryId))
+          .for('no key update');
         // Updating an existing outbox does not need a new FK check against the refused
         // repository FOR UPDATE holder. An absent outbox still uses the bounded insert.
-        const existing = await tx
-          .update(schema.planMirrorState)
-          .set(set)
-          .where(eq(schema.planMirrorState.repositoryId, repositoryId))
-          .returning({ repositoryId: schema.planMirrorState.repositoryId });
-        if (existing.length === 0)
+        if (state) {
           await tx
-            .insert(schema.planMirrorState)
-            .values({
-              repositoryId,
-              revision: 1,
-              writtenRevision: 0,
-              lastError: set.lastError,
-              updatedAt: set.updatedAt,
+            .update(schema.planMirrorState)
+            .set({
+              ...(state.writtenRevision >= state.revision ? { revision: bump } : {}),
+              lastError,
+              updatedAt,
             })
-            .onConflictDoUpdate({ target: schema.planMirrorState.repositoryId, set });
+            .where(eq(schema.planMirrorState.repositoryId, repositoryId));
+          return;
+        }
+        await tx
+          .insert(schema.planMirrorState)
+          .values({ repositoryId, revision: 1, writtenRevision: 0, lastError, updatedAt })
+          .onConflictDoUpdate({
+            target: schema.planMirrorState.repositoryId,
+            set: { revision: bump, lastError, updatedAt },
+          });
       },
       LATE_LOCK_WAIT_MS,
     ),
@@ -1918,11 +1929,12 @@ export async function stampPlanMirrorHashesAtBoot(db: Database): Promise<number>
       });
       if (done) stamped++;
     } catch (err) {
-      if (err instanceof PlanMirrorHeldError) {
-        if (err.holdReason === 'checkout_unavailable')
-          await recordPlanCheckoutHold(db, repositoryId).catch(() => undefined);
+      // A hold is only logged: recording it would make this clean, unstamped row dirty, and its
+      // next flush would adopt a plan.json that differs from the database. Left clean, it waits
+      // for the next edit, as it did before the checkout policy.
+      if (err instanceof PlanMirrorHeldError)
         logger.debug({ repositoryId }, 'plan mirror hash held at boot');
-      } else logger.warn({ err, repositoryId }, 'plan mirror hash not stamped at boot');
+      else logger.warn({ err, repositoryId }, 'plan mirror hash not stamped at boot');
     }
   }
   return stamped;

@@ -342,9 +342,11 @@ describe.skipIf(!url)('update-only plan writers beside repository deletion', () 
       const ids = await seed();
       await writePlanMirror(db, ids.repositoryId, ids.repoPath);
       const json = await readFile(join(ids.repoPath, HAIVE_DATA_FILES.plan), 'utf8');
-      const revision = (await db.query.planMirrorState.findFirst({
+      const before = (await db.query.planMirrorState.findFirst({
         where: eq(schema.planMirrorState.repositoryId, ids.repositoryId),
-      }))!.revision;
+      }))!;
+      // The flush above wrote everything, so the row is clean.
+      expect(before.writtenRevision).toBe(before.revision);
       if (kind === 'import')
         await db
           .delete(schema.planNodes)
@@ -364,13 +366,16 @@ describe.skipIf(!url)('update-only plan writers beside repository deletion', () 
       try {
         await held.promise;
         await expect(run()).rejects.toBeInstanceOf(PlanMirrorHeldError);
+        // A hold on a clean row makes it dirty (one bump), so the sweep retries the held
+        // import or reconcile; a hold on a row that is already dirty leaves its revision as it is.
         expect(
-          (
-            await db.query.planMirrorState.findFirst({
-              where: eq(schema.planMirrorState.repositoryId, ids.repositoryId),
-            })
-          )?.revision,
-        ).toBe(revision + 1);
+          await db.query.planMirrorState.findFirst({
+            where: eq(schema.planMirrorState.repositoryId, ids.repositoryId),
+          }),
+        ).toMatchObject({
+          revision: before.revision + 1,
+          writtenRevision: before.writtenRevision,
+        });
         // The production sync caller (watcher and clone recovery) must see that same hold.
         await expect(
           syncPlanFromCheckout(writerDb, ids.repositoryId, ids.repoPath),

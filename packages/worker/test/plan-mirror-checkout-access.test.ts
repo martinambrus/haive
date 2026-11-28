@@ -11,6 +11,7 @@ import { applyPlanPatch } from '@haive/shared/plan';
 import {
   importPlanMirror,
   reconcilePlanFromCheckout,
+  stampPlanMirrorHashesAtBoot,
   writePlanMirror,
 } from '../src/plan/mirror.js';
 
@@ -95,6 +96,65 @@ describe('plan mirror checkout admission', () => {
     } finally {
       await owner!.release();
     }
+  });
+});
+
+describe('what a held plan mirror records', () => {
+  const state = (f: Awaited<ReturnType<typeof fixture>>) => f.fake.rows(schema.planMirrorState)[0]!;
+
+  it('leaves the revision of a dirty row alone while the hold repeats', async () => {
+    const f = await fixture();
+    await applyPlanPatch(
+      f.db,
+      { ops: [{ op: 'upsert', nodeRef: 'root', parentRef: null, title: 'Local plan' }] },
+      { repositoryId: f.id, origin: 'user' },
+    );
+    expect(state(f)).toMatchObject({ revision: 1, writtenRevision: 0 });
+    const owner = await acquireRootClaim(f.db, f.id, 'rebuild');
+    try {
+      for (let tick = 0; tick < 3; tick++)
+        await expect(writePlanMirror(f.db, f.id, f.root)).rejects.toMatchObject({
+          holdReason: 'checkout_unavailable',
+        });
+    } finally {
+      await owner!.release();
+    }
+    expect(state(f)).toMatchObject({ revision: 1, writtenRevision: 0 });
+    expect(state(f).lastError).toContain('checkout is preparing or unavailable');
+  });
+
+  it('makes a clean row dirty, so the sweep retries what was held', async () => {
+    const f = await fixture();
+    f.fake.insert(schema.planMirrorState, { repositoryId: f.id, revision: 3, writtenRevision: 3 });
+    const owner = await acquireRootClaim(f.db, f.id, 'rebuild');
+    try {
+      await expect(importPlanMirror(f.db, f.id, f.root)).rejects.toMatchObject({
+        holdReason: 'checkout_unavailable',
+      });
+    } finally {
+      await owner!.release();
+    }
+    expect(state(f)).toMatchObject({ revision: 4, writtenRevision: 3 });
+    expect(state(f).lastError).toContain('checkout is preparing or unavailable');
+  });
+
+  it('writes nothing for a boot stamp that is held, so a clean unstamped row stays clean', async () => {
+    const f = await fixture();
+    f.fake.insert(schema.planMirrorState, { repositoryId: f.id, revision: 1, writtenRevision: 1 });
+    // The fake cannot evaluate the sweep's column-to-column filter, so the candidate list is given.
+    const boot = {
+      select: () => ({ from: () => ({ where: async () => [{ repositoryId: f.id }] }) }),
+      transaction: f.fake.db.transaction.bind(f.fake.db),
+    } as unknown as Database;
+    const owner = await acquireRootClaim(f.db, f.id, 'rebuild');
+    try {
+      expect(await stampPlanMirrorHashesAtBoot(boot)).toBe(0);
+    } finally {
+      await owner!.release();
+    }
+    expect(state(f)).toMatchObject({ revision: 1, writtenRevision: 1 });
+    expect(state(f).syncedHash ?? null).toBeNull();
+    expect(state(f).lastError ?? null).toBeNull();
   });
 });
 

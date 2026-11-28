@@ -22,6 +22,7 @@ import {
   writePlanMirror,
   reconcilePlanFromCheckout,
   importPlanMirror,
+  stampPlanMirrorHashesAtBoot,
   PlanMirrorHeldError,
 } from '../src/plan/mirror.js';
 import * as gitPush from '../src/repo/git-push.js';
@@ -156,6 +157,80 @@ describe.skipIf(!url)('the plan sweep when a checkout directory is gone', () => 
       .where(eq(schema.repositories.id, repo.id));
     expect(await sweepDirtyPlanMirrors()).toBe(1);
     expect((await mirror(repo.id))!.lastError).toBeNull();
+  });
+
+  /** The state a foreign rebuild leaves: a live claim and a cloning checkout. */
+  async function foreignRebuild(repositoryId: string) {
+    const owner = (await acquireRootClaim(db, repositoryId, 'rebuild'))!;
+    await db
+      .update(schema.repositories)
+      .set({ status: 'cloning' })
+      .where(eq(schema.repositories.id, repositoryId));
+    return owner;
+  }
+
+  it('leaves the revision of a dirty row alone while a foreign rebuild holds it tick after tick', async () => {
+    const repo = await dirtyRepository({ plan: true, updatedAt: new Date() });
+    await createCheckout(repo.path);
+    const owner = await foreignRebuild(repo.id);
+    try {
+      for (let tick = 0; tick < 3; tick++) expect(await sweepDirtyPlanMirrors()).toBe(0);
+      expect(await mirror(repo.id)).toMatchObject({ revision: 1, writtenRevision: 0 });
+      expect((await mirror(repo.id))!.lastError).toContain('checkout is preparing or unavailable');
+    } finally {
+      await owner.release();
+    }
+  });
+
+  it('makes a clean row dirty when a hold refuses its import, so the sweep retries it', async () => {
+    const repo = await dirtyRepository({ plan: true, updatedAt: new Date() });
+    await createCheckout(repo.path);
+    await writePlanMirror(db, repo.id, repo.path);
+    const clean = (await mirror(repo.id))!;
+    expect(clean.writtenRevision).toBe(clean.revision);
+    const owner = await foreignRebuild(repo.id);
+    try {
+      await expect(importPlanMirror(db, repo.id, repo.path)).rejects.toMatchObject({
+        holdReason: 'checkout_unavailable',
+      });
+      expect(await mirror(repo.id)).toMatchObject({
+        revision: clean.revision + 1,
+        writtenRevision: clean.writtenRevision,
+      });
+    } finally {
+      await owner.release();
+    }
+    await db
+      .update(schema.repositories)
+      .set({ status: 'ready' })
+      .where(eq(schema.repositories.id, repo.id));
+    expect(await sweepDirtyPlanMirrors()).toBe(1);
+    const retried = (await mirror(repo.id))!;
+    expect(retried.writtenRevision).toBe(retried.revision);
+    expect(retried.lastError).toBeNull();
+  });
+
+  it('writes nothing for a held boot stamp, so a clean unstamped row stays clean', async () => {
+    const repo = await dirtyRepository({ plan: true, updatedAt: new Date() });
+    await createCheckout(repo.path);
+    await writePlanMirror(db, repo.id, repo.path);
+    await db
+      .update(schema.planMirrorState)
+      .set({ syncedHash: null })
+      .where(eq(schema.planMirrorState.repositoryId, repo.id));
+    const clean = (await mirror(repo.id))!;
+    const owner = await foreignRebuild(repo.id);
+    try {
+      expect(await stampPlanMirrorHashesAtBoot(db)).toBe(0);
+    } finally {
+      await owner.release();
+    }
+    expect(await mirror(repo.id)).toMatchObject({
+      revision: clean.revision,
+      writtenRevision: clean.writtenRevision,
+      syncedHash: null,
+      lastError: null,
+    });
   });
 
   it('retries a held first import without deleting the unverified incoming plan', async () => {
