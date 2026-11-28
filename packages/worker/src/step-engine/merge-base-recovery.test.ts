@@ -72,6 +72,8 @@ interface Config {
   squash: boolean;
   push: boolean;
   cross?: boolean;
+  /** A merge step other than 12: it never squashes and records no landing. */
+  otherStep?: boolean;
 }
 type Fixture = Awaited<ReturnType<typeof setup>>;
 
@@ -118,8 +120,8 @@ async function setup(cfg: Config) {
   });
   const db = fake.db as unknown as Database;
   const step = {
-    metadata: { id: '12-worktree-cleanup' },
-    mergeResolve: { selectedMerge: () => true, squashable: true },
+    metadata: { id: cfg.otherStep ? '00a-sync-base' : '12-worktree-cleanup' },
+    mergeResolve: { selectedMerge: () => true, ...(cfg.otherStep ? {} : { squashable: true }) },
   } as unknown as StepDefinition;
   const ctx: StepContext = {
     userId,
@@ -335,6 +337,25 @@ describe('T785 replay after a clean merge landed before its state was saved', ()
     ).toEqual([tip, tip]);
   });
 
+  it('a merge of another branch on a tip that already held the feature is neither squashed nor rewritten', async () => {
+    const f = await setup({ squash: true, push: false });
+    await git(f.dir, 'merge', '--no-ff', 'feature', '-m', 'by hand');
+    h.crashAfterMerge = true;
+    await expect(f.run()).rejects.toThrow('worker died after merge before state save');
+    expect(f.stored().phase).toBe('pending');
+    await git(f.dir, 'switch', '-c', 'other', f.data.before);
+    await writeFile(path.join(f.dir, 'other'), 'other\n');
+    await git(f.dir, 'add', '.');
+    await git(f.dir, 'commit', '-m', 'other');
+    await git(f.dir, 'switch', 'main');
+    await git(f.dir, 'merge', '--no-ff', 'other', '-m', 'merge other');
+    await retry(f);
+    await expectLeftAlone(f, {
+      head: await git(f.dir, 'rev-parse', 'main'),
+      reflog: await git(f.dir, 'reflog', '--format=%H %gs'),
+    });
+  });
+
   it('a feature that moved on after the stop is merged atop the landed merge, which stays as it is', async () => {
     const f = await setup({ squash: true, push: false });
     const { landed } = await stopAfterLanding(f);
@@ -353,6 +374,37 @@ describe('T785 replay after a clean merge landed before its state was saved', ()
       `${landed} ${f.data.before} ${f.data.feature}`,
     );
     expect(await git(f.dir, 'show', 'main:later')).toBe('later');
+  });
+
+  it('a merge step that is not squashable records no tip and replays as before', async () => {
+    const f = await setup({ squash: false, push: false, otherStep: true });
+    const { landed } = await stopAfterLanding(f);
+    expect(f.stored().preMergeBaseSha).toBeUndefined();
+    expect((await f.run()).resolved).toBe(true);
+    expect(f.stored().preMergeBaseSha).toBeUndefined();
+    expect(f.stored().baseShaBefore).toBe(landed);
+    expect(await git(f.dir, 'rev-parse', 'main')).toBe(landed);
+    expect(f.landedEvents()).toEqual([]);
+  });
+
+  it('a merge of the feature that a person makes on the tip after a refused attempt is left alone', async () => {
+    const f = await setup({ squash: true, push: false });
+    await writeFile(path.join(f.dir, 'feature'), 'local\n');
+    await f.run();
+    expect(f.fake.rows(schema.taskSteps)[0]?.status).toBe('failed');
+    expect(f.stored().phase).toBe('pending');
+    expect(f.stored().baseShaBefore).toBeUndefined();
+    await rm(path.join(f.dir, 'feature'));
+    await git(f.dir, 'merge', '--no-ff', 'feature', '-m', 'by hand');
+    const head = await git(f.dir, 'rev-parse', 'main');
+    const reflog = await git(f.dir, 'reflog', '--format=%H %gs');
+    await retry(f);
+    expect((await f.run()).resolved).toBe(true);
+    expect(await git(f.dir, 'rev-parse', 'main')).toBe(head);
+    expect(await git(f.dir, 'reflog', '--format=%H %gs')).toBe(reflog);
+    expect(f.stored().phase).toBe('done');
+    expect(f.stored().squashCommitSha ?? null).toBeNull();
+    expect(f.landedEvents()).toEqual([]);
   });
 
   it('a retry after a refused first attempt measures the base afresh', async () => {

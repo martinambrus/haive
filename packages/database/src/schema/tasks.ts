@@ -737,7 +737,8 @@ export interface MergeResolveState {
   /** The base tip, committed ahead of any git write of the feature merge (step 12 only). A stop after
    *  git landed a clean merge and before its state was saved leaves it behind, so the replay measures
    *  the tip from before that merge, not the merge itself. Read only while `baseShaBefore` is unset,
-   *  and only while the tip is it or this merge landed on it; otherwise the tip is measured afresh. */
+   *  and only while the tip is it or this merge landed on it; otherwise the tip is measured afresh.
+   *  A halt that merged nothing, with the base still at it, drops it. */
   preMergeBaseSha?: string;
   /** Sha of the squash commit once it landed. Doubles as the idempotence guard (a set
    *  value means the collapse is done) and as the PROOF, for 12-worktree-cleanup's

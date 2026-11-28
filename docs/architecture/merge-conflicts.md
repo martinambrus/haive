@@ -124,12 +124,15 @@ left. The following rules keep it that way, each MEASURED on git 2.43 and 2.54:
   tip, or a merge whose first parent is that tip and second parent is inside the feature, with the
   whole feature in HEAD (parents and ancestry, never the message); `baseShaBefore` takes it, the
   merge is a no-op, and the squash and both landed events come out as in a run without a stop.
-  Any other tip (a person's commit on top, a hand merge, a feature that moved on, a refused attempt
-  followed by the person's own commit) is measured afresh, as before; when it already holds the
-  feature and a squash was asked for, the history is kept and `squashSkipReason` says why. One case
-  cannot be told apart: a merge of the feature that a person made on exactly the recorded tip
-  during the stop looks like this step's and is squashed as asked. The other merge steps record
-  nothing. Controls: `merge-base-recovery.test.ts`.
+  Any other tip (a person's commit on top, a hand merge, a feature that moved on) is measured
+  afresh, as before; when a recorded tip differs from it, it already holds the feature and a squash
+  was asked for, the history is kept and `squashSkipReason` says why (a first pass has no record, so
+  a tip that moved before it is judged as it always was). A halt that merged nothing (refused, set
+  aside, held, unaborted) while HEAD is still the recorded tip drops the record, so a merge a person
+  makes on that tip before the retry is never read as this step's. One case cannot be told apart: a
+  merge of the feature that a person made on exactly the recorded tip during a stop looks like this
+  step's and is squashed as asked. The other merge steps record nothing. Controls:
+  `merge-base-recovery.test.ts`.
   After a squash, cleanup deletes a feature or DAG issue branch only when its current tip is
   contained in the recorded merge's second parent, using compare-and-delete against that tip.
   A moved or unreadable branch, missing recorded evidence, a symbolic ref, a checkout holder or a
