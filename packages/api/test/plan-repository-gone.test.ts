@@ -8,6 +8,7 @@ vi.mock('../src/lib/admitted-checkout-mutation.js', async () => {
   const { withCheckoutMutation } = await import('@haive/shared/checkout-access');
   const { assertNewWorkAllowed } = await import('../src/middleware/maintenance.js');
   return {
+    admitUnderFence: async (): Promise<void> => undefined,
     withAdmittedCheckoutMutation: async (
       ...args: Parameters<typeof withCheckoutMutation>
     ): Promise<unknown> => {

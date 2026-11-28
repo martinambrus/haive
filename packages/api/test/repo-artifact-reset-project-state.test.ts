@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -33,6 +33,7 @@ vi.mock('@haive/database', async (importOriginal) => ({
 import { Hono } from 'hono';
 import { eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
+import { configService } from '@haive/shared';
 import { createFakeDb } from '@haive/database/testing';
 import { lstatNoFollow } from '@haive/shared/fs-safe';
 import { bundleFileName, claimFileName } from '@haive/shared/project-state';
@@ -60,7 +61,11 @@ const ZIP_SOURCE = 'zip:team-skills';
 const BASE_SOURCE = 'git:https%3A%2F%2Fexample.test%2Fx.git#main';
 
 const dirs: string[] = [];
+beforeEach(() => {
+  vi.spyOn(configService, 'getFresh').mockResolvedValue('normal');
+});
 afterEach(async () => {
+  vi.restoreAllMocks();
   await Promise.all(dirs.splice(0).map((d) => rm(d, { recursive: true, force: true })));
 });
 

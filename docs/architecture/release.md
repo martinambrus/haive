@@ -316,13 +316,15 @@ row stuck in its in-progress status holds the drain until the deadline, and `--f
 claim whose holder died goes stale within `ROOT_CLAIM_STALE_MS` of its last renewal, inside the
 default 30-minute `--drain-timeout`.
 
-**Remaining drain gap (T780 PR2 L6, narrowed by PR2b-3):** the count and the list include every live
-root claim, and attachment, relink/reconciliation and whole-plan-removal requests are admitted under
-the fence. Not admitted: the file-editor save (`PUT /tasks/:id/files/content`, kind `edit`),
-mark-onboarded (`POST /repos/:id/mark-onboarded`, `verify`), the onboarding-artifacts reset
-(`DELETE /repos/:id/onboarding-artifacts`, `reset`), and the plan snapshot Save and Pull, whose
-claim the worker holds. A request of those kinds that starts after the last zero count is not
-refused, so an upgrade can interrupt it. A lease renews while the API is alive, with no duration cap. Stopping it mid-request leaves its
+**Remaining drain gap (T780 PR2 L6, narrowed by PR2b-3 and PR2b-5):** the count and the list include
+every live root claim, and attachment, relink/reconciliation, whole-plan-removal, file-editor save
+(`PUT /tasks/:id/files/content`, kind `edit`), mark-onboarded (`POST /repos/:id/mark-onboarded`,
+`verify`), onboarding-artifacts reset (`DELETE /repos/:id/onboarding-artifacts`, `reset`) and plan
+snapshot Save and Pull (`POST /repos/:id/plan/snapshot/save` and `/pull`) requests are admitted under
+the fence. The Save and Pull claim is taken by the worker, after the route's admission and its
+enqueue, so between the route's fence commit and that claim (the queue pickup) the drain counts
+nothing for the request, and an upgrade whose last zero count falls in that span can interrupt the
+job. The Haive-data Save takes no claim and is neither admitted nor counted. A lease renews while the API is alive, with no duration cap. Stopping it mid-request leaves its
 last stamp live for up to `ROOT_CLAIM_STALE_MS` (15 minutes after the last renewal); new preparations
 wait for that expiry, preserving ready and their pending marker. This bound describes abandoned
 claims only, not a safe deadline for interrupting a live upload.
@@ -351,7 +353,11 @@ Every api route that starts such work refuses with 503 while the state is `drain
 create, upload and refresh, bundle create, upload, replace and sync, provider create, clone and image
 build, and a provider edit that rebuilds the image or downloads a model), and each request that takes
 a `mutation` root claim for new work (a task attachment write or removal, a remote relink and its
-reconciliation, whole-plan removal). Not fenced and not counted,
+reconciliation, whole-plan removal) or its own claim kind (the editor save into the repository root,
+mark-onboarded, the onboarding-artifacts reset), and the plan snapshot Save and Pull, whose job takes
+the claim in the worker: the route admits before it enqueues, the worker is not admitted. A write
+that takes no claim (an editor save into a worktree, or for a task with no repository) holds nothing
+the drain counts and is not refused. Not fenced and not counted,
 since none holds a window open: interactive runtimes (IDE, browser, DDEV control, terminal and login
 containers), cleanup, the plan mirror outbox (it resumes) and the price refresh. The refusal's
 authority is `admitNewWork`: a read of the state past ConfigService's 30 s cache inside the
@@ -363,8 +369,11 @@ wait refuses new work with a retryable 503 rather than admitting it. A claim-tak
 reaches the live-work count; it then takes the claim, then the fence in its own short transaction,
 released before the work starts and ahead of the work's own locks. An updater that counts after that
 transaction commits sees the claim; one that holds the fence first makes the request read the new
-state and release its claim. The remote reconciliation sweep reads that refusal as `maintenance` and
-skips the repository quietly. An
+state and release its claim. A route that holds its own claim kind takes it through
+`acquireAdmittedRootClaim`, in the same order (`new-work-fence-order.test.ts` fails when an api file
+other than `admitted-checkout-mutation.ts` calls `acquireRootClaim` or `withCheckoutMutation`); the
+worker's callers are not admitted there. The remote reconciliation sweep reads that refusal as
+`maintenance` and skips the repository quietly. An
 upload complete makes that read once more right before it claims its session, since the claim is a
 write, so a drain that began after the early check refuses with the session untouched. Every
 updater state write (`draining`, the recount's `maintenance`, and the return to the state it found

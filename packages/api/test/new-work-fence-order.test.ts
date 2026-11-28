@@ -134,32 +134,98 @@ describe('the new-work fence and the locks an admission takes', () => {
   }, 30_000);
 });
 
+describe('the plan snapshot routes', () => {
+  it.each(['savePlanMirror', 'pullPlanMirror'])(
+    'every call of %s sits in a route behind requireNewWorkAllowed, after an admitUnderFence outside any try',
+    (name) => {
+      const sf = parse('routes/plan.ts');
+      const calls = callsOf(sf, name);
+      expect(calls.length, `routes/plan.ts must call ${name}`).toBeGreaterThan(0);
+      const bad: string[] = [];
+      for (const call of calls) {
+        let handler: ts.Node | undefined;
+        for (let up = call.parent; up; up = up.parent) {
+          if (
+            (ts.isArrowFunction(up) || ts.isFunctionExpression(up)) &&
+            ts.isCallExpression(up.parent) &&
+            ts.isPropertyAccessExpression(up.parent.expression) &&
+            up.parent.expression.name.text === 'post'
+          ) {
+            handler = up;
+            break;
+          }
+        }
+        const route = handler?.parent as ts.CallExpression | undefined;
+        const gated =
+          route !== undefined &&
+          route.arguments.some((a) => ts.isIdentifier(a) && a.text === 'requireNewWorkAllowed');
+        const fences = handler === undefined ? [] : callsOf(handler, 'admitUnderFence');
+        const early = fences.filter((f) => {
+          if (f.getStart() >= call.getStart()) return false;
+          for (let up = f.parent; up && up !== handler; up = up.parent) {
+            if (ts.isTryStatement(up)) return false;
+          }
+          return true;
+        });
+        if (!gated || early.length === 0) bad.push(where(sf, call));
+      }
+      expect(bad).toEqual([]);
+    },
+    30_000,
+  );
+});
+
 describe('checkout mutations that start new work', () => {
   const WRAPPER = 'lib/admitted-checkout-mutation.ts';
 
-  /** Every file under src other than the wrapper that calls withCheckoutMutation directly. */
-  const directCallers = (extra?: ts.SourceFile): string[] => {
+  /** Every file under src other than the wrapper that calls `name` directly. */
+  const directCallers = (name: string, extra?: ts.SourceFile): string[] => {
     const found: string[] = [];
     const scan = (file: string, sf: ts.SourceFile) => {
-      if (file !== WRAPPER && callsOf(sf, 'withCheckoutMutation').length > 0) found.push(file);
+      if (file !== WRAPPER && callsOf(sf, name).length > 0) found.push(file);
     };
     for (const file of files()) scan(file, parse(file));
     if (extra) scan(extra.fileName, extra);
     return found;
   };
 
-  it('no file but the wrapper calls withCheckoutMutation', () => {
-    expect(directCallers()).toEqual([]);
-  }, 30_000);
+  it.each(['withCheckoutMutation', 'acquireRootClaim'])(
+    'no file but the wrapper calls %s',
+    (name) => {
+      expect(directCallers(name)).toEqual([]);
+    },
+    30_000,
+  );
 
-  it('the scan reports a synthetic direct call', () => {
-    const synthetic = ts.createSourceFile(
-      'routes/synthetic.ts',
-      'await withCheckoutMutation(db, id, userId, async () => {});',
-      ts.ScriptTarget.Latest,
-      true,
+  it.each(['withCheckoutMutation', 'acquireRootClaim'])(
+    'the scan reports a synthetic direct call of %s',
+    (name) => {
+      const synthetic = ts.createSourceFile(
+        'routes/synthetic.ts',
+        `await ${name}(db, id, userId, async () => {});`,
+        ts.ScriptTarget.Latest,
+        true,
+      );
+      expect(directCallers(name, synthetic)).toContain('routes/synthetic.ts');
+    },
+    30_000,
+  );
+
+  it('acquireAdmittedRootClaim checks the state, then claims, then takes the fence', () => {
+    const sf = parse(WRAPPER);
+    const fn = sf.statements.find(
+      (s): s is ts.FunctionDeclaration =>
+        ts.isFunctionDeclaration(s) && s.name?.text === 'acquireAdmittedRootClaim',
     );
-    expect(directCallers(synthetic)).toContain('routes/synthetic.ts');
+    expect(fn, 'the wrapper file must declare acquireAdmittedRootClaim').toBeDefined();
+    const precheck = callsOf(fn!, 'assertNewWorkAllowed')[0];
+    const claim = callsOf(fn!, 'acquireRootClaim')[0];
+    const fence = callsOf(fn!, 'admitUnderFence')[0];
+    expect(precheck, 'it must call assertNewWorkAllowed').toBeDefined();
+    expect(claim, 'it must call acquireRootClaim').toBeDefined();
+    expect(fence, 'it must call admitUnderFence').toBeDefined();
+    expect(precheck!.getStart()).toBeLessThan(claim!.getStart());
+    expect(claim!.getStart()).toBeLessThan(fence!.getStart());
   }, 30_000);
 
   it('the wrapper checks the state first and takes the fence inside the callback, before the work', () => {
@@ -172,9 +238,9 @@ describe('checkout mutations that start new work', () => {
 
     const callback = claim!.arguments[3];
     expect(callback).toBeDefined();
-    const fence = callsOf(callback!, FENCE)[0];
+    const fence = callsOf(callback!, 'admitUnderFence')[0];
     const work = callsOf(callback!, 'run')[0];
-    expect(fence, 'the callback must call admitNewWork').toBeDefined();
+    expect(fence, 'the callback must call admitUnderFence').toBeDefined();
     expect(work, 'the callback must call run').toBeDefined();
     expect(fence!.getStart()).toBeLessThan(work!.getStart());
   }, 30_000);

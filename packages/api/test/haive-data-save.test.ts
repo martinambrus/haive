@@ -30,7 +30,11 @@ vi.mock('../src/middleware/auth.js', async (importOriginal) => ({
 }));
 vi.mock('@haive/shared', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@haive/shared')>()),
-  configService: { get: async () => null, getBoolean: async () => true },
+  configService: {
+    get: async () => null,
+    getBoolean: async () => true,
+    getFresh: async () => 'normal',
+  },
 }));
 
 import { schema } from '@haive/database';

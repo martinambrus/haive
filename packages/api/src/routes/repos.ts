@@ -26,7 +26,6 @@ import {
 } from 'drizzle-orm';
 import {
   schema,
-  acquireRootClaim,
   isRootClaimLive,
   lockRepositoryTasksKey,
   readLiveRootClaim,
@@ -52,7 +51,10 @@ import {
   writeFileNoFollow,
   type ReadResult,
 } from '@haive/shared/fs-safe';
-import { withAdmittedCheckoutMutation } from '../lib/admitted-checkout-mutation.js';
+import {
+  acquireAdmittedRootClaim,
+  withAdmittedCheckoutMutation,
+} from '../lib/admitted-checkout-mutation.js';
 import { containmentHttpError } from '../lib/fs-http.js';
 import { writeBodyToHeld } from '../lib/held-write.js';
 import { withUploadChunkLock } from '../lib/upload-chunk-lock.js';
@@ -3214,7 +3216,7 @@ repoRoutes.post('/:id/mark-onboarded', async (c) => {
   // without advancing `onboarding_reset_at` — leaving the predicate below satisfied by evidence
   // that no longer exists. Holding the root is what makes "the tree I looked at" and "the tree I
   // am vouching for" the same tree.
-  const held = await acquireRootClaim(db, id, 'verify', userId);
+  const held = await acquireAdmittedRootClaim(db, id, 'verify', userId);
   if (held === null) {
     throw new HttpError(409, rootClaimRefusal((await readLiveRootClaim(db, id))?.kind ?? null));
   }
@@ -3342,7 +3344,7 @@ repoRoutes.delete('/:id/onboarding-artifacts', async (c) => {
   // worker share one connection pool, so a lock held across the walk deadlocks it.
   // Acquired as a LEASE: a reset of a large knowledge base can outlive any fixed expiry, and a
   // claim that expires under a still-running holder re-admits the very `rm -rf` it excludes.
-  const claim = await acquireRootClaim(db, id, 'reset', userId);
+  const claim = await acquireAdmittedRootClaim(db, id, 'reset', userId);
   if (claim === null) {
     // The CAS refuses for three different reasons and answering 409 to all of them would turn a
     // wrong id and someone else's repository into "already being reset". Ownership is resolved

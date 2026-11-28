@@ -285,7 +285,9 @@ checks availability again after acquisition and releases in `finally`. The API r
 `withAdmittedCheckoutMutation` (`lib/admitted-checkout-mutation.ts`): a fresh maintenance-state check,
 the claim, the shared new-work fence in its own short transaction, then the caller's locks; a refusal
 releases the claim, and the worker's plan mirror calls `withCheckoutMutation` directly. It retains no connection
-across an upload body or subprocess. A claim collision answers 409 `checkout_unavailable`;
+across an upload body or subprocess. A route that holds its own claim kind (the editor `edit`,
+mark-onboarded `verify`, the onboarding reset `reset`) takes it through `acquireAdmittedRootClaim`
+in the same file, in the same order. A claim collision answers 409 `checkout_unavailable`;
 concurrent independent mutations in the same repository must retry, with copy naming the held
 kind. A preparation queued after an admitted mutation waits: `withRootClaim` raises
 `RootClaimBusyError`, and the queue delays pickup five seconds without changing status, clearing
