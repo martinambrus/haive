@@ -412,7 +412,8 @@ Preparation carries its actual renewing handle through the plan-only asynchronou
 stamp before admitting a private restore while public status is cloning. The publication
 transaction/savepoints and project-state restore implementation are unchanged, and the project-state
 writer and sync they call apply the same policy under that handle ([Repository refresh](repository-refresh.md));
-there is no boolean bypass. Legacy imports remain a separate follow-up.
+there is no boolean bypass. The legacy imports of a preparation run inside the same claim; only a
+read-only folder scan holds none ("Preparation imports" in [Repository refresh](repository-refresh.md)).
 Any other holder of a live root claim that re-syncs the plan carries its handle the same way
 (`withPlanCheckoutAccess({ mode: 'projection', owner })`): the Undo of a left committed merge
 sets the project files aside and re-syncs under its own edit claim, which the policy would otherwise

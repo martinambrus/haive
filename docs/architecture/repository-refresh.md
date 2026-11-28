@@ -365,8 +365,8 @@ See the [plan mirror contract](plan-canvas.md) for the private restore, lock ord
 **Preparation imports.** The handlers (`handleClone`, `handleCopyLocal`, `handleExtract`, `handleInit`,
 `handleRefresh`) take `withRootClaim` and carry it through `persistDetection` into
 `completePreparationImports`, whose legacy mirror, project-state, plan and RTK steps run inside that
-claim; the sync and plan gates admit it as `preparation` access. The one claimless
-entry was the redelivery of an initial job that had already published `ready` (`repo-queue.ts`, after a
+claim; the sync and plan gates admit it as `preparation` access. The one root-writing entry without
+a claim was the redelivery of an initial job that had already published `ready` (`repo-queue.ts`, after a
 stalled worker or a retry past the ready flip). It now takes `withRootClaim` around
 `completePreparationImports` and, while the claim is held (a crashed predecessor's claim stays live for
 `ROOT_CLAIM_STALE_MS`, or a reset, edit, verify or mutation), delays five seconds through the existing
@@ -382,10 +382,11 @@ imports stay admitted by the ambient `projection` access.
 
 **Runtime opens.** Independent runtime opens use the interactive barrier (see "Interactive mounts at replacement"): runtime
 ensure (`ENSURE`, `NAVIGATE_MAILPIT`, `REBUILD_DDEV`), the Editor ensure and a Terminal open each run under
-`withInteractiveCheckout`, which reads `ready` from the row before it opens and again after its long
-awaits. The row, not the process fence, covers a worker restart or a deferred suspend retry, when the row
+`withInteractiveCheckout`, which reads `ready` from the row before it opens. `ENSURE`, the Editor and the
+Terminal read it again after their long awaits; `NAVIGATE_MAILPIT` and `REBUILD_DDEV` read it only before.
+The row, not the process fence, covers a worker restart or a deferred suspend retry, when the row
 is `cloning` with no claim and an empty fence. DDEV control `restart` takes the same wrapper and checks
-again before its cold-boot fallback, because the failing exec may be the rebuild having removed the runner.
+again only before its cold-boot fallback, because the failing exec may be a checkout rebuild having removed the runner.
 Its refusal is returned, never thrown, as `ok: false` with the message in both `output` and `error` (the
 MCP shim shows the agent only `output`). `status` and `logs` only exec into a runner that already exists
 and stay ungated. Teardown (stopping runners and sessions) must stay ungated.
@@ -402,8 +403,9 @@ Rollback: settle active attachment, remote, plan-delete, plan Save/Pull and mirr
 revert the API/shared/database code together and rebuild shared/database from that revision. There
 is no schema migration. Preserve relink intents, dirty/outbox rows and every aside/staging sibling.
 Rollback reopens the covered races; it never moves an aside back automatically. The redelivery claim
-and the DDEV restart gate are worker-only: revert `repo-queue.ts` and `ddev-control-queue.ts`, which reopens
-a redelivered import under a foreign claim and a DDEV restart during a rebuild, and nothing else.
+and the DDEV restart gate are worker-only: revert `repo-queue.ts` and `ddev-control-queue.ts` with their tests
+(`repo-redelivery-claim.test.ts`, `ddev-control-queue.test.ts`), which fail on a source-only revert. That
+reopens a redelivered import under a foreign claim and a DDEV restart during a rebuild, and nothing else.
 
 T780 PR2b-2 rollback: revert its code commits; there is no migration. Dirty outbox rows, write journals
 and their fixed reasons stay and the sweep retries them; nothing is rewritten or moved. Reverting reopens
