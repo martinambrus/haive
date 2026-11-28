@@ -34,9 +34,17 @@ vi.mock('../src/lib/probe-hosts.js', () => ({ probeEgressFor: async () => ({}) }
 vi.mock('@haive/shared/global-kb', async (original) => ({
   ...(await original<typeof import('@haive/shared/global-kb')>()),
   resolveGlobalKbSettings: async () => ({ mode: 'external' }),
-  resolveGlobalKbConnection: async (settings: { connectionString: string }) => {
-    const pg = postgres(settings.connectionString, { max: 1, connect_timeout: 1 });
-    return { pg, close: () => pg.end({ timeout: 5 }) };
+  withGlobalKbConnection: async (
+    _db: unknown,
+    run: (ctx: unknown) => Promise<unknown>,
+    opts: { settings: { connectionString: string } },
+  ) => {
+    const pg = postgres(opts.settings.connectionString, { max: 1, connect_timeout: 1 });
+    try {
+      return await run({ conn: { pg } });
+    } finally {
+      await pg.end({ timeout: 5 });
+    }
   },
 }));
 
@@ -49,6 +57,7 @@ it.each([
   ['EAI_AGAIN', 'PostgreSQL host could not be resolved'],
   ['CONNECT_TIMEOUT', 'PostgreSQL connection timed out'],
   ['ETIMEDOUT', 'PostgreSQL connection timed out'],
+  ['GLOBAL_KB_DEADLINE', 'PostgreSQL connection timed out'],
   ['28P01', 'PostgreSQL authentication failed'],
   ['28000', 'PostgreSQL authentication failed'],
 ])('returns fixed diagnostics for %s through both routes', async (code, message) => {

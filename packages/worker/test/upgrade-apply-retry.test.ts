@@ -219,6 +219,7 @@ async function setup({
   // A real apply owns a live task and an existing repository; these fixtures exercise the same fence.
   if (!fake.rows(schema.repositories).length)
     fake.insert(schema.repositories, {
+      status: 'ready',
       id: REPO,
       userId: USER,
       name: 'acme',

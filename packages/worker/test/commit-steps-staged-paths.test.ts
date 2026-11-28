@@ -1,4 +1,5 @@
 import { execFile } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { appendFile, mkdir, mkdtemp, rename, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -225,11 +226,24 @@ describe('commit steps stage only the paths their step outputs record', () => {
     let transactions = 0;
     const planTx = () => {
       const planRows = (table: unknown): unknown[] => {
-        if (table === schema.planMirrorState) return [{ revision: 1, writtenRevision: 0 }];
+        if (table === schema.repositories)
+          return [{ id: 'r1', userId: 'u1', status: 'ready', ...repositoryRow }];
+        if (table === schema.planMirrorState)
+          return [
+            {
+              revision: 1,
+              writtenRevision: 0,
+              // A deletion removes a mirror this install actually acknowledged; an unstamped
+              // incoming plan is now reconciled before an empty database can remove it.
+              syncedHash:
+                planNodes?.length === 0 ? createHash('sha256').update('{}\n').digest('hex') : null,
+            },
+          ];
         if (table === schema.planNodes) return planNodes ?? [];
         return [];
       };
       const tx = {
+        query: { repositories: { findFirst: async () => planRows(schema.repositories)[0] } },
         execute: async () => [],
         update: () => ({ set: () => ({ where: async () => [] }) }),
         select: () => {
@@ -243,6 +257,7 @@ describe('commit steps stage only the paths their step outputs record', () => {
             where: () => chain,
             orderBy: () => chain,
             limit: async () => planRows(table),
+            for: async () => planRows(table),
             then: (resolve: (rows: unknown[]) => unknown, reject: (err: unknown) => unknown) =>
               Promise.resolve(planRows(table)).then(resolve, reject),
           });
@@ -616,6 +631,7 @@ describe('commit steps stage only the paths their step outputs record', () => {
       userId: '00000000-0000-4000-8000-0000000000a1',
       name: 'acme',
       source: 'upload',
+      status: 'ready',
       rtkEnabled: false,
     });
     fake.insert(schema.tasks, {

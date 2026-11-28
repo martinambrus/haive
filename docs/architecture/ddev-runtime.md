@@ -90,13 +90,43 @@ no removal goes unrecorded; it does not prove the removal happened), rechecks th
 idle, and removes the immutable container ID with `docker rm -f -v`. An unknown probe or foreign
 runner is kept. An absent runner needs no removal.
 The request waits at most 30 s (`DDEV_REBUILD_WAIT_MS`) for the job. A refusal answers 409 with
-a typed `reason` and `retryable`, and the worker logs it at info. A finished failure answers 500.
+a typed `reason` and `retryable`, and the worker logs it at info. `checkout-unavailable` is the
+refusal of a checkout that is not `ready` (preparing, in error or gone) or whose interactive
+sessions are suspended. The job's admission and the rebuild's own first reads (task context and
+runtime classification) raise it before the runner is touched, and the worker completes it as a
+typed result instead of failing the job,
+because BullMQ hands the api a
+failed job or an expired wait as a message string and never an error class, and the api never keys
+on message text. The dialog shows the refusal's `error`. A finished failure answers 500, a checkout
+refusal once the removal path has started included, since a removal may have happened.
 Success answers 202 with `removed`, false when the runner was already absent. When the wait runs
 out or the outcome is unknown it answers 202 `pending`: the job keeps running, a repeat click
 joins it, and the task's Activity tab shows the request event.
 Recovery is the ordinary ENSURE job, with its existing admission and newest snapshot restore;
 a fresh recovery job ID for each rebuild avoids joining an older ensure that already resolved
 its handle.
+
+**The ddev-control tools answer what happened.** The api relay answers HTTP 200 `{ok, output,
+error?}` for every command, so the MCP shim (`sandbox/ddev-mcp-server.ts`) reads `ok`: an explicit
+`ok: false` is an error result whose text is `error` (else the fixed line `ddev_<action> failed`)
+followed by any output, never an empty success; `ok: true` and a body without `ok` are unchanged.
+That mapping is `relayResult`, kept as source text (`DDEV_RELAY_RESULT_JS`) that the script embeds and
+its unit test evaluates, so both run one definition and only the transport needs a real child.
+`ddev_restart` runs `ddev restart` in place. After a non-zero exit and the checkout re-check it
+asks `probeDdevRecovery`, the probe `ensureDdevStarted` itself decides on (container presence,
+workspace label, the project's structured status and the nested dockerd, never ddev's wording),
+and acts on the answer. `reuse` (the project is serving despite the exit) recovers nothing and
+answers `ok: false` with `ddev restart failed (exit N); the project is still serving, so nothing
+was recovered.` and the last 8000 characters of ddev's output. `warm-start` (runner and nested
+dockerd alive, project down) and `cold-boot` (runner gone, stopped or labelled for another
+workspace, or dockerd down) run `ensureDdevStarted`, with its snapshot restore, and answer
+`ok: true` with the restart output and a closing note that names what the first probe saw and
+the outcome, never the action: `ensureDdevStarted` probes again and can rebuild the runner for
+a changed browser choice (`reconcileDdevAccess`), so "started in place" could be false. The
+note is `[ddev restart failed (exit N); the project was down; the runtime recovery brought it
+back]` for `warm-start` and `[...; the runner or its dockerd was not usable; the runtime
+recovery brought it back]` for `cold-boot`. A probe with no answer, or a throw from
+`ensureDdevStarted`, answers `ok: false` with its own error.
 
 **An HTTP 4xx from the mandatory runtime smoke is UNSURE, not PASS.** The unauthenticated
 probe cannot distinguish a login/access wall from a broken route. `08-phase-5-verify`
@@ -237,3 +267,17 @@ and browser pins, including both raw browser picker fields, before any template 
 unsafe interpolated scalars stop DDEV rendering with the field and a bounded JSON-quoted preview;
 Unicode controls and invisible/bidi characters are escaped as `\uXXXX`. Correct the declared
 dependencies and retry. Undo is a code revert, with no schema or data rollback.
+
+## Repository checkout replacement
+
+The repository lifecycle barrier drains complete DDEV ensures, including coalesced callers'
+`onReady` wiring, and app-runner boots before stopping mounts. A drain has a 30-second deadline;
+Docker/transport deferrals have a 30-minute total bound and structural repair codes.
+The runtime-ensure queue requires ready and repeats admission after startup. Stamped inode
+changes detect old checkouts; legacy unstamped runners and device-only remounts are kept.
+Ordinary recovery for another workspace or a dead nested dockerd still recreates the runner
+during a running step, as before. No running-task identity hold overrides recovery.
+Both checkout-stop and stale runner removal use `-v`: the anonymous nested `/var/lib/docker`
+is recreated fresh, while named repository/CA/registry-cache volumes survive. A new DDEV runner
+restores the ordinary saved snapshot and loses newer unsnapshotted database changes. See
+[Repository refresh](repository-refresh.md) for bounded suspension and deployment.

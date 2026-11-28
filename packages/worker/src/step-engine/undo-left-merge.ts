@@ -28,6 +28,7 @@ import {
 } from '../repo/git-push.js';
 import { worktreeDirPaths, worktreeDirName } from '../repo/worktree-paths.js';
 import { checkoutHoldingTasks } from '../repo/refresh.js';
+import { withPlanCheckoutAccess } from '../repo/checkout-access-scope.js';
 import { findWorktreePathClaimant } from '../repo/worktree-claims.js';
 import { worktreesHoldingBranch } from '../repo/git-workspace.js';
 import { gitOperationInProgress, GitOperationUnreadableError } from '../repo/git-operation.js';
@@ -855,10 +856,14 @@ async function undoLeftMergeInMove(db: Database, payload: UndoLeftMergePayload):
     if (await attempt()) {
       // Capture commits before files move; no merge-dir or task-creation transaction is held
       // across the helper's own transactions. Re-enter all fences before the actual reset.
-      const aside = await setAsideHaiveProjections(db, task.repositoryId, initial.repoPath, fence, {
-        restore: section,
-        putBack: section,
-      });
+      const aside = await withPlanCheckoutAccess(
+        { mode: 'projection', ...(root ? { owner: root } : {}) },
+        () =>
+          setAsideHaiveProjections(db, task.repositoryId!, initial.repoPath, fence, {
+            restore: section,
+            putBack: section,
+          }),
+      );
       prepared = true;
       if (aside.outcome === 'set-aside') kept = aside.kept;
       if (aside.outcome === 'refused') preparationRefusal = aside.reason;
@@ -872,7 +877,14 @@ async function undoLeftMergeInMove(db: Database, payload: UndoLeftMergePayload):
         // Strict: a failed chown throws, so the re-sync is not recorded as complete over files
         // the sandbox user cannot write; the report stays owed and Retry stays offered.
         if (movedCheckout) await handBackAfterMove(movedCheckout, initial.baseShaAfter, true);
-        if (!(await resyncHaiveProjections(db, task.repositoryId, initial.repoPath, taskId)))
+        // The edit claim is still live here: the plan re-sync carries it, or the plan policy
+        // would refuse the Undo's own claim as a foreign owner and the retry would never end.
+        const repositoryId = task.repositoryId;
+        const resynced = await withPlanCheckoutAccess(
+          { mode: 'projection', ...(root ? { owner: root } : {}) },
+          () => resyncHaiveProjections(db, repositoryId, initial.repoPath, taskId),
+        );
+        if (!resynced)
           throw new Error("Haive's project files were not re-synced yet; the job will retry");
         // Re-sync owns its transactions. Journal its success afterwards under the report's
         // lock, so redelivery adds no duplicate and no connection is held over re-sync.

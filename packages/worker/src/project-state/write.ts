@@ -9,7 +9,13 @@ import { admitWatchedCheckout } from './watch-admission.js';
 import { randomUUID } from 'node:crypto';
 import { basename } from 'node:path';
 import { and, asc, eq, inArray, isNull, sql } from 'drizzle-orm';
-import { isRootClaimLive, lockRepositoryTasksKey, schema, type Database } from '@haive/database';
+import {
+  canonicalUuid,
+  isRootClaimLive,
+  lockRepositoryTasksKey,
+  schema,
+  type Database,
+} from '@haive/database';
 import {
   lstatNoFollow,
   openDirNoFollow,
@@ -80,6 +86,8 @@ import {
 } from '@haive/shared/project-state';
 import { CHECKOUT_HOLDING_TASK_STATUSES } from '@haive/shared';
 import { gitOperationInProgress } from '../repo/git-operation.js';
+import { CheckoutUnavailableError, requireCheckoutAccess } from '@haive/shared/checkout-access';
+import { planCheckoutAccess } from '../repo/checkout-access-scope.js';
 import { markProjectStateDirty } from '@haive/shared/project-state-outbox';
 import { readCheckout, readStateFiles, syncProjectStateLocked } from './sync.js';
 import type { TemplateRenderContext } from '../step-engine/template-manifest.js';
@@ -89,8 +97,19 @@ type Tx = Parameters<Parameters<Database['transaction']>[0]>[0];
 /** Before project-state reads and writes; when the task-creation key is needed, take it first. */
 export async function lockProjectState(tx: Tx, repositoryId: string): Promise<void> {
   await tx.execute(
-    sql`select pg_advisory_xact_lock(hashtextextended(${`project-state:${repositoryId}`}, 0))`,
+    sql`select pg_advisory_xact_lock(hashtextextended(${`project-state:${canonicalUuid(repositoryId)}`}, 0))`,
   );
+}
+
+/** Call only after the repository row is held FOR NO KEY UPDATE. */
+export async function checkoutUnavailable(tx: Tx, repositoryId: string): Promise<boolean> {
+  try {
+    await requireCheckoutAccess(tx, repositoryId, planCheckoutAccess());
+    return false;
+  } catch (err) {
+    if (err instanceof CheckoutUnavailableError) return true;
+    throw err;
+  }
 }
 
 interface ProjectStateColumnInput {
@@ -150,6 +169,15 @@ export class ProjectStateMovedError extends Error {
  *  an open git operation. It retains ProjectStateMovedError's public name and refusal semantics. */
 export class ProjectStateCheckoutHeldError extends ProjectStateMovedError {}
 
+/** The shared checkout-access policy refused: another operation holds the checkout, or it is preparing or in error. */
+export class ProjectStateCheckoutUnavailableError extends ProjectStateCheckoutHeldError {
+  constructor() {
+    super(
+      'The repository checkout is preparing or in use by another operation, so nothing was written',
+    );
+  }
+}
+
 /** The incoming record stays on disk for the task-end reconciliation. No column, base, audit
  *  row or record file was changed, so this deferral must neither clear the column nor re-plan 02. */
 export class ProjectStateImportDeferredError extends Error {
@@ -205,6 +233,16 @@ export class ProjectStateWriteError extends Error {
  *  rows it wrote: that one fails the step, which a retry runs again. */
 export function failIfColumnStale(err: unknown): void {
   if (err instanceof ProjectStateWriteError && err.columnStale) throw err;
+}
+
+const CHECKOUT_BUSY =
+  'The repository checkout is preparing or in use by another operation. Retry this step in a moment.';
+
+/** A foreground writer fails its step on a checkout hold. The hold refuses before the column or any
+ *  file changes, so no outbox row is left dirty for the sweep: a warning would end the step with the
+ *  record never written, and only a retry of the step writes it. */
+export function failIfCheckoutUnavailable(err: unknown): void {
+  if (err instanceof ProjectStateCheckoutUnavailableError) throw new Error(CHECKOUT_BUSY);
 }
 
 /** Current explicit membership, then strict history/current legacy metadata, then recorded caller
@@ -781,6 +819,8 @@ export async function writeProjectStateColumn(
       ) {
         throw new ProjectStateMovedError();
       }
+      if (await checkoutUnavailable(tx, repositoryId))
+        throw new ProjectStateCheckoutUnavailableError();
       if (expectedColumns) await refuseMovedColumn(tx, repositoryId, expectedColumns);
       if (holdingTaskId) await refuseReleasedCheckout(tx, holdingTaskId, repositoryId);
       if (refuseWhileHeld) await refuseHeldCheckout(tx, repositoryId);
@@ -1518,6 +1558,7 @@ export async function refuseHeldCheckout(
   if (live.length > 0 || (repo.kind === 'reset' && isRootClaimLive(repo.claimedAt))) {
     throw new ProjectStateCheckoutHeldError();
   }
+  if (await checkoutUnavailable(tx, repositoryId)) throw new ProjectStateCheckoutUnavailableError();
 }
 
 export async function refuseReleasedCheckout(

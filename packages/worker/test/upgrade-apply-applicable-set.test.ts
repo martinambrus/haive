@@ -60,6 +60,7 @@ async function run(
   });
   const column = renderContextColumnFor(REFERENCE_CONTEXT, false);
   fake.insert(schema.repositories, {
+    status: 'ready',
     id: REPO,
     userId: USER,
     name: 'acme',

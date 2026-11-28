@@ -8,7 +8,7 @@ let seedArgs: unknown[] = [];
 let reportArgs: unknown[] = [];
 
 vi.mock('../src/modules.generated.js', () => ({ moduleRegistry: [] }));
-vi.mock('../src/redis.js', () => ({ getRedis: () => ({}) }));
+vi.mock('../src/redis.js', () => ({ getRedis: () => ({}), getPatientRedis: () => ({}) }));
 vi.mock('../src/step-engine/step-catalog.js', () => ({
   syncStepCatalog: async () => void calls.push('catalog'),
 }));

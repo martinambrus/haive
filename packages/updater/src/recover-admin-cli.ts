@@ -3,11 +3,10 @@ import { realpath } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
 import postgres from 'postgres';
-import { eq } from 'drizzle-orm';
 import { drizzle } from 'drizzle-orm/postgres-js';
 import { schema } from '@haive/database';
 import {
-  SECRET_KEYS,
+  SecretUnreadableError,
   configService,
   encryptionKeyBootDatabase,
   secretsService,
@@ -34,28 +33,29 @@ export async function main(args = process.argv.slice(2)): Promise<number> {
   }
   const client = postgres(databaseUrl, { max: 1, max_lifetime: 0 });
   try {
-    // Boot gets its own client: Drizzle rewires codecs on the one it wraps.
-    const bootClient = postgres(databaseUrl, { max: 1, max_lifetime: 0 });
-    try {
-      await configService.initialize(redisUrl, () => encryptionKeyBootDatabase(bootClient));
-    } finally {
-      await bootClient.end({ timeout: 5 }).catch(() => {});
-    }
     const db = drizzle(client, { schema });
-    await secretsService.initialize(db);
-    const key = await configService.getEncryptionKey();
-    // A stored pepper this key cannot read means the key (or Redis) is not this install's. Outside
-    // production the getter would then generate a new pepper over it, breaking every login lookup.
-    const storedPepper = await db.query.systemSecrets.findFirst({
-      where: eq(schema.systemSecrets.key, SECRET_KEYS.EMAIL_BLIND_INDEX_PEPPER),
-      columns: { key: true },
-    });
-    if (storedPepper && (await secretsService.get(SECRET_KEYS.EMAIL_BLIND_INDEX_PEPPER)) === null) {
+    let key: string;
+    let pepper: string;
+    try {
+      // Boot gets its own client: Drizzle rewires codecs on the one it wraps.
+      const bootClient = postgres(databaseUrl, { max: 1, max_lifetime: 0 });
+      try {
+        await configService.initialize(redisUrl, () => encryptionKeyBootDatabase(bootClient));
+      } finally {
+        await bootClient.end({ timeout: 5 }).catch(() => {});
+      }
+      await secretsService.initialize(db);
+      key = await configService.getEncryptionKey();
+      pepper = await secretsService.getEmailBlindIndexPepper();
+    } catch (err) {
+      // A stored secret this key cannot read means the key (or Redis) is not this install's. The
+      // boot message offers the discard override, which would delete this install's secrets.
+      if (!(err instanceof SecretUnreadableError)) throw err;
       throw new Error(
-        'This encryption key does not decrypt the stored email pepper: check DATABASE_URL, REDIS_URL and the key belong to this install. Nothing was changed.',
+        `This encryption key does not decrypt the stored system secrets (${err.secretKeys.join(', ')}): check DATABASE_URL, REDIS_URL and the key belong to this install. Nothing was changed.`,
+        { cause: err },
       );
     }
-    const pepper = await secretsService.getEmailBlindIndexPepper();
     const result = await recoverAdmin(db, {
       email: values.email,
       userId: values['user-id'],

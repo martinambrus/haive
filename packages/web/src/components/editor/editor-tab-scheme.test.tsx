@@ -5,6 +5,9 @@ import { afterEach, expect, it, vi } from 'vitest';
 import { EditorTab } from './editor-tab';
 
 const { post } = vi.hoisted(() => ({ post: vi.fn() }));
+vi.mock('@/components/checkout-session-boundary', () => ({
+  CheckoutSessionBoundary: ({ children }: { children: unknown }) => children,
+}));
 vi.mock('@/lib/api-client', () => ({ api: { post } }));
 vi.mock('@/components/task-source', () => ({ TaskSource: () => <div>Files</div> }));
 vi.mock('@/components/markdown/markdown-view', () => ({

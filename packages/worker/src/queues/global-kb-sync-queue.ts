@@ -1,3 +1,5 @@
+import { displayOllamaUrl } from '@haive/shared/ollama-url';
+import { globalKbCallOptions } from '@haive/shared/global-kb';
 import { safeProcessor } from './safe-processor.js';
 import { createHash } from 'node:crypto';
 import { Queue, Worker, type Job } from 'bullmq';
@@ -21,6 +23,7 @@ import {
   retryOwedGlobalIdentifierBackfill,
   withGlobalKb,
   type GlobalKbContext,
+  type GlobalKbCallOptions,
 } from '@haive/shared/global-kb';
 import { getDb } from '../db.js';
 import { classifyGlobalKbVectorProvenance } from '../global-kb-vector-provenance.js';
@@ -34,6 +37,9 @@ import {
 } from '../step-engine/steps/onboarding/_rag-chunkers.js';
 import { pruneJobSchedulers } from './job-scheduler-prune.js';
 import { reconcileKbAuthorEntryOnTaskEnd } from '../step-engine/steps/_global-kb-promote.js';
+
+// An entry can embed many CPU batches; store-only sweep calls keep the 60 s budget.
+export const GLOBAL_KB_SYNC_DEADLINE_MS = 60 * 60_000;
 
 const log = logger.child({ module: 'global-kb-sync' });
 
@@ -224,98 +230,106 @@ async function hasVectorColumn(ctx: GlobalKbContext): Promise<boolean> {
 /** Reconcile the global vector store to an entry's current state. Active entries
  *  are (re)chunked + (re)embedded with the GLOBAL embed model (hash fallback) and
  *  their chunks fully replaced; everything else has its chunks removed. */
-export async function syncGlobalKbEntry(payload: GlobalKbSyncJobPayload): Promise<void> {
-  await withGlobalKb(getDb(), async (ctx) => {
-    const { entryId, namespace } = payload;
+export async function syncGlobalKbEntry(
+  payload: GlobalKbSyncJobPayload,
+  opts: GlobalKbCallOptions = {},
+): Promise<void> {
+  await withGlobalKb(
+    getDb(),
+    async (ctx) => {
+      const { entryId, namespace } = payload;
 
-    if (payload.reason === 'delete') {
-      if (!(await removeVectorsUnlessActive(ctx, namespace, entryId))) {
-        log.info({ entryId }, 'stale global KB delete job skipped: the entry is active again');
+      if (payload.reason === 'delete') {
+        if (!(await removeVectorsUnlessActive(ctx, namespace, entryId))) {
+          log.info({ entryId }, 'stale global KB delete job skipped: the entry is active again');
+        }
+        return;
       }
-      return;
-    }
 
-    const entry = await ctx.db.query.globalKbEntries.findFirst({
-      where: eq(globalKbEntries.id, entryId),
-    });
+      const entry = await ctx.db.query.globalKbEntries.findFirst({
+        where: eq(globalKbEntries.id, entryId),
+      });
 
-    // Only `active` entries are retrievable; anything else holds no vectors. Re-checked under the
-    // lock at delete time: if a reactivation committed since the read above, its own upsert embeds it.
-    if (!entry || entry.status !== 'active') {
-      await removeVectorsUnlessActive(ctx, namespace, entryId);
-      return;
-    }
+      // Only `active` entries are retrievable; anything else holds no vectors. Re-checked under the
+      // lock at delete time: if a reactivation committed since the read above, its own upsert embeds it.
+      if (!entry || entry.status !== 'active') {
+        await removeVectorsUnlessActive(ctx, namespace, entryId);
+        return;
+      }
 
-    try {
-      const sourcePath = `global_kb/${slugifyHeading(entry.title)}-${entry.id.slice(0, 8)}.md`;
-      const sections = extractMarkdownSections(entry.body, sourcePath);
-      // The header roots on the entry TITLE, never on sourcePath — that filename
-      // is synthetic and would only add noise to the embedding.
-      const built = sections.flatMap((s) =>
-        chunkSection(s, { header: contextHeader(entry.title, s.breadcrumb) }),
-      );
-      const { chunks, dropped } = capChunks(built);
-      if (dropped > 0) {
-        log.warn(
-          { entryId: entry.id, kept: chunks.length, dropped },
-          'global KB entry exceeded the per-entry chunk budget; tail not embedded',
+      try {
+        const sourcePath = `global_kb/${slugifyHeading(entry.title)}-${entry.id.slice(0, 8)}.md`;
+        const sections = extractMarkdownSections(entry.body, sourcePath);
+        // The header roots on the entry TITLE, never on sourcePath — that filename
+        // is synthetic and would only add noise to the embedding.
+        const built = sections.flatMap((s) =>
+          chunkSection(s, { header: contextHeader(entry.title, s.breadcrumb) }),
         );
-      }
-
-      let outcome: SyncWriteOutcome;
-      if (chunks.length > 0) {
-        const texts = chunks.map((c) => c.content);
-        const useOllama = !!(ctx.conn.ollamaUrl && ctx.conn.embedModel);
-        // Batched, unlike before: one entry can carry up to MAX_CHUNKS_PER_FILE (80)
-        // chunks, and sending all of them in a single /api/embed made this the most
-        // timeout-prone embed call in the codebase.
-        const batchSize = await resolveEmbedBatchSize();
-        const embeddings: number[][] = [];
-        const kinds: Array<'model' | 'hashed'> = [];
-        for (let start = 0; start < texts.length; start += batchSize) {
-          const outcome = await embedBatch({
-            ollamaUrl: ctx.conn.ollamaUrl,
-            model: ctx.conn.embedModel,
-            dimensions: ctx.conn.embeddingDimensions,
-            useOllama,
-            texts: texts.slice(start, start + batchSize),
-          });
-          if (outcome.kind === 'failed') {
-            // Throw BEFORE the delete+insert transaction below, so the entry keeps
-            // the chunks it already had rather than losing them for hash noise.
-            log.error({ entryId, start, reason: outcome.reason }, 'global KB embed failed');
-            throw new RagEmbedFailureError(outcome.reason);
-          }
-          embeddings.push(...outcome.embeddings);
-          const kind = outcome.kind === 'embedded' ? 'model' : 'hashed';
-          kinds.push(...outcome.embeddings.map(() => kind));
+        const { chunks, dropped } = capChunks(built);
+        if (dropped > 0) {
+          log.warn(
+            { entryId: entry.id, kept: chunks.length, dropped },
+            'global KB entry exceeded the per-entry chunk budget; tail not embedded',
+          );
         }
 
-        outcome = await writeSyncResults(ctx, entry, sourcePath, chunks, embeddings, kinds);
-      } else {
-        // No extractable content (e.g. an empty body): the same guarded write clears stale chunks.
-        outcome = await writeSyncResults(ctx, entry, sourcePath, [], [], []);
+        let outcome: SyncWriteOutcome;
+        if (chunks.length > 0) {
+          const texts = chunks.map((c) => c.content);
+          const useOllama = !!(ctx.conn.ollamaUrl && ctx.conn.embedModel);
+          // Batched, unlike before: one entry can carry up to MAX_CHUNKS_PER_FILE (80)
+          // chunks, and sending all of them in a single /api/embed made this the most
+          // timeout-prone embed call in the codebase.
+          const batchSize = await resolveEmbedBatchSize();
+          const embeddings: number[][] = [];
+          const kinds: Array<'model' | 'hashed'> = [];
+          for (let start = 0; start < texts.length; start += batchSize) {
+            ctx.signal?.throwIfAborted();
+            const outcome = await embedBatch({
+              ollamaUrl: ctx.conn.ollamaUrl,
+              model: ctx.conn.embedModel,
+              dimensions: ctx.conn.embeddingDimensions,
+              useOllama,
+              texts: texts.slice(start, start + batchSize),
+            });
+            if (outcome.kind === 'failed') {
+              // Throw BEFORE the delete+insert transaction below, so the entry keeps
+              // the chunks it already had rather than losing them for hash noise.
+              log.error({ entryId, start, reason: outcome.reason }, 'global KB embed failed');
+              throw new RagEmbedFailureError(outcome.reason);
+            }
+            embeddings.push(...outcome.embeddings);
+            const kind = outcome.kind === 'embedded' ? 'model' : 'hashed';
+            kinds.push(...outcome.embeddings.map(() => kind));
+          }
+
+          outcome = await writeSyncResults(ctx, entry, sourcePath, chunks, embeddings, kinds);
+        } else {
+          // No extractable content (e.g. an empty body): the same guarded write clears stale chunks.
+          outcome = await writeSyncResults(ctx, entry, sourcePath, [], [], []);
+        }
+        if (outcome === 'retired') {
+          log.info(
+            { entryId: entry.id },
+            'global KB entry left active while syncing; vectors removed, not re-inserted',
+          );
+          return;
+        }
+        if (outcome === 'stale') {
+          log.info(
+            { entryId: entry.id },
+            'global KB entry changed while syncing; results discarded for its own sync to re-embed',
+          );
+          return;
+        }
+        log.info({ entryId: entry.id, chunks: chunks.length }, 'global KB entry synced');
+      } catch (err) {
+        await markSyncFailed(ctx, entry).catch(() => {});
+        throw err;
       }
-      if (outcome === 'retired') {
-        log.info(
-          { entryId: entry.id },
-          'global KB entry left active while syncing; vectors removed, not re-inserted',
-        );
-        return;
-      }
-      if (outcome === 'stale') {
-        log.info(
-          { entryId: entry.id },
-          'global KB entry changed while syncing; results discarded for its own sync to re-embed',
-        );
-        return;
-      }
-      log.info({ entryId: entry.id, chunks: chunks.length }, 'global KB entry synced');
-    } catch (err) {
-      await markSyncFailed(ctx, entry).catch(() => {});
-      throw err;
-    }
-  });
+    },
+    globalKbCallOptions(opts, GLOBAL_KB_SYNC_DEADLINE_MS),
+  );
 }
 
 const PURGE_INTERVAL_MS = 24 * 60 * 60 * 1000; // daily
@@ -346,49 +360,57 @@ export function survivingPredecessors(
   return out;
 }
 
-export async function purgeArchivedGlobalKbEntries(): Promise<void> {
+export async function purgeArchivedGlobalKbEntries(opts: GlobalKbCallOptions = {}): Promise<void> {
   const settings = await resolveGlobalKbSettings();
   if (!settings.enabled) return;
   const days = settings.archiveRetentionDays;
   if (!Number.isFinite(days) || days <= 0) return;
   const cutoff = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
-  await withGlobalKb(getDb(), async (ctx) => {
-    // ONE conditional statement, never select-then-delete-by-id. The WHERE is the whole decision,
-    // and when the delete has to wait for a concurrent writer's row lock Postgres re-evaluates it
-    // against the row that writer committed — so an entry reactivated while the sweep runs (the
-    // PATCH holds the row, then commits `active` with `superseded_at` cleared) no longer matches and
-    // survives. MEASURED on the select-then-delete version: a reactivation held open while the purge
-    // ran was deleted the moment it committed, after the page had reported success. The cutoff is
-    // bound the way drizzle binds a Date to a `timestamp` column, an ISO string whose zone is
-    // ignored, so the retention window is unchanged. Vectors go in the same transaction as rows.
-    const purged = (await ctx.conn.pg.begin(async (tx) => {
-      const rows = (await tx.unsafe(
-        `DELETE FROM global_kb_entries
+  await withGlobalKb(
+    getDb(),
+    async (ctx) => {
+      // ONE conditional statement, never select-then-delete-by-id. The WHERE is the whole decision,
+      // and when the delete has to wait for a concurrent writer's row lock Postgres re-evaluates it
+      // against the row that writer committed — so an entry reactivated while the sweep runs (the
+      // PATCH holds the row, then commits `active` with `superseded_at` cleared) no longer matches and
+      // survives. MEASURED on the select-then-delete version: a reactivation held open while the purge
+      // ran was deleted the moment it committed, after the page had reported success. The cutoff is
+      // bound the way drizzle binds a Date to a `timestamp` column, an ISO string whose zone is
+      // ignored, so the retention window is unchanged. Vectors go in the same transaction as rows.
+      const purged = (await ctx.conn.pg.begin(async (tx) => {
+        const rows = (await tx.unsafe(
+          `DELETE FROM global_kb_entries
           WHERE status = 'archived' AND superseded_at < $1::timestamp
           RETURNING id, namespace, supersedes_entry_id`,
-        [cutoff.toISOString()],
-      )) as unknown as Array<{ id: string; namespace: string; supersedes_entry_id: string | null }>;
-      // Rows that replaced a purged entry now replace its nearest surviving predecessor, as the
-      // api's DELETE route does, or the chain the successor lookup walks breaks at the gap.
-      const predecessor = survivingPredecessors(rows);
-      for (const r of rows) {
-        await tx.unsafe(`DELETE FROM ai_rag_embeddings WHERE namespace = $1 AND entry_id = $2`, [
-          r.namespace,
-          r.id,
-        ]);
-        await tx.unsafe(
-          `UPDATE global_kb_entries
+          [cutoff.toISOString()],
+        )) as unknown as Array<{
+          id: string;
+          namespace: string;
+          supersedes_entry_id: string | null;
+        }>;
+        // Rows that replaced a purged entry now replace its nearest surviving predecessor, as the
+        // api's DELETE route does, or the chain the successor lookup walks breaks at the gap.
+        const predecessor = survivingPredecessors(rows);
+        for (const r of rows) {
+          await tx.unsafe(`DELETE FROM ai_rag_embeddings WHERE namespace = $1 AND entry_id = $2`, [
+            r.namespace,
+            r.id,
+          ]);
+          await tx.unsafe(
+            `UPDATE global_kb_entries
               SET supersedes_entry_id = CASE WHEN id = $1::uuid THEN NULL ELSE $1::uuid END
             WHERE supersedes_entry_id = $2::uuid`,
-          [predecessor.get(r.id) ?? null, r.id],
-        );
+            [predecessor.get(r.id) ?? null, r.id],
+          );
+        }
+        return rows.length;
+      })) as number;
+      if (purged > 0) {
+        log.info({ purged, retentionDays: days }, 'purged expired archived global KB entries');
       }
-      return rows.length;
-    })) as number;
-    if (purged > 0) {
-      log.info({ purged, retentionDays: days }, 'purged expired archived global KB entries');
-    }
-  });
+    },
+    globalKbCallOptions(opts),
+  );
 }
 
 /** Register the daily archived-entry retention sweep. Idempotent: upsertJobScheduler keys on
@@ -446,16 +468,19 @@ async function findReembedCandidates(
   embedModel: string,
   namespace: string,
   dims: number,
+  opts: GlobalKbCallOptions,
 ): Promise<SyncCandidate[]> {
-  return withGlobalKb(getDb(), async (ctx) => {
-    // A jsonb store accepts a new width without a schema change, so its rows of the old width drift too.
-    const jsonb = !(await hasVectorColumn(ctx));
-    const widthDrift = jsonb
-      ? `OR (CASE WHEN jsonb_typeof(r.embedding_json) = 'array'
+  return withGlobalKb(
+    getDb(),
+    async (ctx) => {
+      // A jsonb store accepts a new width without a schema change, so its rows of the old width drift too.
+      const jsonb = !(await hasVectorColumn(ctx));
+      const widthDrift = jsonb
+        ? `OR (CASE WHEN jsonb_typeof(r.embedding_json) = 'array'
                   THEN jsonb_array_length(r.embedding_json) END) IS DISTINCT FROM $3`
-      : '';
-    return (await ctx.conn.pg.unsafe(
-      `SELECT e.id, e.namespace FROM global_kb_entries e
+        : '';
+      return (await ctx.conn.pg.unsafe(
+        `SELECT e.id, e.namespace FROM global_kb_entries e
         WHERE e.status = 'active' AND e.superseded_at IS NULL AND e.namespace = $2
           AND (
             e.embed_status = 'failed'
@@ -467,23 +492,31 @@ async function findReembedCandidates(
             )
           )
         ORDER BY random()`,
-      jsonb ? [embedModel, namespace, dims] : [embedModel, namespace],
-    )) as unknown as SyncCandidate[];
-  });
+        jsonb ? [embedModel, namespace, dims] : [embedModel, namespace],
+      )) as unknown as SyncCandidate[];
+    },
+    globalKbCallOptions(opts),
+  );
 }
 
 /** Whether a re-embed would write current-model vectors the column can hold: the Ollama answers and
  *  one probe embed has the width of the store's `vector` column (the configured width for a jsonb
  *  store). Without it a sweep would queue syncs that rewrite hash rows or die on the insert. */
-async function embedderMatchesStore(settings: {
-  ollamaUrl: string | null;
-  embedModel: string | null;
-  embeddingDimensions: number;
-}): Promise<boolean> {
+async function embedderMatchesStore(
+  settings: {
+    ollamaUrl: string | null;
+    embedModel: string | null;
+    embeddingDimensions: number;
+  },
+  opts: GlobalKbCallOptions,
+): Promise<boolean> {
   const { ollamaUrl, embedModel } = settings;
   if (!ollamaUrl || !embedModel) return false;
   if (!(await probeOllama(ollamaUrl))) {
-    log.warn({ ollamaUrl }, 'global KB re-embed skipped: the embedder does not answer');
+    log.warn(
+      { ollamaUrl: displayOllamaUrl(ollamaUrl) },
+      'global KB re-embed skipped: the embedder does not answer',
+    );
     return false;
   }
   try {
@@ -494,6 +527,7 @@ async function embedderMatchesStore(settings: {
           `SELECT format_type(a.atttypid, a.atttypmod) AS type FROM pg_attribute a
             WHERE a.attrelid = to_regclass('ai_rag_embeddings') AND a.attname = 'vector' AND NOT a.attisdropped`,
         )) as unknown as Array<{ type: string }>,
+      globalKbCallOptions(opts),
     );
     const width = Number(
       /\((\d+)\)/.exec(columns[0]?.type ?? '')?.[1] ?? settings.embeddingDimensions,
@@ -505,6 +539,7 @@ async function embedderMatchesStore(settings: {
       'global KB re-embed skipped: the embedder width is not the store width',
     );
   } catch (err) {
+    opts.signal?.throwIfAborted();
     log.warn({ err }, 'global KB re-embed skipped: the embedder probe failed');
   }
   return false;
@@ -512,15 +547,18 @@ async function embedderMatchesStore(settings: {
 
 /** Retry best-effort terminal settlement independently of Stop/Cancel finish markers.
  * Close the store scan before taking any task row; the helper rechecks status under its fence. */
-async function reconcileUnfinishedKbAuthorEntries(): Promise<void> {
+async function reconcileUnfinishedKbAuthorEntries(opts: GlobalKbCallOptions): Promise<void> {
   const db = getDb();
   // A `failed` entry is still owed a delete when its task was cancelled (Cancel's store call can
   // fail after Stop marked it failed); for a failed task it is already settled.
-  const unfinished = await withGlobalKb(db, ({ db: gdb }) =>
-    gdb
-      .select({ taskId: globalKbEntries.sourceTaskId, status: globalKbEntries.status })
-      .from(globalKbEntries)
-      .where(inArray(globalKbEntries.status, ['skeleton', 'enriching', 'failed'])),
+  const unfinished = await withGlobalKb(
+    db,
+    ({ db: gdb }) =>
+      gdb
+        .select({ taskId: globalKbEntries.sourceTaskId, status: globalKbEntries.status })
+        .from(globalKbEntries)
+        .where(inArray(globalKbEntries.status, ['skeleton', 'enriching', 'failed'])),
+    globalKbCallOptions(opts),
   );
   const openFor = new Set<string>();
   const failedFor = new Set<string>();
@@ -555,32 +593,36 @@ async function reconcileUnfinishedKbAuthorEntries(): Promise<void> {
  *  activation that archived a predecessor had already deleted ITS vectors in the same transaction,
  *  so the topic dropped out of retrieval entirely. Entries with a live upsert are skipped, or a slow
  *  embed backlog would gain a duplicate on every sweep. */
-export async function reconcilePendingGlobalKbSyncs(): Promise<void> {
+export async function reconcilePendingGlobalKbSyncs(opts: GlobalKbCallOptions = {}): Promise<void> {
   const settings = await resolveGlobalKbSettings();
   if (!settings.enabled) return;
-  await reconcileUnfinishedKbAuthorEntries();
+  await reconcileUnfinishedKbAuthorEntries(opts);
   // A store enabled or reachable only after boot still gets its pre-provenance vectors classified.
-  await classifyGlobalKbVectorProvenance(getDb());
-  await retryOwedGlobalIdentifierBackfill(getDb());
+  await classifyGlobalKbVectorProvenance(getDb(), globalKbCallOptions(opts));
+  await retryOwedGlobalIdentifierBackfill(getDb(), globalKbCallOptions(opts));
   const cutoff = new Date(Date.now() - RECONCILE_GRACE_MS);
-  const pending = await withGlobalKb(getDb(), (ctx) =>
-    ctx.db
-      .select({ id: globalKbEntries.id, namespace: globalKbEntries.namespace })
-      .from(globalKbEntries)
-      .where(
-        and(
-          eq(globalKbEntries.status, 'active'),
-          isNull(globalKbEntries.supersededAt),
-          eq(globalKbEntries.embedStatus, 'pending'),
-          lt(globalKbEntries.updatedAt, cutoff),
+  const pending = await withGlobalKb(
+    getDb(),
+    (ctx) =>
+      ctx.db
+        .select({ id: globalKbEntries.id, namespace: globalKbEntries.namespace })
+        .from(globalKbEntries)
+        .where(
+          and(
+            eq(globalKbEntries.status, 'active'),
+            isNull(globalKbEntries.supersededAt),
+            eq(globalKbEntries.embedStatus, 'pending'),
+            lt(globalKbEntries.updatedAt, cutoff),
+          ),
         ),
-      ),
+    globalKbCallOptions(opts),
   );
   const candidates = settings.embedModel
     ? await findReembedCandidates(
         settings.embedModel,
         settings.namespace,
         settings.embeddingDimensions,
+        opts,
       )
     : [];
   if (pending.length === 0 && candidates.length === 0) return;
@@ -589,13 +631,14 @@ export async function reconcilePendingGlobalKbSyncs(): Promise<void> {
     const liveJobs = await queue.getJobs(['active', 'waiting', 'delayed', 'prioritized']);
     const unqueued = pickLostSyncs(candidates, liveJobs);
     const reembed =
-      unqueued.length > 0 && (await embedderMatchesStore(settings))
+      unqueued.length > 0 && (await embedderMatchesStore(settings, opts))
         ? unqueued.slice(0, REEMBED_PER_SWEEP)
         : [];
     const owed = new Map<string, SyncCandidate>();
     for (const e of [...pending, ...reembed]) owed.set(e.id, e);
     const lost = pickLostSyncs([...owed.values()], liveJobs);
     for (const e of lost) {
+      opts.signal?.throwIfAborted();
       await queue.add(
         GLOBAL_KB_JOB_NAMES.SYNC_ENTRY,
         {
@@ -637,19 +680,24 @@ export async function scheduleGlobalKbReconcile(): Promise<void> {
   }
 }
 
-export function startGlobalKbSyncWorker(): Worker {
+export function startGlobalKbSyncWorker(opts: GlobalKbCallOptions = {}): Worker {
+  const controller = new AbortController();
+  const signal = opts.signal
+    ? AbortSignal.any([opts.signal, controller.signal])
+    : controller.signal;
+  const callOptions = { ...opts, signal };
   const worker = new Worker<GlobalKbSyncJobPayload>(
     QUEUE_NAMES.GLOBAL_KB_SYNC,
     safeProcessor(async (job: Job<GlobalKbSyncJobPayload>) => {
       switch (job.name) {
         case GLOBAL_KB_JOB_NAMES.SYNC_ENTRY:
-          await syncGlobalKbEntry(job.data);
+          await syncGlobalKbEntry(job.data, callOptions);
           return;
         case GLOBAL_KB_JOB_NAMES.PURGE_ARCHIVED:
-          await purgeArchivedGlobalKbEntries();
+          await purgeArchivedGlobalKbEntries(callOptions);
           return;
         case GLOBAL_KB_JOB_NAMES.RECONCILE_PENDING:
-          await reconcilePendingGlobalKbSyncs();
+          await reconcilePendingGlobalKbSyncs(callOptions);
           return;
         default:
           throw new Error(`Unknown global-kb job: ${job.name}`);
@@ -657,6 +705,13 @@ export function startGlobalKbSyncWorker(): Worker {
     }),
     { connection: getBullRedis(), concurrency: 2 },
   );
+
+  // Closing waits for active handlers; cancel their store calls before that wait.
+  const close = worker.close.bind(worker);
+  worker.close = async (...args) => {
+    controller.abort();
+    return close(...args);
+  };
 
   worker.on('completed', (job) => {
     logger.info({ jobId: job.id, name: job.name }, 'global KB sync job completed');

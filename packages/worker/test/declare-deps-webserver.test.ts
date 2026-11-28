@@ -46,7 +46,12 @@ function makeCtx(template: { name: string; declaredDeps: Record<string, unknown>
       },
       envTemplates: { findFirst: vi.fn(async () => template ?? undefined) },
     },
-    select: () => ({ from: async () => [] }),
+    select: () => ({
+      from: () => {
+        const empty = Promise.resolve([]);
+        return { then: empty.then.bind(empty), where: () => ({ limit: async () => [] }) };
+      },
+    }),
   } as unknown as Database;
   return {
     db,

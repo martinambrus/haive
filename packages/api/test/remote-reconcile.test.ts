@@ -1,5 +1,6 @@
 import { randomBytes } from 'node:crypto';
 import { eq } from 'drizzle-orm';
+import { PgDialect } from 'drizzle-orm/pg-core';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 const h = vi.hoisted(() => ({
   db: undefined as unknown,
@@ -13,7 +14,7 @@ vi.mock('../src/lib/relink-git.js', () => ({
   verifyRelinkCheckout: h.verify,
   gitFailureText: () => 'git operation failed',
 }));
-import { logger } from '@haive/shared';
+import { configService, logger } from '@haive/shared';
 import { acquireRootClaim, type Database, schema } from '@haive/database';
 import { createFakeDb } from '@haive/database/testing';
 import {
@@ -44,7 +45,25 @@ beforeEach(() => {
     remoteRelinkIntent: '00000000-0000-4000-8000-000000000003',
   });
   h.db = fake.db;
-  h.fresh.mockImplementation((run: (db: unknown) => Promise<unknown>) => run(fake.db));
+  h.fresh.mockImplementation((run: (db: unknown) => Promise<unknown>) =>
+    run({
+      ...fake.db,
+      transaction: (work: (tx: unknown) => Promise<unknown>) =>
+        fake.db.transaction(async (tx) =>
+          work(
+            new Proxy(tx, {
+              get(target, prop) {
+                if (prop !== 'execute') return Reflect.get(target, prop);
+                return (query: any) =>
+                  new PgDialect().sqlToQuery(query).sql.includes('pg_try_advisory_xact_lock')
+                    ? Promise.resolve([{ taken: true }])
+                    : target.execute(query);
+              },
+            }),
+          ),
+        ),
+    }),
+  );
   h.git.mockImplementation(async (_root, args: string[]) => ({
     ok: !args.includes('add'),
     exitedClean: !args.includes('add'),
@@ -54,6 +73,7 @@ beforeEach(() => {
   }));
   info = vi.spyOn(logger, 'info').mockImplementation(() => {});
   vi.spyOn(logger, 'warn').mockImplementation(() => {});
+  vi.spyOn(configService, 'getFresh').mockResolvedValue('normal');
 });
 afterEach(() => {
   vi.useRealTimers();
@@ -236,7 +256,7 @@ it.each(['fenced', 'locked'] as const)(
         },
       });
       const tx = {
-        execute: async () => [],
+        execute: async () => [{ taken: true }],
         select: () => read,
         query: { repositories: { findFirst: async () => ({ id }) } },
       };
@@ -365,3 +385,32 @@ it('sweep logs a held mutation once, retains intent and reconciles after release
     await owner.release();
   }
 });
+
+it.each(['draining', 'maintenance'])(
+  'skips a locked-out reconcile while %s without a claim or Git, and the sweep logs it at info',
+  async (state) => {
+    vi.spyOn(configService, 'getFresh').mockResolvedValue(state);
+    let repositoryWrites = 0;
+    fake.hooks.beforeUpdate = (table) => {
+      if (table === schema.repositories) repositoryWrites += 1;
+    };
+    await expect(reconcileRemote(id, userId, { skipLocked: true })).resolves.toBe('maintenance');
+    expect(repositoryWrites).toBe(0);
+    expect(h.git).not.toHaveBeenCalled();
+    expect(pending()).toBeTruthy();
+
+    vi.useFakeTimers();
+    vi.spyOn(fake.db.query.repositories!, 'findMany').mockResolvedValue([repo] as never);
+    const stop = startRemoteReconcileSweep({ intervalMs: 10 });
+    try {
+      await vi.advanceTimersByTimeAsync(0);
+      expect(logger.warn).not.toHaveBeenCalled();
+      expect(info).toHaveBeenCalledWith(
+        { repositoryId: id, reason: 'maintenance' },
+        'remote reconciliation skipped',
+      );
+    } finally {
+      stop();
+    }
+  },
+);

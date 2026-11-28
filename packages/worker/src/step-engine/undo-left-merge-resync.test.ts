@@ -1,20 +1,27 @@
 import { beforeEach, expect, it, vi } from 'vitest';
 import { schema, type Database } from '@haive/database';
 import { leftCommittedMerges } from '@haive/shared/merge-left-open';
+import { planCheckoutAccess } from '../repo/checkout-access-scope.js';
 import { undoLeftMerge } from './undo-left-merge.js';
 
-const h = vi.hoisted(() => ({
-  sync: vi.fn(),
-  git: vi.fn(),
-  revParse: vi.fn(),
-  handBack: vi.fn(),
-  release: vi.fn(),
-  insert: vi.fn(),
-  holder: false,
-}));
+const h = vi.hoisted(() => {
+  const release = vi.fn();
+  return {
+    sync: vi.fn(),
+    setAside: vi.fn(),
+    holders: vi.fn(),
+    git: vi.fn(),
+    revParse: vi.fn(),
+    handBack: vi.fn(),
+    release,
+    claim: { release },
+    insert: vi.fn(),
+    holder: false,
+  };
+});
 vi.mock('@haive/database', async (original) => ({
   ...(await original<object>()),
-  acquireRootClaim: async () => ({ release: h.release }),
+  acquireRootClaim: async () => h.claim,
   lockRepositoryTasksKey: async () => undefined,
 }));
 vi.mock('@haive/shared/fs-safe', async (original) => ({
@@ -36,6 +43,15 @@ vi.mock('../repo/git-push.js', () => ({
   buildCredentialHelper: h.git,
   scrubSecret: (s: string) => s,
 }));
+vi.mock('../repo/git-workspace.js', () => ({ worktreesHoldingBranch: h.holders }));
+vi.mock('../repo/git-operation.js', async (original) => ({
+  ...(await original<object>()),
+  gitOperationInProgress: async () => false,
+}));
+vi.mock('../repo/git-ref-transaction.js', async (original) => ({
+  ...(await original<object>()),
+  checkGitRefTransactions: async () => undefined,
+}));
 vi.mock('./git-merge.js', () => ({
   isHostCheckout: () => false,
   revParse: h.revParse,
@@ -43,7 +59,7 @@ vi.mock('./git-merge.js', () => ({
 }));
 vi.mock('../project-state/set-aside.js', () => ({
   resyncHaiveProjections: h.sync,
-  setAsideHaiveProjections: h.git,
+  setAsideHaiveProjections: h.setAside,
   putBackProjections: h.git,
   restoreProjectionsInTx: h.git,
 }));
@@ -110,6 +126,18 @@ it('hands back a settled checkout before re-sync without git writes and complete
   expect(events.filter((e) => e.eventType === 'merge.left_committed_resynced')).toHaveLength(1);
   expect(leftCommittedMerges(events)[0]?.resyncOwed).toBe(false);
 });
+it("re-syncs the plan under the Undo's own edit claim, which would otherwise refuse it as a foreign owner", async () => {
+  let access: ReturnType<typeof planCheckoutAccess> | undefined;
+  h.sync.mockImplementationOnce(async () => {
+    access = planCheckoutAccess();
+    return true;
+  });
+  await run();
+  expect(access).toMatchObject({ mode: 'projection' });
+  expect((access as { owner?: unknown }).owner).toBe(h.claim);
+  // The scope ends with the re-sync: nothing after it inherits the claim.
+  expect(planCheckoutAccess()).toEqual({ mode: 'projection' });
+});
 it('retries a failed hand-back before re-sync and keeps recovery owed meanwhile', async () => {
   h.handBack.mockRejectedValueOnce(new Error('hand-back failed'));
   await expect(run()).rejects.toThrow('hand-back failed');
@@ -155,4 +183,43 @@ it('keeps recovery owed behind a live directory holder', async () => {
   await expect(run()).rejects.toThrow(/pending/);
   expect(h.sync).not.toHaveBeenCalled();
   expect(h.insert).not.toHaveBeenCalled();
+});
+it("sets the project files aside under the Undo's own edit claim, which would otherwise refuse it as a foreign owner", async () => {
+  const feature = payload.featureSha;
+  events = [
+    { eventType: 'task.cancel_finished', payload: {} },
+    {
+      eventType: 'merge.left_committed',
+      payload: { ...payload, repoPath: payload.repoPath, mergeStage: 'feature' },
+    },
+  ];
+  (db as unknown as { query: Record<string, unknown> }).query.taskSteps = {
+    findFirst: async () => null,
+  };
+  h.holders.mockResolvedValue([payload.repoPath]);
+  h.git.mockImplementation(async (_dir: string, args?: unknown) => {
+    if (!Array.isArray(args)) return null;
+    if (args[0] === 'rev-list')
+      return {
+        code: 0,
+        stdout: `${payload.baseShaAfter} ${payload.baseShaBefore} ${feature}\n`,
+        stderr: '',
+      };
+    if (args[0] === 'symbolic-ref') return { code: 0, stdout: 'refs/heads/main\n', stderr: '' };
+    return { code: 0, stdout: '', stderr: '' };
+  });
+  h.revParse.mockImplementation(async (_dir: string, spec: string) =>
+    spec.startsWith('refs/haive/undo-left-merge/') ? null : payload.baseShaAfter,
+  );
+  let access: ReturnType<typeof planCheckoutAccess> | undefined;
+  h.setAside.mockImplementationOnce(async () => {
+    access = planCheckoutAccess();
+    return { outcome: 'refused', reason: 'stop here' };
+  });
+
+  await run();
+
+  expect(h.setAside).toHaveBeenCalledTimes(1);
+  expect(access).toMatchObject({ mode: 'projection' });
+  expect((access as { owner?: unknown }).owner).toBe(h.claim);
 });

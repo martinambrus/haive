@@ -27,7 +27,9 @@ vi.mock('../src/queues.js', () => {
   });
   return { getTaskQueue: queue, getRepoQueue: queue };
 });
-vi.mock('../src/lib/sandbox-kill.js', () => ({ killTaskSandboxes: async () => 0 }));
+vi.mock('../src/lib/sandbox-kill.js', () => ({
+  killTaskSandboxes: async () => ({ killed: 0, killConfirmed: true }),
+}));
 vi.mock('../src/middleware/auth.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../src/middleware/auth.js')>()),
   requireAuth: async (c: { set: (key: string, value: string) => void }, next: () => unknown) => {

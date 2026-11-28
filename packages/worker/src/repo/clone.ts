@@ -1,3 +1,5 @@
+import { withPlanCheckoutAccess } from './checkout-access-scope.js';
+import { suspendCheckoutSessions } from './interactive-checkout.js';
 import { RootClaimBusyError } from './root-claim-busy.js';
 import { assertRepoJobOwner, ObsoleteRepoJobError, repoJobPredicate } from './job-owner.js';
 import { auditRepositorySettings, logAuditEvent, type AuditEvent } from '../audit.js';
@@ -232,7 +234,7 @@ async function importHaiveDataMirror(
       .select()
       .from(schema.repositories)
       .where(eq(schema.repositories.id, repositoryId))
-      .for('update');
+      .for('no key update');
     if (!stored) throw new Error('Repository no longer exists');
     for (const field of [
       'scopeExcludeGlobs',
@@ -289,7 +291,8 @@ async function importHaiveDataMirror(
 }
 
 /** Restore this install's projections before publication, importing the incoming record or plan
- *  only where this install has none. A failure must fail recovery, never be best-effort. */
+ *  only where this install has none. The rebuild supplies its publication transaction so every
+ *  nested writer is a savepoint. A failure must fail recovery, never be best-effort. */
 export async function restoreProjectData(
   db: Database,
   repositoryId: string,
@@ -321,9 +324,7 @@ export async function restoreProjectData(
   } else {
     await removeNoFollow(replacementPath, HAIVE_DATA_FILES.plan);
     await removeNoFollow(replacementPath, HAIVE_DATA_FILES.planMarkdown);
-    await writePlanMirror(db, repositoryId, replacementPath, undefined, {
-      recoveredCheckout: true,
-    });
+    await writePlanMirror(db, repositoryId, replacementPath);
   }
 }
 
@@ -347,6 +348,7 @@ export async function persistDetection(
       sizeBytes: detection.sizeBytes,
       storagePath,
       status: 'ready',
+      checkoutSessionReason: null,
       errorCode: null,
       // `null` when this import dropped nothing, so a clean re-import CLEARS a previous run's note
       // rather than leaving the repository labelled with a caveat that no longer applies.
@@ -372,6 +374,7 @@ export async function completePreparationImports(
   // onboarding-derived columns from the committed .haive-data/ mirror. Never
   // fail the scan/clone over a missing or malformed mirror.
   let legacyDeferred = false;
+  let syncUnavailable = false;
   try {
     legacyDeferred = await importHaiveDataMirror(db, repositoryId, storagePath);
   } catch (err) {
@@ -383,6 +386,7 @@ export async function completePreparationImports(
       repositoryId,
       repoPath: storagePath,
     });
+    syncUnavailable = synced.outcome === 'held' && synced.code === 'checkout_unavailable';
     logger.info(
       { repositoryId, outcome: synced.outcome, reason: synced.reason },
       'project state record synced from the checkout',
@@ -391,7 +395,8 @@ export async function completePreparationImports(
     logger.warn({ err, repositoryId }, 'project state sync failed (non-fatal)');
   }
 
-  if (legacyDeferred) {
+  // A record the sync never read must not lose to the legacy files it set aside.
+  if (legacyDeferred && !syncUnavailable) {
     try {
       await importHaiveDataMirror(db, repositoryId, storagePath, true);
     } catch (err) {
@@ -476,7 +481,7 @@ export async function withRootClaim<T>(
     throw new RootClaimBusyError(held?.kind ?? null);
   }
   try {
-    return await run();
+    return await withPlanCheckoutAccess({ mode: 'preparation', owner: claim }, run);
   } finally {
     await claim.release().catch(() => undefined);
     // Not thrown: the tree has already been rewritten, and failing here hands the job back to
@@ -835,47 +840,67 @@ export async function handleExtract(
     });
     if (holding.length > 0)
       throw new Error('A task is using this repository. Retry once it finishes.');
-    const report = await extractArchive(
-      archive,
-      archiveFormat,
-      {
-        anchor: repoStorageRoot,
-        rel: `${payload.userId}/${payload.repositoryId}`,
-      },
-      { repositoryImport: true },
-    ).catch(async (err: unknown) => {
-      if (!(err instanceof MissingArchiveError)) throw err;
-      // Cancel only this completed source, never an in-progress upload or another user's row.
-      // The list can then hide Retry without interpreting status_message or probing the disk.
-      await db
-        .update(schema.repoUploads)
-        .set({ status: 'cancelled', updatedAt: new Date() })
-        .where(
-          and(
-            eq(schema.repoUploads.id, payload.repositoryId),
-            eq(schema.repoUploads.userId, payload.userId),
-            eq(schema.repoUploads.archivePath, payload.archivePath!),
-            eq(schema.repoUploads.status, 'complete'),
-          ),
+    let resumeSessions: (() => void) | undefined;
+    try {
+      const report = await extractArchive(
+        archive,
+        archiveFormat,
+        {
+          anchor: repoStorageRoot,
+          rel: `${payload.userId}/${payload.repositoryId}`,
+        },
+        {
+          repositoryImport: true,
+          beforeSwap: async () => {
+            const rows = await db
+              .update(schema.repositories)
+              .set({ status: 'cloning', checkoutSessionReason: 'draining', updatedAt: new Date() })
+              .where(repoJobPredicate(payload.repositoryId))
+              .returning({ id: schema.repositories.id });
+            if (rows.length === 0) throw new ObsoleteRepoJobError();
+            resumeSessions = await suspendCheckoutSessions(db, payload.repositoryId);
+            await db
+              .update(schema.repositories)
+              .set({ checkoutSessionReason: null })
+              .where(repoJobPredicate(payload.repositoryId));
+          },
+        },
+      ).catch(async (err: unknown) => {
+        if (!(err instanceof MissingArchiveError)) throw err;
+        // Cancel only this completed source, never an in-progress upload or another user's row.
+        // The list can then hide Retry without interpreting status_message or probing the disk.
+        await db
+          .update(schema.repoUploads)
+          .set({ status: 'cancelled', updatedAt: new Date() })
+          .where(
+            and(
+              eq(schema.repoUploads.id, payload.repositoryId),
+              eq(schema.repoUploads.userId, payload.userId),
+              eq(schema.repoUploads.archivePath, payload.archivePath!),
+              eq(schema.repoUploads.status, 'complete'),
+            ),
+          );
+        throw new Error(
+          'The uploaded archive is no longer available. Delete this repository and upload it again.',
         );
-      throw new Error(
-        'The uploaded archive is no longer available. Delete this repository and upload it again.',
-      );
-    });
-    if (report.note) {
-      logger.warn({ repositoryId: payload.repositoryId, dropped: report.dropped }, report.note);
+      });
+      if (report.note) {
+        logger.warn({ repositoryId: payload.repositoryId, dropped: report.dropped }, report.note);
+      }
+      await persistDetection(db, payload.repositoryId, dest, report.note);
+      // Only remove the archive after successful extract + detection. Leaving it
+      // in place on failure lets the user (or a retry) look at what actually
+      // arrived on disk instead of silently masking the error.
+      await removeNoFollow(archive.anchor, archive.rel).catch((err: unknown) => {
+        logger.warn(
+          { err, repositoryId: payload.repositoryId, rel: archive.rel },
+          'extracted repository archive was not removed',
+        );
+      });
+      logger.info({ repositoryId: payload.repositoryId, dest }, 'Repo extract complete');
+    } finally {
+      resumeSessions?.();
     }
-    await persistDetection(db, payload.repositoryId, dest, report.note);
-    // Only remove the archive after successful extract + detection. Leaving it
-    // in place on failure lets the user (or a retry) look at what actually
-    // arrived on disk instead of silently masking the error.
-    await removeNoFollow(archive.anchor, archive.rel).catch((err: unknown) => {
-      logger.warn(
-        { err, repositoryId: payload.repositoryId, rel: archive.rel },
-        'extracted repository archive was not removed',
-      );
-    });
-    logger.info({ repositoryId: payload.repositoryId, dest }, 'Repo extract complete');
   });
 }
 

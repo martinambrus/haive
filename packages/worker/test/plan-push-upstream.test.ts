@@ -1,3 +1,10 @@
+import {
+  createPlanCheckoutDb,
+  PLAN_REPO_ID,
+  PLAN_STEP_ID,
+  PLAN_TASK_ID,
+  PLAN_USER_ID,
+} from './support/plan-checkout-db.js';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { StepContext } from '../src/step-engine/step-definition.js';
 
@@ -129,16 +136,7 @@ beforeEach(() => {
   h.detectOrigin.mockReset().mockResolvedValue(true);
   h.recordError.mockResolvedValue(undefined);
   h.push.mockResolvedValue({});
-  const db = {
-    query: {
-      repositories: { findFirst: async () => ({ id: 'r1', storagePath: '/repo' }) },
-      planMirrorState: { findFirst: async () => ({ revision: 1, writtenRevision: 1 }) },
-    },
-    execute: async () => {},
-    transaction: async (fn: (conn: unknown) => Promise<unknown>) => fn(db),
-    insert: () => ({ values: async () => {} }),
-  };
-  h.db = db;
+  h.db = createPlanCheckoutDb();
 });
 
 const confirm = () => {
@@ -146,12 +144,12 @@ const confirm = () => {
   const ctx = {
     db: h.db,
     repoPath: '/repo',
-    taskId: 't1',
-    taskStepId: 's1',
-    userId: 'u1',
+    taskId: PLAN_TASK_ID,
+    taskStepId: PLAN_STEP_ID,
+    userId: PLAN_USER_ID,
   } as StepContext;
   const detected = {
-    repositoryId: 'r1',
+    repositoryId: PLAN_REPO_ID,
     branch: 'main',
     worktreePath: '/repo/merge',
     worktreeRelPath: 'merge',
@@ -173,7 +171,7 @@ const confirm = () => {
 };
 
 const runs: Array<[string, () => Promise<unknown>]> = [
-  ['save', () => save({ repositoryId: 'r1', userId: 'u1', push: true })],
+  ['save', () => save({ repositoryId: PLAN_REPO_ID, userId: PLAN_USER_ID, push: true })],
   ['planMergeStep.apply', confirm],
 ];
 

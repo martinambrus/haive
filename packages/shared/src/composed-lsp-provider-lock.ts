@@ -1,8 +1,14 @@
-import { and, eq } from 'drizzle-orm';
-import { schema, type Database } from '@haive/database';
+import { and, eq, is } from 'drizzle-orm';
+import { PgTransaction } from 'drizzle-orm/pg-core';
+import { logger } from './logger/index.js';
+import { hasPgCode, schema, type Database, type DbTx } from '@haive/database';
 import { resolveTaskCliProviderId } from './cli-providers/default-provider.js';
 
-import { COMPOSED_LSP_VERIFIED_PROVIDER_NAMES } from './cli-providers/preferred-provider.js';
+import {
+  composedLspAllowedSet,
+  COMPOSED_LSP_VERIFIED_PROVIDER_NAMES,
+} from './cli-providers/preferred-provider.js';
+import { parseImageReferences } from './cli-providers/composed-image-references.js';
 export { COMPOSED_LSP_VERIFIED_PROVIDER_NAMES } from './cli-providers/preferred-provider.js';
 
 /** The API error code of a refused switch. */
@@ -78,6 +84,52 @@ export function decideComposedLspProviderLock(args: {
   return { ok: true, providerId: ids[0]! };
 }
 
+/** Explicit choices use dispatch's effective-image set. Before the first image, retain the
+ * task's one verified provider row; after a build the retained image determines that row. */
+export function decideTaskComposedLspProvider(args: {
+  taskCliProviderId: string | null;
+  providerId: string;
+  providers: readonly (ComposedLspLockProvider & { createdAt: Date })[];
+  composedProviderIds: readonly string[];
+}): ComposedLspLockDecision {
+  const allowed = composedLspAllowedSet(args.providers, args.composedProviderIds)!;
+  const baseline =
+    args.composedProviderIds.length > 0
+      ? [...allowed]
+      : [resolveTaskCliProviderId(args.taskCliProviderId, args.providers)];
+  return decideComposedLspProviderLock({
+    providers: args.providers,
+    effectiveProviderIds: [...baseline, args.providerId],
+  });
+}
+
+export type ComposedLspProviderRestriction = {
+  code: ComposedLspLockViolation['code'];
+  message: string;
+};
+
+/** Server-side picker projection of the same decision the locked writer makes. */
+export function composedLspProviderRestrictions(args: {
+  taskCliProviderId: string | null;
+  providers: readonly (ComposedLspLockProvider & { createdAt: Date })[];
+  composedProviderIds: readonly string[] | undefined;
+}): Record<string, ComposedLspProviderRestriction> | undefined {
+  if (args.composedProviderIds === undefined) return undefined;
+  const composedProviderIds = args.composedProviderIds;
+  return Object.fromEntries(
+    args.providers.flatMap((p) => {
+      const decision = decideTaskComposedLspProvider({
+        ...args,
+        composedProviderIds,
+        providerId: p.id,
+      });
+      return decision.ok
+        ? []
+        : [[p.id, { code: decision.violation.code, message: decision.message }]];
+    }),
+  );
+}
+
 /** The lock verdict for putting `providerId` on a task, or null when the task has no composed-LSP contract. */
 export async function checkTaskComposedLspProvider(
   db: Pick<Database, 'query'>,
@@ -86,7 +138,7 @@ export async function checkTaskComposedLspProvider(
   const { userId, taskId, providerId } = params;
   const task = await db.query.tasks.findFirst({
     where: and(eq(schema.tasks.id, taskId), eq(schema.tasks.userId, userId)),
-    columns: { cliProviderId: true, envTemplateId: true },
+    columns: { cliProviderId: true, envTemplateId: true, metadata: true },
   });
   if (!task?.envTemplateId) return null;
   const template = await db.query.envTemplates.findFirst({
@@ -98,9 +150,20 @@ export async function checkTaskComposedLspProvider(
     where: eq(schema.cliProviders.userId, userId),
     columns: { id: true, name: true, enabled: true, createdAt: true },
   });
-  return decideComposedLspProviderLock({
-    effectiveProviderIds: [resolveTaskCliProviderId(task.cliProviderId, providers), providerId],
+  // Unreadable pins cannot expand eligibility beyond the verified, pre-image rule.
+  let composedProviderIds: string[] = [];
+  try {
+    composedProviderIds = parseImageReferences(task.metadata)
+      .entries.filter((entry) => entry.effective)
+      .map((entry) => entry.providerId);
+  } catch {
+    /* The dispatcher refuses malformed pins; writes retain the conservative lock. */
+  }
+  return decideTaskComposedLspProvider({
+    taskCliProviderId: task.cliProviderId,
+    providerId,
     providers,
+    composedProviderIds,
   });
 }
 
@@ -117,7 +180,8 @@ export async function checkTaskComposedLspProvider(
  * UPDATE: repository delete and task revival); 2 the task's step rows, one id-ordered batch
  * (`lockStepRows`); 3 this lock, the task row; 4 leaf rows (provider rows and step rows through
  * foreign keys as KEY SHARE, saved preference rows, the template row, task events). Step 01
- * inserts its template row (KEY SHARE on the repository row) before taking this lock so it never
+ * inserts its template row (KEY SHARE on the repository row), then fences its step row
+ * FOR NO KEY UPDATE, before taking this task lock, so it never
  * asks for the repository after the task row. The provider-row writers (`lockLoginSet`,
  * `markProvidersReady`) never take a task or step row. One inversion: DELETE of a provider holds
  * the provider row and then needs the task rows its SET NULL rewrites, while a holder of this lock
@@ -141,4 +205,106 @@ export async function lockTaskForComposedLsp(
     .where(and(eq(schema.tasks.id, params.taskId), eq(schema.tasks.userId, params.userId)))
     .for('no key update');
   return row ?? null;
+}
+
+/** Stable retry guidance after a deadlock or a provider deleted since admission. */
+export class ComposedLspWriteBusyError extends Error {
+  readonly code = 'composed_lsp_write_busy';
+  readonly retryable = true;
+  constructor(cause?: unknown) {
+    super('The CLI provider changed concurrently. Retry this action.', { cause });
+    this.name = 'ComposedLspWriteBusyError';
+  }
+}
+
+/** Retry one completed top-level transaction. A savepoint cannot release outer task locks,
+ * so a transaction handle reports busy immediately instead of recreating the same cycle. */
+export async function withComposedLspTransaction<T>(
+  db: Database | DbTx,
+  work: (tx: DbTx) => Promise<T>,
+): Promise<T> {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await db.transaction(work);
+    } catch (error) {
+      if (!hasPgCode(error, '40P01')) throw error;
+      const busy = new ComposedLspWriteBusyError(error);
+      if (attempt > 0 || is(db, PgTransaction)) throw busy;
+      logger.warn(
+        { err: busy, attempt: attempt + 1 },
+        'retrying composed LSP provider transaction',
+      );
+    }
+  }
+}
+
+export class ComposedLspProviderLockedError extends Error {
+  readonly code = COMPOSED_LSP_PROVIDER_LOCKED;
+  constructor(message: string) {
+    super(message);
+    this.name = 'ComposedLspProviderLockedError';
+  }
+}
+
+/** Common task-local choice writer. Call inside the caller's transaction so the lock
+ * covers its associated preference/transition writes too. Null clears the choice. */
+export async function writeLockedStepCliChoice(
+  tx: DbTx,
+  params: {
+    userId: string;
+    taskId: string;
+    stepId: string;
+    role: string;
+    cliProviderId: string | null;
+    effortLevel: string | null;
+  },
+): Promise<void> {
+  const { userId, ...choice } = params;
+  if (choice.cliProviderId) {
+    await lockTaskForComposedLsp(tx, { userId, taskId: choice.taskId });
+    await assertComposedLspWriteProviderAvailable(tx, userId, choice.cliProviderId);
+    const decision = await checkTaskComposedLspProvider(tx, {
+      userId,
+      taskId: choice.taskId,
+      providerId: choice.cliProviderId,
+    });
+    if (decision && !decision.ok) throw new ComposedLspProviderLockedError(decision.message);
+  }
+  await tx
+    .insert(schema.taskStepCliChoices)
+    .values(choice)
+    .onConflictDoUpdate({
+      target: [
+        schema.taskStepCliChoices.taskId,
+        schema.taskStepCliChoices.stepId,
+        schema.taskStepCliChoices.role,
+      ],
+      set: {
+        cliProviderId: choice.cliProviderId,
+        effortLevel: choice.effortLevel,
+        updatedAt: new Date(),
+      },
+    });
+}
+
+export class ComposedLspProviderDisabledError extends Error {
+  readonly code = 'cli_provider_disabled';
+  constructor() {
+    super('The selected CLI provider is disabled. Enable it again or choose another CLI.');
+    this.name = 'ComposedLspProviderDisabledError';
+  }
+}
+
+/** A deleted provider is a concurrent loss; a disabled provider needs a person's action. */
+export async function assertComposedLspWriteProviderAvailable(
+  tx: Pick<Database, 'query'>,
+  userId: string,
+  providerId: string,
+): Promise<void> {
+  const provider = await tx.query.cliProviders.findFirst({
+    where: and(eq(schema.cliProviders.id, providerId), eq(schema.cliProviders.userId, userId)),
+    columns: { enabled: true },
+  });
+  if (!provider) throw new ComposedLspWriteBusyError();
+  if (!provider.enabled) throw new ComposedLspProviderDisabledError();
 }

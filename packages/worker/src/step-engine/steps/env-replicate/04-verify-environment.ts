@@ -397,7 +397,7 @@ export function createVerifyEnvironmentStep(
                 ...(!evidence.entries.every((e) => e.identity.plugin.ready)
                   ? {
                       guidance:
-                        'LSP bridge is unready. Upgrade and commit missing local PHP plugin files before creating a worktree, then Retry 01b and final verification with the selected provider.',
+                        'LSP bridge is unready. Install or repair the selected language-server plugins for this provider. Upgrade and commit any missing local plugin files before creating a worktree, then Retry 01b and final verification with the selected provider.',
                     }
                   : {}),
               }

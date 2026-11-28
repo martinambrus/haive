@@ -1,3 +1,4 @@
+import { globalKbCallOptions } from '@haive/shared/global-kb';
 /**
  * One-off, idempotent maintenance script (RAG breadcrumb context headers).
  *
@@ -55,15 +56,18 @@ async function main(): Promise<void> {
     process.exit(0);
   }
 
-  const entries = await withGlobalKb(getDb(), async (ctx) =>
-    ctx.db
-      .select({
-        id: globalKbEntries.id,
-        namespace: globalKbEntries.namespace,
-        title: globalKbEntries.title,
-      })
-      .from(globalKbEntries)
-      .where(eq(globalKbEntries.status, 'active')),
+  const entries = await withGlobalKb(
+    getDb(),
+    async (ctx) =>
+      ctx.db
+        .select({
+          id: globalKbEntries.id,
+          namespace: globalKbEntries.namespace,
+          title: globalKbEntries.title,
+        })
+        .from(globalKbEntries)
+        .where(eq(globalKbEntries.status, 'active')),
+    globalKbCallOptions(),
   );
 
   console.log(`Active global KB entries: ${entries.length} (namespace: ${settings.namespace})`);

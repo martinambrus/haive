@@ -1,5 +1,5 @@
 import { logger } from '@haive/shared';
-import { getRedis } from '../redis.js';
+import { getPatientRedis, getRedis } from '../redis.js';
 
 const log = logger.child({ module: 'cli-stream-publisher' });
 
@@ -27,32 +27,47 @@ export function streamKey(invocationId: string): string {
   return `${STREAM_PREFIX}${invocationId}`;
 }
 
+/** Pending finite-client writes must settle before a second connection closes the stream. */
+const pendingChunks = new Map<string, Set<Promise<void>>>();
+export const CLI_EXIT_WAIT_MS = 5_000;
+
 export async function publishCliChunk(
   invocationId: string | null | undefined,
   stream: 'stdout' | 'stderr' | 'text',
   data: string,
 ): Promise<void> {
   if (!invocationId || !data) return;
+  const pending = pendingChunks.get(invocationId) ?? new Set<Promise<void>>();
+  pendingChunks.set(invocationId, pending);
+  const writing = (async () => {
+    try {
+      // Pipeline the append with a TTL refresh (one round-trip) so a stream that stops being
+      // written — orphaned by a worker SIGKILL, superseded — still expires instead of leaking.
+      await getRedis()
+        .multi()
+        .xadd(
+          streamKey(invocationId),
+          'MAXLEN',
+          '~',
+          STREAM_MAXLEN,
+          '*',
+          'stream',
+          stream,
+          'data',
+          data,
+        )
+        .expire(streamKey(invocationId), CLI_STREAM_LIVE_TTL_SECONDS)
+        .exec();
+    } catch (err) {
+      log.warn({ err, invocationId }, 'publishCliChunk failed');
+    }
+  })();
+  pending.add(writing);
   try {
-    // Pipeline the append with a TTL refresh (one round-trip) so a stream that stops being
-    // written — orphaned by a worker SIGKILL, superseded — still expires instead of leaking.
-    await getRedis()
-      .multi()
-      .xadd(
-        streamKey(invocationId),
-        'MAXLEN',
-        '~',
-        STREAM_MAXLEN,
-        '*',
-        'stream',
-        stream,
-        'data',
-        data,
-      )
-      .expire(streamKey(invocationId), CLI_STREAM_LIVE_TTL_SECONDS)
-      .exec();
-  } catch (err) {
-    log.warn({ err, invocationId }, 'publishCliChunk failed');
+    await writing;
+  } finally {
+    pending.delete(writing);
+    if (pending.size === 0) pendingChunks.delete(invocationId);
   }
 }
 
@@ -218,14 +233,32 @@ export async function publishCliRetryResolved(
 export async function publishCliExit(
   invocationId: string | null | undefined,
   code: number | null,
+  tuning: { waitMs?: number } = {},
 ): Promise<void> {
   if (!invocationId) return;
+  let expired = false;
+  let timer: ReturnType<typeof setTimeout> | undefined;
   try {
-    const r = getRedis();
-    await r.xadd(streamKey(invocationId), '*', 'stream', 'exit', 'code', String(code ?? -1));
-    await r.expire(streamKey(invocationId), STREAM_TTL_SECONDS);
+    await Promise.race([
+      (async () => {
+        // Chunks use another socket. Closing first makes the API discard their late frames.
+        await Promise.all(pendingChunks.get(invocationId) ?? []);
+        if (expired) return;
+        const r = getPatientRedis();
+        await r.xadd(streamKey(invocationId), '*', 'stream', 'exit', 'code', String(code ?? -1));
+        await r.expire(streamKey(invocationId), STREAM_TTL_SECONDS);
+      })(),
+      new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(() => {
+          expired = true;
+          reject(new Error('CLI exit frame deadline exceeded'));
+        }, tuning.waitMs ?? CLI_EXIT_WAIT_MS);
+      }),
+    ]);
   } catch (err) {
     log.warn({ err, invocationId }, 'publishCliExit failed');
+  } finally {
+    clearTimeout(timer);
   }
 }
 

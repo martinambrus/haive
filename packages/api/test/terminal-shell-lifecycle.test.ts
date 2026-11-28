@@ -558,6 +558,10 @@ describe('shell start directory and restart', () => {
   });
 
   it.each([
+    [
+      JSON.stringify({ type: 'exit', reason: 'repository_rebuilt' }),
+      { type: 'exit', reason: 'repository_rebuilt' },
+    ],
     [JSON.stringify({ type: 'exit', reason: 'restart' }), { type: 'exit', reason: 'restart' }],
     [JSON.stringify({ type: 'exit' }), { type: 'exit' }],
   ])('relays the end of the shell as %s', async (raw, frame) => {
@@ -655,4 +659,19 @@ describe('shell start directory and restart', () => {
     expect(ctlPublishes()).toEqual([]);
     expect(ws.sent.some((f) => JSON.parse(f).type === 'error')).toBe(true);
   });
+  it.each(['task', 'repo'] as const)(
+    'retains a rebuild reason before %s socket subscription',
+    async (scope) => {
+      publisherFake.kv.set(
+        `${TERMINAL_EXIT_KEY_PREFIX}sess-1`,
+        JSON.stringify({ type: 'exit', reason: 'repository_rebuilt' }),
+      );
+      const ws = await connect(scope);
+      expect(ws.closeArgs?.[0]).toBe(TERMINAL_CLOSE_CODES.REPOSITORY_REBUILT);
+      expect(ws.sent.map((raw) => JSON.parse(raw))).toContainEqual({
+        type: 'exit',
+        reason: 'repository_rebuilt',
+      });
+    },
+  );
 });

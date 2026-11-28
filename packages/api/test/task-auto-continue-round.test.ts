@@ -31,6 +31,38 @@ app.route('/', taskRoutes);
 app.onError(errorHandler);
 
 describe('switching auto-continue on while a task waits on a form', () => {
+  it('queues the pointer and epoch observed by the toggle write, after an intervening Retry', async () => {
+    h.add.mockClear();
+    const fake = createFakeDb({ tasks: schema.tasks, taskEvents: schema.taskEvents });
+    fake.insert(schema.tasks, {
+      id: TASK,
+      userId: USER,
+      status: 'waiting_user',
+      currentStepId: 'old-step',
+      currentRound: 1,
+      orchestrationEpoch: 3,
+    });
+    fake.hooks.beforeUpdate = () => {
+      fake.patch(schema.tasks, TASK, {
+        currentStepId: 'new-step',
+        currentRound: 2,
+        orchestrationEpoch: 4,
+      });
+    };
+    h.db = fake.db;
+    const res = await app.request(`/${TASK}`, {
+      method: 'PATCH',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ autoContinue: true }),
+    });
+    expect(res.status).toBe(200);
+    expect(h.add).toHaveBeenCalledWith(
+      TASK_JOB_NAMES.ADVANCE_STEP,
+      expect.objectContaining({ stepId: 'new-step', round: 2, epoch: 4 }),
+      expect.anything(),
+    );
+  });
+
   it('queues the advance for the round the task is on', async () => {
     const fake = createFakeDb({ tasks: schema.tasks, taskEvents: schema.taskEvents });
     fake.insert(schema.tasks, {

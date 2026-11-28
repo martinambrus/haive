@@ -1,5 +1,5 @@
 import { and, eq, inArray, sql } from 'drizzle-orm';
-import { schema, type Database } from '@haive/database';
+import { canonicalUuid, schema, type Database } from '@haive/database';
 import { MODULE_SOURCE_JOB_NAMES, secretsService } from '@haive/shared';
 import type { Queue } from 'bullmq';
 import { fetchModuleSource, sourceFetchError } from './source-fetch.js';
@@ -20,7 +20,7 @@ export async function runModuleSourceFetch(
   try {
     await db.transaction(async (lock) => {
       const held = await lock.execute(
-        sql`SELECT pg_try_advisory_xact_lock(hashtext(${'module-source:' + sourceId})) AS held`,
+        sql`SELECT pg_try_advisory_xact_lock(hashtext(${'module-source:' + canonicalUuid(sourceId)})) AS held`,
       );
       if (!held[0]?.held) return;
       const [source] = await db

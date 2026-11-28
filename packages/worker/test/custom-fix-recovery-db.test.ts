@@ -2259,9 +2259,9 @@ describe.skipIf(!url)('recovery of a fix round on Postgres', () => {
           via: 'test',
           watchSince: null,
         });
-        expect(resumed).toBe(true);
+        expect(resumed).toEqual({ epoch: 4 });
         verdict('S7-auto-resume', leg, await trace(leg, id), {
-          task: { step: 'TARGET', round: 1, status: 'running', epoch: 0, dead: false },
+          task: { step: 'TARGET', round: 1, status: 'running', epoch: 1, dead: false },
           rows: ['TARGET@0:done', 'TARGET@1:running'],
           events: ['task.auto_resumed'],
           jobs: [],
@@ -2573,6 +2573,49 @@ describe.skipIf(!url)('recovery of a fix round on Postgres', () => {
       await refusedBefore(id);
       expect((await eventsOf(id)).map((e) => e.eventType)).toContain('step.loop_back');
     });
+
+    it.each(['loop_back', 'continue'] as const)(
+      'keeps the real Stop failure and settlement identity when an unroutable %s returns late',
+      async (action) => {
+        await deactivate();
+        const id = await seedTask(leg);
+        const source = await seedRow(leg, id, 'REVIEW', 0, 'done');
+        const ctx = await ctxFor(leg, id);
+        // The supported crash-left-run shape already exercised above: Stop ends
+        // the run but leaves a finished source row and the task's epoch alone.
+        await db.insert(schema.cliInvocations).values({
+          taskId: id,
+          taskStepId: source.id,
+          mode: 'cli',
+          prompt: 'crash-left run',
+        });
+        const { stopActiveCliInvocations } = await import(apiSource('lib/task-control.ts'));
+        expect(await stopActiveCliInvocations(db, id, { failTask: true })).toMatchObject({
+          cancelled: 1,
+          stopped: 0,
+          failedAt: expect.any(String),
+        });
+        const stopped = await taskOf(id);
+        expect(stopped).toMatchObject({ status: 'failed', orchestrationEpoch: BASE_EPOCH });
+        const beforeEvents = await eventsOf(id);
+        expect(beforeEvents.map((event) => event.eventType)).toContain(
+          'task.stop_settle_requested',
+        );
+        if (action === 'continue') await resolveFixLoopGate(db, ctx, source, 'continue', 0, '');
+        else
+          await handleResult(db, ctx, source.stepId, {
+            status: 'loop_back',
+            row: source,
+            diagnosis: 'defect',
+            sourceStepId: source.stepId,
+          });
+        expect(await taskOf(id)).toEqual(stopped);
+        if (action === 'loop_back') expect(await rowOf(source.id)).toEqual(source);
+        else expect(await rowOf(source.id)).toMatchObject({ status: 'done' });
+        expect(await eventsOf(id)).toEqual(beforeEvents);
+        expect(h.adds).toEqual([]);
+      },
+    );
 
     it('fails the task by name at the round-limit Continue', async () => {
       await deactivate();

@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ConfigUnavailableError, configService, logger } from '@haive/shared';
 
@@ -7,7 +8,11 @@ vi.mock('../src/queues.js', async (load) => ({
   getPlanMirrorQueue: () => ({ add: h.add }),
   getPlanMirrorQueueEvents: () => h.events,
 }));
-import { enqueueCheckoutSync, observeCheckoutBranchForReset } from '../src/lib/plan-mirror.js';
+import {
+  enqueueCheckoutSync,
+  enqueuePlanMirrorRefresh,
+  observeCheckoutBranchForReset,
+} from '../src/lib/plan-mirror.js';
 
 const REPO = '00000000-0000-4000-8000-0000000000b1';
 const USER = '00000000-0000-4000-8000-0000000000a1';
@@ -101,5 +106,30 @@ describe('enqueueCheckoutSync', () => {
     await enqueueCheckoutSync(REPO, USER);
     expect(h.add).toHaveBeenCalledTimes(1);
     expect(h.add.mock.calls[0]?.[2]).toMatchObject({ jobId: `checkout-sync-${REPO}` });
+  });
+});
+
+describe('job ids from another uuid spelling', () => {
+  const repo = randomUUID();
+  const spellings = [repo.toUpperCase(), repo.replaceAll('-', ''), `{${repo}}`];
+
+  it.each([
+    ['enqueueCheckoutSync', enqueueCheckoutSync, 'checkout-sync-'],
+    ['enqueuePlanMirrorRefresh', enqueuePlanMirrorRefresh, 'plan-mirror-'],
+  ] as const)('%s keys the job and payload by the canonical id', async (_n, enqueue, prefix) => {
+    vi.spyOn(configService, 'getBoolean').mockResolvedValue(true);
+    for (const spelled of spellings) {
+      expect(spelled).not.toBe(repo);
+      h.add.mockClear();
+      await enqueue(spelled, USER);
+      expect(h.add).toHaveBeenCalledTimes(1);
+      expect(h.add.mock.calls[0]?.[1]).toEqual({ repositoryId: repo, userId: USER });
+      expect(h.add.mock.calls[0]?.[2]).toMatchObject({ jobId: `${prefix}${repo}` });
+    }
+  });
+
+  it('keeps a canonical id as it was', async () => {
+    await enqueuePlanMirrorRefresh(REPO, USER);
+    expect(h.add.mock.calls[0]?.[2]).toMatchObject({ jobId: `plan-mirror-${REPO}` });
   });
 });

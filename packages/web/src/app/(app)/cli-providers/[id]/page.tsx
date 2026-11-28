@@ -101,6 +101,7 @@ export default function EditCliProviderPage() {
           mode="edit"
           provider={provider}
           metadata={meta}
+          onProviderSaved={setProvider}
           onTestBlockChange={setTestBlockMessage}
           secretsReloadNonce={secretsReloadNonce}
         />
@@ -130,7 +131,11 @@ export default function EditCliProviderPage() {
       {provider.name === 'claude-code' && (
         <>
           <p className="text-sm text-neutral-400">{LOGIN_SET_NOTE}</p>
-          <ClaudeUsageAuth providerId={provider.id} />
+          <ClaudeUsageAuth
+            providerId={provider.id}
+            authMode={provider.authMode}
+            isolateAuth={provider.isolateAuth}
+          />
         </>
       )}
     </div>

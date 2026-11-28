@@ -1,3 +1,10 @@
+import {
+  planCheckoutAccess,
+  planCheckoutDatabase,
+  withPlanCheckoutAccess,
+} from '../repo/checkout-access-scope.js';
+import { assertCheckoutMutationOwner, withCheckoutMutation } from '@haive/shared/checkout-access';
+import { withSettledTransaction } from '@haive/database';
 import { withProjectionMove } from '../project-state/projection-move.js';
 import { prepareProjectStatePush, commitProjectStatePush } from '../project-state/push.js';
 import { safeProcessor } from './safe-processor.js';
@@ -258,7 +265,7 @@ async function integrateOriginInMove(args: {
   kept: KeptFiles;
   onLanded?: (sha: string) => void;
 }): Promise<IntegrateOutcome> {
-  const db = getDb();
+  const db = planCheckoutDatabase(getDb());
   const previousCommit = await headCommit(args.repoPath);
 
   const originBranch = await fetchOrigin({
@@ -308,7 +315,7 @@ async function integrateOriginInMove(args: {
     // worktree kept.
     const reports: (() => Promise<void>)[] = [];
     // A failure after the report was written (an index git would not give up) still commits it.
-    const failedAfterReport = await db.transaction(async (tx) => {
+    const failedAfterReport = await withSettledTransaction(db, async (tx) => {
       let phase: 'relocating' | 'reported' = 'relocating';
       await lockPlanMerge(tx, args.repositoryId);
       await refuseOpenPlanMerge(tx, args.repositoryId);
@@ -333,7 +340,7 @@ async function integrateOriginInMove(args: {
     for (const markReported of reports) await markReported();
     if (failedAfterReport) throw failedAfterReport.error;
     // A file found rewritten ends the transaction unmoved and goes back to the set-aside.
-    const moved = await db.transaction(async (tx) => {
+    const moved = await withSettledTransaction(db, async (tx) => {
       await lockPlanMerge(tx, args.repositoryId);
       // The api refuses a save while a conversation is open, but one can open after that check.
       await refuseOpenPlanMerge(tx, args.repositoryId);
@@ -458,15 +465,20 @@ const planSaveSeams: SaveSeams = {
   commit: ({ repoPath, message, identity }) =>
     commitPlanSnapshotFiles({ repoPath, message, identity }),
   async beforePush({ repo, repoPath, identity }) {
-    await prepareProjectStatePush(getDb(), { repositoryId: repo.id, sourcePath: repoPath });
+    const access = planCheckoutAccess();
+    await prepareProjectStatePush(planCheckoutDatabase(getDb()), {
+      repositoryId: repo.id,
+      sourcePath: repoPath,
+    });
     // integrateOrigin has ended its transaction. The state commit takes its own ordered
     // projection locks here, once, with no nested pool operation or merge-lock reacquisition.
-    return getDb().transaction((tx) =>
+    return withSettledTransaction(getDb(), (tx) =>
       commitProjectStatePush(tx, {
         repositoryId: repo.id,
         sourcePath: repoPath,
         targetPath: repoPath,
         identity,
+        ...(access.mode === 'mutation' && access.owner ? { checkoutOwner: access.owner } : {}),
       }),
     );
   },
@@ -474,13 +486,29 @@ const planSaveSeams: SaveSeams = {
     await reconcilePlanFromCheckout(getDb(), repo.id, repoPath);
     await flushPlanMirrorForRepository(getDb(), repo.id);
     await commitPlanSnapshotFiles({ repoPath, message, identity });
-    if (!(await resyncWithKeptMetadata(getDb(), repo.id, repoPath, kept)))
+    if (!(await resyncWithKeptMetadata(planCheckoutDatabase(getDb()), repo.id, repoPath, kept)))
       throw new Error('project state re-sync failed before pushing');
   },
 };
 
+async function withPlanMutation<T>(
+  payload: PlanMirrorJobPayload,
+  run: () => Promise<T>,
+): Promise<T> {
+  if (!payload.repositoryId || !payload.userId) throw new Error('repositoryId and userId required');
+  await requireOwnedRepository(payload.repositoryId, payload.userId);
+  return withCheckoutMutation(getDb(), payload.repositoryId, payload.userId, (owner) =>
+    withPlanCheckoutAccess({ mode: 'mutation', owner }, async () => {
+      assertCheckoutMutationOwner(owner);
+      const result = await run();
+      assertCheckoutMutationOwner(owner);
+      return result;
+    }),
+  );
+}
+
 export async function save(payload: PlanMirrorJobPayload): Promise<PlanMirrorJobResult> {
-  return saveCore(payload, planSaveSeams);
+  return withPlanMutation(payload, () => saveCore(payload, planSaveSeams));
 }
 
 export async function saveCore(
@@ -578,7 +606,14 @@ export async function saveCore(
           await seams.afterLanding({ ...scope, kept });
         }
       } catch (err) {
-        return await recoverAfterMoveFailure(getDb(), repo.id, repoPath, kept, before, err);
+        return await recoverAfterMoveFailure(
+          planCheckoutDatabase(getDb()),
+          repo.id,
+          repoPath,
+          kept,
+          before,
+          err,
+        );
       }
       const carried = await seams.beforePush?.(scope);
       if (carried?.committed) {
@@ -641,11 +676,12 @@ export async function saveCore(
  * leave a half-merged tree that every later step then runs against. Refusing and
  * saying why is the honest option.
  */
-export const pull: typeof pullInMove = (...args) => withProjectionMove(() => pullInMove(...args));
+export const pull: typeof pullInMove = (payload) =>
+  withPlanMutation(payload, () => withProjectionMove(() => pullInMove(payload)));
 
 async function pullInMove(payload: PlanMirrorJobPayload): Promise<PlanMirrorJobResult> {
   if (!payload.repositoryId || !payload.userId) throw new Error('repositoryId and userId required');
-  const db = getDb();
+  const db = planCheckoutDatabase(getDb());
   const repo = await requireOwnedRepository(payload.repositoryId, payload.userId);
 
   const row = await db.query.repositories.findFirst({
@@ -776,7 +812,7 @@ async function pullInMove(payload: PlanMirrorJobPayload): Promise<PlanMirrorJobR
     }
   } catch (err) {
     if (!(err instanceof PlanMirrorRefusal)) {
-      await recordPlanMirrorError(db, repo.id, err).catch(() => undefined);
+      await recordPlanMirrorError(getDb(), repo.id, err).catch(() => undefined);
     }
     throw err;
   }

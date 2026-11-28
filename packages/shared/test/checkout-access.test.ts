@@ -207,3 +207,36 @@ it('allows writes beyond the initial stale window after confirmed renewals, and 
     expect.objectContaining({ code: 'checkout_unavailable' }),
   );
 });
+
+it('permits locked projections during owed ready scans, but never under a foreign live claim', async () => {
+  fake.patch(schema.repositories, id, { refreshPending: true });
+  await expect(requireCheckoutAccess(db, id, { mode: 'projection' })).resolves.toMatchObject({
+    id,
+  });
+  const owner = (await acquireRootClaim(db, id, 'refresh'))!;
+  try {
+    await expect(requireCheckoutAccess(db, id, { mode: 'projection' })).rejects.toMatchObject({
+      code: 'checkout_unavailable',
+    });
+  } finally {
+    await owner.release();
+  }
+  fake.patch(schema.repositories, id, { status: 'cloning' });
+  await expect(requireCheckoutAccess(db, id, { mode: 'projection' })).rejects.toMatchObject({
+    code: 'checkout_unavailable',
+  });
+});
+
+it('admits a projection under its own live claim of any kind, and refuses a released handle', async () => {
+  const owner = (await acquireRootClaim(db, id, 'edit', userId))!;
+  await expect(requireCheckoutAccess(db, id, { mode: 'projection', owner })).resolves.toMatchObject(
+    { id },
+  );
+  await expect(requireCheckoutAccess(db, id, { mode: 'projection' })).rejects.toMatchObject({
+    code: 'checkout_unavailable',
+  });
+  await owner.release();
+  await expect(requireCheckoutAccess(db, id, { mode: 'projection', owner })).rejects.toMatchObject({
+    code: 'checkout_unavailable',
+  });
+});

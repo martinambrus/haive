@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { once } from 'node:events';
 import {
   UnrecoverableError,
   Worker,
@@ -150,6 +151,8 @@ function expectOneIdPerTuple(ids: (string | undefined)[]) {
 describe.skipIf(!redisUrl)("the recovery re-drives' advance job id, on an isolated Redis", () => {
   beforeAll(async () => {
     initRedis(redisUrl!);
+    // Finite commands reject while connecting rather than entering an offline queue.
+    if (getRedis().status !== 'ready') await once(getRedis(), 'ready');
     expect(
       await getRedis().keys(`${hoisted.prefix}:*`),
       'the private key prefix starts empty',

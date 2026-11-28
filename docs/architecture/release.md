@@ -303,23 +303,31 @@ One `--drain-timeout` covers the first wait and every re-wait: past it, work sti
 admissions still reopened stop the upgrade with an error, or with `--force` enter maintenance
 anyway. The journal (`upgrade_runs.phase`) reads `draining` during a re-wait and `maintenance` again
 on entry. Then the updater takes the snapshot. Live work (`liveWorkCount`) is a live task or a
-background job a route queued: a repository `cloning` or with `refresh_pending` set, a bundle `syncing`, a CLI provider whose
-sandbox image is `building` or whose model is `provisioning`. `GET /admin/maintenance/blocking` and
-the admin maintenance page list both, so what the page shows is what the updater waits for; a job
-row stuck in its in-progress status holds the drain until the deadline, and `--force` passes it.
+background job a route queued: a repository `cloning`, with `refresh_pending` set or holding a live
+root claim of any kind, a bundle `syncing`, a CLI provider whose
+sandbox image is `building` or whose model is `provisioning`. A claim is live while its
+`root_claimed_at` is newer than `ROOT_CLAIM_STALE_MS`; both counters compare against a cutoff built
+from the caller's clock and never against `now()`, because the column is a UTC wall clock without a
+zone and a session time zone would skew the window. `GET /admin/maintenance/blocking` and
+the admin maintenance page list both, so what the page shows is what the updater waits for; a
+repository listed only for its claim reads `checkout in use (<operation>)`, with `cloning` and
+`pending preparation` keeping precedence. A job
+row stuck in its in-progress status holds the drain until the deadline, and `--force` passes it. A
+claim whose holder died goes stale within `ROOT_CLAIM_STALE_MS` of its last renewal, inside the
+default 30-minute `--drain-timeout`.
 
-**Known drain gap (T780 PR2 L6, found-not-fixed):** API-held root claims for streamed attachments,
-attachment removal, remote relink/reconciliation and plan removal (`root_claim_kind = 'mutation'`)
-are neither counted by `liveWorkCount` nor listed by `/admin/maintenance/blocking`. Their admissions
-also do not take the new-work fence, so a zero count does not prove those requests finished.
-Before starting an upgrade, let those requests finish and prevent new attachment/relink/plan-delete
-requests throughout the drain and service replacement. Read the repository claim rows as an
-additional check: `root_claimed_at > now() - interval '15 minutes'` must return no live holds.
-A lease renews while the API is alive, with no duration cap. Stopping it mid-request leaves its
+**Remaining drain gap (T780 PR2 L6, narrowed by PR2b-3 and PR2b-5):** the count and the list include
+every live root claim, and attachment, relink/reconciliation, whole-plan-removal, file-editor save
+(`PUT /tasks/:id/files/content`, kind `edit`), mark-onboarded (`POST /repos/:id/mark-onboarded`,
+`verify`), onboarding-artifacts reset (`DELETE /repos/:id/onboarding-artifacts`, `reset`) and plan
+snapshot Save and Pull (`POST /repos/:id/plan/snapshot/save` and `/pull`) requests are admitted under
+the fence. The Save and Pull claim is taken by the worker, after the route's admission and its
+enqueue, so between the route's fence commit and that claim (the queue pickup) the drain counts
+nothing for the request, and an upgrade whose last zero count falls in that span can interrupt the
+job. The Haive-data Save takes no claim and is neither admitted nor counted. A lease renews while the API is alive, with no duration cap. Stopping it mid-request leaves its
 last stamp live for up to `ROOT_CLAIM_STALE_MS` (15 minutes after the last renewal); new preparations
 wait for that expiry, preserving ready and their pending marker. This bound describes abandoned
-claims only, not a safe deadline for interrupting a live upload. Full repair needs both counted
-claims and mutation admission under the maintenance fence; this PR does not claim that fix.
+claims only, not a safe deadline for interrupting a live upload.
 
 Which tasks count depends on the state in force (`drainTaskStatuses`, in `@haive/shared`). Over
 `normal` or `draining` they are `queued`, `running`, `paused`, `waiting_user` and `waiting_pr`: the
@@ -341,16 +349,31 @@ updater never waits for it. It does not filter by owner role: an administrator's
 passes the gate and could still answer it) is listed there too, though it is not waited for. A page
 newer than its api reads a response without `parked` as an empty list.
 Every api route that starts such work refuses with 503 while the state is `draining` or
-`maintenance`: the task routes, and every route that writes a job's in-progress status (repository
+`maintenance`: the task routes, every route that writes a job's in-progress status (repository
 create, upload and refresh, bundle create, upload, replace and sync, provider create, clone and image
-build, and a provider edit that rebuilds the image or downloads a model). Not fenced and not counted,
+build, and a provider edit that rebuilds the image or downloads a model), and each request that takes
+a `mutation` root claim for new work (a task attachment write or removal, a remote relink and its
+reconciliation, whole-plan removal) or its own claim kind (the editor save into the repository root,
+mark-onboarded, the onboarding-artifacts reset), and the plan snapshot Save and Pull, whose job takes
+the claim in the worker: the route admits before it enqueues, the worker is not admitted. A write
+that takes no claim (an editor save into a worktree, or for a task with no repository) holds nothing
+the drain counts and is not refused. Not fenced and not counted,
 since none holds a window open: interactive runtimes (IDE, browser, DDEV control, terminal and login
 containers), cleanup, the plan mirror outbox (it resumes) and the price refresh. The refusal's
 authority is `admitNewWork`: a read of the state past ConfigService's 30 s cache inside the
 transaction that records the work, under a shared
 database fence (`lockNewWorkFenceShared`, an advisory lock on `NEW_WORK_FENCE_KEY`); most routes
 also answer an early 503 from the same fresh read before they start (`assertNewWorkAllowed`). A state that cannot be read within the bounded
-wait refuses new work with a retryable 503 rather than admitting it. An
+wait refuses new work with a retryable 503 rather than admitting it. A claim-taking request
+(`withAdmittedCheckoutMutation`) reads the state once before it claims, so a refused request never
+reaches the live-work count; it then takes the claim, then the fence in its own short transaction,
+released before the work starts and ahead of the work's own locks. An updater that counts after that
+transaction commits sees the claim; one that holds the fence first makes the request read the new
+state and release its claim. A route that holds its own claim kind takes it through
+`acquireAdmittedRootClaim`, in the same order (`new-work-fence-order.test.ts` fails when an api file
+other than `admitted-checkout-mutation.ts` calls `acquireRootClaim` or `withCheckoutMutation`); the
+worker's callers are not admitted there. The remote reconciliation sweep reads that refusal as
+`maintenance` and skips the repository quietly. An
 upload complete makes that read once more right before it claims its session, since the claim is a
 write, so a drain that began after the early check refuses with the session untouched. Every
 updater state write (`draining`, the recount's `maintenance`, and the return to the state it found
@@ -417,7 +440,10 @@ Draining runs against the source release's schema before migration. The counter 
 `tasks.dead_at` in the catalog and excludes dead tasks only when that column exists (0197); older
 schemas count every task in the selected live statuses. It also detects `repositories.refresh_pending`
 (0250) in the catalog before counting that marker beside `cloning`, so a ready checkout being
-refreshed still holds the drain. Older source schemas retain the cloning-only count. Deploy the
+refreshed still holds the drain, and `repositories.root_claimed_at` (0162) before counting a live
+root claim beside them. The released v0.2.0 schema ends at 0155, so the updater of the target
+release meets a source schema without either column; the API and worker always read their own
+migrated schema and need no such check. Older source schemas retain the cloning-only count. Deploy the
 marker-aware updater with the API/worker that set it; before downgrading, settle pending refreshes
 and retain the additive column and migration. Its other repositories, bundles and provider
 columns all exist in the first release baseline. If configuration boot needs its encrypted-row
@@ -535,8 +561,12 @@ record stays and that next start waits out the stale window before it breaks it.
 way when the deadline passes is not interrupted; the next fence check refuses. The updater's clock is `performance.now()`, the
 bridge's Go's monotonic `time.Now()`, never the record's `startedAt`; a clock that counts a suspended machine only expires early, but the bound cannot see a pause its own clock does not count (a
 paused VM).
-The bridge's heartbeat stops for good at expiry or loss; the operation it guards continues without it, as after a lapse. A remaining race (T765 item 5): the heartbeat reads its own
-record and then overwrites it, so a contender that broke the lock and created its own in between is overwritten; closing it
+The bridge cancels its operation immediately on proven lease loss, or after transient renewal errors persist for half the stale window (30 s), terminating its supervised
+command before waiting for the stale deadline. Renewal retries continue during cancellation and command Wait;
+only expiry or loss stops them for good. An independent timer checks the last successful renewal even
+while a heartbeat is blocked in file I/O; its clock uses a separate mutex from that I/O. A frozen
+bridge still cannot observe its own missed beats.
+A remaining race (T765 item 5): the heartbeat reads its own record and then overwrites it, so a contender that broke the lock and created its own in between is overwritten; closing it
 needs a descriptor-held compare before the truncating open, in both implementations. A result already decided (done or rolled back) is not replaced when the beat notices a loss afterwards; a
 loss during the pruning after a commit stops the pruning and keeps `done` and exit 0. Release removes the file only when it carries the holder's token, is shared by
 every
@@ -601,10 +631,11 @@ for 30 minutes) or a freeze between the proof and the action it guards; between 
 displaced fresh lock the name is briefly
 absent, so the displaced holder's next beat creates it again and a third party creating it first keeps it. A
 holder whose beat cannot be written (a full disk, say) stops refreshing the lock, which then lapses after 60 s;
-the extension's container-identity check still covers that case. A bridge process killed in the middle of Start
-or Stop (the Desktop window closes) can leave its Compose child running while both of its leases lapse, this
-one and the [window lock](#docker-desktop-extension); killed in the middle of Install, it can leave the
-installer running while the window lock lapses. A container started by an updater killed outright (SIGKILL, OOM)
+the bridge cancels a supervised command on proven loss or 30 s without a successful renewal. A killed bridge's host command is terminated by OS supervision, subject to the simultaneous-kill limit below (see [command supervision](#host-command-supervision)); work the Docker daemon
+already accepted can still complete after the client dies. Killing the client does not undo a partially
+started stack, and an interrupted operation does not authorize automatic cleanup or a retry of an ambiguous
+upgrade: inspect status, logs and the updater journal and retain the existing manual recovery refusals.
+A container started by an updater killed outright (SIGKILL, OOM)
 outlives it; the next updater's child check refuses while it runs, but only for containers labelled by this
 release's updater or later (an older updater's children carry no labels); a child started inside the
 proof-to-action window above runs next to a new holder already past its own check, and is caught only by the
@@ -856,8 +887,8 @@ install stack lock's record, with the same beat, stale rule, break and release (
 contract, and the updater never sees this one. Install needs it because the install directory, and so
 the stack lock, does not exist yet; Start and Stop take the stack lock inside it. A live holder refuses
 a second window with a message that says the lock clears itself, once the contender has seen a beat
-(within about 5 s). A hard termination leaves the file, and the next operation clears it after 60 s
-without a change (up to two minutes when the stack lock was left too); a tomb that cannot be removed stays
+(within about 5 s). A hard termination tears down the supervised command and leaves the file; the next
+operation clears it after 60 s without a change (up to two minutes when the stack lock was left too); a tomb that cannot be removed stays
 beside it, harmless. Normal completion and handled signals release it. Earlier bridges took this name as
 a folder, which has no beat and never lapses: the bridge refuses a folder at once, naming it, and never
 deletes it or waits on it, since a live older operation cannot be told from a dead one. Its message says
@@ -865,11 +896,152 @@ to check this install's containers and delete that folder by hand. An older brid
 file refuses the same way (its `mkdir` finds the name taken), so old and new bridges still exclude each
 other. If an older bridge makes its folder at that name in the instant a stale file is being broken, the
 break renames the folder back; a file created there first keeps the name.
-Keep the tab open during long operations. Processes have a
-30-minute deadline; a timeout or close can leave a completed install or partially
-started stack, so refresh status and inspect logs before retrying. Cancellation kills
-the direct child only; installer grandchildren can outlive it even after lock release. No automatic
-reinstall or deletion is attempted.
+Keep the tab open during long operations. Processes have a 30-minute deadline; a timeout or close can
+leave a completed install or partially started stack, so refresh status and inspect logs before retrying.
+No automatic reinstall or deletion is attempted.
+
+### Host command supervision
+
+Host mutations (Compose and the embedded installer) run through a private
+`--haive-command-supervisor` mode of the same bridge binary. Docker queries also use supervision,
+except Windows `status` and the pre-lease `docker info` engine probe, which run without a Job Object:
+they hold no install lease and cannot mutate a stack. The mode receives the command runner's filtered
+environment, working directory and output capture/private logging. Arguments remain separate, without
+an extra shell; `argv[0]` becomes the resolved executable path. `commandSupervisor` refuses command fields
+it cannot preserve (stdin, extra files, process attributes, cancellation hooks, wait delays or a started
+command) instead of silently discarding them.
+
+The parent holds the only write end of an anonymous admission/liveness pipe, which never reaches the
+command. Admission requires both a random per-launch nonce (matching argument and environment, removed
+before the command starts) and a byte from the parent's pipe. Supervisor failures are written to stderr,
+which the installer/Compose path captures in the private operation log.
+
+- **Linux:** the command owns a process group and has `SysProcAttr.Pdeathsig = SIGKILL`. Its creating
+  goroutine holds its OS thread until Wait finishes. The supervisor is named `haive-cmd-guard` through
+  `PR_SET_NAME`, so `pkill haive-desktop` without `-f` does not also kill its watcher.
+  `pkill -f haive-desktop` can match and kill both. Both bridge and
+  supervisor request child-subreaper status to reap orphaned group members; a refusal logs a warning
+  and degrades to ordinary OS reaping instead of refusing every command. Parent-pipe EOF kills the
+  command group, covering Compose/installer grandchildren beyond the direct child's parent-death signal.
+- **macOS:** the pipe watcher survives bridge death and kills the command group; it needs no Linux-only
+  parent-death signal. Orphans are reaped by launchd. On both Unix targets the supervisor reports the
+  command's pgid and completion over a separate close-on-exec status pipe. If it dies by signal or
+  without reporting completion, the surviving bridge kills that group and waits for it to disappear
+  before releasing leases, then reports a distinct uncertain-outcome error with manual recovery advice.
+  Normal launcher exit also kills remaining group members: a shell's background jobs are terminated,
+  even if the launcher exits successfully. Descendants that deliberately detach into another process
+  group remain outside this mechanism. Only ESRCH proves an empty group during cancellation or a
+  supervisor-death sweep: EPERM retains an unconfirmed-stop refusal. After a successful command only,
+  a non-ESRCH probe error is logged as a warning instead of turning success into exit 125.
+  The bridge consumes the pgid report before status EOF and signals it immediately on cancellation,
+  including if the supervisor is stalled; a valid completion record skips the redundant bridge-side kill.
+- **Windows (amd64/arm64):** the parent creates an unnamed, non-inheritable Job Object with
+  `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`, starts the waiting supervisor, assigns it and only then admits
+  the command. Descendants inherit membership at creation without breakaway flags. Bridge death closes
+  the sole job handle and kills all members. Cancellation calls `TerminateJobObject`; errors are
+  retained, and job accounting must reach zero active processes before completion. Install/Start/Stop
+  fail closed if assignment fails (including an incompatible enclosing job); the Win32 error is logged
+  and the user sees a supervision-policy refusal, rather than a Docker engine-context diagnosis.
+  This uses stdlib `syscall` only.
+
+Both leases keep beating through command/group teardown and output draining, including after
+cancellation. Proven lease loss cancels immediately; transient heartbeat errors cancel only at
+`now - lastGoodBeat >= stale/2` (30 s). Renewal continues until release, and the user sees lease loss
+as the cancellation cause. Teardown waits use the named 30 s `commandTeardownTimeout` per phase,
+including output draining and group/job polling. If teardown cannot be confirmed within these bounds,
+the operation returns a distinct "Could not confirm the command stopped" error requiring manual host
+inspection before retrying. Before releasing either held lease, that error and the supervisor-death
+uncertain-outcome path atomically write `<install>/.haive-extension-unconfirmed` (0600 on Unix,
+profile ACL on Windows). Its JSON contains only `os`, `pgid` (0 when unknown), `operation` and UTC
+`time`; it contains no command arguments, environment or secrets. A failed early Install creates a
+partial install directory to keep this marker inside the updater's mount. The bridge reports a marker
+write failure explicitly; persistence still depends on a writable, functioning host filesystem.
+Both leases may then release, but every Install/Start/Stop refuses while the marker exists and keeps
+the operation log intact. Status remains read-only and reports the refusal, without clearing it.
+A mutating Unix bridge request clears a same-OS marker itself only while holding the window lease
+and only when `kill(-pgid, 0)` returns ESRCH. The pre-lease check may refuse or proceed to that lease,
+but never removes a marker. Immediately before removal under the lease, the bridge re-reads and
+compares the complete record with the one probed; a changed record refuses, even with the same pgid.
+A live or reused pgid, EPERM, an unknown pgid or malformed marker keeps refusing. The updater never
+clears this marker. It checks the same filename before taking its stack lease (and again before
+returning it) and refuses with stable code `extension-command-unconfirmed`; it cannot probe a host pgid
+from its Linux container.
+Deploy the updated bridge and target updater together for this protection; older versions ignore the marker.
+A frozen VM or an unschedulable kernel task cannot offer a hard wall-clock guarantee.
+
+Manual recovery for a marker that cannot clear itself:
+
+1. Preserve `<install>.extension.log` and read `<install>/.haive-extension-unconfirmed`. Refresh
+   extension Status, inspect this install's Docker Desktop containers and check the updater journal.
+   Stop any still-running updater and let its work finish or follow the existing interrupted-upgrade
+   recovery procedure before enabling another mutation. Preserve `.env` and all data volumes.
+2. **Linux:** use `cat "$HOME/haive_desktop/.haive-extension-unconfirmed"` and
+   `ps -eo pid,ppid,pgid,stat,args`. Find every member of the recorded pgid and this operation's
+   detached descendants. If the group still exists and belongs to this command, terminate it with
+   `kill -KILL -- -<pgid>`; verify it is absent in `ps` (and `kill -0 -- -<pgid>` reports no such process).
+   Never signal a reused group belonging to something else. Once no command/supervisor/descendant
+   from this operation remains, remove only the marker with
+   `rm -- "$HOME/haive_desktop/.haive-extension-unconfirmed"`, or let the bridge clear an ESRCH pgid.
+3. **macOS:** use `cat "$HOME/haive_desktop/.haive-extension-unconfirmed"` and
+   `ps -axo pid,ppid,pgid,stat,command`. Identify the group and detached descendants as above;
+   for a group verified to belong to this operation, use `kill -KILL -- -<pgid>` and wait until it
+   disappears from `ps` (launchd may need time to reap it). Only after all of this operation's
+   processes are gone, use `rm -- "$HOME/haive_desktop/.haive-extension-unconfirmed"`, or retry
+   for automatic ESRCH clearance. Unknown/reused pgids require process inspection, not a blind kill.
+4. **Windows (PowerShell):** run
+   `Get-Content -LiteralPath "$env:USERPROFILE\haive_desktop\.haive-extension-unconfirmed"` and
+   `Get-CimInstance Win32_Process | Select-Object ProcessId,ParentProcessId,Name,CommandLine`.
+   Privately identify this bridge/supervisor, docker.exe, Compose plugin, installer and descendants
+   using the recorded operation/time and install path (command lines may contain private data).
+   After checking each PID belongs to this operation, use `taskkill /F /T /PID <pid>` if needed;
+   repeat the process listing and confirm all those processes exited. Windows has no pgid probe for
+   this marker. Then run
+   `Remove-Item -LiteralPath "$env:USERPROFILE\haive_desktop\.haive-extension-unconfirmed"`.
+5. Refresh Status and resume recovery of any interrupted install/upgrade before retrying normal work.
+   Deleting the marker acknowledges the inspection; it neither stops processes nor undoes daemon work.
+
+**Remaining Unix limit:** simultaneous SIGKILL of bridge and supervisor defeats the pipe watcher and
+bridge-side group sweep on both macOS and Linux. On Linux Pdeathsig kills only the direct command;
+grandchildren can survive. On macOS the whole command can survive. A kill before the pgid report also
+leaves the surviving bridge without a group identity to sweep. Leases then stop beating and may expire
+while survivors still run. Inspect host processes, status/logs and the updater journal before retrying
+an interrupted operation; existing conservative install/start recovery advice remains. OS supervision
+also cannot undo work already accepted by the Docker daemon.
+
+Linux real-process controls use fake sleeping payloads only: bridge death, supervisor-only death,
+whole-group cancellation, a Pdeathsig-only backstop and lease renewal through blocked output draining.
+The supervisor-death control failed before its fix (a grandchild survived and the lease was released);
+removing Pdeathsig makes the independent backstop fail. Shared controls cover nonce admission, refusal
+of unsupported fields, preserved exit/directory/environment, bounded waits, error mapping and heartbeat
+transient/sustained/lost decisions. Windows controls spawn grandchildren, check their process handles
+after cancellation and `TerminateProcess` of a helper bridge, and force a real Win32 assignment failure
+through the production refusal branch. The macOS bridge-kill control uses `kill(pid, 0)` and `ps` to
+observe both command and grandchild. Windows and macOS tests are compiled with `go test -c` and vetted
+for amd64/arm64, but **were not executed** here. No real stacks or volumes were touched.
+
+#### Must verify on real hosts before release
+
+- **Windows 10/11 amd64, and arm64 if shipped, launched by Docker Desktop host exec:** verify job
+  assignment under its enclosing job and Defender/EDR; Status, Install, Start and Stop; a genuine
+  assignment refusal with its Win32 log and truthful UI cause while read-only probes remain usable.
+  Run native `TestWindows*`, shared `TestSupervisor*` and lease controls. During Start, test
+  `taskkill /F` on the bridge and `taskkill /F /IM haive-desktop.exe`; confirm supervisor, docker.exe
+  and Compose plugin exit within seconds and the lease stops beating. Check cancel/timeout reaches
+  zero job members and terminating an empty job succeeds. Exercise installer profile paths with spaces,
+  console-window behavior and Defender latency. With updater polling over the shared lock file, check
+  a transient sharing violation is tolerated, sustained errors cancel at 30 s and proven loss cancels
+  at once. Confirm buffered host exec supplies no supervisor admission stdin.
+- **macOS arm64 and amd64:** run native tests, including bridge-kill and cancel controls; kill the
+  bridge during Start and confirm docker/Compose exit. Kill only the supervisor and check bridge-side
+  group cleanup plus the uncertain-outcome refusal. Check `kill(-pgid, 0)` stops seeing the killed
+  group promptly after launchd reaping; validate timeout/manual recovery behavior. Verify Gatekeeper
+  and quarantine permit re-exec, and Docker credential helpers work in a background process group.
+  Treat simultaneous bridge/supervisor SIGKILL as the remaining limit, not a supported recovery path.
+- **Linux Docker Desktop:** determine whether window close/host-exec timeout kills just the bridge,
+  its process group or its whole tree (the watcher must survive). Confirm the distinct supervisor name,
+  supervisor-only cleanup, subreaper-denied warning/degradation, and real Compose Start/Stop. Check
+  descendants/background jobs and credential helpers under supervision. Native Desktop/Compose and
+  cross-VM lock-file coherence remain unmeasured by container tests.
 
 ### Build and validation
 
@@ -995,7 +1167,11 @@ live first-start check below on the owner's native Desktop version.
    disappears while the directory and volumes remain. Reinstalling the extension
    must reattach to this same install rather than reinstall it.
 
-Rollback of this code is a git revert, with no database migration. A leftover
+Rollback of this code is a git revert, with no database migration. Reverting command supervision restores
+its previous orphan-child risk: finish or terminate active host operations before replacing the bridge,
+and inspect status/logs and the updater journal before retrying an interrupted operation. The
+`.haive-extension-unconfirmed` marker is inert for older code; resolve its command using the OS-specific
+manual steps above before reverting, then remove only that marker. A leftover
 `.haive-stack-lock` in an install directory is inert for the previous code; delete it
 only when no updater container and no extension operation is running. Port values
 selected by Start remain in the install's `.env` after rollback; retain those valid

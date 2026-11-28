@@ -1,4 +1,5 @@
 'use client';
+import { CheckoutSessionBoundary } from '@/components/checkout-session-boundary';
 
 import { useEffect, useRef, useState } from 'react';
 import { Maximize2, Minimize2 } from 'lucide-react';
@@ -29,7 +30,16 @@ type EditorState = 'starting' | 'ready' | 'unavailable' | 'refused' | 'error';
  *  while this tab is mounted; switching away unmounts the iframe, and the worker
  *  grace-stops the container 30 min later. Falls back to the read-only file viewer
  *  when the IDE is disabled, unavailable for the repo, or the task has ended. */
-export function EditorTab({ taskId, repositoryId, className }: EditorTabProps) {
+export function EditorTab(props: EditorTabProps) {
+  const path = props.repositoryId ? `/repos/${props.repositoryId}` : `/tasks/${props.taskId}`;
+  return (
+    <CheckoutSessionBoundary key={path} path={path}>
+      <EditorTabSession {...props} />
+    </CheckoutSessionBoundary>
+  );
+}
+
+function EditorTabSession({ taskId, repositoryId, className }: EditorTabProps) {
   const ensurePath = repositoryId
     ? `/repos/${repositoryId}/ensure-ide`
     : `/tasks/${taskId}/ensure-ide`;

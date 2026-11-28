@@ -82,7 +82,8 @@ database, server) against the file's own guard; the admin-URL suites with no dat
 `unrestrictedDatabases` with a reason. Each row runs vitest with `--maxWorkers=2`.
 
 The **desktop-bridge-go** job runs `gofmt -l`, `go vet` for linux, windows and darwin on amd64 and arm64, and
-`go test -p 1 ./...` for `docker/desktop-extension/bridge/`, in the golang image the extension's Dockerfile pins
+`go test -c` for each target plus native Linux `go test -p 1 ./...` for `docker/desktop-extension/bridge/`,
+in the golang image the extension's Dockerfile pins
 (`scripts/test/ci-desktop-bridge.test.mjs` keeps the two equal). It always starts and reports; its checks run only
 when the bridge, its embedded installers, the Dockerfile or the job's own files changed against the base commit.
 
@@ -161,3 +162,30 @@ A deferred COMMIT trigger is unsuitable: after client death the server can finis
 submitted COMMIT. The probe kills the child first, releases the barrier, verifies no early repair,
 then models lease expiry on the scratch row before the sweep repairs it. Git fixtures in
 `checkout-access-db.test.ts` are built once and copied for each test.
+
+`interactive-checkout.test.ts` fakes Docker to pin drain/stop/defer ordering, detached shells,
+failed root tasks, anonymous-volume removal with named-volume retention, bounded drains and unrelated-repository exclusion. The existing
+Terminal and Editor lifecycle fixtures delay real opens/boots at promise barriers; the refresh
+fixture proves committed cloning precedes suspension and no rename occurs before it finishes.
+Editor identity controls simulate a surviving container after loss of process-local state.
+`editor-handshake.test.ts` and the mocked terminal socket fixture pin late attach refusal,
+replacement epoch binding and retained exit reasons. `browser-vnc-attach.test.ts` uses mocked
+transports to hold input and the VNC greeting until the TCP attach admission settles, and to
+prove a refused attach forwards no input. `browser-vnc-upgrade-checkout.test.ts` drives the
+installed upgrade handler with fake transports and real epoch admission: an omitted or stale
+epoch must refuse before probing or ensuring a runtime, while a matching or initial null epoch
+can attach. `interactive-status.test.ts` exercises both task and repository routers for owner
+status/epoch responses, no-store caching and foreign-user/invalid-ID refusals. Ordinary fake-Docker lifecycle tests stub
+only the filesystem identity seam, keeping actual reuse comparisons and labels in the test.
+Projection/refresh tests that are about Git/SQL stub the suspension seam; they must not contact a
+live daemon or session registry.
+
+A Docker mount-identity control must use uniquely named throwaway containers/volumes and a
+temporary bind mount; no development service, queue, runtime or task terminal is a fixture.
+
+Recovery controls pin legacy-container retention, inode-only remount comparison, scratch
+shell reuse without repository lookups, ordinary runtime recovery during running steps, upload
+Editor suspension before swap, terminal failure versus bounded retry, and stranded suspension
+recovery. The real-Git refresh fixture recounts holders before suspension. The
+`repo-refresh-smoke` injects only `suspendSessions` into the actual refresh handler: it is a
+Git/SQL recovery smoke and requires neither Redis nor Docker session services. Its suspension seam is asserted without opening production services.

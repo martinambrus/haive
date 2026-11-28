@@ -9,6 +9,7 @@ import {
   TERMINAL_CLOSE_CODES,
   TERMINAL_CTL_CHANNEL_PREFIX,
   TERMINAL_PROVIDER_DISABLED_MESSAGE,
+  TERMINAL_REPOSITORY_REBUILT_MESSAGE,
   TERMINAL_WORKDIR_CHANNEL_PREFIX,
   TERMINAL_IN_CHANNEL_PREFIX,
   TERMINAL_OUT_CHANNEL_PREFIX,
@@ -285,7 +286,9 @@ export async function runScopedShellSession(
     try {
       // Only a known code is passed on, with its own sentence: an unknown code or an
       // over-long reason would make close() throw and leave the socket open.
-      if ('closeCode' in reply && reply.closeCode === TERMINAL_CLOSE_CODES.PROVIDER_DISABLED)
+      if ('closeCode' in reply && reply.closeCode === TERMINAL_CLOSE_CODES.REPOSITORY_REBUILT)
+        ws.close(TERMINAL_CLOSE_CODES.REPOSITORY_REBUILT, TERMINAL_REPOSITORY_REBUILT_MESSAGE);
+      else if ('closeCode' in reply && reply.closeCode === TERMINAL_CLOSE_CODES.PROVIDER_DISABLED)
         ws.close(TERMINAL_CLOSE_CODES.PROVIDER_DISABLED, TERMINAL_PROVIDER_DISABLED_MESSAGE);
       else ws.close(1011, 'open_failed');
     } catch {
@@ -347,11 +350,27 @@ export async function runScopedShellSession(
     exited = true;
     const restarted = raw === JSON.stringify({ type: 'exit', reason: 'restart' });
     const providerDisabled = raw === JSON.stringify({ type: 'exit', reason: 'provider_disabled' });
-    sendJson(ws, restarted ? { type: 'exit', reason: 'restart' } : { type: 'exit' });
+    const rebuilt = raw === JSON.stringify({ type: 'exit', reason: 'repository_rebuilt' });
+    sendJson(
+      ws,
+      rebuilt
+        ? { type: 'exit', reason: 'repository_rebuilt' }
+        : restarted
+          ? { type: 'exit', reason: 'restart' }
+          : { type: 'exit' },
+    );
     try {
       ws.close(
-        providerDisabled ? TERMINAL_CLOSE_CODES.PROVIDER_DISABLED : 1000,
-        providerDisabled ? TERMINAL_PROVIDER_DISABLED_MESSAGE : 'pty_ended',
+        rebuilt
+          ? TERMINAL_CLOSE_CODES.REPOSITORY_REBUILT
+          : providerDisabled
+            ? TERMINAL_CLOSE_CODES.PROVIDER_DISABLED
+            : 1000,
+        rebuilt
+          ? TERMINAL_REPOSITORY_REBUILT_MESSAGE
+          : providerDisabled
+            ? TERMINAL_PROVIDER_DISABLED_MESSAGE
+            : 'pty_ended',
       );
     } catch {
       // ignore

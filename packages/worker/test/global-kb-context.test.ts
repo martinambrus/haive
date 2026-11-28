@@ -312,7 +312,9 @@ describe('resolveGlobalKbContext: one read for the digest and the rules', () => 
 
   it('opens the store once per dispatch, with the bounds of one dispatch', async () => {
     await ask(true);
-    expect(h.calls).toEqual([{ connectTimeoutSeconds: 3, deadlineMs: 6000 }]);
+    expect(h.calls).toEqual([
+      { connectTimeoutSeconds: 3, deadlineMs: 6000, signal: expect.any(AbortSignal) },
+    ]);
   });
 
   it('puts a statement timeout ahead of each query, inside a transaction of its own', async () => {

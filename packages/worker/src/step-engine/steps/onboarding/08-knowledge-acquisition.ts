@@ -1,3 +1,5 @@
+import { restoreKbReroutes } from './_kb-reroute-recovery.js';
+import { rethrowIfGlobalKbTimeout } from '@haive/shared/global-kb';
 import {
   ensureDirNoFollow,
   isPathContainmentError,
@@ -40,6 +42,7 @@ import {
 } from '@haive/shared/global-kb';
 import {
   clearTaskPromotedDrafts,
+  findConsumedTaskPromotions,
   globalKbTopicKey,
   promoteToGlobalKbDraft,
 } from '../_global-kb-promote.js';
@@ -2091,10 +2094,21 @@ export const knowledgeAcquisitionStep: StepDefinition<KnowledgeDetect, Knowledge
     }[] = [];
     let globalPromoted = 0;
 
+    // Restore original local bytes before purging drafts, including after a later apply failure.
+    const recovery = await restoreKbReroutes(
+      ctx.repoPath,
+      ctx.taskId,
+      ctx.logger,
+      undefined,
+      (ids) =>
+        findConsumedTaskPromotions(ctx.db, ctx.taskId, ids, ctx.logger, { signal: ctx.signal }),
+    );
+
     // Idempotent re-runs (Retry): drop this task's prior promoted drafts ONCE,
     // before any promotion below (placement re-routes AND entry promotes), so a
     // retry replaces rather than duplicates them. No-op when global KB is off.
-    await clearTaskPromotedDrafts(ctx.db, ctx.taskId, ctx.logger);
+    if (recovery.canPurgeDrafts)
+      await clearTaskPromotedDrafts(ctx.db, ctx.taskId, ctx.logger, { signal: ctx.signal });
 
     // 1. Re-place / improve existing KB files into the canonical layout. Updates
     //    win over placements for the same file; first writer wins per destination.
@@ -2116,6 +2130,10 @@ export const knowledgeAcquisitionStep: StepDefinition<KnowledgeDetect, Knowledge
     /** Legacy pages deleted because an update folded their content into a newer page. */
     const mergedRemoved: string[] = [];
     const removedPaths: string[] = [];
+    for (const p of recovery.consumed) {
+      if ((await lstatNoFollow(ctx.repoPath, `${KB_DIR}/${p}`)) === null)
+        removedPaths.push(`${KB_DIR}/${p}`);
+    }
     for (const u of updates) {
       const src = existingByPath.get(existingKbKey(u.path));
       if (!src) {
@@ -2142,7 +2160,7 @@ export const knowledgeAcquisitionStep: StepDefinition<KnowledgeDetect, Knowledge
         );
         // Recorded as soon as it is on disk: a deletion below that throws must not leave it unstaged.
         written.push({ id: src.relPath, filePath: destPath, source: 'updated' });
-        if (dest !== src.relPath) {
+        if (dest !== src.relPath && recovery.canDeleteLocal) {
           await removeNoFollow(ctx.repoPath, `${KB_DIR}/${src.relPath}`);
           removedPaths.push(`${KB_DIR}/${src.relPath}`);
         }
@@ -2155,7 +2173,7 @@ export const knowledgeAcquisitionStep: StepDefinition<KnowledgeDetect, Knowledge
         // a model naming any KB page there — or the very page it just wrote — would have it
         // deleted. Files under `legacy/` are ones THIS step imported and whose content is by
         // construction duplicated in the page that displaced them.
-        for (const merged of u.mergedFrom ?? []) {
+        for (const merged of recovery.canDeleteLocal ? (u.mergedFrom ?? []) : []) {
           const rel = existingKbKey(merged);
           const safe = sanitizeKbRelPath(rel);
           if (!safe.ok || !safe.normalized.startsWith(`${LEGACY_IMPORT_SUBDIR}/`)) {
@@ -2213,6 +2231,9 @@ export const knowledgeAcquisitionStep: StepDefinition<KnowledgeDetect, Knowledge
           // MOVE it to the Global KB as a draft (deduped above) and delete the local
           // copy so it never feeds RAG.
           handledSrc.add(src.relPath);
+          // Write recovery before issuing a promotion: its commit can have an unknown outcome.
+          // A journal failure keeps the local source and lets the rest of apply continue.
+          const journaled = await recovery.rememberReroute(src.relPath, content);
           try {
             const promo = await promoteToGlobalKbDraft(
               ctx.db,
@@ -2227,10 +2248,12 @@ export const knowledgeAcquisitionStep: StepDefinition<KnowledgeDetect, Knowledge
                 projectName: detected.projectName ?? undefined,
               },
               ctx.logger,
+              { signal: ctx.signal },
             );
-            if (promo && !promo.deduped) {
+            if (promo && !promo.deduped && journaled) {
               await removeNoFollow(ctx.repoPath, `${KB_DIR}/${src.relPath}`);
               removedPaths.push(`${KB_DIR}/${src.relPath}`);
+              await recovery.confirmReroute(src.relPath, promo.id);
               globalPromoted += 1;
               written.push({
                 id: src.relPath,
@@ -2244,8 +2267,15 @@ export const knowledgeAcquisitionStep: StepDefinition<KnowledgeDetect, Knowledge
                 { path: src.relPath, existingId: promo.id },
                 'kb re-route deduped (topic already in global KB); kept local copy',
               );
+            } else if (promo) {
+              ctx.logger.warn(
+                { path: src.relPath },
+                'kb re-route promoted but kept local: the recovery journal is unavailable',
+              );
             }
           } catch (err) {
+            ctx.signal?.throwIfAborted();
+            rethrowIfGlobalKbTimeout(err);
             ctx.logger.warn({ err, path: p.path }, 'kb global re-route failed');
           }
           continue;
@@ -2277,8 +2307,10 @@ export const knowledgeAcquisitionStep: StepDefinition<KnowledgeDetect, Knowledge
           createParents: true,
         });
         written.push({ id: src.relPath, filePath: destPath, source: 'existing' });
-        await removeNoFollow(ctx.repoPath, `${KB_DIR}/${src.relPath}`);
-        removedPaths.push(`${KB_DIR}/${src.relPath}`);
+        if (recovery.canDeleteLocal) {
+          await removeNoFollow(ctx.repoPath, `${KB_DIR}/${src.relPath}`);
+          removedPaths.push(`${KB_DIR}/${src.relPath}`);
+        }
       } catch (err) {
         ctx.logger.warn({ err, path: p.path, dest }, 'kb placement move failed');
       }
@@ -2361,6 +2393,7 @@ export const knowledgeAcquisitionStep: StepDefinition<KnowledgeDetect, Knowledge
             projectName: detected.projectName ?? undefined,
           },
           ctx.logger,
+          { signal: ctx.signal },
         );
         if (promo && !promo.deduped) {
           globalPromoted += 1;
@@ -2488,6 +2521,7 @@ export const knowledgeAcquisitionStep: StepDefinition<KnowledgeDetect, Knowledge
     // that is the one case where the files on disk are the evidence a human needs and a
     // retry re-runs the whole mining pass anyway.
     if (bodyFailures.length === 0) await discardKbDrafts(ctx.repoPath, ctx.logger);
+    await recovery.finish();
 
     if (unknownPaths.length > 0) {
       ctx.logger.warn(

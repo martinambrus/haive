@@ -62,6 +62,21 @@ pinned target's round as 07's. `custom-fix-recovery-db.test.ts` (worker) and
 equal traces. The one target-sensitive check is the dead-task judge, which also refuses a pinned
 target this worker cannot run (see [Worker restarts](worker-restarts.md#dead-tasks)).
 
+An unroutable target's failure UPDATE refuses `failed`, `cancelled` and `completed`
+tasks in the same statement as its epoch check. Stop does not move the epoch and
+can leave a finished source row owned, so the row lock alone cannot protect its
+failure. A late loop-back or Continue keeps Stop's diagnosis and completion stamp,
+including the stamp used by Stop attribution and settlement re-drive, and records
+no new unroutable event. The shared `writeTaskFailed` enforces this for every caller,
+including an unqualified `markTaskFailed`, a missing revise target and gate Abort;
+recovery must reopen the failed task before a fresh failure can replace it.
+Retry remains the explicit revival path; Stop needs no epoch change.
+If a gate Continue picked up an already-failed task and its target cannot run,
+the gate closes while the original failure text and completion stamp remain.
+No new `fix_loop.unroutable` event or replacement explanation is written to the
+failed task. This deliberately preserves the first failure and its settlement
+identity; the routing refusal remains in the worker log, and Retry still works.
+
 **The target is fixed; what varies is whether 07 runs.** In DAG mode
 (`06b-sprint-planning.output.mode === 'dag'`) 07 used to skip at EVERY round, so every
 loop_back wrote a diagnosis nothing consumed and re-ran the whole review chain against
@@ -350,7 +365,11 @@ on no step: the worker never falls back to 07 for one (its router fails the task
 no provider), so the card and the listing resolve the ordinary slot.
 
 A choice that becomes unusable before the gate answer is applied refuses that answer
-instead of failing the task. The same transaction restores the gate's `waiting_form` status,
+instead of failing the task. This includes a provider disabled between the initial provider
+read and the locked choice write: `recordFixRoundCliChoice` converts the writer's
+`ComposedLspProviderDisabledError` to `FixRoundCliUnavailable` by class, while a composed-LSP
+lock refusal retains `FixRoundCliLocked` and its specific explanation.
+The same transaction restores the gate's `waiting_form` status,
 clears its submitted values, stamps `waiting_started_at`, refreshes the eligible options and
 adds a fixed explanation to the form. It leaves the task waiting for the person, writes no
 round choice or continuation event and queues no next step. The original row-ownership and
@@ -616,7 +635,10 @@ has no row yet. Runtime recheck bounds and return-address handling remain unchan
 
 The snapshot read honours Cancel: it calls the step's `throwIfCancelled` before each attempt and
 each file and rethrows `TaskCancelledError` rather than reading it as an unknown snapshot. The
-queue-level recheck passes no step context, so its read has no cancel source.
+queue-level recheck owns a task-status/epoch poll for the duration of its snapshot read (2 seconds,
+like the step runner): Cancel, Stop and an overtaking Retry abort at the next per-file/attempt
+check. The poll is released on success or failure and also covers insight handoffs. Git's initial
+changed-file read and a single in-flight file read remain bounded but uninterruptible.
 
 Insight rounds write no `fix_loop.started` and do not consume `maxFixRounds`. A blocking
 check inside an insight round still enters the ordinary implementation fix loop and spends
@@ -671,6 +693,10 @@ every latched gate. No `gate2_approved` is recorded, since nothing failed. The r
 the cycle (workflow-commits says what ends one: a Retry of the pick's row does not); outside a cycle
 gate 2 keeps honouring its presets, deferred findings or not. Configured checks on either side still
 run.
+Approval of that QA-kept gate 2 advances to the following gate 3 without writing a
+`gate2_approved` check event; the cycle event still forces gate 3 to park for its own owner answer.
+The latest completed QA row is ordered by round, then `run_seq`, then `created_at`, descending
+(the latter two defend ties; the normal table has a unique task/step/round index).
 Gate 3 regenerates its diff, message and form. Earlier commit/message approval is not
 reused, and empty selection retains the existing staging and commit path.
 

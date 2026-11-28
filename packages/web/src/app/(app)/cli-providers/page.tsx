@@ -406,7 +406,7 @@ export default function CliProvidersPage() {
   async function handleDisconnectUsage(p: CliProvider) {
     if (
       !confirm(
-        `Disconnect usage tracking for ${p.label} and every row that shares its login? The task header will stop showing its 5h/weekly windows until you reconnect.`,
+        `Disconnect usage tracking for ${p.label}${p.isolateAuth ? '' : ' and every row that shares its login'}? The task header will stop showing its 5h/weekly windows until you reconnect.`,
       )
     ) {
       return;
@@ -603,6 +603,7 @@ export default function CliProvidersPage() {
                               onClick: () => handleSignOut(p),
                             },
                             p.name === 'claude-code' &&
+                              p.authMode === 'subscription' &&
                               needsReconnect[p.id] === true && {
                                 key: 'usage-reconnect',
                                 label: usageState?.busy ? 'Connecting...' : 'Reconnect',
@@ -621,12 +622,14 @@ export default function CliProvidersPage() {
                                 spin: usageState?.busy === true,
                                 disabled: usageState?.busy === true,
                                 onClick: () => handleDisconnectUsage(p),
-                                title:
-                                  needsReconnect[p.id] === true
+                                title: p.isolateAuth
+                                  ? 'Stop tracking usage and delete the stored usage token from this row'
+                                  : needsReconnect[p.id] === true
                                     ? 'Stop tracking usage and delete the stored usage token from every row that shares this login'
                                     : "Stop tracking Claude's subscription usage and delete the stored usage token from every row that shares this login",
                               },
                             p.name === 'claude-code' &&
+                              p.authMode === 'subscription' &&
                               needsReconnect[p.id] !== true &&
                               usageConnected[p.id] !== true && {
                                 key: 'usage-connect',

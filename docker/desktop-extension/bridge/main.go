@@ -65,15 +65,17 @@ type state struct {
 type runner func(context.Context, string, []string, string, io.Writer) (string, error)
 
 type bridge struct {
-	dir       string
-	os        string
-	run       runner
-	health    func(string) bool
-	portInUse func(int) bool
-	rename    func(string, string) error
-	sleep     func(time.Duration)
-	readEnv   func(string) ([]byte, error)
-	lockCfg   lockConfig
+	dir         string
+	os          string
+	run         runner
+	health      func(string) bool
+	portInUse   func(int) bool
+	rename      func(string, string) error
+	sleep       func(time.Duration)
+	readEnv     func(string) ([]byte, error)
+	groupGone   func(int) bool
+	lockCfg     lockConfig
+	leaseFailed context.CancelFunc
 }
 
 func validateRequest(r request) error {
@@ -707,19 +709,78 @@ func (b bridge) handle(ctx context.Context, r request) (s state, err error) {
 	if err = validateRequest(r); err != nil {
 		return s, err
 	}
+	// Preserve supervision failures through the operation-specific error mapping.
+	var commandFailure error
+	windowHeld := false
+	baseRun := b.run
+	b.run = func(callCtx context.Context, exe string, args []string, dir string, log io.Writer) (string, error) {
+		if commandFailure != nil {
+			return "", commandFailure
+		}
+		if r.Action == "status" || (exe == "docker" && len(args) > 0 && args[0] == "info") {
+			callCtx = context.WithValue(callCtx, readOnlyProbeKey{}, true)
+		}
+		out, runErr := baseRun(callCtx, exe, args, dir, log)
+		var unavailable *supervisionUnavailable
+		if errors.As(runErr, &unavailable) || errors.Is(runErr, errCommandUncertain) || errors.Is(runErr, errCommandStopUnconfirmed) {
+			commandFailure = runErr
+			if windowHeld && r.Action != "status" && (errors.Is(runErr, errCommandUncertain) || errors.Is(runErr, errCommandStopUnconfirmed)) {
+				if markerErr := b.markUnconfirmed(r.Action, runErr); markerErr != nil {
+					commandFailure = errors.Join(runErr, fmt.Errorf("Cannot persist the unconfirmed marker at %s: %w", b.unconfirmedPath(), markerErr))
+				}
+			}
+		}
+		return out, runErr
+	}
+	defer func() {
+		if errors.Is(context.Cause(ctx), errLeaseLost) {
+			if err == nil {
+				err = errLeaseLost
+			} else {
+				err = fmt.Errorf("%w %v", errLeaseLost, err)
+			}
+		}
+		if err != nil && commandFailure != nil && !errors.Is(err, commandFailure) {
+			err = fmt.Errorf("%w %v", commandFailure, err)
+		}
+		if r.Action == "status" {
+			if markerErr := b.checkUnconfirmed(reportUnconfirmed); markerErr != nil {
+				s.Error = markerErr.Error()
+				if err != nil {
+					err = errors.Join(err, markerErr)
+				}
+			}
+		}
+	}()
 	engine, err := b.run(ctx, "docker", []string{"info", "--format", "{{.ID}}"}, "", nil)
+	if err != nil && commandFailure != nil {
+		return s, commandFailure
+	}
 	if err != nil || strings.TrimSpace(engine) != r.Engine {
 		return s, errors.New("The host Docker CLI must point to the same engine as Docker Desktop. Select its context, then retry.")
 	}
 	if r.Action == "status" {
 		return b.inspect(ctx)
 	}
+	if err := b.checkUnconfirmed(probeUnconfirmed); err != nil {
+		return s, err
+	}
+	// Proven lease loss or half a stale window without renewal cancels commands while there is still
+	// time before stale takeover. Heartbeats themselves outlive cancellation and
+	// stop only when the operation (including command Wait) releases the lease.
+	ctx, cancel := context.WithCancelCause(ctx)
+	defer cancel(nil)
+	b.leaseFailed = func() { cancel(errLeaseLost) }
 	// Cross-process exclusion also protects against two open Desktop windows.
 	releaseWindow, err := b.takeWindowLock(ctx)
 	if err != nil {
 		return s, err
 	}
 	defer releaseWindow()
+	windowHeld = true
+	if err := b.checkUnconfirmed(clearUnconfirmed); err != nil {
+		return s, err
+	}
 	// Refuse before any installer, Compose call or .env port rewrite.
 	if err := b.checkUpgrade(ctx); err != nil {
 		return s, err
@@ -757,6 +818,9 @@ func (b bridge) handle(ctx context.Context, r request) (s state, err error) {
 		return s, err
 	}
 	defer release()
+	if err := b.checkUnconfirmed(clearUnconfirmed); err != nil {
+		return s, err
+	}
 	notice := ""
 	action := []string{"stop"} // Keep containers, network and every data volume.
 	if r.Action == "start" {
@@ -779,6 +843,9 @@ func (b bridge) handle(ctx context.Context, r request) (s state, err error) {
 		return s, err
 	}
 	if _, err = b.run(ctx, "docker", args, b.dir, log); err != nil {
+		if commandFailure != nil {
+			return s, commandFailure
+		}
 		if r.Action == "start" {
 			// Preserve whatever Compose can report, even after up --wait failed.
 			s, _ = b.inspect(ctx)
@@ -792,8 +859,10 @@ func (b bridge) handle(ctx context.Context, r request) (s state, err error) {
 	return s, err
 }
 
+type readOnlyProbeKey struct{}
+
 func runCommand(ctx context.Context, exe string, args []string, dir string, log io.Writer) (string, error) {
-	cmd := exec.CommandContext(ctx, exe, args...)
+	cmd := exec.Command(exe, args...)
 	cmd.Dir = dir
 	// Ambient Haive settings must not override the install's pinned .env, and a
 	// registry token must never reach an unrelated child. Keep Docker context/PATH.
@@ -804,14 +873,29 @@ func runCommand(ctx context.Context, exe string, args []string, dir string, log 
 			cmd.Env = append(cmd.Env, e)
 		}
 	}
+	execute := runSupervised
+	// These probes take no install lease and cannot mutate a stack. Windows may
+	// run them without a Job Object even when enclosing-job policy blocks nesting.
+	if runtime.GOOS == "windows" && ctx.Value(readOnlyProbeKey{}) == true {
+		execute = func(ctx context.Context, cmd *exec.Cmd) error {
+			cmd.WaitDelay = commandTeardownTimeout
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			if err := cmd.Start(); err != nil {
+				return err
+			}
+			return waitCommand(ctx, cmd, func() { cmd.Process.Kill() })
+		}
+	}
 	if log != nil {
 		cmd.Stdout, cmd.Stderr = log, log
-		return "", cmd.Run()
+		return "", execute(ctx, cmd)
 	}
 	var out strings.Builder
 	cmd.Stdout = &out
 	// Errors are reported by operation, never with raw third-party output or .env.
-	err := cmd.Run()
+	err := execute(ctx, cmd)
 	return out.String(), err
 }
 

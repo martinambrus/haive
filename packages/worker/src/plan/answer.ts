@@ -1,6 +1,10 @@
 import { and, eq } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
-import { markPlanMirrorDirty } from '@haive/shared/plan';
+import {
+  lockRepositoryForPlanWrite,
+  markPlanMirrorDirty,
+  PlanPatchError,
+} from '@haive/shared/plan';
 import { planMirrorPayloadSchema, planMirrorV2Schema } from '@haive/shared/schemas';
 import {
   conflictBody,
@@ -54,11 +58,15 @@ export async function answerPlanQuestion(
     answer,
   }: { repositoryId: string; userId: string; conflictId: string; answer: ProjectStateAnswer },
 ): Promise<ProjectStateResolveResult> {
-  const [repo] = await tx
-    .select({ userId: schema.repositories.userId })
-    .from(schema.repositories)
-    .where(eq(schema.repositories.id, repositoryId));
-  if (!repo || repo.userId !== userId) return { kind: 'not_found' };
+  let repo;
+  try {
+    repo = await lockRepositoryForPlanWrite(tx, repositoryId);
+  } catch (err) {
+    if (err instanceof PlanPatchError && err.kind === 'repository_gone')
+      return { kind: 'not_found' };
+    throw err;
+  }
+  if (repo.userId !== userId) return { kind: 'not_found' };
   const [row] = await tx
     .select()
     .from(schema.projectStateConflicts)

@@ -23,6 +23,8 @@ describe('SecretsService cache', () => {
     stored = encrypt('old', h.key);
     reads = 0;
     const db = {
+      // The boot key check reads the stored secrets; this fake holds none at boot.
+      execute: async () => [],
       insert: () => ({
         values: (row: { encryptedValue: string }) => ({
           onConflictDoUpdate: async () => {

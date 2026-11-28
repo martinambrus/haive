@@ -127,7 +127,7 @@ Undo is read-only unless `--apply` is present. It uses only the backup's scope, 
 
 `haive_build` (`packages/worker/src/build-stamp.ts`, migration 0172) records which Haive build inserted a run, so runs before and after a prompt change can be compared by build rather than by timestamp. Four forms: `release:<HAIVE_VERSION>` on a published image (no `.git` above the worker and a non-dev version), `commit:<sha>` when the checkout's working tree equals HEAD's tree, `tree:<sha>` when it does not — the id of the tree the working copy would commit, so two identical states share it and any edit changes it — and `unknown` when none can be read, never a guess. NULL means not recorded: rows from before 0172, and a process that never ran `initBuildStamp`. The worker computes it ONCE at boot, before its first queue worker starts (about 0.6 s on this repository), and the three statements that insert a run stamp it (`insertOwnedRun`, step-runner's recap run and that run's failure record), so it names the build that INSERTED the row: a run requeued at boot executes on the next build. The dev watcher restarts the worker after a source change, which is what retakes it. The tree is built in a temporary index and object directory and writes nothing under `.git`. The index is seeded with `read-tree` of HEAD, the one call that sees the real objects (a C-quoted `GIT_ALTERNATE_OBJECT_DIRECTORIES`, since the variable splits on colons; a write through alternates would touch the real object files), so `add -A` keeps the committed mode wherever `core.fileMode` or `core.symlinks` says the disk cannot be trusted, as `git status` does, and a sparse checkout's skip-worktree entries keep HEAD's content (`write-tree --missing-ok`, since their blobs are only in the real store); tracked files an ignore rule matches are force-added. Replace refs are off for every call (`GIT_NO_REPLACE_OBJECTS`), so a commit id names its own tree, and `lfs.storage` points into the scratch directory, since the git-lfs clean filter would otherwise store a changed file's content under `.git/lfs`. Not covered: the gitignored `dist` of `@haive/shared` and `@haive/database`, and a linked worktree inside a container, whose gitfile names a host path, so it stamps `unknown`.
 
-The dispatcher (`resolveDispatch`) filters to enabled providers, orders the resolved preferred provider first and the rest by the default priority (oldest `created_at`, `id` breaking a tie: `orderByDefaultPriority`, see [Step summaries](step-summaries.md)), and picks the first whose adapter is registered and has `supportsCliAuth` — plus `supportsSubagents` when the step declares the `subagents` capability. A candidate whose adapter cannot build its command (it throws `ProviderBuildError`, such as an ollama provider with no model set) is logged and skipped in favour of the next candidate when it was an implicit default. The explicitly selected provider (`preferredProviderId`: a task, step or saved per-step choice) rethrows its build failure instead, so an explicit choice never runs on another CLI silently. An explicit pick whose provider is listed but switched off does not run at all: `dispatchCandidates` yields no candidate and `resolveDispatch` returns a skip plan naming the provider (`disabledProvider`, `@haive/shared/cli-preferred-provider`, which `orchestrator/provider-hold.ts` re-exports), never the next-oldest CLI. A fresh step is held before it gets there (see [Worker restarts](worker-restarts.md)). Only a pick whose provider row is gone (a delete sets the column NULL) is implicit again. When no candidate builds, the first candidate's error is thrown rather than a skip plan. Any other error stays fatal. If none matches, the step is skipped. Every plan it emits is a CLI invocation; there is no API-mode branch. Auth mode selects which credentials the CLI is given, not whether the dispatcher bypasses the CLI. A composed-LSP task refuses a preferred provider outside its allowed set; the one exception is a saved per-step pick the resolver reports as `savedPreference`, which is skipped and said so (see Provider lock in [Sandbox](sandbox.md)). That decision (disabled refusal, lock refusal, saved-pick skip) is one pure function, `resolvePreferredProvider` (`@haive/shared/cli-preferred-provider`), which the step hold calls too, so a switched-off saved pick the lock skips neither refuses nor holds. The api's CLI mirrors (the step cards, the task detail's effective CLI and the disable preview) call the same function, so what the page shows is what dispatch runs.
+The dispatcher (`resolveDispatch`) filters to enabled providers, orders the resolved preferred provider first and the rest by the default priority (oldest `created_at`, `id` breaking a tie: `orderByDefaultPriority`, see [Step summaries](step-summaries.md)), and picks the first whose adapter is registered and has `supportsCliAuth` — plus `supportsSubagents` when the step declares the `subagents` capability. A candidate whose adapter cannot build its command (it throws `ProviderBuildError`, such as an ollama provider with no model set) is logged and skipped in favour of the next candidate when it was an implicit default. The explicitly selected provider (`preferredProviderId`: a task, step or saved per-step choice) rethrows its build failure instead, so an explicit choice never runs on another CLI silently. An explicit pick whose provider is listed but switched off does not run at all: `dispatchCandidates` yields no candidate and `resolveDispatch` returns a skip plan naming the provider (`disabledProvider`, `@haive/shared/cli-preferred-provider`, which `orchestrator/provider-hold.ts` re-exports), never the next-oldest CLI. A fresh step is held before it gets there (see [Worker restarts](worker-restarts.md)). Only a pick whose provider row is gone (a delete sets the column NULL) is implicit again. When no candidate builds, the first candidate's error is thrown rather than a skip plan. Any other error stays fatal. If none matches, the step is skipped. Every plan it emits is a CLI invocation; there is no API-mode branch. Auth mode selects which credentials the CLI is given, not whether the dispatcher bypasses the CLI. A composed-LSP task refuses a preferred provider outside its allowed set; the one exception is a saved per-step pick the resolver reports as `savedPreference`, which is skipped and said so (see Provider lock in [Sandbox](sandbox.md)). That decision (disabled refusal, lock refusal, saved-pick skip) is one pure function, `resolvePreferredProvider` (`@haive/shared/cli-preferred-provider`), which the step hold calls too, so a switched-off saved pick the lock skips neither refuses nor holds. The api's CLI mirrors (the step cards, the task detail's effective CLI and the disable preview) call the same function, so what the page shows is what dispatch runs. Separately, the task detail's `cliProviderRestrictions` carries `{code, message}` explicit-write refusals from the same pure provider-lock decision as the writer, using dispatch's `composedLspAllowedSet`, for the task page's pickers; web never reconstructs that rule from provider names or image metadata.
 
 `disableTools` is a best-effort optimization, never a provider eligibility requirement.
 The Claude-family adapters and grok honor the flag; codex, gemini, amp and antigravity keep
@@ -194,8 +194,8 @@ text mentioning that code, other OAuth codes, server failures and aborts remain 
 raw body or description, which may echo credentials.
 
 `ClaudeOauthError` (`@haive/shared/claude-oauth`) follows the same rule: its message is
-`claude oauth <grant>: http <status>`, plus ` (<code>)` when the JSON `error` is a registered
-RFC 6749 code. Any other `error` value, the description and a plain-text body are dropped. The
+`claude oauth <grant>: http <status>`, plus ` (<code>)` only for HTTP 400/401 when the JSON
+`error` is a registered RFC 6749 code. A gateway 5xx carrying `invalid_grant` is transient. Any other `error` value, the description and a plain-text body are dropped. The
 message reaches the Connect HTTP 400 and the usage poller's warn log, so callers key on `code`
 (`isClaudeRefreshRejected` reads `invalid_grant`), never on wording. A 200 body that is not JSON
 throws a fixed `claude oauth: invalid token response`, because the parser's SyntaxError quotes
@@ -212,3 +212,63 @@ at 20 per step attempt, then halts for Retry; busy waits remain uncapped. Receiv
 outcomes retain it. A failed fence clear
 is checked and retried on the next tick even before access-token expiry. See
 [Sandbox](sandbox.md) for archive retention, lock ordering and the controlled hold measurements.
+
+Claude usage authorization starts and completes only for a `claude-code` row on subscription
+auth; the poller also excludes API-key rows even if they retain a legacy usage grant. Disconnect
+and generic secret deletion can still remove that legacy grant. Manual usage-grant writes on
+API-key rows are refused, as are OAuth start/complete, with `usage_auth_subscription_required`.
+Completion rechecks auth mode as well as login scope after taking the advisory lock. List and
+edit-page authorization controls require subscription auth; legacy grants can still be disconnected.
+The edit form reports the persisted provider to its parent after every settings save, including
+the save before Rebuild image, so usage authorization and Disconnect scope follow the saved auth
+mode and isolation without reloading. A later secret-write or image-build failure does not undo
+that settings save.
+The usage API excludes frozen API-key Claude snapshots, and the task header also filters on
+the provider's auth mode when its row is known, so neither header surface keeps prompting an
+impossible reconnect for a known API-key row. If the provider list fails to load or omits a row,
+the header keeps the API-filtered snapshot and renders its own provider name, like the task-list
+strip; an unknown row is not evidence that usage is ineligible.
+The task header's empty-meter fallback is also suppressed on API-key Claude rows.
+An API-key Claude clone holds
+its source auth scope lock through the secret copy, but never copies the usage grant, whether
+shared or isolated. A subscription clone still seeds from its shared set; an isolated clone
+starts without a grant. Disconnect's confirmation and action title name only the isolated row
+when its authentication is isolated; the edit-page card uses the same scope-specific copy.
+
+Any Claude usage refresh failure stops that set's poll for the tick. The attempt is recorded
+before the vendor call, preserving the normal minimum 190-second cadence even on 429, 5xx,
+network failures and repeated non-`invalid_grant` refusals. These failures retain the stored
+grant without fetching usage with its stale access token. They warn once per failure streak
+for the exact refresh token; successful refresh or token replacement clears the streak.
+The warning retains sanitized OAuth status/code and omits arbitrary network error text.
+They remain retryable rather than declaring a transient vendor refusal a dead credential.
+
+The encryption key is loaded before the refresh request. After a successful response, the
+poller encrypts synchronously, locks the login-set rows, and commits a compare-and-swap update
+of every identical pre-refresh copy before starting the usage fetch. No advisory-lock checks
+intervene or roll back this CAS: a lost lock connection cannot discard an otherwise committable
+rotation, and the CAS cannot overwrite a newer grant. A failed usage fetch or snapshot write
+cannot roll that commit back. This preserves the existing single-use refresh assumption;
+no new vendor semantics were verified (item 6 remains outside scope).
+
+The remote rotation and local commit cannot be atomic. Process loss before that commit,
+a local transaction/commit failure after the vendor rotates, or a timeout/connection loss
+that hides a vendor-committed response can still lose the new token. Under the single-use
+assumption, the old refresh token is then spent and reconnect is required. Forced reconnect
+is the worst outcome of this gap; the CAS prevents overwriting a newer connection. Closing
+the gap would need vendor idempotency or a verified token grace period.
+
+Allowance-watch arming and reset backfill both require an `ok` snapshot no older than the
+existing 13-minute UI freshness bound (`USAGE_SNAPSHOT_STALE_AFTER_MS`). The recovery percentage
+probe uses that same age bound, so a refresh outage cannot feed it hours-old `ok` numbers.
+A reset captured earlier from a fresh `ok` snapshot remains authoritative even if a later
+snapshot errors or ages out. No existing snapshots or captured resets are rewritten.
+
+Usage-window eligibility is one browser-safe shared predicate, `hasUsageWindow`
+(`@haive/shared/usage-window`), used by poll target selection, outage probe expectations,
+rate-limit watch arming and snapshot display. API-key Claude rows use the existing five-minute
+server-error cool-off without waiting for a snapshot the poller cannot produce. Subscription
+Claude still requires a post-failure `ok` probe. Rate-limit recovery retains its existing
+captured-reset/percentage verdict, including a reset captured before an auth-mode change;
+there is no rate-limit cool-off fallback. Provider enablement and credential presence remain
+separate from this capability check.

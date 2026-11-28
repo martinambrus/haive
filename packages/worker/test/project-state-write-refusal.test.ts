@@ -82,6 +82,7 @@ async function setup(seedColumn: Context | null = null) {
   });
   const column = keyOf(repositories, 'render_context');
   fake.insert(repositories, {
+    status: 'ready',
     id: REPO,
     userId: USER,
     name: 'acme',

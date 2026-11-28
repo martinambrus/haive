@@ -11,7 +11,14 @@ import {
   ideSessionKey,
   logger,
 } from '@haive/shared';
-import { ideTarget, targetBelongsToUser, ensureIde, type IdeTarget } from '../lib/ide-target.js';
+import {
+  ideTarget,
+  targetBelongsToUser,
+  ensureIde,
+  ideCheckoutState,
+  requireIdeCheckout,
+  type IdeTarget,
+} from '../lib/ide-target.js';
 import { editorBootstrap } from '../lib/editor-bootstrap.js';
 import { bodyLimit } from 'hono/body-limit';
 import { grantEditor, redeemEditor } from '../lib/editor-grants.js';
@@ -121,6 +128,11 @@ ideRoutes.use('*', async (c, next) => {
   const identity = await editorIdentity(c.req.header('cookie'), scope);
   if (!identity) throw new HttpError(401, 'Not authenticated');
   const user = await requireEditorUser(identity.sub, identity.tv);
+  if (!(await targetBelongsToUser(ideTarget(parsed.id, user.id, parsed.repository))))
+    throw new HttpError(404, 'Not found');
+  await requireIdeCheckout(ideTarget(parsed.id, user.id, parsed.repository), {
+    epoch: identity.checkoutEpoch ?? null,
+  });
   c.set('userId', user.id);
   await next();
 });
@@ -129,6 +141,19 @@ ideRoutes.use('*', async (c, next) => {
 export const taskIdeAccessRoutes = new Hono<AppEnv>();
 export const repoIdeAccessRoutes = new Hono<AppEnv>();
 taskIdeAccessRoutes.post('/:id/editor-handshake', requireAuth, (c) => grantEditor(c));
+for (const [router, repository] of [
+  [taskIdeAccessRoutes, false],
+  [repoIdeAccessRoutes, true],
+] as const) {
+  router.get('/:id/interactive-status', requireAuth, async (c) => {
+    const id = c.req.param('id');
+    if (!isCanonicalUuid(id)) throw new HttpError(404, 'Not found');
+    const target = ideTarget(id, c.get('userId'), repository);
+    if (!(await targetBelongsToUser(target))) throw new HttpError(404, 'Not found');
+    c.header('Cache-Control', 'no-store');
+    return c.json(await ideCheckoutState(target));
+  });
+}
 repoIdeAccessRoutes.post('/:id/editor-handshake', requireAuth, (c) => grantEditor(c, true));
 repoIdeAccessRoutes.post('/:id/ensure-ide', requireAuth, async (c) => {
   const id = c.req.param('id');
@@ -277,6 +302,8 @@ export function installIdeWebSocket(server: Server): void {
           rejectUpgrade(socket, 403, 'Forbidden');
           return;
         }
+        await requireIdeCheckout(target, { epoch: auth.checkoutEpoch ?? null });
+        if (auth.session.revoked) return;
         // Bring the IDE container up before bridging (worker-only). Coalesced per
         // task; on timeout reject so the editor's reconnect retries once a slow
         // first-launch image pull finishes in the background.
@@ -294,8 +321,16 @@ export function installIdeWebSocket(server: Server): void {
           return;
         }
         if (auth.session.revoked) return;
-        proxyWsUpgrade(req, socket, head, target, auth.session);
+        await requireIdeCheckout(target, { epoch: auth.checkoutEpoch ?? null });
+        if (auth.session.revoked) return;
+        proxyWsUpgrade(req, socket, head, target, auth.session, {
+          epoch: auth.checkoutEpoch ?? null,
+        });
       } catch (err) {
+        if (err instanceof HttpError) {
+          rejectUpgrade(socket, err.status, 'Editor checkout unavailable; reopen from Haive');
+          return;
+        }
         log.error({ err, path: rawUrl.split(/[?#]/)[0] }, 'ide upgrade handler failed');
         rejectUpgrade(socket, 500, 'Internal Server Error');
       }
@@ -354,6 +389,7 @@ function proxyWsUpgrade(
   head: Buffer,
   target: IdeTarget,
   session: UpgradeSession,
+  checkout: { epoch: string | null },
 ): void {
   const taskId = target.sessionId;
   const prefix = target.prefix;
@@ -383,9 +419,10 @@ function proxyWsUpgrade(
 
   session.onRevoke(() => teardown('session revoked', false));
 
-  upstream.on('connect', () => {
+  upstream.on('connect', async () => {
     try {
-      if (session.revoked) return;
+      await requireIdeCheckout(target, checkout);
+      if (closed || session.revoked) return;
       const lines = [`${req.method ?? 'GET'} ${strippedPath} HTTP/1.1`];
       const incoming = new Headers();
       for (const [name, value] of Object.entries(req.headers)) {
@@ -411,6 +448,11 @@ function proxyWsUpgrade(
       void acquireIdeSession(taskId);
       log.info({ taskId, host }, 'ide ws bridge connected');
     } catch (err) {
+      if (err instanceof HttpError) {
+        rejectUpgrade(socket, err.status, 'Editor checkout unavailable; reopen from Haive');
+        teardown('checkout unavailable at attach', false);
+        return;
+      }
       teardown(`upgrade request failed: ${err instanceof Error ? err.message : String(err)}`);
     }
   });

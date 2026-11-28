@@ -45,6 +45,7 @@ import { extractBundleItemId } from '../../_custom-bundle-loader.js';
 import { retireInstallManifest } from '../../_retire-install-manifest.js';
 import { resolveRenderContext, unionExpandedFor } from '../../_upgrade-render.js';
 import {
+  failIfCheckoutUnavailable,
   failIfColumnStale,
   ProjectStateImportDeferredError,
   lockProjectState,
@@ -1101,7 +1102,7 @@ export const upgradeRollbackStep: StepDefinition<RollbackDetect, RollbackOutput>
           })
           .from(schema.repositories)
           .where(eq(schema.repositories.id, detected.repositoryId))
-          .for('update');
+          .for('no key update');
         const applicableExpanded = await unionExpandedFor(tx, {
           repositoryId: detected.repositoryId,
           userId: ctx.userId,
@@ -1130,6 +1131,7 @@ export const upgradeRollbackStep: StepDefinition<RollbackDetect, RollbackOutput>
       }
     } catch (err) {
       failIfColumnStale(err);
+      failIfCheckoutUnavailable(err);
       recordWrite = err instanceof ProjectStateImportDeferredError ? 'deferred' : 'failed';
       const message = safeErrorMessage(err);
       if (err instanceof ProjectStateImportDeferredError) {

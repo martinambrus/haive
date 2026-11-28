@@ -819,14 +819,82 @@ id (`integration.github_client.update`, whose user secret joins the transaction 
 service's `executor`); "Use as connection" and every sign-in (`integration.connection.create`,
 `.reconnect`; a forge sign-in's Git credential, connection and row are one transaction); the
 write switch (`integration.write_switch`); a repository's allow-list (`repository.integrations.update`);
-and a repository's remote and its credential binding (`repository.remote.update`). The relink holds the
-repository row `FOR NO KEY UPDATE`, which still serializes it with another relink and with the settings
-routes' `FOR UPDATE` but does not block a new task's foreign-key insert while its git calls run; the wait for
-that row is bounded (`boundedLockWait`), so a relink behind another answers 409 busy before any audit row or
-git write. The general repository settings, tooling save, allow-list save and delete each bound their
-own row take too; the allow-list key and the delete's task-creation key have their own bounds. These
-waits are per statement, not one deadline for the whole request. Implicit row writers and worker
-`FOR UPDATE` takes still wait behind the relink's git work (T516). It inserts the audit row, changes git, then writes the column. Its `credentialsId` keeps the saved credential when omitted, binds the named one when given (both fit-checked against the new URL) and clears the binding when `null` (no fit check); the web "Change remote" dialog defaults to keeping it. Each git call is cut at 10 s with
+and a repository's remote and its credential binding (`repository.remote.update`).
+
+Relink, intent recording and reconciliation take the per-repository
+`remote-relink:<id>` advisory transaction key through `boundedLockWait` **before** any repository
+row. Relink and reconciliation hold `FOR KEY SHARE` across Git, excluding deletion without
+blocking ordinary non-key UPDATEs or child foreign-key checks. Only their final locked reread
+uses bounded `FOR NO KEY UPDATE`. The sweep tries the advisory key without waiting, then uses
+`SKIP LOCKED` for its initial row read. A request key/row timeout answers 409 busy; these are
+per-statement waits, not a whole-request deadline.
+
+The relink inserts its required audit before Git. Under the final writer lock it compares the
+intent token, remote URL and checkout paths, plus credentials and branch only when supplied,
+with its original read. A mismatch refuses, undoes Git and retains repair intent: the undo's
+old snapshot may differ from the concurrently committed remote. The comparison also proves
+that the audit's fields, `credentialsChanged` and `branchChanged` still describe the locked
+row. Omitted credentials are fit-checked again against the final row and never written back;
+omitted branch and every unrelated column likewise keep concurrent writes. Reconciliation
+compares its token, remote and checkout paths before clearing intent, retaining it on a race.
+
+Settings, tooling (including CLI-target removal), allow-list, legacy mirror import, onboarding
+applicable-set writes, upgrade apply/rollback, RAG scope and review-watermark writers use
+`FOR NO KEY UPDATE`: they change no referenced key, still exclude each other's writes and
+remain compatible with relink's Git hold. The project-state writer already uses that strength.
+Deletion retains bounded `FOR UPDATE` because it must exclude child inserts and remove the row.
+The shared onboarding/upgrade admission helper retains its existing bounded `FOR UPDATE`
+(through API admission, worker revival and dead revival), preserving its admission exclusion;
+it can still answer busy during Git. Residual 409: delete and onboarding/upgrade admission
+(including Retry/revival) can hold the task-creation key while their FOR UPDATE waits behind
+relink KEY SHARE, so a concurrent Task Start can still answer 409 busy at its shorter 5 s bound.
+Task Start can also refuse T780's live checkout mutation lease; a compatible project-state
+writer no longer holds its task key waiting on relink Git.
+
+Every advisory key built from an id a client can spell (a route parameter, or a job payload copied
+from one) takes it through `canonicalUuid` (`@haive/database`), the lowercase 8-4-4-4-12 form.
+PostgreSQL reads a uuid in any case, in braces, and with hyphens omitted or after any group of four
+digits, so such an id keyed as written takes a different lock than the printed id of the same row
+and two writers each believe they hold the exclusion. The sinks: `remoteRelinkKey`, `lockRepositoryTasksKey`
+(`onboarding-upgrade:`), `withTaskAttachmentsLock`, `lockPlanMerge`, `lockPlanPatch` and
+`tryLockPlanPatch`, `lockTaskIntegrations` and `tryLockTaskIntegrations`, the allow-list save
+(`integration-allow-list:`), the project-state key (`lockProjectState` and the tooling route),
+`lockPlanMirror`, the `cli-sandbox:` fence and `module-source:`. A canonical id keys exactly the
+text it keyed before, so old and new processes share one key during a rollout. A new key built from
+an id a client can spell takes the same step. Keys built from names, paths or constants are not
+uuids, and keys built from an id read from the database or a signed token already hold the printed
+form; both are untouched.
+
+The same step covers what a spelling reaches outside an advisory key. `ragSyncLockKey`
+(`@haive/shared/rag`, the `haive:rag-sync:` lock) canonicalizes, since the api holds a route
+parameter and the worker a database id. A route that already read the row builds from `row.id`
+(PostgreSQL prints the lowercase form), never from the parameter: the task attachment routes'
+uploads directory and stored paths (`requireOwnedTask`, `resolveTaskUploadsDir`), the job ids and
+payloads of the browser-access, merge abort/undo/resync and module-source fetch routes, and the
+module-source delete's token secret key and the audit target of its delete and fetch (a delete through
+an upper-case id once left `module_source:<id>:token` behind).
+`enqueueCheckoutSync` and `enqueuePlanMirrorRefresh` take a route parameter or a body id from many
+callers, so they use `canonicalUuid` in the helper. The browser-VNC bridge needs no step:
+`extractTaskId` admits only the canonical form and answers 404 before any read to another, so its
+runner names and `ensure-<id>` job id already have one spelling. An attachment row stored under another spelling
+before this stays refused (404, or 409 "not in a recognised layout" on delete), as it already was
+under the canonical one. Other ids built from a spelling, such as the `ensure-ide-` job id
+(`ideTarget`, `lib/ide-target.ts`), are not covered.
+
+Lock order: mutation-lease acquisition/release uses separate short row-update transactions;
+none holds a row while acquiring a key. Relink/intent/repair and gate-4 origin persistence use
+remote key → row and acquire no task-creation, project-state or allow-list key afterward.
+Gate 4 opens its own transaction with no outer task/domain key; credential validation and
+audit insertion acquire no advisory key. The shared `remoteRelinkKey` in `@haive/database`
+defines the key text for API and worker. Existing writers keep task key →
+domain key → row (or their existing subset), and deletion keeps task key → row. The repository
+delete and the CLI-target removal read the owner's row without a lock before their keys, so a caller
+who does not own the repository never queues on them. No holder of
+a row waits for the new remote key. The final KEY SHARE → NO KEY UPDATE upgrade adds no
+reverse key edge. RAG Retry's post-commit restore remains bounded and can now pass during Git;
+`forceRagReembed` retains its pre-existing cross-relink limitation.
+
+Its `credentialsId` keeps the saved credential when omitted, binds the named one when given (both fit-checked against the new URL) and clears the binding when `null` (no fit check); the web "Change remote" dialog defaults to keeping it. Each git call is cut at 10 s with
 SIGTERM, and with SIGKILL only if the child is still alive 2 s later: git removes its `config.lock` on
 SIGTERM and leaves it on SIGKILL (MEASURED with git 2.43.0 and 2.54.0), and a left lock fails every later write to that config. The route
 puts git's remote back when the transaction fails: inside the transaction for a failure its callback sees (a
@@ -856,19 +924,22 @@ row lock, a typed URL or chosen credential that differs from a saved one refuses
 (`pushed:false`, nothing written, no audit row) and points to "Change remote" on the Repositories
 page; a value the form only displayed from the detect snapshot never fills a slot cleared since. A row that already
 has a remote, with an origin in the checkout, makes the push a one-off: no row lock, no write, and
-the selected credential is used for that push only. Otherwise it takes a bounded `FOR NO KEY UPDATE` lock,
-re-checks the row under it, and follows the relink's order: `repository.remote.update` row
-(source `gate4_push`), an add-only `ensureOrigin` when the checkout has no origin, then the column
-write, which also binds the selected credential when one was chosen. It removes only an origin it
-added, on a callback or commit failure, after an in-flight callback settles; a failed restore is
+the selected credential is used for that push only. Otherwise it takes the same `remote-relink:<id>`
+advisory transaction key as relink, then `FOR NO KEY UPDATE`, both under the existing LOCAL lock
+timeout. It re-checks the row, inserts the `repository.remote.update` audit row
+(source `gate4_push`), runs add-only `ensureOrigin` when the checkout has no origin, then writes the
+columns, binding the selected credential when one was chosen. It removes only an origin it
+added, on a callback or commit failure, after an in-flight callback settles. Callback-failure
+undo retains the remote key through Git, excluding relink; a commit/connection-failure undo
+can run after lock release and retains the existing late-restore race. A failed restore is
 the reported failure. Each git call is aborted after 10 s; the worker's abort sends SIGTERM to the
 git process group and SIGKILL 1 s later (the relink waits 2 s), so a killed git can still leave a
 `config.lock`. A Retry after a failed row write repairs the row from the checkout's origin, under
 the lock and without touching git, but only when that origin still matches the one the form showed;
 a changed origin is refused before any credential or row write, matching `taskRemoteUrl`'s rule that
 a push approval binds to the address the user saw. Retries and matching values add no duplicate
-audit row. A lock wait that times out fails the step with the database's message (the worker has no
-409 mapping).
+audit row. A key or row wait that times out keeps the existing step failure:
+`Repository is busy. Retry this step in a moment.` The worker has no HTTP 409 mapping.
 
 Disconnect (`integration.connection.disconnect`) is the one exception, on purpose: its row follows
 the vendor revoke, which cannot be undone and whose outcome (`revoked`) the row records, so it stays

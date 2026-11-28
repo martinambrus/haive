@@ -44,6 +44,7 @@ const { TerminalSessionManager } = await import('../src/terminal/terminal-sessio
 function manager() {
   const db = {
     query: {
+      repositories: { findFirst: async () => ({ id: 'repo-1', status: 'ready' }) },
       tasks: {
         findFirst: async () => ({
           id: 'task-1',

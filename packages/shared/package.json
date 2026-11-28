@@ -7,6 +7,10 @@
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "exports": {
+    "./ollama-url": {
+      "types": "./dist/ollama-url.d.ts",
+      "import": "./dist/ollama-url.js"
+    },
     "./checkout-access": {
       "types": "./dist/checkout-access.d.ts",
       "import": "./dist/checkout-access.js"
@@ -214,6 +218,10 @@
     "./house-rule-render": {
       "types": "./dist/global-kb/house-rule-render.d.ts",
       "import": "./dist/global-kb/house-rule-render.js"
+    },
+    "./usage-window": {
+      "types": "./dist/cli-providers/usage-window.d.ts",
+      "import": "./dist/cli-providers/usage-window.js"
     },
     "./claude-oauth": {
       "types": "./dist/cli-providers/claude-oauth.d.ts",

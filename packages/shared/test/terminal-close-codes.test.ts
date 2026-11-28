@@ -10,6 +10,7 @@ it('pins terminal refusal codes without colliding with login banner codes', () =
     REPO_READ_ONLY: 4423,
     REPO_NOT_READY: 4424,
     PROVIDER_DISABLED: 4425,
+    REPOSITORY_REBUILT: 4426,
   });
   expect(constants.CLI_LOGIN_CLOSE_CODES).toEqual({
     AUTH_BUSY: 4409,

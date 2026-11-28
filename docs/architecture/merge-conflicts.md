@@ -102,18 +102,65 @@ left. The following rules keep it that way, each MEASURED on git 2.43 and 2.54:
   with the merge commit's sha (`squashMergeSha`) ahead of any reset, so a crash between the reset and
   the commit re-enters it. `squashMergeCommit` decides in a fixed
   order, on parents, trees and ancestry only: a feature already contained in the base tip recorded
-  at the first open (`baseShaBefore`) has nothing to squash, unless `ORIG_HEAD` or HEAD shows this
-  merge's interrupted squash (a two-parent commit on that tip, or the recorded merge), which goes to
+  at the first open (`baseShaBefore`) has nothing to squash, unless the recorded merge, `ORIG_HEAD`
+  or HEAD shows this merge's interrupted squash (a two-parent commit on that tip), which goes to
   the proofs below instead; HEAD at that tip is a reset already
-  made, committed only when `ORIG_HEAD` is the recorded merge commit (or, for a row saved without
-  one, a merge of base and feature) with the staged tree; HEAD with that tip as its one parent is a
-  squash already made, accepted on the same proof against its tree. A feature branch that moved
-  after the merge does not break either proof;
+  made, committed only when the recorded merge commit has that base as its first parent and
+  matches the staged tree (a legacy row without a recorded sha requires `ORIG_HEAD` to prove a
+  merge of base and feature); HEAD with that tip as its one parent is a squash already made,
+  accepted on the same proof against its tree. A recorded merge sha suffices when `ORIG_HEAD`
+  is missing or overwritten: a crash after the soft reset resumes the commit, and a crash after
+  the commit accepts it without resetting or recommitting. Parent and tree mismatches still halt.
+  A feature branch that moved after the merge does not break either proof;
   HEAD as the feature's merge is reset and recommitted unless its tree equals the base's. An
   unproven reset or squash halts the step with its claim kept. Otherwise (a person's commit on
   top of the merge, a moved base, an empty net diff) it keeps the merge commit and records why
   (`squashSkipReason`, shown by `12-worktree-cleanup`), so a squash never folds in a commit that is
   not the merge's own.
+  A stop after git landed a clean feature merge and before its section saved would replay with the
+  landed tip as `baseShaBefore`: no squash (unsquashed history pushed), no `merge.landed`, the merge
+  as the undo point. So step 12 (`squashable`) saves the base tip as `preMergeBaseSha` in a section of
+  its own ahead of the merge, while `baseShaBefore` is unset. A replay keeps it only when HEAD is that
+  tip, or a merge whose first parent is that tip and second parent is inside the feature, with the
+  whole feature in HEAD (parents and ancestry, never the message); `baseShaBefore` takes it, the
+  merge is a no-op, and the squash and both landed events come out as in a run without a stop.
+  Any other tip (a person's commit on top, a hand merge, a feature that moved on) is measured
+  afresh, as before; when a recorded tip differs from it, it already holds the feature and a squash
+  was asked for, the history is kept and `squashSkipReason` says why (a first pass has no record, so
+  a tip that moved before it is judged as it always was). Only a read that shows another tip measures
+  afresh: a git error in the proof (the parents of HEAD, the feature tip, the ancestry) throws and
+  keeps the record, since measuring the landed merge as the base would lose the true one for every
+  later retry. Every halt that merged nothing (refused, set aside, held, unaborted, files not put
+  back, plan base unread, merge directory held by another task, the early ones included) drops the
+  record while HEAD is still the recorded tip, ahead of its own status write, so a merge a person
+  makes on that tip before the retry is never read as this step's. One case cannot be told apart: a
+  merge of the feature on exactly the recorded tip that this step did not make looks like its own and
+  is squashed as asked. It arises from a person's hand merge between a thrown exit that left the
+  record (an error in the merge section or in the proof, a section refused as superseded, Stop,
+  cancel) and the very next attempt, and from a merge made on the forge and fast-forwarded in. No
+  content is lost and the push is not forced. The other merge steps record nothing. Controls:
+  `merge-base-recovery.test.ts`, the limitation included.
+  After a squash, cleanup deletes a feature or DAG issue branch only when its current tip is
+  contained in the recorded merge's second parent, using compare-and-delete against that tip.
+  A moved or unreadable branch, missing recorded evidence, a symbolic ref, a checkout holder or a
+  refused delete keeps the branch, with structured `branchLeftovers` output, a
+  `worktree.branch_leftovers` event and a step warning. Cleanup checks detached worktrees' own
+  `rebase-merge/head-name`, `rebase-apply/head-name` and `BISECT_START` through fs-safe under the
+  repository anchor, preserving `branch -D`'s rebase/bisect refusal. An unreadable worktree listing
+  or operation state retains the branch as `unreadable-worktrees`; it never throws out of apply
+  after the merge landed. Git has no atomic checkout-and-ref check, so a checkout or operation
+  started after the final holder read can still race deletion. Symbolic refs are refused before
+  deletion, and `update-ref --no-deref` also prevents following one introduced after that check.
+  Ref absence is checked before requiring recorded merge evidence: Retry after pruning the merge
+  object succeeds for an already-gone branch, while a junk loose ref (`rev-parse` exit 1 but
+  `show-ref --verify --quiet` exit 128) stays as `unreadable-branch`. After deletion, including an
+  already-absent ref on Retry, `git config --remove-section branch.<name>` removes upstream config;
+  exit 128 means no section and succeeds idempotently. Other config failures are reported as
+  `config-cleanup-refused`, even though the ref is gone. Leftover copy gives a human explanation
+  and repository-terminal recovery guidance; structured reason slugs stay in fields. Events record
+  observed tips and Retry appends no duplicate for the same branch and tip (legacy events without
+  tips cannot deduplicate). Legacy squash rows without a recorded merge keep existing branches.
+  No decision reads message text.
   The pre-push fetch also runs outside a section, into a ref only that pass names
   (`refs/haive/pre-push/<step>/<uuid>`, no `FETCH_HEAD`, no tags); the section then records
   `origin/<base>` from it and counts how far the base is behind, so a pass that lost the claim moves
@@ -181,7 +228,7 @@ left. The following rules keep it that way, each MEASURED on git 2.43 and 2.54:
   anything has moved nothing in the relocation throws on running out of descriptors (a throw lost
   them, and a Retry put a 0600 file back 0644): a file whose mode cannot be read is left in place
   and a path that cannot be read is not put back, both reported as leftovers, and an unread parent
-  counts as existing, so its owner is left as it is. Only the manifest probe, which runs before any move, rethrows. The commit then
+  counts as existing, so its owner is left as it is. The manifest and directory-owner probes run before any move and may rethrow. The commit then
   stages only the paths the fixer was sent to resolve, so neither a stray nor a person's own
   uncommitted work at a same-branch root is swept into it, where `add -A` took both. What a fixer
   staged itself outside those paths is put back in the index as the merge had it, byte for byte so a
@@ -204,7 +251,16 @@ left. The following rules keep it that way, each MEASURED on git 2.43 and 2.54:
   identity (whoever owns the tree, since a tree the sandbox reaches through its mode bits is accepted
   as it stands), one `diff --name-only -z` per call, and the index is refreshed since a chown moves ctime and
   `merge --abort` refuses stat data that moved; a name that is not UTF-8 stays the worker's and is
-  logged. A fast-forward of the checkout is handed back the same way from the commit before it
+  logged. Each hand-back stat is strict: a proven missing path or an fs-safe containment refusal
+  (`isPathContainmentError`, stable code `EPATHCONTAINMENT`) needs no ownership change. In
+  particular, a directory replaced by a symlink leaves no file beneath it Haive may hand back;
+  nothing is chowned through the link. Every other stat failure (including EACCES) remains unknown:
+  an unreadable path is recorded as a failed hand-back. Strict callers (projection put-back and merge Undo) throw `MERGE_HAND_BACK_FAILED` and remain retryable; ordinary callers warn. A successful
+  retry hands back the same changed paths. The fixer relocation reads the directory owner strictly
+  before any move or restore and throws `MERGE_OWNER_UNREADABLE` on failure or disappearance,
+  preserving the baseline and all fixer bytes for Retry. It never restores with an unknown owner;
+  conservative reads after a move still retain the in-memory undo, as described above.
+  A fast-forward of the checkout is handed back the same way from the commit before it
   (`handBackAfterMove`): 00a's on the checked-out branch, a repository refresh's, and a plan Pull's,
   Save's or confirm's, which their callers run after `landPlanMerge`'s transaction commits, so the
   task-creation lock covers the move only. In the checkout, Haive's projection files and their directories

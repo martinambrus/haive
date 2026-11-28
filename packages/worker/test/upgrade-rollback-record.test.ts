@@ -51,7 +51,7 @@ const UPGRADE = context({
 
 /** An upgrade that only created a file, rolled back. The repository holds the upgrade's context, the
  *  upgrade's own row (the newest, still live until the rollback retires it) and one older row. */
-async function rollback(
+async function rollbackWorld(
   older: Record<string, unknown> | null,
   installJson?: string,
   refuseRecordWrite = false,
@@ -82,6 +82,7 @@ async function rollback(
     cliProviders: schema.cliProviders,
   });
   fake.insert(schema.repositories, {
+    status: 'ready',
     id: REPO,
     userId: USER,
     name: 'acme',
@@ -179,19 +180,30 @@ async function rollback(
     else await writeFile(rulesPath, deferredRules);
   }
   const apply = () => upgradeRollbackStep.apply(ctx, { detected } as never);
-  const applied = apply();
+  return { root, exists: (rel: string) => existsSync(join(root, rel)), fake, apply };
+}
+
+/** The world, then its first apply. */
+async function rollback(
+  older: Record<string, unknown> | null,
+  installJson?: string,
+  refuseRecordWrite = false,
+  deferredRules?: string | null,
+) {
+  const world = await rollbackWorld(older, installJson, refuseRecordWrite, deferredRules);
+  const applied = world.apply();
   const out = await (older === null || deferredRules !== undefined
     ? applied
     : recordWritten(applied, { recordWriteFails: refuseRecordWrite }));
   if (older === null) expect(out.recordWrite).toBe('skipped');
   return {
-    root,
+    root: world.root,
     out,
-    exists: (rel: string) => existsSync(join(root, rel)),
-    column: fake.rows(schema.repositories)[0]!.renderContext,
-    sync: fake.rows(schema.projectStateSync),
-    fake,
-    apply,
+    exists: world.exists,
+    column: world.fake.rows(schema.repositories)[0]!.renderContext,
+    sync: world.fake.rows(schema.projectStateSync),
+    fake: world.fake,
+    apply: world.apply,
   };
 }
 
@@ -308,4 +320,39 @@ describe('04 and .haive/install.json', () => {
     expect(exists(RECORD_RENDER)).toBe(false);
     expect(exists('.haive/install.json')).toBe(true);
   });
+});
+
+describe('04 while another operation holds the checkout', () => {
+  it.each(['mutation', 'edit'] as const)(
+    'fails the apply to retry when a %s claim holds it, and the retry writes the record',
+    async (kind) => {
+      const s = await rollbackWorld(BEFORE);
+      const column = () => s.fake.rows(schema.repositories)[0]!.renderContext;
+      s.fake.patch(schema.repositories, REPO, { rootClaimedAt: new Date(), rootClaimKind: kind });
+
+      const failure = await s.apply().then(
+        () => null,
+        (err: unknown) => err,
+      );
+
+      expect(failure).toBeInstanceOf(Error);
+      expect((failure as Error).message).toContain('Retry this step');
+      // The rollback's own work stands; the record write changed nothing.
+      expect(s.exists(CREATED)).toBe(false);
+      expect(column()).toEqual({ ...UPGRADE, rtkChoiceRecorded: true });
+      expect(s.fake.rows(schema.projectStateSync)).toEqual([]);
+      expect(s.exists(RECORD_RENDER)).toBe(false);
+
+      s.fake.patch(schema.repositories, REPO, { rootClaimedAt: null, rootClaimKind: null });
+      await recordWritten(s.apply());
+
+      expect(column()).toEqual({
+        ...BEFORE,
+        cliTargets: ['claude-code'],
+        rtkChoiceRecorded: true,
+      });
+      expect(s.exists(RECORD_RENDER)).toBe(true);
+      expect(s.fake.rows(schema.projectStateSync)).toHaveLength(1);
+    },
+  );
 });

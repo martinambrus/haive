@@ -1,3 +1,10 @@
+import {
+  ComposedLspProviderLockedError,
+  ComposedLspProviderDisabledError,
+  ComposedLspWriteBusyError,
+} from '@haive/shared/composed-lsp-provider-lock';
+import { GlobalKbConfigOutcomeUnknownError } from '../lib/global-kb-config-outcome.js';
+import { GlobalKbDeadlineError, classifyGlobalKbError } from '@haive/shared/global-kb';
 import { DataEdgePlanError } from '@haive/shared/data-edge-plan';
 import { DerivedRunPlanError } from '@haive/shared/modularity';
 import { DerivedTaskAdmissionError } from '../lib/derived-errors.js';
@@ -16,6 +23,44 @@ import { isUuid } from '../lib/uuid.js';
 const INVALID_TEXT_REPRESENTATION = '22P02';
 
 export const errorHandler: ErrorHandler<AppEnv> = (err, c) => {
+  if (err instanceof GlobalKbConfigOutcomeUnknownError) {
+    logger.warn({ errorClass: err.errorClass }, 'Global KB config confirmation unavailable');
+    return c.json({ error: err.message, code: err.code, retryable: false }, 503);
+  }
+  if (err instanceof GlobalKbDeadlineError) {
+    logger.warn({ errorClass: classifyGlobalKbError(err) }, 'Global KB call timed out');
+    const retryable = ['GET', 'HEAD', 'PUT', 'PATCH', 'DELETE'].includes(c.req.method);
+    if (retryable) c.header('Retry-After', '1');
+    return c.json(
+      {
+        error: retryable
+          ? err.message
+          : 'Global KB call timed out; the operation may have completed. Check its state before trying again.',
+        code: err.code,
+        retryable,
+      },
+      503,
+    );
+  }
+  if (err instanceof ComposedLspProviderDisabledError)
+    return c.json({ error: err.message, code: err.code }, 400);
+  if (err instanceof ComposedLspProviderLockedError)
+    return c.json({ error: err.message, code: err.code }, 409);
+  if (err instanceof ComposedLspWriteBusyError) {
+    c.header('Retry-After', '1');
+    return c.json({ error: err.message, code: err.code, retryable: true }, 503);
+  }
+  if (hasPgCode(err, '40P01')) {
+    c.header('Retry-After', '1');
+    return c.json(
+      {
+        error: 'This action conflicted with another update. Retry this action.',
+        code: 'transaction_retry_required',
+        retryable: true,
+      },
+      503,
+    );
+  }
   if (err instanceof UserPostgresDsnError)
     return c.json({ error: err.message, code: err.code }, 400);
   if (err instanceof ModuleAdmissionError)

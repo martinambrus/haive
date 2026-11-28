@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import TaskDetailPage from './page';
+import { refreshUsageWindow } from '@/lib/use-usage-window';
 import {
   buttons,
   createRenderer,
@@ -48,6 +49,7 @@ const net = vi.hoisted(() => ({
   detail: {} as Record<string, unknown>,
   providers: null as unknown[] | null,
   defaultProviderId: null as string | null,
+  usageStatus: 'ok',
 }));
 
 const NOW = '2026-10-15T09:00:00.000Z';
@@ -60,6 +62,7 @@ const providerRow = (id: string, name: string, label: string) => ({
   name,
   label,
   enabled: true,
+  authMode: 'subscription',
   effortScale: null,
   createdAt: NOW,
 });
@@ -70,7 +73,7 @@ const snapshot = (providerId: string, providerName: string) => ({
   fiveHour: { usedPct: 40, resetsAt: null },
   fetchedAt: NOW,
   stale: false,
-  status: 'ok',
+  status: net.usageStatus,
 });
 
 const taskRow = (over: Record<string, unknown> = {}) => ({
@@ -467,4 +470,30 @@ it('does not restore a task CLI that the composed dispatch mirror explicitly ref
   expect(usageTitles(view)).toEqual([]);
   await cliTab(view);
   expect(upcomingPickerNone(view)).toContain(NONE_PLAIN);
+});
+
+it('header ignores a legacy needs_reconnect snapshot on an API-key Claude row', async () => {
+  net.providers = [{ ...providerRow('p-claude', 'claude-code', 'Claude'), authMode: 'api_key' }];
+  net.usageStatus = 'needs_reconnect';
+  try {
+    const view = await mount({ cliProviderId: 'p-claude', effectiveCliProviderId: 'p-claude' });
+    refreshUsageWindow();
+    for (let i = 0; i < 8; i += 1) await view.flush();
+    expect(usageTitles(view)).toEqual([]);
+    expect(
+      findAll(view.tree(), (h) => h.props.href === '/cli-providers/p-claude#usage-tracking'),
+    ).toHaveLength(0);
+    expect(
+      findAll(
+        view.tree(),
+        (h) =>
+          typeof h.props.title === 'string' &&
+          h.props.title.includes('Connect it on the CLI providers page'),
+      ),
+    ).toHaveLength(0);
+  } finally {
+    net.providers = null;
+    net.usageStatus = 'ok';
+    refreshUsageWindow();
+  }
 });

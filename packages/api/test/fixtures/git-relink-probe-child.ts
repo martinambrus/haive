@@ -1,4 +1,5 @@
 import { Hono } from 'hono';
+import { configService } from '@haive/shared';
 import { initDatabase } from '../../src/db.js';
 import { repoRoutes } from '../../src/routes/repos.js';
 import { errorHandler } from '../../src/middleware/error-handler.js';
@@ -15,6 +16,8 @@ if (
 )
   throw new Error('Use the disposable relink_test database');
 initDatabase(url!);
+// This process has no configuration store; the relink is admitted in the normal state.
+configService.getFresh = async () => 'normal';
 
 // Mount both production handlers: the mutation-claim middleware and the relink itself.
 const handlers = repoRoutes.routes.filter(

@@ -1,6 +1,6 @@
 import type { Job, Queue } from 'bullmq';
 import { CLI_EXEC_JOB_NAMES, logger } from '@haive/shared';
-import { getRedis } from '../redis.js';
+import { getPatientRedis } from '../redis.js';
 
 const log = logger.child({ module: 'boot-requeue' });
 
@@ -20,7 +20,7 @@ export function cliExecJobRequeuedAtBoot(job: { name: string }): boolean {
 }
 
 export async function countBootRequeue(key: string): Promise<number> {
-  const redis = getRedis();
+  const redis = getPatientRedis();
   const count = await redis.incr(key);
   await redis.expire(key, COUNT_TTL_S);
   return count;

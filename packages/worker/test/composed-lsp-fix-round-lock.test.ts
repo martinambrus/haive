@@ -120,3 +120,26 @@ describe('next fix round CLI on a composed-LSP task', () => {
     expect(await options(1)).toEqual([CLAUDE, CODEX].sort());
   });
 });
+
+it('an advisory option becoming stale is refused by the transactional writer', async () => {
+  const fake = setup(1);
+  const providers = fake.rows(schema.cliProviders) as unknown as CliProviderRecord[];
+  expect(
+    (
+      await fixRoundOptionProviders(
+        fake.db as unknown as Database,
+        USER,
+        TASK,
+        providers,
+        phase2ImplementStep,
+      )
+    ).map((p) => p.id),
+  ).toContain(CODEX);
+  fake.patch(schema.envTemplates, TEMPLATE, { declaredDeps: { lspInstallContractVersion: 2 } });
+  await expect(
+    fake.db.transaction((tx) =>
+      recordFixRoundCliChoice(tx as unknown as Database, USER, TASK, phase2ImplementStep, 2, CODEX),
+    ),
+  ).rejects.toBeInstanceOf(FixRoundCliLocked);
+  expect(fake.rows(schema.taskStepCliChoices)).toEqual([]);
+});

@@ -1,3 +1,9 @@
+import {
+  CHECKOUT_IDENTITY_LABEL,
+  checkoutIdentity,
+  runnerCheckoutMatches,
+} from './checkout-identity.js';
+import { withSubpathInteractiveCheckout } from '../repo/interactive-checkout.js';
 import { requireRunnerPresence, RunnerProbeError } from './runner-probe.js';
 import { execFile, spawn } from 'node:child_process';
 import { readFile, type FileHandle } from 'node:fs/promises';
@@ -335,6 +341,7 @@ export async function startDdevRunner(params: {
   bootScope?: DdevBootScope;
 }): Promise<DdevRunnerHandle> {
   params.bootScope?.throwIfAborted();
+  const identity = await checkoutIdentity(params.repoSubpath);
   const tag = await ensureDdevRunnerImage(params.bootScope?.signal);
   params.bootScope?.throwIfAborted();
   const name = runnerName(params.taskId);
@@ -460,6 +467,8 @@ export async function startDdevRunner(params: {
         'haive.ddev=1',
         '--label',
         `${RUNNER_SUBPATH_LABEL}=${params.repoSubpath}`,
+        '--label',
+        `${CHECKOUT_IDENTITY_LABEL}=${identity}`,
         ...limitArgs,
         ...weightArgs,
         ...publish,
@@ -2120,7 +2129,11 @@ async function runnerDockerdUp(name: string): Promise<boolean> {
   }
 }
 
-async function probeDdevRecovery(
+/** How to bring the task's runner up, from definite answers only: container presence, workspace
+ *  label, the project's structured status and the nested dockerd, never ddev's wording. Exported
+ *  for the ddev-control restart, which recovers a failed restart unless this says `reuse`. A probe
+ *  with no answer throws RunnerProbeError. */
+export async function probeDdevRecovery(
   existing: DdevRunnerHandle,
   repoSubpath: string,
 ): Promise<DdevRecovery> {
@@ -2262,40 +2275,42 @@ export async function ensureDdevStarted(
     onReady?: (handle: DdevRunnerHandle) => Promise<void>;
   } = {},
 ): Promise<DdevRunnerHandle> {
-  // Coalesce concurrent boots of the SAME task into one. An interactive 08a apply
-  // and the VNC runtime-ensure job can both call this at once; two startDdevRunner
-  // calls would then collide on the fixed container name (`docker run --name`
-  // conflict) and fail the loser. The first call's in-flight promise serves both.
-  let configured = false;
-  const handle = await ddevBoots.ensure(
-    taskId,
-    opts.signal,
-    (signal) =>
-      withDdevBootCancellation(
-        signal,
-        async (id) => {
-          opts.onProgress?.('Removing the incomplete DDEV startup…');
-          await exec('docker', ['rm', '-f', '-v', id], { timeout: 90_000 });
-        },
-        async (scope) => {
-          const bootOpts = { ...opts, signal };
-          let handle = await ensureDdevStartedInner(taskId, repoSubpath, bootOpts, scope);
-          scope.throwIfAborted();
-          handle = await reconcileDdevAccess(taskId, repoSubpath, handle, bootOpts, scope);
-          scope.throwIfAborted();
-          // Keep cancellation armed through debugging/database wiring, including its restart.
-          await opts.onReady?.(handle);
-          configured = true;
-          scope.throwIfAborted();
-          return handle;
-        },
-      ),
-    repoSubpath,
-  );
-  // A successful coalesced caller still performs its own optional wiring.
-  if (!configured) await opts.onReady?.(handle);
-  if (opts.signal?.aborted) throw new DdevBootAbortedError();
-  return handle;
+  return withSubpathInteractiveCheckout(repoSubpath, async () => {
+    // Coalesce concurrent boots of the SAME task into one. An interactive 08a apply
+    // and the VNC runtime-ensure job can both call this at once; two startDdevRunner
+    // calls would then collide on the fixed container name (`docker run --name`
+    // conflict) and fail the loser. The first call's in-flight promise serves both.
+    let configured = false;
+    const handle = await ddevBoots.ensure(
+      taskId,
+      opts.signal,
+      (signal) =>
+        withDdevBootCancellation(
+          signal,
+          async (id) => {
+            opts.onProgress?.('Removing the incomplete DDEV startup…');
+            await exec('docker', ['rm', '-f', '-v', id], { timeout: 90_000 });
+          },
+          async (scope) => {
+            const bootOpts = { ...opts, signal };
+            let handle = await ensureDdevStartedInner(taskId, repoSubpath, bootOpts, scope);
+            scope.throwIfAborted();
+            handle = await reconcileDdevAccess(taskId, repoSubpath, handle, bootOpts, scope);
+            scope.throwIfAborted();
+            // Keep cancellation armed through debugging/database wiring, including its restart.
+            await opts.onReady?.(handle);
+            configured = true;
+            scope.throwIfAborted();
+            return handle;
+          },
+        ),
+      repoSubpath,
+    );
+    // A successful coalesced caller still performs its own optional wiring.
+    if (!configured) await opts.onReady?.(handle);
+    if (opts.signal?.aborted) throw new DdevBootAbortedError();
+    return handle;
+  });
 }
 
 async function ensureDdevStartedInner(
@@ -2346,6 +2361,17 @@ async function ensureDdevStartedInner(
   }
 
   const existing = runnerHandleForTask(taskId, repoSubpath);
+  const presence = await requireRunnerPresence(existing.container);
+  if (
+    presence.state === 'present' &&
+    !(await runnerCheckoutMatches(existing.container, repoSubpath, { onUnknown: 'retry' }))
+  ) {
+    if (presence.running)
+      await exec('docker', ['stop', '--time', '10', existing.container], { timeout: 30_000 });
+    await exec('docker', ['rm', '-v', existing.container], { timeout: 90_000 });
+    if ((await requireRunnerPresence(existing.container)).state !== 'absent')
+      throw new RunnerProbeError(existing.container, new Error('Old DDEV runner remains'));
+  }
   const recovery = await probeDdevRecovery(existing, repoSubpath);
   scope.throwIfAborted();
 

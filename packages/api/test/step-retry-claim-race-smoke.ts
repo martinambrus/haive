@@ -419,8 +419,8 @@ async function main(): Promise<void> {
 
     // 5b. A row created after the Retry took its rows is not held by it. When a pass has activated
     //     one and is still writing it as the Retry's bump lands, the sweep after the bump cannot
-    //     take the row without waiting for a pass that waits for the task row: the Retry answers
-    //     503 and changes nothing.
+    //     take the row without waiting for a pass that waits for the task row: the Retry waits
+    //     at most 250 ms per lock, then answers 503 and changes nothing.
     await db
       .update(schema.taskSteps)
       .set({ status: 'failed', errorMessage: 'kaboom once more', endedAt: now })
@@ -455,11 +455,11 @@ async function main(): Promise<void> {
     });
     await taskHeldAgain.release();
     // This script lets go of the row only once the Retry has answered, so a Retry that waited for it
-    // instead of refusing would wait for good: fail the check rather than hang.
+    // without its bound would wait for good: fail the check rather than hang.
     const refused = await Promise.race([action, sleep(10_000).then(() => null)]);
     await releaseRowLock();
     res = refused ?? (await action);
-    check('the Retry does not wait for the pass writing the row', refused !== null);
+    check('the Retry bounds its wait for the pass writing the row', refused !== null);
     check(
       'a Retry whose sweep meets a row created after its rows were taken and being written answers 503',
       res.status === 503,

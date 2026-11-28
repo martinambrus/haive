@@ -1,4 +1,6 @@
+import { REDIS_UNAVAILABLE_CODE } from '../constants/index.js';
 import { randomUUID } from 'node:crypto';
+import { canonicalUuid } from '@haive/database';
 import type { Redis } from 'ioredis';
 import { logger } from '../logger/index.js';
 
@@ -8,7 +10,7 @@ const log = logger.child({ module: 'rag-sync-lock' });
 const LOCK_TTL_MS = 120_000;
 const HEARTBEAT_MS = 30_000;
 const POLL_MS = 5_000;
-/** The worker's shared Redis client queues commands forever while Redis is stalled; no lock command waits longer. */
+/** Bounds lock commands even when the supplied client has no command deadline. */
 const COMMAND_TIMEOUT_MS = 5_000;
 
 const REFRESH_SCRIPT = `
@@ -76,11 +78,13 @@ export interface AcquireRagSyncLockOptions extends RagSyncLockTuning {
   waitMs: number;
   pollMs?: number;
   signal?: AbortSignal;
-  onWait?: () => void;
+  onWait?: (reason: 'held' | typeof REDIS_UNAVAILABLE_CODE) => void;
 }
 
+/** One key per repository however the caller spells its id: the api holds a route parameter, the
+ *  worker a database id, and PostgreSQL reads both as the same row. */
 export function ragSyncLockKey(repositoryId: string): string {
-  return `haive:rag-sync:${repositoryId}`;
+  return `haive:rag-sync:${canonicalUuid(repositoryId)}`;
 }
 
 function bounded<T>(op: Promise<T>, timeoutMs: number, signal?: AbortSignal): Promise<T> {
@@ -190,15 +194,21 @@ export async function acquireRagSyncLock(
   for (;;) {
     if (signal?.aborted) throw new RagSyncLockAbortedError();
     let got: RagSyncLock | null = null;
+    let reason: 'held' | typeof REDIS_UNAVAILABLE_CODE = 'held';
     try {
       got = await attempt(redis, repositoryId, options, signal);
     } catch (err) {
-      if (!(err instanceof RagSyncLockCommandTimeoutError)) throw err;
+      if (
+        !(err instanceof RagSyncLockCommandTimeoutError) &&
+        (err as { code?: unknown } | null)?.code !== REDIS_UNAVAILABLE_CODE
+      )
+        throw err;
+      reason = REDIS_UNAVAILABLE_CODE;
       log.warn({ err, repositoryId }, 'RAG sync lock attempt got no answer; retrying');
     }
     if (got) return got;
     if (Date.now() - startedAt >= waitMs) throw new RagSyncLockTimeoutError(waitMs);
-    onWait?.();
+    onWait?.(reason);
     await new Promise<void>((resolve) => {
       const timer = setTimeout(done, pollMs);
       function done(): void {

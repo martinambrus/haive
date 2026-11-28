@@ -13,7 +13,10 @@ import { CORE_COMPOSABLE_STEPS } from '../src/step-engine/composable-core.js';
 import { stepRegistry } from '../src/step-engine/registry.js';
 import { syncStepCatalog } from '../src/step-engine/step-catalog.js';
 
-vi.mock('../src/redis.js', () => ({ getRedis: () => ({ set: async () => 'OK' }) }));
+vi.mock('../src/redis.js', () => ({
+  getRedis: () => ({ set: async () => 'OK' }),
+  getPatientRedis: () => ({ set: async () => 'OK' }),
+}));
 
 const url = process.env.STEP_CATALOG_TEST_URL;
 if (url && !new URL(url).pathname.startsWith('/step_catalog_test'))

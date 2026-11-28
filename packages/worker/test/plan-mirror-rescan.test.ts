@@ -6,6 +6,7 @@ import { schema, type Database } from '@haive/database';
 import { createFakeDb } from '@haive/database/testing';
 import { HAIVE_DATA_FILES } from '@haive/shared';
 import { syncProjectStateFromCheckout } from '../src/project-state/sync.js';
+import * as plan from '@haive/shared/plan';
 import { importPlanMirror } from '../src/plan/mirror.js';
 import { persistDetection } from './support/repo-preparation.js';
 
@@ -36,6 +37,8 @@ const MIRROR = {
 
 const dirs: string[] = [];
 beforeEach(() => {
+  // Advisory contention is covered by the PostgreSQL suite; this fake tests import outcomes.
+  vi.spyOn(plan, 'tryLockPlanPatch').mockResolvedValue(true);
   vi.mocked(syncProjectStateFromCheckout).mockResolvedValue({ outcome: 'unchanged' } as never);
 });
 afterEach(async () => {
@@ -64,7 +67,7 @@ function repository(opts: { hasPlan?: boolean } = {}) {
     userId: USER,
     name: 'acme',
     source: 'blank',
-    status: 'cloning',
+    status: 'ready',
   });
   if (opts.hasPlan) {
     fake.insert(schema.planNodes, {

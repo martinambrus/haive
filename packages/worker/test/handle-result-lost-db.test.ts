@@ -20,6 +20,7 @@ import {
   handleResult,
   processTaskJob,
   markTaskCancelled,
+  markTaskFailed,
   setContainerCleanupRunner,
 } from '../src/queues/task-queue.js';
 import type { ResolvedTaskContext } from '../src/queues/run-list.js';
@@ -1512,12 +1513,7 @@ describe.skipIf(!url)('a hand-off write that loses its row or task says so, on P
   ];
 
   describe.each(TASK_SITES)('$name: the pass lost its task', (site) => {
-    // The function fails a task with writeTaskFailed, which refuses a cancelled or completed task
-    // and a moved epoch but not one that already failed.
-    const causes = TASK_CAUSES.filter(
-      (cause) => cause.reason !== 'task_failed' || site !== FIX_TARGET_SITE,
-    );
-    it.each(causes)('$reason (info): $what', async (cause) => {
+    it.each(TASK_CAUSES)('$reason (info): $what', async (cause) => {
       const c = await open(site);
       if (cause.afterCheck) afterEpochCheck(() => cause.land(c));
       else await cause.land(c);
@@ -1532,6 +1528,24 @@ describe.skipIf(!url)('a hand-off write that loses its row or task says so, on P
       });
     });
   });
+
+  it.each([undefined, E])(
+    'keeps an ended task unchanged when failure is requested at epoch %s',
+    async (epoch) => {
+      for (const status of ['failed', 'cancelled', 'completed'] as const) {
+        const taskId = await makeTask({
+          status,
+          errorMessage: 'original failure',
+          completedAt: new Date('2026-11-01T00:00:00Z'),
+        });
+        const read = () => db.query.tasks.findFirst({ where: eq(schema.tasks.id, taskId) });
+        const before = await read();
+        expect(await markTaskFailed(db, taskId, 'late failure', epoch)).toBe(false);
+        expect(await read()).toEqual(before);
+        expect(await eventTypes(taskId)).toEqual([]);
+      }
+    },
+  );
 
   describe('a row or task that is gone, or a loss nothing explains (warn)', () => {
     it('waiting_form_row -> task_gone: the task was deleted after the epoch check, its row with it', async () => {

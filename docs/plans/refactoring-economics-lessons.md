@@ -1,9 +1,10 @@
 # What "The Economic Benefit of Refactoring" offers Haive: what agents read, and refactors measured by it
 
 > Implementation review: 2026-11-12 against `3426c8c34`; corrections are folded into the relevant sections.
-> **In progress** 2026-11-16. The recording tranche of P0 is implemented: tally feeds, paths,
-> versioned records and a convergent backfill. Statistics is pending. The original measurement
-> scripts and output are unavailable, so the same-population reproduction remains unverified.
+> **In progress** 2026-11-28. P0 is built: the recording tranche (tally feeds, paths, versioned
+> records and a convergent backfill) and the statistics tranche (the "Files read" card; its browser
+> check is owed). The original measurement scripts and output are unavailable, so the
+> same-population reproduction remains unverified.
 > Initially assessed 2026-10-17. One source: Giles Edwards-Alexander, "The Economic Benefit of
 > Refactoring", martinfowler.com (Exploring Gen AI), 30 July 2026. Four items, turned into phases.
 > Later phases remain undecided. P0 gates the rest: without a record of what agents read there is no hotspot
@@ -116,13 +117,16 @@ in context. Per repository: the files that cost the most, and which steps pay fo
   while later rows continue; an empty first page skips the count. Existing usage fields are preserved; a compare-and-swap lets concurrent writes win.
   No token usage or cost snapshot is rewritten. An elided transcript retains raw character floors
   but has unknown weighted exposure.
-- **Statistics.** A "Files read" section on the existing lazy tool-usage tab
-  (`/m/statistics/tool-usage`), which already pays for `tool_usage` rows. Per repository (the repo
-  facet), ranked by weighted tokens: path, reads, runs, tasks, estimated weighted tokens, and share
-  of the repository's file-read tokens, plus each step's file-read share of its prompt tokens. A
-  share's denominator is exact `token_usage` and counts only runs with `resultSeen` (M5). The
-  estimate is labelled as characters / 4 beside the exact totals. `RankedBars`, n on every row,
-  `n=` under `MIN_SAMPLES_FOR_TREND`, a dash where nothing is observable.
+- **Statistics.** Built: a "Files read" card on the lazy Tools tab, served by its own endpoint
+  `GET /m/statistics/files-read` rather than from `/tool-usage`, so it has its own request and
+  failure and the existing payload is untouched. A repository is required: paths of different
+  repositories are not comparable. Ranked by weighted tokens: path, reads, runs, tasks, estimated
+  weighted tokens, and share of the repository's file-read tokens, plus each step's file-read share
+  of its prompt tokens. A share's denominator is exact `token_usage` and counts only runs with
+  `resultSeen` (M5). The estimate is labelled as characters / 4 beside the exact totals; n on every
+  row, `n=` under `MIN_SAMPLES_FOR_TREND`, a dash where nothing is observable. It draws its own
+  rows rather than using `RankedBars`, whose label truncation hides the end of a path. How it
+  counts: [Statistics](../architecture/statistics.md), "Files read".
 
 **Check.**
 - Tally unit tests: a whole and a ranged read, a `sed -n` and a `cat` chain, a redirect that is not a

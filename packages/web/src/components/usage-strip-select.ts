@@ -1,4 +1,5 @@
-import type { Task, UsageWindowSnapshot } from '@/lib/api-client';
+import { hasUsageWindow } from '@haive/shared/usage-window';
+import type { CliProvider, Task, UsageWindowSnapshot } from '@/lib/api-client';
 // Relative, not the `@/` alias: this module is unit-tested and the web package has no
 // vitest config, so an aliased VALUE import would not resolve under the test runner (the
 // aliased type imports above are erased and stay fine).
@@ -53,6 +54,7 @@ export function selectMetersForProviderIds(
   providerIds: readonly (string | null)[],
   snapshots: readonly UsageWindowSnapshot[] | null,
   allowanceKeys?: Readonly<Record<string, string>>,
+  providers?: readonly Pick<CliProvider, 'id' | 'name' | 'authMode'>[],
 ): StripMeter[] {
   if (!snapshots) return [];
 
@@ -67,6 +69,12 @@ export function selectMetersForProviderIds(
   const deadByAllowance = new Map<string, UsageWindowSnapshot>();
   const pendingByAllowance = new Map<string, UsageWindowSnapshot>();
   for (const snap of snapshots) {
+    // Unknown rows (including a failed provider-list fetch) trust the API's eligibility
+    // filter and keep the snapshot's own name. Known rows gate retained snapshots by auth.
+    if (providers) {
+      const provider = providers.find((p) => p.id === snap.providerId);
+      if (provider && !hasUsageWindow(provider.name, provider.authMode)) continue;
+    }
     const key = allowanceKeyOf(snap.providerId, allowanceKeys);
     if (!visible.has(key)) continue;
     if (snap.status === 'needs_reconnect' || snap.status === 'pending') {

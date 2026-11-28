@@ -246,7 +246,10 @@ export function Dialog({
           aria-modal={label ? true : undefined}
           aria-label={label}
           tabIndex={-1}
-          className={cn('relative z-10 w-full max-w-lg outline-none', className)}
+          className={cn(
+            'relative z-10 max-h-[calc(100dvh-2rem)] w-full max-w-lg overflow-y-auto outline-none',
+            className,
+          )}
         >
           {children}
         </div>

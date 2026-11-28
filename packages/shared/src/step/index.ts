@@ -629,6 +629,9 @@ export class ReopenStepFormError extends Error {
    *  the text through dispatch/recovery for its eventual non-null form only.
    *  Plan steps reopen with internal control text, which stays out of the form. */
   readonly notice: boolean;
+  /** Re-offer refused answers as defaults through the existing reuse reconciliation and
+   * default overlay. Human-only fields reset; the refreshed form still needs a new submit. */
+  readonly reuseFormValues: boolean;
   /** Start a new durable batch after consuming the previous attempt's agent results.
    *  A generation bump is only safe for steps whose attempt identity is journal-backed,
    *  currently 08e. */
@@ -641,11 +644,17 @@ export class ReopenStepFormError extends Error {
   readonly rerunPreForm: boolean;
   constructor(
     message = 'step has another decision to present',
-    opts?: { notice?: boolean; newAttempt?: boolean; rerunPreForm?: boolean },
+    opts?: {
+      notice?: boolean;
+      newAttempt?: boolean;
+      rerunPreForm?: boolean;
+      reuseFormValues?: boolean;
+    },
   ) {
     super(message);
     this.name = 'ReopenStepFormError';
     this.notice = opts?.notice === true;
+    this.reuseFormValues = opts?.reuseFormValues === true;
     this.newAttempt = opts?.newAttempt === true;
     this.rerunPreForm = opts?.rerunPreForm === true;
   }
@@ -795,7 +804,7 @@ export interface StepDefinition<TDetect = unknown, TApply = unknown> {
    *  only when the form is first built; receives the parsed preForm llmOutput.
    *  No-op for steps that don't declare it. */
   prepareForm?(ctx: StepContext, detected: TDetect, llmOutput?: unknown): Promise<void>;
-  /** Only for steps with `metadata.reuseLastCompletedFormValues`. The runner replays
+  /** For steps with `metadata.reuseLastCompletedFormValues` or a reopen with `reuseFormValues`. The runner replays
    *  a prior completed task's answers verbatim, so they can be STALE against the repo
    *  as it stands today. This hook gets a last look at those answers, alongside this
    *  task's fresh `detect()` output, and returns the set to auto-submit. Called before

@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { beforeEach, afterEach, expect, it, vi } from 'vitest';
 import { schema, type Database } from '@haive/database';
 import { createFakeDb } from '@haive/database/testing';
-import { configService, secretsService } from '@haive/shared';
+import { configService, secretsService, envelopeDecrypt } from '@haive/shared';
 import { cliAuthScope } from '@haive/shared/cli-auth-state';
 import { ClaudeOauthError } from '@haive/shared/claude-oauth';
 const h = vi.hoisted(() => ({
@@ -85,7 +85,15 @@ function setup(isolateAuth = true) {
   });
   return fake;
 }
-const GRANT = JSON.stringify({ accessToken: 'old', refreshToken: 'refresh', expiresAt: 0 });
+const KEK = 'ab'.repeat(32);
+const OLD_ACCESS = randomUUID();
+const OLD_REFRESH = randomUUID();
+const NEW_ACCESS = randomUUID();
+const NEW_REFRESH = randomUUID();
+const CLI_LOGIN = randomUUID();
+const REPLACEMENT_ACCESS = randomUUID();
+const SPENT_REFRESH = randomUUID();
+const GRANT = JSON.stringify({ accessToken: OLD_ACCESS, refreshToken: OLD_REFRESH, expiresAt: 0 });
 /** The stored copy of the grant the mocked read returns, as the rotation write finds it. */
 function seedGrant(fake: ReturnType<typeof setup>) {
   fake.insert(schema.cliProviderSecrets, {
@@ -106,15 +114,16 @@ beforeEach(() => {
   vi.stubGlobal('fetch', h.fetch);
   h.read.mockReset().mockResolvedValue(GRANT);
   h.refresh.mockReset().mockResolvedValue({
-    accessToken: 'new',
-    refreshToken: 'rotated',
+    accessToken: NEW_ACCESS,
+    refreshToken: NEW_REFRESH,
     expiresAt: Date.now() + 100000,
   });
   vi.spyOn(configService, 'getBoolean').mockResolvedValue(true);
   vi.spyOn(configService, 'get').mockResolvedValue('off');
-  vi.spyOn(secretsService, 'getMasterKek').mockResolvedValue('ab'.repeat(32));
+  vi.spyOn(secretsService, 'getMasterKek').mockResolvedValue(KEK);
 });
 afterEach(() => {
+  vi.useRealTimers();
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
 });
@@ -124,7 +133,7 @@ it('holds the shared scope across the usage credential read, grant and write wit
   h.refresh.mockImplementation(async () => {
     expect(h.acquire).toHaveBeenCalledOnce();
     expect(h.release).not.toHaveBeenCalled();
-    return { accessToken: 'new', refreshToken: 'rotated', expiresAt: Date.now() + 100000 };
+    return { accessToken: NEW_ACCESS, refreshToken: NEW_REFRESH, expiresAt: Date.now() + 100000 };
   });
   await runUsagePollTick(fake.db as unknown as Database);
   expect(h.acquire).toHaveBeenCalledWith(
@@ -150,8 +159,8 @@ it('a usage refresh after a sign-out request still removes the volumes and both 
   fake.insert(schema.cliProviderSecrets, {
     providerId: provider.id,
     secretName: 'CLAUDE_CODE_OAUTH_TOKEN',
-    encryptedValue: 'login',
-    encryptedDek: 'login',
+    encryptedValue: CLI_LOGIN,
+    encryptedDek: CLI_LOGIN,
   });
   const volume = cliAuthScope(provider as any);
   const volumes = new Set([volume]);
@@ -204,8 +213,13 @@ it('leaves the usage secret and login generation unchanged when the rotation upd
         encryptedDek: 'dek',
         grant: JSON.parse(GRANT),
       },
-      { accessToken: 'new', refreshToken: 'rotated', expiresAt: Date.now() + 100000, scopes: [] },
-      h.release.assertHeld,
+      {
+        accessToken: NEW_ACCESS,
+        refreshToken: NEW_REFRESH,
+        expiresAt: Date.now() + 100000,
+        scopes: [],
+      },
+      KEK,
     ),
   ).rejects.toThrow('update refused');
   expect(fake.rows(schema.cliProviderSecrets)).toHaveLength(1);
@@ -218,10 +232,10 @@ it('leaves the usage secret and login generation unchanged when the rotation upd
 it.each([
   [null, null],
   ['invalid JSON', null],
-  [JSON.stringify({ refreshToken: 'no-access' }), null],
+  [JSON.stringify({ refreshToken: randomUUID() }), null],
   [
-    JSON.stringify({ accessToken: 'already-refreshed', refreshToken: 'rotated', expiresAt: 1e15 }),
-    'already-refreshed',
+    JSON.stringify({ accessToken: REPLACEMENT_ACCESS, refreshToken: NEW_REFRESH, expiresAt: 1e15 }),
+    REPLACEMENT_ACCESS,
   ],
 ])('re-reads credentials under the refresh lock before using %s', async (raw, token) => {
   const fake = setup();
@@ -249,16 +263,16 @@ it.each([
 it('refreshes using the token re-read under the lock', async () => {
   const fake = setup();
   h.read.mockResolvedValueOnce(
-    JSON.stringify({ accessToken: 'obsolete', refreshToken: 'spent', expiresAt: 0 }),
+    JSON.stringify({ accessToken: randomUUID(), refreshToken: SPENT_REFRESH, expiresAt: 0 }),
   );
   await runUsagePollTick(fake.db as unknown as Database);
   expect(h.read).toHaveBeenCalledTimes(2);
-  expect(h.refresh).toHaveBeenCalledWith('refresh');
+  expect(h.refresh).toHaveBeenCalledWith(OLD_REFRESH);
   expect(h.release).toHaveBeenCalledTimes(2);
 });
 
 it.each(['key', 'write'])(
-  'rolls back refreshed usage credentials after lock loss during %s',
+  'persists refreshed usage credentials despite lock-check failure during %s',
   async (phase) => {
     const fake = setup();
     seedGrant(fake);
@@ -268,7 +282,7 @@ it.each(['key', 'write'])(
     if (phase === 'key')
       vi.spyOn(secretsService, 'getMasterKek').mockImplementationOnce(async () => {
         lose();
-        return 'ab'.repeat(32);
+        return KEK;
       });
     else
       fake.hooks.beforeUpdate = async (table) => {
@@ -276,11 +290,24 @@ it.each(['key', 'write'])(
       };
     await runUsagePollTick(fake.db as unknown as Database);
     expect(h.refresh).toHaveBeenCalledOnce();
-    expect(fake.rows(schema.cliProviderSecrets)).toMatchObject([{ encryptedValue: GRANT }]);
+    const [stored] = fake.rows(schema.cliProviderSecrets);
+    expect(stored!.encryptedValue).not.toBe(GRANT);
+    expect(
+      JSON.parse(
+        envelopeDecrypt(
+          {
+            encryptedValue: stored!.encryptedValue as string,
+            encryptedDek: stored!.encryptedDek as string,
+          },
+          KEK,
+        ),
+      ),
+    ).toMatchObject({ accessToken: NEW_ACCESS, refreshToken: NEW_REFRESH });
   },
 );
 
-it('retries a rejected-refresh snapshot after losing the auth lock', async () => {
+it('retries a rejected-refresh snapshot after losing the auth lock, respecting the throttle', async () => {
+  vi.useFakeTimers({ toFake: ['Date'] });
   const fake = setup();
   let first = true;
   h.refresh.mockImplementation(async () => {
@@ -293,6 +320,9 @@ it('retries a rejected-refresh snapshot after losing the auth lock', async () =>
   await runUsagePollTick(fake.db as unknown as Database);
   expect(fake.rows(schema.usageWindowSnapshots)).toHaveLength(0);
   h.release.assertHeld.mockResolvedValue(undefined);
+  await runUsagePollTick(fake.db as unknown as Database);
+  expect(h.refresh).toHaveBeenCalledTimes(1);
+  vi.setSystemTime(Date.now() + 190_000);
   await runUsagePollTick(fake.db as unknown as Database);
   expect(h.refresh).toHaveBeenCalledTimes(2);
   expect(fake.rows(schema.usageWindowSnapshots)).toMatchObject([{ status: 'needs_reconnect' }]);

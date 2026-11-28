@@ -91,6 +91,10 @@ test('format, cross-platform vet and tests run independently with read-only sour
   assert.match(vet.run, /for os in linux windows darwin; do/);
   assert.match(vet.run, /for arch in amd64 arm64; do/);
   assert.match(vet.run, /GOOS=\$os GOARCH=\$arch go vet -p 1 \.\/\.\.\. \|\| exit 1/);
+  assert.match(
+    vet.run,
+    /GOOS=\$os GOARCH=\$arch go test -p 1 -c -o "\/tmp\/bridge-\$os-\$arch\.test" \. \|\| exit 1/,
+  );
   assert.match(checks.find((step) => step.name === 'Go test').run, /go test -p 1 -v \.\/\.\.\./);
 });
 

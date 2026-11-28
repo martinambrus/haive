@@ -12,6 +12,9 @@ export * from './secret-env.js';
 
 export const APP_NAME = 'Haive';
 
+/** Stable transport contract shared by Redis outage writers and readers. */
+export const REDIS_UNAVAILABLE_CODE = 'redis_unavailable';
+
 /** Shared manual insight page bound, including copies returned by task polls. */
 export const INSIGHTS_AT_GATE = 30;
 
@@ -289,7 +292,13 @@ export interface RuntimeEnsurePayload {
 
 /** A refusal before rebuild removal; carried as a completed job result for the API. */
 export interface DdevRebuildRefusal {
-  reason: 'busy' | 'probe-unknown' | 'foreign-runner' | 'workspace-mismatch' | 'no-ddev';
+  reason:
+    | 'busy'
+    | 'probe-unknown'
+    | 'foreign-runner'
+    | 'workspace-mismatch'
+    | 'no-ddev'
+    | 'checkout-unavailable';
   message: string;
   retryable: boolean;
 }
@@ -508,6 +517,7 @@ export const TERMINAL_CLOSE_CODES = {
   REPO_READ_ONLY: 4423,
   REPO_NOT_READY: 4424,
   PROVIDER_DISABLED: 4425,
+  REPOSITORY_REBUILT: 4426,
 } as const;
 
 /** Maximum time from enqueue before a sign-out must acquire its auth scope and start. */
@@ -780,6 +790,9 @@ export const PUBSUB_CHANNELS = {
  *  → reaper kills container and deletes registry entry. */
 export const TERMINAL_SESSION_PREFIX = 'terminal:session:';
 export const TERMINAL_REQUEST_CHANNEL = 'terminal:request';
+export const TERMINAL_REPOSITORY_REBUILT_MESSAGE =
+  'Repository sessions stopped for a checkout rebuild. Reopen after the repository is ready.';
+
 export const TERMINAL_PROVIDER_DISABLED_MESSAGE =
   'The CLI provider is disabled. Enable it before opening a terminal.';
 export const TERMINAL_IN_CHANNEL_PREFIX = 'terminal:in:';

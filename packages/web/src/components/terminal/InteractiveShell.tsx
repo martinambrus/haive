@@ -1,4 +1,5 @@
 'use client';
+import { TERMINAL_CLOSE_CODES } from '@haive/shared/constants';
 
 import { useEffect, useRef, useState } from 'react';
 import Link from 'next/link';
@@ -7,7 +8,7 @@ import { FitAddon } from '@xterm/addon-fit';
 import { WebLinksAddon } from '@xterm/addon-web-links';
 import { ClipboardAddon } from '@xterm/addon-clipboard';
 import '@xterm/xterm/css/xterm.css';
-import { apiWebSocketUrl } from '@/lib/api-client';
+import { api, apiWebSocketUrl } from '@/lib/api-client';
 import { attachWheelScroll } from '@/lib/terminal-wheel';
 import { copyTerminalSelection } from '@/lib/terminal-copy';
 import { useTerminalCopy } from '@/lib/use-terminal-copy';
@@ -58,6 +59,8 @@ export function InteractiveShell(props: InteractiveShellProps) {
   const [containerLabel, setContainerLabel] = useState<string | null>(null);
   const [workdirMismatch, setWorkdirMismatch] = useState<WorkdirMismatch | null>(null);
   const [confirmRestart, setConfirmRestart] = useState(false);
+  const [repositoryRebuilt, setRepositoryRebuilt] = useState(false);
+  const [checkoutReady, setCheckoutReady] = useState(false);
   const [connectNonce, setConnectNonce] = useState(0);
   const sendFrameRef = useRef<((frame: unknown) => void) | null>(null);
   const restartingRef = useRef(false);
@@ -68,6 +71,28 @@ export function InteractiveShell(props: InteractiveShellProps) {
     copied: cliCopied,
     copyPending,
   } = usePendingCliCopy();
+
+  useEffect(() => {
+    if (!repositoryRebuilt || !scopeId) return;
+    let disposed = false;
+    let timer: ReturnType<typeof setTimeout>;
+    const poll = async () => {
+      try {
+        const status = await api.get<{ status: string }>(
+          `/${scope === 'repo' ? 'repos' : 'tasks'}/${scopeId}/interactive-status`,
+        );
+        if (!disposed) setCheckoutReady(status.status === 'ready');
+      } catch {
+        if (!disposed) setCheckoutReady(false);
+      }
+      if (!disposed) timer = setTimeout(() => void poll(), 2500);
+    };
+    void poll();
+    return () => {
+      disposed = true;
+      clearTimeout(timer);
+    };
+  }, [repositoryRebuilt, scope, scopeId]);
 
   useEffect(() => {
     if (!scopeId) return;
@@ -209,6 +234,8 @@ export function InteractiveShell(props: InteractiveShellProps) {
       switch (parsed.type) {
         case 'connected':
           setState('connected');
+          setRepositoryRebuilt(false);
+          setCheckoutReady(false);
           setErrorMsg(null);
           if (typeof parsed.containerName === 'string') setContainerLabel(parsed.containerName);
           applyWorkdirMismatch(parsed.workdirMismatch);
@@ -223,6 +250,10 @@ export function InteractiveShell(props: InteractiveShellProps) {
         case 'exit':
           setState('closed');
           term.writeln('\r\n\x1b[36m[shell exited]\x1b[0m');
+          if (parsed.reason === 'repository_rebuilt') {
+            setRepositoryRebuilt(true);
+            setErrorMsg(terminalRefusalMessage(TERMINAL_CLOSE_CODES.REPOSITORY_REBUILT));
+          }
           if (parsed.reason === 'restart') restartingRef.current = true;
           reconnectIfRestarting();
           break;
@@ -249,6 +280,7 @@ export function InteractiveShell(props: InteractiveShellProps) {
 
     ws.onclose = (ev) => {
       if (disposed) return;
+      if (ev.code === TERMINAL_CLOSE_CODES.REPOSITORY_REBUILT) setRepositoryRebuilt(true);
       const refusal = terminalRefusalMessage(ev.code);
       if (refusal) {
         setState('error');
@@ -340,6 +372,18 @@ export function InteractiveShell(props: InteractiveShellProps) {
           </span>
         </div>
       </div>
+      {repositoryRebuilt && (
+        <Button
+          disabled={!checkoutReady}
+          onClick={() => {
+            setRepositoryRebuilt(false);
+            setCheckoutReady(false);
+            setConnectNonce((n) => n + 1);
+          }}
+        >
+          Reopen terminal
+        </Button>
+      )}
       {workdirMismatch && (
         <div
           role="status"

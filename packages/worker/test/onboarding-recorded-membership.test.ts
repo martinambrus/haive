@@ -403,6 +403,28 @@ describe('recorded membership completion siblings', () => {
     },
   );
   it.skipIf(!url)(
+    'fails the rollback for a retry while another operation holds the checkout, and the retry after a fresh detect writes the record',
+    async () => {
+      const s = await undoOnly(legacy, true);
+      const claim = (kind: string | null) =>
+        s.db
+          .update(schema.repositories)
+          .set({ rootClaimedAt: kind ? new Date() : null, rootClaimKind: kind })
+          .where(eq(schema.repositories.id, s.repositoryId));
+      await claim('edit');
+      await expect(s.apply()).rejects.toThrow('Retry this step');
+      expect((await s.db.select().from(schema.repositories))[0]!.renderContext).toEqual(legacy);
+      await claim(null);
+      // What Retry runs: the step detects again, and the held pass already put the upgrade's row aside.
+      const retry = await upgradeRollbackStep.detect!(s.ctx);
+      expect(retry.newArtifactsToUndo).toEqual([]);
+      expect((await s.apply(s.ctx, retry)).recordWrite).toBe('written');
+      expect((await s.db.select().from(schema.repositories))[0]!.renderContext).toMatchObject({
+        cliTargets: ['codex', 'future-cli'],
+      });
+    },
+  );
+  it.skipIf(!url)(
     'keeps explicit current[] authority and genuinely unknown undo-only legacy behavior',
     async () => {
       const explicit = await undoOnly({ ...legacy, cliTargets: [] });

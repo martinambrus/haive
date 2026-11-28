@@ -5,7 +5,7 @@ const USER = vi.hoisted(() => '00000000-0000-4000-8000-0000000000a1');
 const h = vi.hoisted(() => ({
   db: undefined as unknown,
   add: vi.fn(async (..._args: unknown[]) => undefined),
-  kill: vi.fn(async (_taskId: string) => 0),
+  kill: vi.fn(async (_taskId: string) => ({ killed: 0, killConfirmed: true })),
   guardPin: false,
 }));
 
@@ -336,6 +336,7 @@ describe('a task Retry re-runs the step the task stopped on', () => {
         applyReceipt: { id: 'old-apply', kind: 'custom-migration', input: 'command' },
         rerunGeneration: 2,
         formValues: { migrationCommand: 'node migrate.js' },
+        waitingStartedAt: new Date('2026-01-01'),
       });
       t.fake.patch(schema.taskSteps, LATER_ROW, {
         stepId: '11g-save-database',
@@ -523,7 +524,10 @@ describe('a task Retry re-runs the step the task stopped on', () => {
       prompt: 'p',
       startedAt: t.fake.now(),
     });
-    expect((await t.retry()).status).toBe(200);
+    h.kill.mockResolvedValueOnce({ killed: 0, killConfirmed: false });
+    const response = await t.retry();
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ killed: 0, killConfirmed: false });
     const run = t.fake.rows(schema.cliInvocations)[0]!;
     expect(run.supersededAt).not.toBeNull();
     expect(run.endedAt).not.toBeNull();
@@ -860,3 +864,47 @@ it.each(['task', 'step'] as const)(
     }
   },
 );
+
+describe('answered form re-offer', () => {
+  it.each(['helper', 'task Retry'])(
+    'preserves an accepted gate-3 answer before pickup through %s',
+    async (path) => {
+      const t = setup({
+        stepId: '10-gate-3-commit',
+        status: 'waiting_form',
+        waitingStartedAt: null,
+        formValues: { commit: true },
+        rerunGeneration: 4,
+      });
+      t.fake.patch(schema.tasks, TASK, { currentStepId: '10-gate-3-commit' });
+      const before = structuredClone(t.step(TARGET_ROW));
+      if (path === 'helper')
+        await t.fake.db.transaction((tx) =>
+          reofferParkedSteps(tx as never, TASK, t.fake.now(), [], null),
+        );
+      else expect((await t.retry()).status).toBe(200);
+      expect(t.step(TARGET_ROW)).toMatchObject({
+        status: 'waiting_form',
+        rerunGeneration: 4,
+        formValues: { commit: true },
+      });
+      expect(t.step(TARGET_ROW)).toEqual(before);
+    },
+  );
+
+  it.each([
+    ['unanswered', { waitingStartedAt: new Date('2026-01-01'), formValues: null }],
+    ['legacy ambiguous', { waitingStartedAt: null, formValues: null }],
+    [
+      'open marker with saved values',
+      { waitingStartedAt: new Date('2026-01-01'), formValues: { commit: true } },
+    ],
+    ['fix-loop decision', { waitingStartedAt: null, formValues: { fixLoopAction: 'continue' } }],
+  ])('re-offers a %s park conservatively', async (_label, fields) => {
+    const t = setup({ status: 'waiting_form', rerunGeneration: 4, ...fields });
+    await t.fake.db.transaction((tx) =>
+      reofferParkedSteps(tx as never, TASK, t.fake.now(), [], null),
+    );
+    expect(t.step(TARGET_ROW)).toMatchObject({ status: 'pending', rerunGeneration: 5 });
+  });
+});

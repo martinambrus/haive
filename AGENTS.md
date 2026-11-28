@@ -318,8 +318,8 @@ listed here, and keep this file under 32 KiB: Codex CLI reads no more of it than
 - [Model pricing and spend](docs/architecture/model-pricing.md): cost precedence, billable and
   notional spend, price feeds, FX. `resolveCostDecision`, `model-prices.ts`.
 - [Statistics](docs/architecture/statistics.md): the statistics module's `/m/statistics` api, day bucketing, charts,
-  per-step spend, tool usage, throughput.
-  `@haive/shared/stats`, `modules/statistics/`, `summarizeThroughput`.
+  per-step spend, tool usage, files read, throughput.
+  `@haive/shared/stats`, `modules/statistics/`, `summarizeThroughput`, `buildFilesRead`.
 
 ### Sandbox and runtime
 
@@ -357,7 +357,8 @@ listed here, and keep this file under 32 KiB: Codex CLI reads no more of it than
 - [MCP server consent](docs/architecture/mcp-consent.md): MCP server lists committed by another
   install. `importHaiveDataMirror`.
 - [Repository refresh](docs/architecture/repository-refresh.md): fast-forward, never delete.
-  `repo/refresh.ts`, `checkout-access.ts`, `requireCheckoutAccess`, `withCheckoutMutation`,
+  `repo/refresh.ts`, `interactive-checkout.ts`, `checkout-identity.ts`,
+  `CheckoutSessionsBusyError`, `checkout-access.ts`, `requireCheckoutAccess`, `withCheckoutMutation`,
   `assertCheckoutMutationOwner`, `RootClaimBusyError`.
 - [Onboarding template versioning](docs/architecture/onboarding-upgrades.md): the manifest, what
   to bump, upgrade apply and rollback, RTK off. `template-manifest.ts`, `_agent-templates.ts`,
@@ -378,7 +379,7 @@ listed here, and keep this file under 32 KiB: Codex CLI reads no more of it than
 ### Modularity
 
 - [Modules](docs/architecture/modules.md): the four states, `pnpm module add|remove`, channel builds. `gen-modules.mjs`, `module.mjs`, `build-channel.mjs`, `channel-boot-check.mjs`, `publish-channel.mjs`.
-- [Integrations](docs/architecture/integrations.md): accounts, write switch, resolution, forge calls. `resolver.ts`.
+- [Integrations](docs/architecture/integrations.md): accounts, write switch, resolution, forge calls, uuid spelling in advisory keys, lock keys and job ids. `resolver.ts`, `canonicalUuid`.
 - [Task types](docs/architecture/task-types.md): seeding, composer, prompt steps, custom tools, creator. `task_type_definitions`.
 
 ## Review guidelines

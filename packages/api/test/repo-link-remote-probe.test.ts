@@ -18,6 +18,7 @@ vi.mock('node:child_process', async (original) => {
   return { ...actual, execFile: Object.assign(vi.fn(), { [promisify.custom]: h.git }) };
 });
 import { Hono } from 'hono';
+import { configService } from '@haive/shared';
 import { schema } from '@haive/database';
 import { createFakeDb } from '@haive/database/testing';
 import { repoRoutes } from '../src/routes/repos.js';
@@ -41,6 +42,7 @@ beforeEach(() => {
   h.db = fake.db;
   h.entry.mockReset().mockResolvedValue({ kind: 'directory' });
   h.git.mockReset().mockResolvedValue({ stdout: '', stderr: '' });
+  vi.spyOn(configService, 'getFresh').mockResolvedValue('normal');
 });
 const link = () =>
   app.request(`/${REPO}/remote`, {

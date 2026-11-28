@@ -1,3 +1,12 @@
+vi.mock('./checkout-identity.js', async (original) => {
+  const actual = await original<typeof import('./checkout-identity.js')>();
+  return {
+    ...actual,
+    checkoutIdentity: async () => '1:2',
+    runnerCheckoutMatches: (container: string, subpath: string, options = {}) =>
+      actual.runnerCheckoutMatches(container, subpath, { ...options, identity: '1:2' }),
+  };
+});
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { RUNNER_SUBPATH_LABEL, appRunnerName } from '@haive/shared';
 
@@ -11,9 +20,13 @@ const h = vi.hoisted(() => {
     probeFailure: null as Error | null,
     failExistenceOnly: false,
     probeReads: 0,
+    staleIdentity: false,
+    held: false,
+    argv: [] as string[][],
   };
   const out = (stdout: string) => ({ stdout, stderr: '' });
   const docker = async (_command: string, args: string[]) => {
+    state.argv.push(args);
     const [verb, ...rest] = args;
     if (verb === 'ps') {
       const name = rest[rest.indexOf('--filter') + 1]!.slice('name=^/'.length, -1);
@@ -32,8 +45,11 @@ const h = vi.hoisted(() => {
       const label = /^\{\{index \.Config\.Labels "(.+)"\}\}$/.exec(format)?.[1];
       if (label === undefined) throw new Error(`fake docker: unhandled inspect format ${format}`);
       if (label === state.unreadableLabel) throw new Error('docker inspect timed out');
-      return out(`${labels[label] ?? ''}\n`);
+      return out(
+        `${label === 'haive.checkout.identity' && h.state.staleIdentity ? '1:3' : (labels[label] ?? '')}\n`,
+      );
     }
+    if (verb === 'stop') return out('');
     if (verb === 'rm') {
       for (const name of rest.filter((arg) => !arg.startsWith('-'))) {
         if (state.containers.delete(name)) state.calls.push(`rm ${name}`);
@@ -54,7 +70,12 @@ vi.mock('node:child_process', async () => {
   return { ...actual, execFile: Object.assign(vi.fn(), { [promisify.custom]: h.docker }) };
 });
 vi.mock('../db.js', () => ({
-  getDb: () => ({ query: { tasks: { findFirst: async () => null } } }),
+  getDb: () => ({
+    query: {
+      tasks: { findFirst: async () => (h.state.held ? { status: 'running', deadAt: null } : null) },
+      taskSteps: { findFirst: async () => (h.state.held ? { id: 'running-step' } : undefined) },
+    },
+  }),
 }));
 vi.mock('./runtime-caps.js', () => ({
   RUNTIME_WEIGHT_LABEL: 'haive.runtime.weight',
@@ -77,6 +98,9 @@ const ensure = () => ensureAppRunnerStarted(TASK, SUBPATH, 'image:tag');
 beforeEach(() => {
   h.state.containers.clear();
   h.state.calls.length = 0;
+  h.state.argv.length = 0;
+  h.state.staleIdentity = false;
+  h.state.held = false;
   h.state.unreadableLabel = null;
   h.state.probeFailure = null;
   h.state.failExistenceOnly = false;
@@ -152,4 +176,26 @@ describe('app runner inspect failures', () => {
     await expect(ensure()).rejects.toThrow('cold boot reached');
     expect(h.state.calls).toEqual([`run ${NAME}`]);
   });
+});
+
+it('drops anonymous volumes when repairing an idle app runner mount', async () => {
+  h.state.containers.set(NAME, { [RUNNER_SUBPATH_LABEL]: SUBPATH });
+  h.state.staleIdentity = true;
+  await expect(ensure()).rejects.toThrow('cold boot reached');
+  expect(h.state.argv).toContainEqual(['rm', '-v', NAME]);
+});
+
+it('recovers a Retry-resolved workspace during a running task step', async () => {
+  h.state.held = true;
+  h.state.containers.set(NAME, { [RUNNER_SUBPATH_LABEL]: 'user/previous-workspace' });
+  await expect(ensure()).rejects.toThrow('cold boot reached');
+  expect(h.state.calls).toEqual([`rm ${NAME}`, `run ${NAME}`]);
+});
+
+it('keeps a running app when its checkout identity label is unreadable', async () => {
+  h.state.held = true;
+  h.state.containers.set(NAME, { [RUNNER_SUBPATH_LABEL]: SUBPATH });
+  h.state.unreadableLabel = 'haive.checkout.identity';
+  await expect(ensure()).resolves.toEqual({ container: NAME, projectDir: `/repos/${SUBPATH}` });
+  expect(h.state.calls).toEqual([]);
 });

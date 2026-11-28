@@ -104,7 +104,12 @@ import {
   assertNewWorkAllowed,
   requireNewWorkAllowed,
 } from '../../middleware/maintenance.js';
-import { lockTaskForComposedLsp } from '@haive/shared/composed-lsp-provider-lock';
+import {
+  assertComposedLspWriteProviderAvailable,
+  composedLspProviderRestrictions,
+  lockTaskForComposedLsp,
+  withComposedLspTransaction,
+} from '@haive/shared/composed-lsp-provider-lock';
 import { assertComposedLspProviderAllowed, loadUsableProvider } from '../../lib/step-cli-choice.js';
 import { HttpError, type AppEnv } from '../../context.js';
 import {
@@ -1293,11 +1298,19 @@ taskRoutes.get('/:id', async (c) => {
     executionContract: _execution,
     ...taskFields
   } = task;
+  let malformedComposedPin = false;
   const composedIds = task.envTemplateId
-    ? (await loadComposedProviderSets(db, [id])).get(id)
+    ? (
+        await loadComposedProviderSets(db, [id], () => {
+          malformedComposedPin = true;
+        })
+      ).get(id)
     : undefined;
+  // Read-only CLI views retain their raw fallback, while known contract-2 pickers must
+  // still carry the writer's conservative restrictions when image metadata is unreadable.
+  const pickerComposedIds = malformedComposedPin ? [] : composedIds;
   const providerRows =
-    task.cliProviderId === null || composedIds !== undefined
+    task.cliProviderId === null || pickerComposedIds !== undefined
       ? await db
           .select({
             id: schema.cliProviders.id,
@@ -1324,9 +1337,15 @@ taskRoutes.get('/:id', async (c) => {
             preferred.providerId,
             allowed ? providerRows.filter((p) => allowed.has(p.id)) : providerRows,
           );
+  const cliProviderRestrictions = composedLspProviderRestrictions({
+    taskCliProviderId: task.cliProviderId,
+    providers: providerRows,
+    composedProviderIds: pickerComposedIds,
+  });
   const taskWithActive = {
     ...taskFields,
     effectiveCliProviderId,
+    ...(cliProviderRestrictions === undefined ? {} : { cliProviderRestrictions }),
     typeLabel: typeLabels.get(task.type) ?? null,
     pausedByAdmin: adminPausedIds.has(id),
     pauseLocked: adminPauseLocks(adminPausedIds.has(id), c.get('userRole')),
@@ -1422,22 +1441,28 @@ taskRoutes.patch('/:id', async (c) => {
   if (!task) throw new HttpError(404, 'Task not found');
 
   const patch: Partial<typeof schema.tasks.$inferInsert> = {};
-  if (
-    body.autoContinue === true &&
-    task.status === 'waiting_user' &&
-    task.currentStepId &&
-    !isTaskDead(task)
-  ) {
-    assertExecutionContractUsable(task.executionContract);
-  }
   if (body.title !== undefined) patch.title = body.title;
   if (body.autoContinue !== undefined) patch.autoContinue = body.autoContinue;
 
-  const updated = await db
-    .update(schema.tasks)
-    .set({ ...patch, updatedAt: new Date() })
-    .where(eq(schema.tasks.id, id))
-    .returning();
+  const updated = await db.transaction(async (tx) => {
+    // RETURNING reads the pointer and epoch under the toggle's own row lock. A Retry
+    // before this write is observed; one after commit makes the queued wakeup stale.
+    const rows = await tx
+      .update(schema.tasks)
+      .set({ ...patch, updatedAt: new Date() })
+      .where(eq(schema.tasks.id, id))
+      .returning();
+    const toggled = rows[0];
+    if (
+      body.autoContinue === true &&
+      toggled?.status === 'waiting_user' &&
+      toggled.currentStepId &&
+      !isTaskDead(toggled)
+    )
+      assertExecutionContractUsable(toggled.executionContract);
+    return rows;
+  });
+  const toggled = updated[0];
 
   if (body.title !== undefined) {
     await appendTaskEvent(db, id, null, 'task.renamed', { title: body.title, by: userId });
@@ -1452,9 +1477,9 @@ taskRoutes.patch('/:id', async (c) => {
     // a step that still needs input just re-enters waiting_form.
     if (
       body.autoContinue === true &&
-      task.status === 'waiting_user' &&
-      task.currentStepId &&
-      !isTaskDead(task)
+      toggled?.status === 'waiting_user' &&
+      toggled.currentStepId &&
+      !isTaskDead(toggled)
     ) {
       await addOrRefuse(
         () =>
@@ -1463,8 +1488,9 @@ taskRoutes.patch('/:id', async (c) => {
             {
               taskId: id,
               userId,
-              stepId: task.currentStepId,
-              round: task.currentRound,
+              stepId: toggled.currentStepId,
+              round: toggled.currentRound,
+              epoch: toggled.orchestrationEpoch,
             } as TaskJobPayload,
             {
               attempts: 3,
@@ -1589,8 +1615,14 @@ taskRoutes.post('/:id/action', async (c) => {
             .limit(1)
         : [];
       if (target) {
-        await retryTaskAtStep(db, id, userId, target, { liftPause });
-        return c.json({ ok: true, status: 'running' });
+        const result = await retryTaskAtStep(db, id, userId, target, { liftPause });
+        return c.json({
+          ok: true,
+          status: 'running',
+          killed: result.killed,
+          killConfirmed: result.killConfirmed,
+          killError: result.killError,
+        });
       }
       // A full restart from step 0 refuses pinned custom tools that would fail at their step.
       await assertCustomToolsUsable(db, task);
@@ -1679,11 +1711,17 @@ taskRoutes.post('/:id/action', async (c) => {
       if (resumeAudit) logAuditEvent(resumeAudit);
       // Answering a parked form revives the task, so its pass can open a row between the settle
       // above and the bump. None can at the old epoch after it, so settle once more.
-      await stopActiveCliInvocations(db, id, { failTask: false });
+      const killResult = await stopActiveCliInvocations(db, id, { failTask: false });
       await settleActiveSteps(db, id, task.executionContract);
       await appendTaskEvent(db, id, null, 'task.retried', { by: userId });
       await enqueueStart(id, userId);
-      return c.json({ ok: true, status: 'queued' });
+      return c.json({
+        ok: true,
+        status: 'queued',
+        killed: killResult.killed,
+        killConfirmed: killResult.killConfirmed,
+        killError: killResult.killError,
+      });
     }
     case 'pause': {
       // Terminal tasks have nothing left to hold.
@@ -1804,12 +1842,13 @@ taskRoutes.post('/:id/cancel-active-cli', async (c) => {
 
   // Stop the running CLI (supersede its invocation, fail the step + task) and
   // force-remove only the cli sandboxes — the DDEV/app runtime is left running.
-  const { killed, cancelled, stopped, failedAt } = await stopActiveCliInvocations(db, id, {
+  const result = await stopActiveCliInvocations(db, id, {
     failTask: true,
   });
+  const { failedAt, ...activity } = result;
   await enqueueStopSettle(id, userId, failedAt);
-  logger.info({ taskId: id, killed, cancelled, stopped }, 'cancel-active-cli');
-  return c.json({ ok: true, killed, cancelled, stopped });
+  logger.info({ taskId: id, ...activity }, 'cancel-active-cli');
+  return c.json({ ok: true, ...activity });
 });
 
 /** Max steer message length. Bounds the NDJSON line written to the CLI's stdin
@@ -2018,10 +2057,11 @@ taskRoutes.patch('/:id/summary-cli', async (c) => {
   // instead of what was just picked here.
   patch.summaryCliChoiceAt = new Date();
 
-  await db.transaction(async (tx) => {
+  await withComposedLspTransaction(db, async (tx) => {
     if (body.summaryCliProviderId) {
       // Lock the task row, then decide: see lockTaskForComposedLsp for the lock order.
       await lockTaskForComposedLsp(tx, { userId, taskId: id });
+      await assertComposedLspWriteProviderAvailable(tx, userId, body.summaryCliProviderId);
       await assertComposedLspProviderAllowed(tx, userId, id, body.summaryCliProviderId);
     }
     await tx.update(schema.tasks).set(patch).where(eq(schema.tasks.id, id));

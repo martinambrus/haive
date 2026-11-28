@@ -126,6 +126,7 @@ async function measure(
     {
       connectTimeoutSeconds: DISPATCH_KB_BOUNDS.connectTimeoutSeconds,
       deadlineMs: DISPATCH_KB_BOUNDS.deadlineMs,
+      signal: DISPATCH_KB_BOUNDS.signal ?? new AbortController().signal,
       settings,
     },
   );

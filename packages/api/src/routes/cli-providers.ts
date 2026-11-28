@@ -1315,13 +1315,15 @@ cliProviderRoutes.post('/:id/clone', requireNewWorkAllowed, async (c) => {
   // A clone of a subscription row never copies the login token: it takes the login of its set.
   const takesSetLogin = source.name === 'claude-code' && source.authMode === 'subscription';
   const joinsSet = takesSetLogin && !source.isolateAuth;
-  // The login token and the usage grant both come from the set, never from the source's copy.
+  // Usage grants only belong to subscription sets. Never copy a legacy grant from an API-key
+  // source, especially into a new isolated scope where it could retire the original grant.
   const fromSet = (name: string) =>
-    takesSetLogin && (isSetLoginSecret(source.name, name) || isUsageGrantSecret(source.name, name));
+    isUsageGrantSecret(source.name, name) || (takesSetLogin && isSetLoginSecret(source.name, name));
+  const locksSource = joinsSet || (source.name === 'claude-code' && source.authMode === 'api_key');
   let usageSeeded = false;
   const created = await withCliAuthLocks(
     db,
-    joinsSet ? [source] : [],
+    locksSource ? [source] : [],
     (assertHeld) =>
       db.transaction(async (tx) => {
         await admitNewWork(tx);
@@ -1359,7 +1361,14 @@ cliProviderRoutes.post('/:id/clone', requireNewWorkAllowed, async (c) => {
         const row = inserted[0]!;
         // First lock on an existing provider row; the clone is invisible until commit.
         // Order: advisory auth lock, this set lock, then secret writes.
-        const members = joinsSet ? await lockLoginSet(tx, row) : [];
+        await assertHeld();
+        const members = locksSource ? await lockLoginSet(tx, joinsSet ? row : source) : [];
+        if (locksSource && !members.some((m) => m.id === source.id))
+          throw new HttpError(
+            409,
+            'CLI authentication settings changed. Reload and try again.',
+            'cli_auth_busy',
+          );
 
         const sourceSecrets = (
           await tx.query.cliProviderSecrets.findMany({
@@ -1423,6 +1432,7 @@ cliProviderRoutes.post('/:id/clone', requireNewWorkAllowed, async (c) => {
           usageSeeded = grant.length > 0;
           if (seeded.row) return seeded.row;
         }
+        await assertHeld();
         return row;
       }),
     { waitMs: CLI_AUTH_JOIN_WAIT_MS },
@@ -1480,6 +1490,13 @@ cliProviderRoutes.post('/:providerId/secrets', async (c) => {
   const db = getDb();
   const provider = await loadOwnedProvider(db, userId, providerId);
   const usageGrant = isUsageGrantSecret(provider.name, body.secretName);
+  if (usageGrant && provider.authMode !== 'subscription') {
+    throw new HttpError(
+      400,
+      'Usage tracking auth requires subscription authentication',
+      'usage_auth_subscription_required',
+    );
+  }
   if (usageGrant && !isUsageGrantValue(body.value)) {
     throw new HttpError(
       400,
@@ -1584,11 +1601,15 @@ cliProviderRoutes.post('/:providerId/usage-auth/start', async (c) => {
   const db = getDb();
   const provider = await db.query.cliProviders.findFirst({
     where: and(eq(schema.cliProviders.id, providerId), eq(schema.cliProviders.userId, userId)),
-    columns: { id: true, name: true },
+    columns: { id: true, name: true, authMode: true },
   });
   if (!provider) throw new HttpError(404, 'CLI provider not found');
-  if (provider.name !== 'claude-code') {
-    throw new HttpError(400, 'Usage tracking auth is only available for Claude Code providers');
+  if (provider.name !== 'claude-code' || provider.authMode !== 'subscription') {
+    throw new HttpError(
+      400,
+      'Usage tracking auth is only available for Claude Code subscription providers',
+      'usage_auth_subscription_required',
+    );
   }
   const { verifier, challenge, state } = createClaudePkceChallenge();
   await getRedis().set(
@@ -1606,6 +1627,12 @@ cliProviderRoutes.post('/:providerId/usage-auth/complete', async (c) => {
   const body = usageAuthCompleteSchema.parse(await c.req.json());
   const db = getDb();
   const provider = await loadOwnedProvider(db, userId, providerId);
+  if (provider.name !== 'claude-code' || provider.authMode !== 'subscription')
+    throw new HttpError(
+      400,
+      'Usage tracking auth is only available for Claude Code subscription providers',
+      'usage_auth_subscription_required',
+    );
 
   const { code, state } = parseClaudeAuthCode(body.code);
   if (!state) {

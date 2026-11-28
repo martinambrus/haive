@@ -19,8 +19,11 @@ function fakeDb(
     version,
     status: 'todo',
   };
+  const statements: string[] = [];
   const tx = {
-    execute: async () => undefined,
+    execute: async (query: SQL) => {
+      statements.push(new PgDialect().sqlToQuery(query).sql);
+    },
     select: () => ({
       from: () => ({
         where: () => {
@@ -55,13 +58,28 @@ function fakeDb(
     }),
     insert: () => ({ values: () => ({ onConflictDoUpdate: async () => undefined }) }),
   };
-  return { db: { transaction: async (fn: (t: typeof tx) => unknown) => fn(tx) } as never, row };
+  return {
+    db: { transaction: async (fn: (t: typeof tx) => unknown) => fn(tx) } as never,
+    row,
+    statements,
+  };
 }
 
 const OPTS = { repositoryId: 'repo-1', origin: 'user', requireExpectedVersion: true } as const;
 const op = (fields: Record<string, unknown>) => ({ op: 'upsert', nodeRef: NODE, ...fields });
 
 describe('applyPlanPatch node versions', () => {
+  it.each([undefined, 250, 25])(
+    'bounds repository acquisition separately from subsequent writes (%s ms)',
+    async (repositoryLockTimeoutMs) => {
+      const { db, statements } = fakeDb(3);
+      await applyPlanPatch(db, { ops: [op({ ordinal: 2 })] }, { ...OPTS, repositoryLockTimeoutMs });
+      expect(statements).toEqual([
+        `SET LOCAL lock_timeout = '${repositoryLockTimeoutMs ?? 5_000}ms'`,
+        'SET LOCAL lock_timeout = DEFAULT',
+      ]);
+    },
+  );
   it('describes an unversioned CAS race using the read version, not a caller expectation', async () => {
     const { db } = fakeDb(3, undefined, (row) => {
       row.version = 4;

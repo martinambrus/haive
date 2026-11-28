@@ -2,7 +2,13 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { logger } from '@haive/shared';
 import { type AliasRepository } from '../src/repo/worktree-alias-background.js';
 import { type AliasRetry } from '../src/repo/worktree-alias-sweep.js';
-import { WorktreeAliasSweeper } from '../src/repo/worktree-alias-background.js';
+import {
+  WorktreeAliasSweeper,
+  WORKTREE_ALIAS_BATCH_MS,
+} from '../src/repo/worktree-alias-background.js';
+
+// Step-count assertions must not depend on how long the host takes between operations.
+const maxBatchMs = Number.POSITIVE_INFINITY;
 
 describe('worktree alias background batches', () => {
   it('bounds work per tick, records only completion, and retries an ambiguous completion after restart', async () => {
@@ -16,7 +22,7 @@ describe('worktree alias background batches', () => {
       yield { examined: 1, replaced: 0 };
       yield { examined: 2, replaced: 1 };
     });
-    const worker = new WorktreeAliasSweeper({ next, complete }, { walk, maxSteps: 1 });
+    const worker = new WorktreeAliasSweeper({ next, complete }, { walk, maxSteps: 1, maxBatchMs });
     await worker.tick();
     expect(complete).not.toHaveBeenCalled();
     await worker.tick();
@@ -24,7 +30,10 @@ describe('worktree alias background batches', () => {
     await worker.tick();
     expect(complete).toHaveBeenCalledTimes(1);
     await worker.stop();
-    const restarted = new WorktreeAliasSweeper({ next, complete }, { walk, maxSteps: 8 });
+    const restarted = new WorktreeAliasSweeper(
+      { next, complete },
+      { walk, maxSteps: 8, maxBatchMs },
+    );
     await restarted.tick();
     expect(complete).toHaveBeenCalledTimes(2); // Copies share the batch while time remains.
     expect(walk).toHaveBeenCalledTimes(2);
@@ -42,7 +51,7 @@ describe('worktree alias background batches', () => {
         close();
       }
     };
-    const worker = new WorktreeAliasSweeper({ next, complete }, { walk, maxSteps: 1 });
+    const worker = new WorktreeAliasSweeper({ next, complete }, { walk, maxSteps: 1, maxBatchMs });
     await Promise.all([worker.tick(), worker.tick()]);
     expect(next).toHaveBeenCalledTimes(1);
     await worker.tick();
@@ -99,7 +108,7 @@ it('M6 checkpoints progress yielded before a repository fault and never resets i
   };
   const repo = { id: 'r', anchor: '/owned' };
   const store = { next: vi.fn(async () => repo), complete: vi.fn(), checkpoint, reset };
-  const worker = new WorktreeAliasSweeper(store, { walk });
+  const worker = new WorktreeAliasSweeper(store, { walk, maxBatchMs });
   await worker.tick();
   expect(checkpoint).toHaveBeenCalledWith(repo, scan, []);
   expect(reset).not.toHaveBeenCalled();
@@ -124,6 +133,7 @@ it('M1 caps retry delay, and polls an empty install only at the idle cadence', a
 });
 
 it('L-c batches multiple replacements up to the time cap', async () => {
+  expect(WORKTREE_ALIAS_BATCH_MS).toBe(100);
   let now = 0;
   vi.spyOn(Date, 'now').mockImplementation(() => now);
   const complete = vi.fn(async () => true);
@@ -135,12 +145,13 @@ it('L-c batches multiple replacements up to the time cap', async () => {
   };
   const worker = new WorktreeAliasSweeper(
     { next: async () => ({ id: 'r', anchor: '/owned' }), complete },
-    { walk, maxBatchMs: 100 },
+    { walk, maxSteps: 8, maxBatchMs: 100 },
   );
   await worker.tick();
-  expect(now).toBe(120); // Four copies, checking the deadline between operations.
+  expect(now).toBe(120); // The deadline ends the tick after four copies, before maxSteps.
   expect(complete).not.toHaveBeenCalled();
   await worker.tick();
+  expect(now).toBe(180);
   expect(complete).toHaveBeenCalledOnce();
   await worker.stop();
 });
@@ -159,7 +170,7 @@ it.each([
   };
   const worker = new WorktreeAliasSweeper(
     { next: async () => ({ id: 'r', anchor: '/owned' }), complete: async () => true },
-    { walk },
+    { walk, maxBatchMs },
   );
   await worker.tick();
   expect(exposure ? warn : info).toHaveBeenCalledWith(

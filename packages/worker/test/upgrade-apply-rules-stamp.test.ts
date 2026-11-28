@@ -87,6 +87,7 @@ async function setup(stamp: string | null | undefined, live: string | null) {
     ...RECORD_WRITE_TABLES,
   });
   fake.insert(schema.repositories, {
+    status: 'ready',
     id: REPO,
     userId: USER,
     name: 'acme',
@@ -413,6 +414,20 @@ describe('02 and the rules override its plan was made from', () => {
 
     await expect(s.agentsMd()).rejects.toMatchObject({ code: 'ENOENT' });
     expect(s.fake.rows(schema.onboardingArtifacts)).toEqual([]);
+  });
+
+  it('tells the user to retry the step, not the plan, while another operation holds the checkout', async () => {
+    const s = await setup('A', 'A');
+    s.fake.patch(schema.repositories, REPO, { rootClaimedAt: new Date(), rootClaimKind: 'edit' });
+
+    const failure = await s.apply().then(
+      () => null,
+      (err: unknown) => err,
+    );
+
+    expect(failure).toBeInstanceOf(Error);
+    expect((failure as Error).message).toContain('Retry this step');
+    expect((failure as Error).message).not.toContain('no longer holds');
   });
 
   it.each([

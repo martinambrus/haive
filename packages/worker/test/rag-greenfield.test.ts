@@ -273,7 +273,7 @@ beforeEach(async () => {
         where: (condition: never) => ({
           for: async (mode: string) => {
             expect(table).toBe(schema.repositories);
-            expect(mode).toBe('update');
+            expect(mode).toBe('no key update');
             return [{ scopeExcludeGlobs: repo.scopeExcludeGlobs }];
           },
           limit: async () => (table === schema.tasks ? [{ repositoryId: 'repo-1' }] : []),

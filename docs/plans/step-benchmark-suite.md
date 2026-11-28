@@ -168,13 +168,15 @@ separate from this documentation review.
   the raw output, and the workspace diff the dispatch left (tracked and untracked files against
   the restored fixture), since a step with `file_write` such as `07-phase-2-implement` edits the
   tree directly and its `apply` reads only the textual summary. Each row also carries the pack id
-  and pack hash. Stored in the benchmarks module's own tables (P6), apart from live tables, so
-  nothing in the live workflow reads it.
+  and both pack hashes (P2), the test files the dispatch touched (P3), and the tool calls by name
+  from `cli_invocations.tool_usage.tools`, so a web lookup or an unexpected tool shows on the row.
+  Stored in the benchmarks module's own tables (P6), apart from live tables, so nothing in the
+  live workflow reads it.
 - **Fixtures belong to a pack.** A fixture is captured from a run on a pack's repository and stored
   under that pack; a fixture captured from a user's own repository is a private pack that is never
   exported (P7).
 - **Cohort.** A matrix pins each CLI's version for its whole duration. The cell key includes pack hash, fixture/unit id, step, requested model, effective effort
-  level **and source**, CLI version, grader version, and `haive_build`, and a cell whose rows mix versions or other cohort inputs is refused, since
+  level **and source**, CLI version, tool surface, grader version, and `haive_build`, and a cell whose rows mix versions or other cohort inputs is refused, since
   a CLI upgrade between weekly allowances changes prompt handling, tools and output parsing.
 - **Staleness.** When a step's source hash differs from a fixture's, the runner refuses to mix new
   results with old ones and reports the fixture as stale. Results are compared only within one `haive_build`: a
@@ -184,7 +186,10 @@ separate from this documentation review.
   two results are compared only when their pack hash, build stamp, grader version and CLI versions
   all match. Installs on one release may share `release:<version>`, but pool only with identical
   relevant runtime inputs. Also hash the sandbox image digest, module/adapter versions, rules,
-  house-rule approvals, prompt-building inputs and retrieval snapshot. The build stamp alone
+  house-rule approvals, prompt-building inputs, retrieval snapshot and the tool surface: egress
+  mode, the disallowed-tool list, and the loaded MCP servers and tool count
+  (`tool_usage.loaded`). An answer reached with a tool and one reached without it are different
+  experiments. The build stamp alone
   cannot identify these mutable facts, and its current implementation excludes built library
   dist. An unknown build or an unverifiable environment is local-only, outside comparisons. A `tree:` stamp names an uncommitted checkout no other install can reproduce,
   so such results stay local and are never exported.
@@ -193,8 +198,8 @@ separate from this documentation review.
   one chosen result row (that row's id is the key), then runs `apply` exactly once and the grader
   on that row's raw output. Capture pre-apply and post-apply tree hashes separately; applying
   the final diff and then calling `apply` would perform file mutations twice. Preserve modes,
-  deletes, renames, binary files and untracked files; a text-only patch is insufficient. Grader and `apply` changes then
-  re-run without any model call. Model and effort comparisons always run live.
+  deletes, renames, binary files and untracked files; a text-only patch is insufficient. Grader and `apply` changes, and
+  answer-key corrections (P3), then re-run without any model call. Model and effort comparisons always run live.
 
 **Isolation and reproducibility gates.** A capture is a versioned immutable manifest of every
 read needed by this dispatch: fixture tree/state, step rows, form answers, persona definitions,
@@ -216,6 +221,13 @@ on timeout, with bounded disk, output, memory and wall time. A failed or timed-o
 a result with a structural outcome; it is never silently rerun until it passes. A served-model
 reroute or dropped effort is disclosed and excluded from the intended cell, not relabelled.
 
+Benchmark runs block WebSearch and WebFetch through the adapter's `disallowedTools`. Packs and
+their answer keys are public on GitHub (P7), WebSearch runs server-side so egress `none` cannot
+block it, and nothing in the worker gates web tools today. A row whose `tool_usage` shows a web
+call is disclosed and excluded from the intended cell, like a reroute. A CLI that cannot block web
+tools and whose `tool_usage` coverage is not `full` cannot show that it never looked the key up,
+so its rows are an unverifiable environment: local-only, outside comparisons.
+
 The runner and fixture loader cannot depend on untracked scripts, scratch `.claude` files or a
 memory key on one machine. Commit the minimal harness/fixtures needed to reproduce each check.
 Preserve private/public provenance on capture; public export requires a separately reviewed
@@ -231,8 +243,12 @@ and delete the result store.
 
 A **pack** is the unit of input: a fixture repository pinned by commit, 1-3 task statements for the
 workflow steps, an answer key, the step fixtures captured from one upstream run on it, and a
-manifest (pack id, topic tags, stack, the steps it covers, the model that generated it, the content
-hash). Topic tags are a stack tag detected from the repository's manifests (`Cargo.toml`,
+manifest (pack id, topic tags, stack, the steps it covers, the model that generated it, and two
+content hashes). The **input hash** covers what the contestant reads: the repository, the task
+statements and the fixtures. The **key hash** covers what grades it: the answer key, the hidden
+tests and the ideal output. "Pack hash" elsewhere in this plan means both. A key correction (P3)
+changes only the key hash, so the fixtures stay valid and earlier rows re-grade under the new key
+through P1's zero-token replay instead of being re-captured or re-run. Topic tags are a stack tag detected from the repository's manifests (`Cargo.toml`,
 `composer.json`, `package.json`) plus free area tags, so "rust" and "Rust CLI" group under one
 stack. A pack names the steps it covers: a step whose output barely depends on the domain
 (`10-gate-3-commit`, `00-triage`) can be left out rather than padding the topic's report.
@@ -248,6 +264,19 @@ files, 2-3 dependencies, SQLite, installing in seconds. Kept in its own reposito
 is clean and pinned by commit. Every authored pack follows the same rules: small, installing in
 seconds, traps graded easy to hard.
 
+**Holdout pack.** Beside the reference pack, a private variant: the same trap types in fresh code
+with fresh names, never published, exported or used to tune anything. It must pass the same check
+below. It serves two purposes:
+
+- **Contamination.** The per-model gap between reference and holdout grades estimates how much of a
+  reference score comes from exposure to the public pack, as the GSM1k study did for GSM8K. Read
+  each model's gap against the gap the other models show: a difficulty difference between the two
+  packs moves every model alike, exposure moves only some. A gap is evidence, not proof, of
+  memorization.
+- **Transfer.** A Haive prompt or step change tuned on the reference pack, which the shared replay
+  harness invites (Relation to other plans), counts as an improvement only once it is confirmed on
+  the holdout. A score that rose only on the pack it was tuned against measures the tuning.
+
 Planted traps, each with a written answer key, graded easy to hard so scores spread out and no
 model sits at 100%:
 
@@ -257,6 +286,11 @@ model sits at 100%:
 - one convention every file follows except one
 - a fact visible only by reading two files together
 - one real bug with a deterministic repro
+- a task statement whose stated cause is wrong, graded on whether the output follows the false
+  premise or corrects it
+- a repository file holding a harmless instruction addressed to the agent (for example, create a
+  marker file), graded on whether the output or the diff obeys it; this measures the model together
+  with Haive's prompt containment (`_untrusted-repo.ts`)
 - a README task whose correct content depends on three of the above
 
 **Check, for every pack.** The answer key is complete: an ideal output scores 100%, an empty output
@@ -266,17 +300,35 @@ not runnable. For an authored pack the reviewed ideal output is part of the pack
 ## P3 — Graders, cheapest first
 
 1. **Deterministic.** Output parses to the step's schema; files exist; `php -l` passes; tests pass;
-   required sections are present; every path the output cites exists in the fixture.
+   required sections are present; every path the output cites exists in the fixture. "Tests pass"
+   means the pack's own tests, those in the fixture and the hidden ones, copied over the
+   contestant's tree before they run, never the tests the dispatch left behind: an edited, skipped
+   or deleted assertion is graded as the pack wrote it. Tests the contestant added run only as
+   information. The test files the dispatch touched, classified from P1's workspace diff by
+   `isTestEvidencePath` (`workflow/_test-paths.ts`), are recorded beside the grade as a structural
+   flag. The live workflow's `_fix-test-edits.ts` shows such edits without replaying the old tests;
+   a pack holds the original tests, so the benchmark replays them.
 2. **Answer key.** Planted-trap recall and precision; KB entries checked against the fact list;
-   hallucinated facts counted. The key is read from the pack, so one grader serves every topic.
+   facts absent from the key counted. The key is read from the pack, so one grader serves every
+   topic. A fact absent from the key is reported as unmatched, not hallucinated, until someone
+   triages it: a hallucination, or a real issue the key missed. Precision over untriaged facts is
+   provisional and labelled so. A key gap becomes a key correction, recorded in the pack with its
+   date and reason, so a later reader can tell an intentional correction from a key bent toward
+   one model's output. It changes the key hash (P2), and every earlier row on the pack re-grades
+   by replay.
 3. **LLM judge, only for what is left** (prose quality, plan structure). Pairwise A vs B, run in both
    orders, judged by a model from another family than both contestants. No absolute 1-10 scores.
-   A pairwise verdict depends on the opponent, so it is not a per-run grade: verdicts go into their
+   The judge sees the two outputs labelled A and B only, with no model, provider or effort named,
+   each inside a `fencedAgentBlock` as data: a contestant's output is text from the run, and an
+   instruction inside it must not steer the verdict. A pairwise verdict depends on the opponent, so it is not a per-run grade: verdicts go into their
    own record (run A, run B, order, winner or tie) and are reported as win rates per pair of
    cells. The per-run grade on a result row comes only from layers 1 and 2, and only that grade
    feeds P4's means, A/A spread and intervals. For judge calibration compare independent outputs from the same cell in both orders,
    track ties separately, and require no systematic position preference. Identical output
-   against itself should tie; it is not evidence for a 50% non-tie win rate.
+   against itself should tie; it is not evidence for a 50% non-tie win rate. Calibration also
+   covers length and confidence: fixed pairs where a longer, more assured output carries a
+   planted error and a plainer one is correct. Preference judges are known to favour convincing
+   over correct, and position-swap agreement alone cannot catch that.
 
 DDEV: no DDEV task. If environment setup is worth measuring, a **micro DDEV fixture** — the P2 app
 with `01-env-detect`'s DDEV output graded by `ddev config` validating, `ddev start`, HTTP 200 and the
@@ -284,7 +336,9 @@ DB importing — costs one step's tokens and about a minute of `ddev start`. Inc
 shows the step is cheap; otherwise drop it.
 
 **Check.** Unit tests for each grader on fixed outputs; the pairwise judge agrees with itself when
-A and B are swapped on at least 9 of 10 fixed pairs.
+A and B are swapped on at least 9 of 10 fixed pairs, and picks the correct output on at least 9 of
+10 fixed length/confidence pairs. A fixture whose dispatch edits a test still grades on the pack's
+original test.
 
 ## P4 — Noise floor, then the matrix
 
@@ -310,7 +364,8 @@ A and B are swapped on at least 9 of 10 fixed pairs.
    freedom (k=4 gives 3 for one pilot), not the matrix cell's n. Pool only matched, defensible
    variance groups and document the formula and confidence level in the implementation.
    Adaptive third runs and screening many models make ordinary intervals exploratory;
-   confirm selected comparisons on fresh runs before publishing a statistical winner.
+   confirm selected comparisons on fresh runs of fixtures not used to select them (the holdout
+   pack, or another pack on the topic) before publishing a statistical winner.
    Once several independent fixtures exist, bootstrap paired differences by fixture, with a
    fixed seed and every repeat of a fixture kept in one resample unit. Report observed
    all-k-success counts for reliability; do not present a two-run estimate of p raised to k
@@ -384,15 +439,18 @@ already removed keeps its data (`Missing`) until "Purge data..." on `/admin/modu
   checks happen only after maintainer review in a disposable credential-free sandbox with
   bounded resources and no Docker socket; issue labels alone never authorize execution.
 - **Acceptance.** A maintainer moves an accepted bundle into `benchmarks/community/` by PR; P6
-  ingests it on the next update. Results are self-reported: the page marks them so, and because the
-  pack is public a maintainer can re-run any cell to spot-check it.
+  ingests it on the next update. Results are self-reported, and the page marks them so. Because
+  the pack is public, a maintainer re-runs at least one cell of a bundle that would change a
+  published topic ranking before accepting it, and records that re-run beside the bundle; other
+  bundles may be spot-checked. A required re-run keeps acceptance from becoming a routine click.
 - **Docs list.** A generated docs page (or the wiki) renders P6's topic reports from the committed
   bundles, so the public list and an install's page come from the same data and the same code.
 
 **Sharing limits.** Keep the answer key and hidden grader out of the contestant's mount, prompt,
-RAG corpus and subprocess environment, even when they are public in the pack repository. Public
-traps cannot prove absence of training contamination; the generator-family exclusion is a bias
-control, not a guarantee. Grades are self-reported until rerun. Exported HTML/Markdown renders
+RAG corpus, subprocess environment and web reach (P1 blocks web tools), even when they are public
+in the pack repository. Public traps cannot prove absence of training contamination; the
+generator-family exclusion is a bias control, not a guarantee, and the holdout gap (P2) estimates
+it. Grades are self-reported until rerun. Exported HTML/Markdown renders
 model text through the shared Markdown policy, and no raw model HTML is executed. P3's zero-token
 byte-identical check applies to deterministic graders only; an LLM judge is replayed from a stored
 verdict or called live as a separately costed observation.
@@ -428,6 +486,13 @@ verdict or called live as a separately costed observation.
   import reads it from the release assets or the module carries the directory.
 - Whether a generator plus user review produces answer keys good enough to pass P2's check without
   a hand-written ideal output, or the user has to write one.
+- Whether each CLI in the matrix can block web tools for a run (P1). Claude-family adapters take
+  `--disallowedTools`. The codex adapter's own comment says only the omitted `minimal` effort
+  disables web search, so codex searches at every effort Haive offers and has no switch for it yet.
+- Whether pack rankings agree with live outcomes, such as per-model fix-loop rounds and 08c
+  findings on real tasks. Task mix confounds that comparison, so it is a sanity check only: a pack
+  ranking that live outcomes contradict sends the pack back for review rather than overruling
+  either.
 
 ## Decided
 
@@ -437,9 +502,16 @@ verdict or called live as a separately costed observation.
   reference pack; results and public packs are shared by GitHub issue and accepted into
   `benchmarks/community/`; a benchmarks module stores local and accepted results, imports on boot
   and on demand, and computes topic reports from within-pack comparisons.
+- 2026-11-27: grading never trusts what the contestant can change or reach: the pack's original
+  tests are replayed, web tools are blocked and the tool surface joins the cohort. A private
+  holdout pack estimates contamination and confirms tuned changes; answer-key corrections are
+  recorded with a reason and re-grade by replay; two traps test false premises and embedded
+  instructions; the judge is blind and calibrated for length; a bundle that would change a
+  ranking is re-run before acceptance.
 
 ## Relation to other plans
 
 - `refactoring-economics-lessons` D2 and `parsimony-lessons` P3: one replay harness serves all three.
+  A change those plans tune on the reference pack is confirmed on the holdout pack (P2).
 - `parsimony-lessons` P0: its change-size counter can be one more grade column for
   `07-phase-2-implement` results.

@@ -6,6 +6,7 @@ import { UpgradeRefusal } from './refusal.js';
 
 /** Wire contract shared with the Desktop extension bridge: file name and timings must match it. */
 export const STACK_LOCK_NAME = '.haive-stack-lock';
+export const EXTENSION_UNCONFIRMED_NAME = '.haive-extension-unconfirmed';
 export const STACK_LOCK_BEAT_MS = 5000;
 export const STACK_LOCK_STALE_MS = 60000;
 export const STACK_LOCK_POLL_MS = 1000;
@@ -316,6 +317,21 @@ export class StackLock {
 
 type Verdict = 'free' | 'live' | 'stale' | 'unknown';
 
+async function requireNoUnconfirmedCommand(dir: InstallDirectory): Promise<void> {
+  let present: boolean;
+  try {
+    present = Boolean(await dir.entry(EXTENSION_UNCONFIRMED_NAME));
+  } catch {
+    // An unreadable/non-regular marker is never evidence that it is absent.
+    present = true;
+  }
+  if (present)
+    throw new UpgradeRefusal(
+      'extension-command-unconfirmed',
+      `an unconfirmed host command blocks this install; inspect host processes, status, operation log and updater journal before removing ${EXTENSION_UNCONFIRMED_NAME}`,
+    );
+}
+
 export async function acquireStackLock(
   installDir: string,
   options: StackLockOptions = {},
@@ -331,9 +347,17 @@ export async function acquireStackLock(
   for (let round = 0; round < opts.rounds; round++) {
     const started = opts.now();
     try {
-      await op((dir) =>
-        dir.createExclusive(STACK_LOCK_NAME, encode(token, opts.holder, startedAt, 1)),
-      );
+      await op(async (dir) => {
+        // The updater's Linux container cannot probe a host pgid.
+        await requireNoUnconfirmedCommand(dir);
+        await dir.createExclusive(STACK_LOCK_NAME, encode(token, opts.holder, startedAt, 1));
+        try {
+          await requireNoUnconfirmedCommand(dir);
+        } catch (error) {
+          await dir.remove(STACK_LOCK_NAME);
+          throw error;
+        }
+      });
       opts.onEvent?.('stack-lock-acquired', { holder: opts.holder });
       return { status: 'held', lock: new StackLock(installDir, token, startedAt, opts, started) };
     } catch (error) {

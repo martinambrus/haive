@@ -9,7 +9,9 @@ import {
   configService,
   lockLoginSet,
   logger,
+  secretsService,
   parseAllowanceWatchMode,
+  hasUsageWindow,
   type AuthMode,
   type CliProviderName,
 } from '@haive/shared';
@@ -19,6 +21,7 @@ import { getDb } from '../db.js';
 import { resolveProbeFetch } from '../cli-adapters/probe-fetch.js';
 import { getBullRedis } from '../redis.js';
 import {
+  ClaudeOauthError,
   claudeTokenNeedsRefresh,
   isClaudeRefreshRejected,
   refreshClaudeToken,
@@ -90,6 +93,9 @@ const DEFAULT_MIN_POLL_INTERVAL_MS = 60 * 1000 + POLL_LEEWAY_MS;
  *  singleton). Drives the min-interval throttle; cleared on restart, where a fresh boot
  *  poll is fine. */
 const lastPollAt = new Map<string, number>();
+
+// Warn once per failing refresh token until recovery or a credential replacement.
+const refreshFailureToken = new Map<string, string>();
 
 /** Providers whose stored usage refresh token the token endpoint has rejected with
  *  invalid_grant — revoked, or (common when one account is registered as several
@@ -190,6 +196,7 @@ async function resolveSetGrant(
 
   const current = await pick();
   if (!current) return null;
+  if (refreshFailureToken.get(key) !== current.grant.refreshToken) refreshFailureToken.delete(key);
   if (!current.grant.refreshToken || !claudeTokenNeedsRefresh(current.grant.expiresAt)) {
     return current;
   }
@@ -205,9 +212,12 @@ async function resolveSetGrant(
 
     if (holder.grant.refreshToken && claudeTokenNeedsRefresh(holder.grant.expiresAt)) {
       try {
+        // Load everything needed to encrypt before the vendor spends its single-use token.
+        const masterKek = await secretsService.getMasterKek();
+        lastPollAt.set(key, Date.now());
         const fresh = await refreshClaudeToken(holder.grant.refreshToken);
-        await release.assertHeld();
-        const rotated = await rotateGrantCopies(db, rep, holder, fresh, release.assertHeld);
+        const rotated = await rotateGrantCopies(db, rep, holder, fresh, masterKek);
+        refreshFailureToken.delete(key);
         deadUsageRefreshToken.delete(key); // recovered (or was never dead)
         return rotated;
       } catch (err) {
@@ -236,13 +246,18 @@ async function resolveSetGrant(
           if (written) deadUsageRefreshToken.set(key, holder.grant.refreshToken);
           return null;
         }
-        // Transient (network / 5xx): try the stale token anyway; the fetch surfaces the
-        // state without marking the token permanently dead.
-        log.warn(
-          { providerId: rep.id, err },
-          'claude usage token refresh failed; using stale token',
-        );
-        return holder;
+        // Any refresh failure stops this poll. Keep the stored grant for the next tick,
+        // but never use an access token we already decided needs refreshing.
+        if (refreshFailureToken.get(key) !== holder.grant.refreshToken) {
+          // OAuth errors retain only status and an allowlisted code; an arbitrary network
+          // error may include request credentials and must not be attached.
+          log.warn(
+            { providerId: rep.id, ...(err instanceof ClaudeOauthError ? { err } : {}) },
+            'claude usage token refresh failed; skipping poll',
+          );
+          refreshFailureToken.set(key, holder.grant.refreshToken);
+        }
+        return null;
       }
     }
     return holder;
@@ -557,7 +572,6 @@ export async function runUsagePollTick(db: Database): Promise<void> {
     return;
   }
 
-  const supported = new Set(Object.keys(USAGE_PROVIDERS));
   const providers = (await db.query.cliProviders.findMany({
     where: eq(schema.cliProviders.enabled, true),
     columns: {
@@ -575,7 +589,7 @@ export async function runUsagePollTick(db: Database): Promise<void> {
   const targets: ProviderRow[] = [];
   const setReps = new Map<string, ProviderRow>();
   for (const p of providers) {
-    if (!supported.has(p.name)) continue;
+    if (!hasUsageWindow(p.name, p.authMode)) continue;
     if (USAGE_PROVIDERS[p.name]?.token.kind !== 'oauthRefresh') {
       targets.push(p);
       continue;
@@ -638,6 +652,7 @@ export async function checkProviderRecovery(db: Database): Promise<void> {
       currentRound: schema.tasks.currentRound,
       autoResumeCount: schema.tasks.allowanceAutoResumeCount,
       providerName: schema.cliProviders.name,
+      providerAuthMode: schema.cliProviders.authMode,
     })
     .from(schema.tasks)
     .leftJoin(
@@ -684,7 +699,7 @@ export async function checkProviderRecovery(db: Database): Promise<void> {
           since: task.since,
           now,
           snapshot: snap ? { status: snap.status, fetchedAt: snap.fetchedAt } : null,
-          hasUsageWindow: !!task.providerName && task.providerName in USAGE_PROVIDERS,
+          hasUsageWindow: hasUsageWindow(task.providerName, task.providerAuthMode),
         });
         if (!verdict.back) {
           if (verdict.giveUp) {
@@ -709,6 +724,8 @@ export async function checkProviderRecovery(db: Database): Promise<void> {
         }
         via = verdict.via;
       } else {
+        // Rate-limit verdicts retain captured resets across auth changes; they do not
+        // infer probe capability from a provider name or use the server-error cool-off.
         // Backfill the reset if the arm path couldn't capture it (no snapshot yet) but the
         // window is now visible — so a later tick can fire on the authoritative reset.
         let resetAt = task.resetAt;
@@ -755,7 +772,7 @@ export async function checkProviderRecovery(db: Database): Promise<void> {
           }
           continue;
         }
-        let resumed: boolean;
+        let resumed: Awaited<ReturnType<typeof autoResumeFailedStep>>;
         try {
           resumed = await autoResumeFailedStep(db, {
             taskId: task.id,
@@ -793,22 +810,8 @@ export async function checkProviderRecovery(db: Database): Promise<void> {
         if (resumed) {
           // Keep the narrowed step id across the enqueue callback.
           const stepId = task.currentStepId;
-          // Stamped with the epoch the re-open left the task at, so that a Retry or a re-drive that
-          // moves it on before the job is picked up drops the job as stale; an unstamped one is
-          // exempt from that drop and re-enters the step by its status. A read that fails costs the
-          // stamp and never the advance: the re-open has committed and nothing else queues this job.
-          const reopened = await db.query.tasks
-            .findFirst({
-              where: eq(schema.tasks.id, task.id),
-              columns: { orchestrationEpoch: true },
-            })
-            .catch((err: unknown) => {
-              log.warn(
-                { taskId: task.id, providerId: task.providerId, err },
-                'provider recovered; the task epoch could not be read, so the auto-resume advance is queued without one',
-              );
-              return undefined;
-            });
+          // The reopen returns its committed epoch. Reading it back could stamp
+          // this old wakeup with a concurrent Retry's newer epoch.
           await retrying(async () => {
             await getTaskQueue().add(
               TASK_JOB_NAMES.ADVANCE_STEP,
@@ -817,7 +820,7 @@ export async function checkProviderRecovery(db: Database): Promise<void> {
                 userId: task.userId,
                 stepId,
                 round: task.currentRound ?? 0,
-                epoch: reopened?.orchestrationEpoch,
+                epoch: resumed.epoch,
               },
               {
                 attempts: 3,

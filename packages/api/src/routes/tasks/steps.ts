@@ -10,6 +10,7 @@ import {
 import { validateFormValues, type FormSchema } from '@haive/shared';
 import { assertUserPostgresDsn } from '@haive/shared/egress';
 import { Hono } from 'hono';
+import { isDeepStrictEqual } from 'node:util';
 import { z } from 'zod';
 import {
   and,
@@ -29,6 +30,8 @@ import {
 import type { SQL } from 'drizzle-orm';
 import {
   schema,
+  boundedLockWait,
+  LATE_LOCK_WAIT_MS,
   isLockNotAvailable,
   lockStepRows,
   resetDagCurrentLevelForRetry,
@@ -61,7 +64,7 @@ import { parseInvocationHistoryQuery } from './_invocation-history.js';
 import { loadCustomToolCalls, loadIntegrationCalls } from './_call-log.js';
 import { HttpError, type AppEnv } from '../../context.js';
 import { admitNewWork, assertNewWorkAllowed } from '../../middleware/maintenance.js';
-import { killTaskSandboxes } from '../../lib/sandbox-kill.js';
+import { killTaskSandboxes, type SandboxKillResult } from '../../lib/sandbox-kill.js';
 import { refuseBesideLiveUpgrade, refuseReviveBesideLive } from '../upgrades.js';
 import {
   cancelLiveRuns,
@@ -184,8 +187,8 @@ function refuseLiveFanout(count: number): void {
 }
 
 /** An open wait must still have the marker read by the handler: a closer or a re-park took that wait.
- *  A NULL marker can be an already answered wait (or a legacy unmarked park), so only the status
- *  is checked there. This keeps accepting a duplicate read after an answer closed the wait. */
+ *  A NULL marker can also be a legacy unmarked park, so this predicate checks only its status.
+ *  Submit separately checks saved answers under the row lock before using this predicate. */
 function stillParkedAsRead(step: { id: string; waitingStartedAt: Date | null }) {
   return and(
     eq(schema.taskSteps.id, step.id),
@@ -210,16 +213,15 @@ async function reopenFailedTask(tx: DbHandle, taskId: string, now: Date): Promis
     .where(and(eq(schema.tasks.id, taskId), eq(schema.tasks.status, 'failed')));
 }
 
-/** Supersede the live invocations of the step rows `ids` and drop their agent minings. With
- *  `noWait`, for a caller that already holds step rows and the task row, it first locks what it will
- *  write without waiting: a pass holds a run and then wants its step row (`writeLoginHint`), so a
- *  wait for the run from there closes a cycle, and a held row is answered with a lock-not-available
- *  error instead. */
+/** Supersede the live invocations of the step rows `ids` and drop their agent minings.
+ *  `lockFirst` takes the rows at their write strength under the caller's bounded wait.
+ *  That caller already holds steps (and possibly the task), while a pass can hold a run
+ *  and want its step (`writeLoginHint`): a longer hold must refuse before deadlock detection. */
 async function sweepRunsOf(
   tx: DbHandle,
   ids: string[],
   now: Date,
-  opts: { noWait?: boolean } = {},
+  opts: { lockFirst?: boolean } = {},
 ): Promise<void> {
   // Both halves of the step's spend: its own invocations AND the recap pass, whose
   // task_step_id is deliberately NULL. Without the second arm a re-run leaves the prior
@@ -232,21 +234,21 @@ async function sweepRunsOf(
     ),
     isNull(schema.cliInvocations.supersededAt),
   );
-  if (opts.noWait) {
+  if (opts.lockFirst) {
     await tx
       .select({ id: schema.cliInvocations.id })
       .from(schema.cliInvocations)
       .where(runs)
-      .for('no key update', { noWait: true });
+      .for('no key update');
   }
   await tx.update(schema.cliInvocations).set({ supersededAt: now }).where(runs);
   const minings = inArray(schema.taskStepAgentMinings.taskStepId, ids);
-  if (opts.noWait) {
+  if (opts.lockFirst) {
     await tx
       .select({ id: schema.taskStepAgentMinings.id })
       .from(schema.taskStepAgentMinings)
       .where(minings)
-      .for('update', { noWait: true });
+      .for('update');
   }
   await tx.delete(schema.taskStepAgentMinings).where(minings);
 }
@@ -259,7 +261,8 @@ async function sweepRunsOf(
  *  step PLUS its downstream, while the resume mining arm passes the downstream ONLY — there the
  *  clicked step deliberately keeps its detect/form output and its surviving agents' rows.
  *  Extracted so those two can never disagree about what a re-run resets. (The worker's
- *  resetStepAndDownstream is a third, deliberate copy; keep it in sync.)
+ *  resetStepAndDownstream is a third, deliberate copy; keep reset fields and the
+ *  shared late-lock bound in sync. Its 55P03 maps to a worker hold; the API answers 503.)
  *
  *  Callers pass only rows worth resetting — a row already `pending` has nothing to blank.
  *
@@ -300,6 +303,7 @@ export async function resetRowsForRerun(
   now: Date,
   opts: {
     rowsHeld?: boolean;
+    lateLockWaitMs?: number;
     preserveGuards?: boolean;
     executionContract?: unknown;
     /** Rescan after a retained producer even when the initial reset set is empty. */
@@ -325,8 +329,13 @@ export async function resetRowsForRerun(
   if (rows.length === 0 && !anchor) return [];
   const ids = rows.map((r) => r.id);
   // The rows a pass activated meanwhile are held already (`rowsHeld`) and the task row is bumped:
-  // their runs are swept without waiting, and a held one refuses the action as a held row does.
-  if (opts.rowsHeld) await refusingWhenLocked(() => sweepRunsOf(tx, ids, now, { noWait: true }));
+  // their runs get the same bounded wait as a held row, refusing a longer hold.
+  if (opts.rowsHeld)
+    await refusingWhenLocked(
+      tx,
+      () => sweepRunsOf(tx, ids, now, { lockFirst: true }),
+      opts.lateLockWaitMs,
+    );
   else await sweepRunsOf(tx, ids, now);
   // Re-running 06c-dag-execute (or any step whose set includes it) must also clear the wedged
   // DAG level: resetting task_steps alone leaves task_dag_issues failed_unrecoverable, so
@@ -378,10 +387,14 @@ export async function resetRowsForRerun(
   ).filter((r) => r.id !== anchor?.id || ids.includes(r.id));
   // A guard decision (and even its first run) can land after the caller's read.
   // These extra rows were not in the first run sweep. We hold steps now, so
-  // refuse a busy run rather than wait in the reverse lock order.
+  // bound the wait for a busy run rather than wait indefinitely in reverse lock order.
   const extraIds = held.filter((r) => !ids.includes(r.id)).map((r) => r.id);
   if (extraIds.length) {
-    await refusingWhenLocked(() => sweepRunsOf(tx, extraIds, now, { noWait: true }));
+    await refusingWhenLocked(
+      tx,
+      () => sweepRunsOf(tx, extraIds, now, { lockFirst: true }),
+      opts.lateLockWaitMs,
+    );
     ids.push(...extraIds);
   }
   for (const r of held) {
@@ -490,11 +503,15 @@ function hasDurableApplyState(row: {
   return row.applyReceipt != null || row.guardState != null || row.stepId === '11g-save-database';
 }
 
-/** A statement that could not take a lock without waiting: the pass that holds it is mid-write, and
- *  the action rolls back. The bump holds the task row, so waiting here could close a cycle. */
-async function refusingWhenLocked<T>(run: () => Promise<T>): Promise<T> {
+/** The action already holds step/task rows. Wait out brief benign holds, but roll
+ *  back on a longer hold (55P03), since waiting indefinitely can close a cycle. */
+export async function refusingWhenLocked<T>(
+  tx: DbHandle,
+  run: () => Promise<T>,
+  timeoutMs = LATE_LOCK_WAIT_MS,
+): Promise<T> {
   try {
-    return await run();
+    return await boundedLockWait(tx, run, timeoutMs);
   } catch (err) {
     if (isLockNotAvailable(err)) {
       throw new HttpError(503, 'The task changed while this was being applied; try again');
@@ -506,7 +523,7 @@ async function refusingWhenLocked<T>(run: () => Promise<T>): Promise<T> {
 /** Rows a pass activated between the action's read and its epoch bump. The worker's claim checks
  *  the epoch under the task row's lock, so after the bump this set is final. */
 async function rowsActivatedMeanwhile(tx: DbHandle, taskId: string, kept: readonly string[]) {
-  return refusingWhenLocked(() =>
+  return refusingWhenLocked(tx, () =>
     tx
       .select()
       .from(schema.taskSteps)
@@ -520,7 +537,7 @@ async function rowsActivatedMeanwhile(tx: DbHandle, taskId: string, kept: readon
       // The rows are normally held by the id-ordered batch already, and FOR UPDATE on a row held
       // FOR NO KEY UPDATE is an upgrade that conflicts with the KEY SHARE a pass's run insert holds
       // on it: a 503 for a row this transaction holds itself.
-      .for('no key update', { noWait: true }),
+      .for('no key update'),
   );
 }
 
@@ -636,7 +653,7 @@ export async function retryTaskAtStep(
   userId: string,
   target: typeof schema.taskSteps.$inferSelect,
   opts: { liftPause?: { read: Date; role: string | undefined; actorUserId: string } } = {},
-): Promise<{ epoch: number }> {
+): Promise<{ epoch: number } & Partial<SandboxKillResult>> {
   // The immutable task pin is authoritative even for callers outside the action route.
   const task = await db.query.tasks.findFirst({
     where: eq(schema.tasks.id, taskId),
@@ -718,9 +735,13 @@ export async function retryTaskAtStep(
     };
   });
   if (moved.resumeAudit) logAuditEvent(moved.resumeAudit);
+  let sandboxKill: SandboxKillResult | undefined;
   if (moved.live) {
-    const killed = await killTaskSandboxes(taskId);
-    logger.info({ taskId, killed }, 'killed task sandboxes for task retry');
+    sandboxKill = await killTaskSandboxes(taskId);
+    logger[sandboxKill.killConfirmed ? 'info' : 'warn'](
+      { taskId, ...sandboxKill },
+      'task retry sandbox cleanup',
+    );
   }
   await addBestEffort(
     () =>
@@ -743,7 +764,7 @@ export async function retryTaskAtStep(
     'step advance not queued; the stalled sweep will queue it',
     { taskId, stepId: target.stepId },
   );
-  return { epoch: moved.epoch };
+  return { epoch: moved.epoch, ...sandboxKill };
 }
 function unendedTask(taskId: string) {
   return and(
@@ -1113,15 +1134,6 @@ stepRoutes.post('/:id/steps/:stepId/submit', async (c) => {
     .limit(1);
   const step = stepRows[0];
   if (!step) throw formNotWaiting('form submission', stepId);
-  if (await insightGateLatched(db, id, stepId)) {
-    if (
-      body.stepRowId !== step.id ||
-      step.waitingStartedAt === null ||
-      typeof body.waitingStartedAt !== 'string' ||
-      new Date(body.waitingStartedAt).getTime() !== step.waitingStartedAt.getTime()
-    )
-      throw formStale();
-  }
   // Upgrade the same persisted 06 schema the display and worker readers use. Keep all
   // other fields sparse: their existing defaults/presets are resolved by 06 apply.
   const submitSchema = upgradeRunConfigSchema(
@@ -1140,6 +1152,18 @@ stepRoutes.post('/:id/steps/:stepId/submit', async (c) => {
   const normalized = normalizeStepFormValues(stepId, submittedValues);
   if (!normalized.success) throw new HttpError(400, normalized.issues.join('; '));
   const values = normalized.data;
+  if (await insightGateLatched(db, id, stepId)) {
+    if (
+      body.stepRowId !== step.id ||
+      (step.waitingStartedAt === null
+        ? step.formValues === null || !isDeepStrictEqual(step.formValues, values)
+        : new Date(body.waitingStartedAt as string).getTime() !==
+          step.waitingStartedAt.getTime()) ||
+      typeof body.waitingStartedAt !== 'string'
+    )
+      throw formStale();
+  }
+
   if (
     stepId === '04-tooling-infrastructure' &&
     typeof values.ragConnectionString === 'string' &&
@@ -1150,6 +1174,25 @@ stepRoutes.post('/:id/steps/:stepId/submit', async (c) => {
 
   const now = new Date();
   const writeAnswer = async (tx: DbHandle) => {
+    // A submit closes the wait before pickup changes waiting_form. Decide from the
+    // held row so two submissions cannot both replace the accepted answer. A legacy
+    // unmarked park with no values still accepts its first answer.
+    const [held] = await tx
+      .select({
+        status: schema.taskSteps.status,
+        waitingStartedAt: schema.taskSteps.waitingStartedAt,
+        formValues: schema.taskSteps.formValues,
+        updatedAt: schema.taskSteps.updatedAt,
+      })
+      .from(schema.taskSteps)
+      .where(eq(schema.taskSteps.id, step.id))
+      .for('no key update');
+    if (!held || held.status !== 'waiting_form') throw formNotWaiting('form submission', stepId);
+    if (held.waitingStartedAt === null && held.formValues !== null) {
+      if (!isDeepStrictEqual(held.formValues, values))
+        throw formNotWaiting('form submission', stepId);
+      return { accepted: false, answeredAt: held.updatedAt };
+    }
     const answered = await tx
       .update(schema.taskSteps)
       .set({
@@ -1192,12 +1235,26 @@ stepRoutes.post('/:id/steps/:stepId/submit', async (c) => {
           ? { userId, generation: step.rerunGeneration, commit: values.commit }
           : {}),
     });
+    return { accepted: true, answeredAt: now };
   };
-  await db.transaction(async (tx) => {
-    if (!(await admitAnswer(tx, id))) return writeAnswer(tx);
-    await refuseReviveBesideLive(tx, id);
-    await writeAnswer(tx);
-    await reopenFailedTask(tx, id, now);
+  const answer = await db.transaction(async (tx) => {
+    let written: Awaited<ReturnType<typeof writeAnswer>>;
+    if (!(await admitAnswer(tx, id))) {
+      written = await writeAnswer(tx);
+    } else {
+      await refuseReviveBesideLive(tx, id);
+      written = await writeAnswer(tx);
+      if (written.accepted) await reopenFailedTask(tx, id, now);
+    }
+    // Keep the accepted step row locked through this read, step before task as
+    // Retry does. A takeover after commit makes an identical retry's wakeup stale.
+    const [heldTask] = await tx
+      .select({ epoch: schema.tasks.orchestrationEpoch })
+      .from(schema.tasks)
+      .where(eq(schema.tasks.id, id))
+      .for('share');
+    if (!heldTask) throw new HttpError(404, 'Task not found');
+    return { ...written, epoch: heldTask.epoch };
   });
 
   const payload: TaskJobPayload = {
@@ -1205,11 +1262,19 @@ stepRoutes.post('/:id/steps/:stepId/submit', async (c) => {
     userId,
     stepId,
     round: step.round,
-    formValues: values,
+    // A first answer retains the ordinary submit timestamp guard. An identical
+    // retry only wakes its saved answer: carrying values would also let it reopen
+    // a failed task at pickup. It must not survive a newer Retry/reset either.
+    ...(answer.accepted ? { formValues: values } : { epoch: answer.epoch }),
   };
   const queued = await addBestEffort(
     () =>
       getTaskQueue().add(TASK_JOB_NAMES.ADVANCE_STEP, payload, {
+        // Collapse a repeated enqueue (including a lost acknowledgement) while
+        // its job is live. A new park's accepted timestamp or epoch gets a new id.
+        deduplication: {
+          id: `form-submit-${step.id}-${answer.answeredAt.getTime()}-${answer.epoch}`,
+        },
         attempts: 3,
         backoff: { type: 'exponential', delay: 5000 },
         removeOnComplete: 100,
@@ -1343,6 +1408,8 @@ stepRoutes.post('/:id/steps/:stepId/action', async (c) => {
     .limit(1);
   const step = stepRows[0];
   if (!step) throw new HttpError(404, 'Step not found');
+
+  let sandboxKill: SandboxKillResult | undefined;
 
   if (body.action === 'retry' && isGuardOwnedSkip(step, task.executionContract))
     throwGuardOwnedSkip();
@@ -1498,8 +1565,11 @@ stepRoutes.post('/:id/steps/:stepId/action', async (c) => {
         (r) => r.status === 'running' || r.status === 'waiting_cli',
       );
     if (cascadeIsActive) {
-      const killed = await killTaskSandboxes(id);
-      logger.info({ taskId: id, stepId, killed }, 'killed task sandboxes for retry-while-active');
+      sandboxKill = await killTaskSandboxes(id);
+      logger[sandboxKill.killConfirmed ? 'info' : 'warn'](
+        { taskId: id, stepId, ...sandboxKill },
+        'step action sandbox cleanup',
+      );
     }
     await addBestEffort(
       () =>
@@ -1519,7 +1589,7 @@ stepRoutes.post('/:id/steps/:stepId/action', async (c) => {
       'step advance not queued; the stalled sweep will queue it',
       { taskId: id, stepId },
     );
-    return c.json({ ok: true, status: 'pending' });
+    return c.json({ ok: true, status: 'pending', ...sandboxKill });
   }
 
   if (body.action === 'resume') {
@@ -1781,8 +1851,11 @@ stepRoutes.post('/:id/steps/:stepId/action', async (c) => {
           (r) => r.status === 'running' || r.status === 'waiting_cli',
         );
       if (liveInCascade) {
-        const killed = await killTaskSandboxes(id);
-        logger.info({ taskId: id, stepId, killed }, 'killed sandboxes for fan-out resume');
+        sandboxKill = await killTaskSandboxes(id);
+        logger[sandboxKill.killConfirmed ? 'info' : 'warn'](
+          { taskId: id, stepId, ...sandboxKill },
+          'step action sandbox cleanup',
+        );
       }
       await addBestEffort(
         () =>
@@ -1805,7 +1878,7 @@ stepRoutes.post('/:id/steps/:stepId/action', async (c) => {
         'step advance not queued; the stalled sweep will queue it',
         { taskId: id, stepId },
       );
-      return c.json({ ok: true, status: 'running', retriedAgents });
+      return c.json({ ok: true, status: 'running', retriedAgents, ...sandboxKill });
     }
     const isLoopStep = ((await loadStepFlags(db)).get(stepId)?.cliRoles?.length ?? 0) > 0;
     if (step.status !== 'failed' || (step.iterationCount <= 0 && !isLoopStep)) throw notResumable();
@@ -1880,8 +1953,11 @@ stepRoutes.post('/:id/steps/:stepId/action', async (c) => {
       return result;
     });
     if (isLive(step) || moved.leftActive.some(isLive)) {
-      const killed = await killTaskSandboxes(id);
-      logger.info({ taskId: id, stepId, killed }, 'killed sandboxes for resume');
+      sandboxKill = await killTaskSandboxes(id);
+      logger[sandboxKill.killConfirmed ? 'info' : 'warn'](
+        { taskId: id, stepId, ...sandboxKill },
+        'step action sandbox cleanup',
+      );
     }
     // Stamp the epoch (here and on the other recovery actions below) so a task-level retry
     // that bumps it invalidates this job instead of letting it run against the restarted
@@ -1910,7 +1986,7 @@ stepRoutes.post('/:id/steps/:stepId/action', async (c) => {
       'step advance not queued; the stalled sweep will queue it',
       { taskId: id, stepId },
     );
-    return c.json({ ok: true, status: 'running', resumedFromIteration });
+    return c.json({ ok: true, status: 'running', resumedFromIteration, ...sandboxKill });
   }
 
   if (body.action === 'retry_ai') {
@@ -2003,8 +2079,11 @@ stepRoutes.post('/:id/steps/:stepId/action', async (c) => {
       return result;
     });
     if (moved.leftActive.some(isLive)) {
-      const killed = await killTaskSandboxes(id);
-      logger.info({ taskId: id, stepId, killed }, 'killed sandboxes for retry_ai');
+      sandboxKill = await killTaskSandboxes(id);
+      logger[sandboxKill.killConfirmed ? 'info' : 'warn'](
+        { taskId: id, stepId, ...sandboxKill },
+        'step action sandbox cleanup',
+      );
     }
     await addBestEffort(
       () =>
@@ -2027,7 +2106,7 @@ stepRoutes.post('/:id/steps/:stepId/action', async (c) => {
       'step advance not queued; the stalled sweep will queue it',
       { taskId: id, stepId },
     );
-    return c.json({ ok: true, status: 'running' });
+    return c.json({ ok: true, status: 'running', ...sandboxKill });
   }
 
   if (body.action === 'skip') {
@@ -2110,8 +2189,11 @@ stepRoutes.post('/:id/steps/:stepId/action', async (c) => {
       return result;
     });
     if (moved.leftActive.some(isLive)) {
-      const killed = await killTaskSandboxes(id);
-      logger.info({ taskId: id, stepId, killed }, 'killed sandboxes for skip');
+      sandboxKill = await killTaskSandboxes(id);
+      logger[sandboxKill.killConfirmed ? 'info' : 'warn'](
+        { taskId: id, stepId, ...sandboxKill },
+        'step action sandbox cleanup',
+      );
     }
     // The api can't see unmaterialized future steps, so it can't compute the next
     // step. Enqueue an advance for the SKIPPED step; the worker sees it is already
@@ -2138,7 +2220,7 @@ stepRoutes.post('/:id/steps/:stepId/action', async (c) => {
       'step advance not queued; the stalled sweep will queue it',
       { taskId: id, stepId },
     );
-    return c.json({ ok: true, status: 'skipped', nextStepId: null });
+    return c.json({ ok: true, status: 'skipped', nextStepId: null, ...sandboxKill });
   }
 
   if (body.action === 'abort') {
@@ -2362,6 +2444,7 @@ stepRoutes.patch('/:id/steps/:stepId/cli-provider', async (c) => {
   const stepId = c.req.param('stepId');
   const body = setCliProviderRequestSchema.parse(await c.req.json());
   const db = getDb();
+  let sandboxKill: SandboxKillResult | undefined;
 
   const task = await db.query.tasks.findFirst({
     where: and(eq(schema.tasks.id, id), eq(schema.tasks.userId, userId)),
@@ -2575,8 +2658,11 @@ stepRoutes.patch('/:id/steps/:stepId/cli-provider', async (c) => {
       return moved;
     });
     if ((redrive?.leftActive ?? pendingResetExtras).some(isLive)) {
-      const killed = await killTaskSandboxes(id);
-      logger.info({ taskId: id, stepId, killed }, 'killed sandboxes for a CLI switch');
+      sandboxKill = await killTaskSandboxes(id);
+      logger[sandboxKill.killConfirmed ? 'info' : 'warn'](
+        { taskId: id, stepId, ...sandboxKill },
+        'step action sandbox cleanup',
+      );
     }
   }
 
@@ -2622,5 +2708,5 @@ stepRoutes.patch('/:id/steps/:stepId/cli-provider', async (c) => {
     );
   }
 
-  return c.json({ ok: true, stepId, cliProviderId: body.cliProviderId });
+  return c.json({ ok: true, stepId, cliProviderId: body.cliProviderId, ...sandboxKill });
 });

@@ -247,6 +247,7 @@ async function handBackWritten(
   const skipped: string[] = [];
   const kept: string[] = [];
   let changed = false;
+  let failure: unknown;
   for (const raw of names) {
     const name = utf8Name(raw);
     if (name === null) {
@@ -260,13 +261,23 @@ async function handBackWritten(
       const rel = `${plan.prefix}${at}`;
       if (seen.has(rel)) continue;
       seen.add(rel);
-      const entry = await lstatNoFollow(plan.anchor, rel).catch(() => null);
+      const entry = await lstatNoFollow(plan.anchor, rel, { strict: true }).catch(
+        (err: unknown) => {
+          // A refused path (for example beneath a symlink after a directory type change)
+          // contains no file we may hand back. Other read failures remain unknown.
+          if (isPathContainmentError(err)) return null;
+          failure ??= err;
+          kept.push(rel);
+          return null;
+        },
+      );
       if (entry === null || entry.kind === 'symlink' || entry.stats.uid !== plan.writer) continue;
       await chownNoFollow(plan.anchor, rel, plan.owner).then(
         () => {
           changed = true;
         },
-        () => {
+        (err: unknown) => {
+          failure ??= err;
           kept.push(rel);
         },
       );
@@ -274,7 +285,18 @@ async function handBackWritten(
   }
   if (changed) await gitRun(dir, ['update-index', '-q', '--refresh']);
   if (strict && kept.length > 0) {
-    throw new Error(`could not hand back to the sandbox user: ${kept.slice(0, 5).join(', ')}`);
+    throw Object.assign(
+      new Error(`could not hand back to the sandbox user: ${kept.slice(0, 5).join(', ')}`, {
+        cause: failure,
+      }),
+      { code: 'MERGE_HAND_BACK_FAILED' },
+    );
+  }
+  if (kept.length > 0) {
+    logger.warn(
+      { dir, names: kept.slice(0, 20), count: kept.length, err: failure },
+      'paths could not be handed back to the sandbox user',
+    );
   }
   if (skipped.length > 0) {
     logger.warn(
@@ -996,10 +1018,22 @@ export async function relocateFixerChanges(
   ) {
     return nothingChecked('the merge it was sent into is no longer open');
   }
+  // No files have moved yet: an unknown owner must stop here, before a restore can create
+  // worker-owned files that the sandbox cannot edit. Reads after a move remain conservative.
+  const ownerUnreadable = (cause?: unknown) =>
+    Object.assign(
+      new Error('the merge directory owner could not be read; no fixer changes were moved', {
+        cause,
+      }),
+      { code: 'MERGE_OWNER_UNREADABLE' },
+    );
   const tree = await lstatNoFollow(root, prefix.replace(/\/$/, ''), { strict: true }).catch(
-    () => null,
+    (err: unknown) => {
+      throw ownerUnreadable(err);
+    },
   );
-  const owner = tree ? { uid: tree.stats.uid, gid: tree.stats.gid } : undefined;
+  if (!tree) throw ownerUnreadable();
+  const owner = { uid: tree.stats.uid, gid: tree.stats.gid };
   const resolving = new Set(baseline.resolving);
   const outside = (c: { srcMode: string; dstMode: string; path: string }): boolean =>
     !covered(resolving, c.path) &&
@@ -1427,8 +1461,28 @@ export async function completeMergeHostSide(
   return mergeCommitted(worktreePath, branch);
 }
 
-/** Collapse only the feature merge's own first-parent edge; resume a reset only when its
- *  ORIG_HEAD and staged tree still prove the same merge. A live merge is left to its fixer.
+/** HEAD when it is a merge of the feature onto exactly `base`: two parents, the first `base`, the
+ *  second inside the feature's tip. Parents and ancestry only, never the message. Null only for a
+ *  tip that a read showed to be something else: a git error throws, since a caller that took it for
+ *  "not this merge" would measure the tip afresh and lose the one it holds. */
+export async function landedFeatureMerge(
+  dir: string,
+  base: string,
+  featureRef: string,
+): Promise<string | null> {
+  const parents = await gitRun(dir, ['rev-list', '--parents', '-n', '1', 'HEAD']);
+  if (parents.code !== 0) {
+    throw new Error(`git rev-list HEAD failed in ${dir}: ${gitDetail(parents)}`);
+  }
+  const commits = parents.stdout.trim().split(/\s+/);
+  if (commits.length !== 3 || commits[1] !== base) return null;
+  const feature = await revParse(dir, `${featureRef}^{commit}`);
+  if (feature === null || !(await isCommitAncestor(dir, commits[2]!, feature))) return null;
+  return commits[0]!;
+}
+
+/** Collapse only the feature merge's own first-parent edge; resume a reset only when the
+ *  recorded merge (ORIG_HEAD for legacy rows) and staged tree prove it. A live merge is left to its fixer.
  *  git merge --squash never writes MERGE_HEAD, which the conflict resolver needs. */
 export async function squashMergeCommit(
   worktreePath: string,
@@ -1456,18 +1510,26 @@ export async function squashMergeCommit(
       feature = mergedFeature;
     }
   }
-  const origParents = await gitRun(worktreePath, ['rev-list', '--parents', '-n', '1', 'ORIG_HEAD']);
-  const origCommits = origParents.stdout.trim().split(/\s+/);
+  const recoveryMerge = squashMergeSha ?? 'ORIG_HEAD';
+  const recoveryParents = await gitRun(worktreePath, [
+    'rev-list',
+    '--parents',
+    '-n',
+    '1',
+    recoveryMerge,
+  ]);
+  const recoveryCommits = recoveryParents.stdout.trim().split(/\s+/);
+  // Reset and committed recovery use the first clause; a still-landed recorded merge
+  // uses HEAD below. Merely reading the recorded sha proves neither recovery state.
   const recoveringSquash =
     (headParents.code === 0 &&
       (headCommits[0] === baseShaBefore ||
         (headCommits.length === 2 && headCommits[1] === baseShaBefore)) &&
-      origParents.code === 0 &&
-      origCommits.length === 3 &&
-      origCommits[1] === baseShaBefore) ||
-    (squashMergeSha !== undefined &&
-      ((headParents.code === 0 && headCommits[0] === squashMergeSha) ||
-        (origParents.code === 0 && origCommits[0] === squashMergeSha)));
+      recoveryParents.code === 0 &&
+      recoveryCommits.length === 3 &&
+      recoveryCommits[1] === baseShaBefore) ||
+    (squashMergeSha !== undefined && headParents.code === 0 && headCommits[0] === squashMergeSha);
+  // Resolver capture excludes X1 (feature in base, personal commit atop M) and X2 (feature in base, HEAD == base, staged tree == M, M^1 != base).
   if (feature && !recoveringSquash) {
     const contained = await gitRun(worktreePath, [
       'merge-base',
@@ -1500,8 +1562,10 @@ export async function squashMergeCommit(
     onSkipped?.(note);
     return null;
   };
-  const restoreMerge = `restore ORIG_HEAD to the feature merge${squashMergeSha ? ` ${squashMergeSha}` : ''}`;
-  const candidate = resetAlready || committedAlready ? 'ORIG_HEAD' : 'HEAD';
+  const restoreMerge = squashMergeSha
+    ? `restore the recorded feature merge object ${squashMergeSha}`
+    : 'restore ORIG_HEAD to the feature merge';
+  const candidate = resetAlready || committedAlready ? recoveryMerge : 'HEAD';
   const parents = await gitRun(worktreePath, ['rev-list', '--parents', '-n', '1', candidate]);
   const commits = parents.stdout.trim().split(/\s+/);
   const matchesMerge = squashMergeSha

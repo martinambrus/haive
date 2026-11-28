@@ -1,3 +1,8 @@
+import { CheckoutUnavailableError } from '@haive/shared/checkout-access';
+import {
+  registerCheckoutTerminalCloser,
+  withInteractiveCheckout,
+} from '../repo/interactive-checkout.js';
 import { pinnedTaskStepIds } from '@haive/shared/modularity';
 import { randomUUID } from 'node:crypto';
 import { Duplex } from 'node:stream';
@@ -65,6 +70,8 @@ interface SessionState {
   attachedAt: number;
   /** Revocation owns the exit notification, including any late PTY end. */
   providerDisabled?: boolean;
+  repositoryId?: string | null;
+  repositoryRebuilt?: boolean;
 }
 
 export interface TerminalSessionManagerOptions {
@@ -112,6 +119,7 @@ export class TerminalSessionManager {
     Promise<Awaited<ReturnType<typeof ensureShellContainer>>>
   >();
   private started = false;
+  private unregisterCheckoutCloser?: () => void;
 
   constructor(opts: TerminalSessionManagerOptions) {
     this.db = opts.db;
@@ -132,6 +140,9 @@ export class TerminalSessionManager {
   async start(): Promise<void> {
     if (this.started) return;
     this.started = true;
+    this.unregisterCheckoutCloser = registerCheckoutTerminalCloser((id) =>
+      this.closeRepository(id),
+    );
     await this.subscriber.subscribe(TERMINAL_REQUEST_CHANNEL);
     this.subscriber.on('message', (channel, raw) => {
       this.handleSubscriberMessage(channel, raw).catch((err) => {
@@ -144,6 +155,7 @@ export class TerminalSessionManager {
   async stop(): Promise<void> {
     if (!this.started) return;
     this.started = false;
+    this.unregisterCheckoutCloser?.();
     const stopping = (async () => {
       for (const session of this.sessions.values()) {
         await this.teardownSession(session, 'manager-stop').catch(() => undefined);
@@ -188,7 +200,9 @@ export class TerminalSessionManager {
           error: scrubErrorPaths(err),
           ...(err instanceof TerminalProviderDisabledError
             ? { closeCode: TERMINAL_CLOSE_CODES.PROVIDER_DISABLED }
-            : {}),
+            : err instanceof CheckoutUnavailableError
+              ? { closeCode: TERMINAL_CLOSE_CODES.REPOSITORY_REBUILT }
+              : {}),
         }));
         if (this.started) {
           await this.redis.publish(replyChannel, JSON.stringify(reply));
@@ -316,7 +330,44 @@ export class TerminalSessionManager {
     return adapter.buildShellEnv(provider, secrets, gitEnv);
   }
 
+  async closeRepository(repositoryId: string): Promise<void> {
+    await Promise.all(
+      [...this.sessions.values()]
+        .filter((session) => session.repositoryId === repositoryId)
+        .map(async (session) => {
+          session.repositoryRebuilt = true;
+          const teardown = this.teardownSession(session, 'repository-rebuilt');
+          await Promise.all([
+            teardown,
+            this.publishExit(
+              session,
+              JSON.stringify({ type: 'exit', reason: 'repository_rebuilt' }),
+            ),
+          ]);
+        }),
+    );
+  }
+
   private async openSession(req: TerminalOpenRequest): Promise<TerminalOpenResult> {
+    const repositoryId =
+      req.scope === 'repo'
+        ? req.repositoryId
+        : (
+            await this.db.query.tasks.findFirst({
+              where: eq(schema.tasks.id, req.taskId!),
+              columns: { repositoryId: true },
+            })
+          )?.repositoryId;
+    return withInteractiveCheckout(this.db, repositoryId, (check) =>
+      this.openSessionInner(req, repositoryId, check),
+    );
+  }
+
+  private async openSessionInner(
+    req: TerminalOpenRequest,
+    repositoryId: string | null | undefined,
+    checkCheckout: () => Promise<void>,
+  ): Promise<TerminalOpenResult> {
     const scope: 'task' | 'repo' = req.scope ?? 'task';
     const providerId = req.cliProviderId;
 
@@ -445,6 +496,7 @@ export class TerminalSessionManager {
       this.ensureInFlight.set(ensureKey, ensurePromise);
     }
     const ensured = await ensurePromise;
+    await checkCheckout();
 
     // Each WS gets its own PTY exec, but the exec attaches to a single
     // long-lived tmux session ("haive-task") shared across all WSs against
@@ -508,6 +560,7 @@ export class TerminalSessionManager {
         scope === 'task'
           ? await this.probeWorkdirMismatch(ensured.containerName, workdir)
           : undefined;
+      await checkCheckout();
       attachedAt = ++this.turnSeq;
       ptyHandle = await this.docker.getContainer(ensured.containerName).exec({
         Cmd: tmuxCommand,
@@ -533,6 +586,7 @@ export class TerminalSessionManager {
 
     const session: SessionState = {
       sessionId,
+      repositoryId,
       userId: req.userId,
       scope,
       scopeId,
@@ -555,7 +609,7 @@ export class TerminalSessionManager {
     });
     ptyStream.on('end', () => {
       // Revocation owns its exit reason; a late PTY end must not overwrite it.
-      if (session.providerDisabled) return;
+      if (session.providerDisabled || session.repositoryRebuilt) return;
       const restarted = (this.restartedAt.get(session.containerName) ?? -1) > session.attachedAt;
       const exit = JSON.stringify(
         restarted ? { type: 'exit', reason: 'restart' } : { type: 'exit' },
@@ -604,6 +658,7 @@ export class TerminalSessionManager {
       // A close that ran during the read has already unsubscribed; subscribing now would leak.
       if (!this.sessions.has(sessionId)) throw new Error('the shell ended while it was opening');
       await this.subscriber.subscribe(inChannel, ctlChannel);
+      await checkCheckout();
     } catch (err) {
       await this.teardownSession(session, 'open-failed').catch(() => undefined);
       throw err;

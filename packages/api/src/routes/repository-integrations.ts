@@ -1,7 +1,7 @@
 import { Hono } from 'hono';
 import { z } from 'zod';
 import { and, eq, inArray, isNull, ne, sql } from 'drizzle-orm';
-import { schema } from '@haive/database';
+import { canonicalUuid, schema } from '@haive/database';
 import { getDb, type Database } from '../db.js';
 import { insertAuditEvent, logAuditEvent, type AuditEvent } from '../lib/audit.js';
 import { requireOwnConnections } from '../lib/integration-choice.js';
@@ -65,13 +65,13 @@ repositoryIntegrationRoutes.put('/:id/integrations', async (c) => {
     // Bound the advisory key too: a concurrent save may hold it while waiting on a relink's row.
     const [stored] = await boundedLockWait(tx, async () => {
       await tx.execute(
-        sql`select pg_advisory_xact_lock(hashtextextended(${`integration-allow-list:${repositoryId}`}, 0))`,
+        sql`select pg_advisory_xact_lock(hashtextextended(${`integration-allow-list:${canonicalUuid(repositoryId)}`}, 0))`,
       );
       return tx
         .select({ restricted: schema.repositories.integrationsRestricted })
         .from(schema.repositories)
         .where(eq(schema.repositories.id, repositoryId))
-        .for('update');
+        .for('no key update');
     });
     if (!stored) throw new HttpError(404, 'Repository not found');
     const current = new Set(

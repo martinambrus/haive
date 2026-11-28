@@ -3,6 +3,9 @@ import { act, cleanup, render, screen } from '@testing-library/react';
 import { afterEach, expect, it, vi } from 'vitest';
 
 const { post, loadOrigin } = vi.hoisted(() => ({ post: vi.fn(), loadOrigin: vi.fn() }));
+vi.mock('@/components/checkout-session-boundary', () => ({
+  CheckoutSessionBoundary: ({ children }: { children: unknown }) => children,
+}));
 vi.mock('@/lib/api-client', () => ({ api: { post } }));
 vi.mock('@/lib/editor-origin', async (importOriginal) => {
   loadOrigin();

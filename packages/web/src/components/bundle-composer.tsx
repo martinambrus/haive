@@ -40,9 +40,12 @@ interface BundleComposerProps {
   value: BundleComposerEntry[];
   onChange: (next: BundleComposerEntry[]) => void;
   disabled?: boolean;
+  /** One deadline for polling response headers and body together. */
+  pollTimeoutMs?: number;
 }
 
 const CHUNK_SIZE = 4 * 1024 * 1024;
+export const BUNDLE_POLL_TIMEOUT_MS = 10_000;
 
 async function refusalError(response: Response, fallback: string): Promise<Error> {
   const body = (await response.json().catch(() => null)) as { error?: unknown } | null;
@@ -157,6 +160,7 @@ export function BundleComposer({
   value,
   onChange,
   disabled = false,
+  pollTimeoutMs = BUNDLE_POLL_TIMEOUT_MS,
 }: BundleComposerProps) {
   const [error, setError] = useState<string | null>(null);
   const [showGitForm, setShowGitForm] = useState(false);
@@ -259,19 +263,28 @@ export function BundleComposer({
   onChangeRef.current = onChange;
   const loadBundleFilesRef = useRef(loadBundleFiles);
   loadBundleFilesRef.current = loadBundleFiles;
+  const actionGeneration = useRef(0);
 
   useEffect(() => {
     let cancelled = false;
     let loaded = false;
+    let inFlight = false;
+    let activeController: AbortController | null = null;
     let handle: ReturnType<typeof setInterval> | null = null;
 
     const fetchOnce = async (): Promise<void> => {
+      if (cancelled || inFlight) return;
+      inFlight = true;
+      const generation = actionGeneration.current;
+      const controller = new AbortController();
+      activeController = controller;
+      const deadline = setTimeout(() => controller.abort(), pollTimeoutMs);
       try {
         const res = await fetch(
           `${API_BASE_URL}/bundles?repositoryId=${encodeURIComponent(repositoryId)}`,
-          { credentials: 'include' },
+          { credentials: 'include', signal: controller.signal },
         );
-        if (!res.ok || cancelled) return;
+        if (!res.ok || cancelled || controller.signal.aborted) return;
         const { bundles } = (await res.json()) as {
           bundles: Array<{
             id: string;
@@ -285,7 +298,9 @@ export function BundleComposer({
             archiveFilename?: string | null;
           }>;
         };
-        if (cancelled) return;
+        // Acceptance of a local sync makes any earlier server snapshot stale.
+        if (cancelled || controller.signal.aborted || generation !== actionGeneration.current)
+          return;
         loaded = true;
         const next: BundleComposerEntry[] = bundles.map((b) => ({
           id: b.id,
@@ -329,9 +344,17 @@ export function BundleComposer({
               v.lastReplacementNote === n.lastReplacementNote
             );
           });
-        if (!same) onChangeRef.current(next);
+        if (!same) {
+          // Remember handled transitions even before the parent renders the value.
+          valueRef.current = next;
+          onChangeRef.current(next);
+        }
       } catch {
         // Transient network error — keep polling.
+      } finally {
+        clearTimeout(deadline);
+        activeController = null;
+        inFlight = false;
       }
     };
 
@@ -341,9 +364,10 @@ export function BundleComposer({
     }, 2500);
     return () => {
       cancelled = true;
+      activeController?.abort();
       if (handle) clearInterval(handle);
     };
-  }, [repositoryId]);
+  }, [repositoryId, pollTimeoutMs]);
 
   const removeBundle = async (entry: BundleComposerEntry) => {
     if (disabled || busy) return;
@@ -373,6 +397,7 @@ export function BundleComposer({
         credentials: 'include',
       });
       if (!res.ok) throw await refusalError(res, 'resync failed');
+      actionGeneration.current += 1;
       onChange(value.map((v) => (v.id === entry.id ? { ...v, status: 'syncing' } : v)));
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
@@ -435,6 +460,7 @@ export function BundleComposer({
         },
       );
       if (!completeRes.ok) throw await refusalError(completeRes, 'replace complete failed');
+      actionGeneration.current += 1;
       onChange(value.map((v) => (v.id === entry.id ? { ...v, status: 'syncing' } : v)));
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));

@@ -1,5 +1,6 @@
 import postgres, { type Sql } from 'postgres';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { ROOT_CLAIM_STALE_MS } from '@haive/database';
 import { liveWorkCount } from '../src/run.js';
 
 const url = process.env.UPDATER_LIVE_COUNT_TEST_URL;
@@ -67,6 +68,80 @@ describe.skipIf(!url)('liveWorkCount on Postgres', () => {
       await tx`ALTER TABLE pg_temp.repositories DROP COLUMN refresh_pending`;
       await tx`INSERT INTO repositories (user_id, name, source, status) VALUES (${OWNER}, 'legacy', 'local_path', 'cloning')`;
       expect(await liveWorkCount(tx)).toBe(1);
+    });
+  });
+
+  describe('a live root claim', () => {
+    const KINDS = ['reset', 'rebuild', 'refresh', 'edit', 'mutation', 'verify', null] as const;
+    const claim = (id: string, ageMs: number, kind: string | null = 'mutation', tx: Sql = sql) => {
+      const stamp = new Date(Date.now() - ageMs).toISOString();
+      return tx`UPDATE repositories
+                SET root_claimed_at = ${stamp}::timestamp, root_claim_kind = ${kind}, root_claim_owner = 'test-owner'
+                WHERE id = ${id}`;
+    };
+    const STALE = ROOT_CLAIM_STALE_MS + 60_000;
+    const FRESH = ROOT_CLAIM_STALE_MS - 60_000;
+
+    it.each(KINDS)('counts a ready repository claimed for %s', async (kind) => {
+      const id = await repository('ready');
+      await claim(id, 1000, kind);
+      expect(await liveWorkCount(sql)).toBe(1);
+    });
+
+    it('does not count a stale claim', async () => {
+      const id = await repository('ready');
+      await claim(id, STALE);
+      expect(await liveWorkCount(sql)).toBe(0);
+    });
+
+    it('counts a claim inside the window', async () => {
+      const id = await repository('ready');
+      await claim(id, FRESH);
+      expect(await liveWorkCount(sql)).toBe(1);
+    });
+
+    it('counts a repository once however many reasons hold it', async () => {
+      const id = await repository('cloning');
+      await sql`UPDATE repositories SET refresh_pending = true WHERE id = ${id}`;
+      await claim(id, 1000);
+      expect(await liveWorkCount(sql)).toBe(1);
+    });
+
+    it('does not count a released claim', async () => {
+      const id = await repository('ready');
+      await claim(id, 1000);
+      await sql`UPDATE repositories SET root_claimed_at = NULL, root_claim_kind = NULL, root_claim_owner = NULL WHERE id = ${id}`;
+      expect(await liveWorkCount(sql)).toBe(0);
+    });
+
+    it.each([
+      ['a stale claim', STALE, 0],
+      ['a claim inside the window', FRESH, 1],
+    ])('reads %s the same under another session time zone', async (_name, age, expected) => {
+      const id = await repository('ready');
+      await claim(id, age);
+      await sql.begin(async (tx) => {
+        await tx`SET LOCAL TIME ZONE 'Pacific/Auckland'`;
+        expect(await liveWorkCount(tx)).toBe(expected);
+      });
+    });
+
+    it.each([
+      [
+        'claim columns',
+        'root_claimed_at, DROP COLUMN root_claim_kind, DROP COLUMN root_claim_owner',
+      ],
+      [
+        'claim columns and the refresh marker',
+        'root_claimed_at, DROP COLUMN root_claim_kind, DROP COLUMN root_claim_owner, DROP COLUMN refresh_pending',
+      ],
+    ])('drains a source schema without the %s', async (_name, drop) => {
+      await sql.begin(async (tx) => {
+        await tx`CREATE TEMP TABLE repositories (LIKE public.repositories INCLUDING DEFAULTS) ON COMMIT DROP`;
+        await tx.unsafe(`ALTER TABLE pg_temp.repositories DROP COLUMN ${drop}`);
+        await tx`INSERT INTO repositories (user_id, name, source, status) VALUES (${OWNER}, 'legacy', 'local_path', 'cloning')`;
+        expect(await liveWorkCount(tx)).toBe(1);
+      });
     });
   });
 

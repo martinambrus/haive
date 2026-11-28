@@ -2,6 +2,7 @@ import { and, eq, notInArray, sql } from 'drizzle-orm';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   createDatabase,
+  LATE_LOCK_WAIT_MS,
   hasPgCode,
   isLockNotAvailable,
   lockStepRows,
@@ -35,7 +36,9 @@ vi.mock('../src/queues.js', () => {
     getUsagePollQueue: queue,
   };
 });
-vi.mock('../src/lib/sandbox-kill.js', () => ({ killTaskSandboxes: async () => 0 }));
+vi.mock('../src/lib/sandbox-kill.js', () => ({
+  killTaskSandboxes: async () => ({ killed: 0, killConfirmed: true }),
+}));
 vi.mock('../src/middleware/auth.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../src/middleware/auth.js')>()),
   requireAuth: async (c: { set: (key: string, value: string) => void }, next: () => unknown) => {
@@ -76,12 +79,12 @@ import { cancelLiveRuns } from '../src/lib/task-control.js';
 //
 //   AS    sanity: beside a peer that takes a run and then a mining row, a writer in that order is clean and one in
 //         the reverse order is seen holding the mining row and deadlocks, so a setup that cannot cycle fails here.
-//         A late sweep that asks for the run with NOWAIT meets the A7 and A7c criteria, so they can be met.
+//         A NOWAIT sanity baseline also meets the cycle-refusal criteria.
 //   A6    the fan-out Resume writes the mining rows of the failed agents and then supersedes the run that blocks
 //         the step; a Retry holds that run and wants the mining row.
 //   A7    the late sweep (`resetRowsForRerun` with `rowsHeld`) of a Retry or Resume that holds the step rows and
 //         the task row waits for the run of a row a pass activated meanwhile; the pass holds that run and then
-//         wants the step row (`writeLoginHint`). The sweep must refuse at once (55P03, or a 503) instead.
+//         wants the step row (`writeLoginHint`). The sweep must refuse within its bound (55P03, or a 503).
 //   A7c   the same sweep beside a Stop that has ended the live run and then wants the step rows.
 //   A7d   the same sweep reached through the Retry action's route, which must answer 503.
 //   A6g/h guarded done-producer Resume forces the batch with an empty downstream reset set:
@@ -102,7 +105,7 @@ const LOGIN_HINT = {
   providerName: 'claude',
 } as const;
 const BLOCKED_WITHIN_MS = 10_000;
-const REFUSES_WITHIN_MS = 1_000;
+const CYCLE_LOCK_WAIT_MS = 40;
 const TEST_TIMEOUT = 30_000;
 
 type Tx = Parameters<Parameters<Database['transaction']>[0]>[0];
@@ -123,7 +126,7 @@ type Held = {
     | typeof schema.tasks;
   id: string;
 };
-/** What `expectRefusedAtOnce` reads of a run in which the late sweep was the code under test. */
+/** What `expectBoundedRefusal` reads of a run in which the late sweep was the code under test. */
 type LateRun = {
   deadlocked: string[];
   heldWhileWaiting: string[];
@@ -371,7 +374,7 @@ describe.skipIf(!url)(
       const deadline = Date.now() + BLOCKED_WITHIN_MS;
       while (!(await condition())) {
         if (Date.now() > deadline) throw new Error(`${what} within ${BLOCKED_WITHIN_MS} ms`);
-        await sleep(20);
+        await sleep(5);
       }
     };
 
@@ -405,12 +408,12 @@ describe.skipIf(!url)(
 
     /** The peer takes `first`; once the code under test is blocked on it, the peer takes `second` and commits.
      *  `mustNotHold` are the rows asked for with NOWAIT while the code under test waits. A code under test that
-     *  is expected to refuse at once (`mayRefuseAtOnce`) may end before it ever waits; the peer then goes on. */
+     *  may refuse within its bound (`mayRefuse`) may end before it ever waits; the peer then goes on. */
     async function interleave<T>(
       codeUnderTest: () => Promise<T>,
       { first, second }: { first: Lock; second: Lock },
       mustNotHold: Held[],
-      { mayRefuseAtOnce = false }: { mayRefuseAtOnce?: boolean } = {},
+      { mayRefuse = false }: { mayRefuse?: boolean } = {},
     ) {
       const holder = await holdingPeer(first, second);
 
@@ -430,7 +433,7 @@ describe.skipIf(!url)(
         const deadline = Date.now() + BLOCKED_WITHIN_MS;
         for (;;) {
           if (underTestEnded) {
-            if (mayRefuseAtOnce) break;
+            if (mayRefuse) break;
             const early = await underTest;
             throw new Error(
               `the code under test ended without waiting for the peer: ${early.ok ? 'no error' : describeError(early.error)}`,
@@ -445,7 +448,7 @@ describe.skipIf(!url)(
               `the code under test was not blocked by the peer within ${BLOCKED_WITHIN_MS} ms`,
             );
           }
-          await sleep(20);
+          await sleep(5);
         }
       } finally {
         holder.release();
@@ -483,11 +486,12 @@ describe.skipIf(!url)(
       expect(heldWhileWaiting, 'rows the code under test held while it waited').toEqual([]);
     };
 
-    /** The late sweep ended within a second with a refusal and no side was killed. What it held while it waited
+    /** The late sweep ended within its bound plus scheduler slack with a refusal and no side was killed. What it held while it waited
      *  is not asserted (a refusal after a bounded wait meets the criterion too); it is named in the message. */
-    const expectRefusedAtOnce = (
+    const expectBoundedRefusal = (
       run: LateRun,
       refusal: (error: unknown) => boolean = isRefusal,
+      waitMs = LATE_LOCK_WAIT_MS,
     ) => {
       const held = run.heldWhileWaiting.join(', ') || 'nothing';
       const ended = run.underTestOutcome.ok
@@ -505,7 +509,9 @@ describe.skipIf(!url)(
         !run.underTestOutcome.ok && refusal(run.underTestOutcome.error),
         `the late sweep did not refuse: it ${ended}`,
       ).toBe(true);
-      expect(run.elapsedMs, 'ms the late sweep took to refuse').toBeLessThan(REFUSES_WITHIN_MS);
+      // SQL locking is the interaction under test. Allow scheduler slack that grows
+      // with the injected bound; the deadlocked assertion detects a killed peer.
+      expect(run.elapsedMs, 'ms the late sweep took to refuse').toBeLessThan(waitMs * 10 + 1000);
     };
 
     /** The refused sweep rolled back, and the pass's write landed. */
@@ -553,14 +559,18 @@ describe.skipIf(!url)(
     };
 
     /** What the Retry and the Resume do from there: reset the rows a pass activated meanwhile, rows held. */
-    const lateSweep = (taskId: string, step: Awaited<ReturnType<typeof rowOf>>) =>
+    const lateSweep = (
+      taskId: string,
+      step: Awaited<ReturnType<typeof rowOf>>,
+      lateLockWaitMs = CYCLE_LOCK_WAIT_MS,
+    ) =>
       db.transaction(async (tx) => {
         await holdRowsAndBump(tx, taskId);
-        await resetRowsForRerun(tx, taskId, [step], new Date(), { rowsHeld: true });
+        await resetRowsForRerun(tx, taskId, [step], new Date(), { rowsHeld: true, lateLockWaitMs });
       });
 
-    /** The late sweep in the shape the fix is meant to give it: the run of its row is asked for with NOWAIT. */
-    const refusingSweep = (taskId: string) =>
+    /** A NOWAIT sanity baseline, independent of the production bounded-wait policy. */
+    const nowaitBaseline = (taskId: string) =>
       db.transaction(async (tx) => {
         await holdRowsAndBump(tx, taskId);
         await tx
@@ -628,33 +638,33 @@ describe.skipIf(!url)(
       );
 
       it(
-        'AS: a late sweep that asks for the run with NOWAIT refuses at once beside a pass that holds the run and wants the step row',
+        'AS: the NOWAIT baseline refuses immediately beside a pass that holds the run and wants the step row',
         async () => {
           const { taskId } = await seedLateRow('live');
 
-          const run = await interleave(() => refusingSweep(taskId), passPeer, lateProbes(taskId), {
-            mayRefuseAtOnce: true,
+          const run = await interleave(() => nowaitBaseline(taskId), passPeer, lateProbes(taskId), {
+            mayRefuse: true,
           });
 
-          expectRefusedAtOnce(run);
+          expectBoundedRefusal(run);
           await expectPassLanded(taskId, 'live');
         },
         TEST_TIMEOUT,
       );
 
       it(
-        'AS: a late sweep that asks for the run with NOWAIT refuses at once beside a Stop that has ended the run and wants the step rows',
+        'AS: the NOWAIT baseline refuses immediately beside a Stop that has ended the run and wants the step rows',
         async () => {
           const { taskId } = await seedLateRow('live');
 
           const run = await interleave(
-            () => refusingSweep(taskId),
+            () => nowaitBaseline(taskId),
             stopPeer(taskId),
             lateProbes(taskId),
-            { mayRefuseAtOnce: true },
+            { mayRefuse: true },
           );
 
-          expectRefusedAtOnce(run);
+          expectBoundedRefusal(run);
           await expectStopFinished(taskId);
         },
         TEST_TIMEOUT,
@@ -780,9 +790,9 @@ describe.skipIf(!url)(
                   second: writeLoginHint(LATE.id),
                 },
             lateProbes(taskId),
-            { mayRefuseAtOnce: true },
+            { mayRefuse: true },
           );
-          expectRefusedAtOnce(run, isServiceUnavailable);
+          expectBoundedRefusal(run, isServiceUnavailable);
           expect(await rowOf(STEP.id)).toMatchObject({
             status: 'done',
             output: { retained: true },
@@ -897,6 +907,30 @@ describe.skipIf(!url)(
     });
 
     describe('the late sweep of a Retry or Resume that holds the step rows and the task row', () => {
+      it.each(['run', 'agent'] as const)(
+        'T482: waits for an explicitly released benign %s hold',
+        async (kind) => {
+          const { taskId, step } = await seedLateRow('live');
+          await seedMining({ status: 'running' });
+          // No server lock timer in this benign control: release is an explicit signal
+          // after observing the real wait, so observation never races a 250 ms deadline.
+          const run = await interleave(
+            () => lateSweep(taskId, step, 0),
+            {
+              first: kind === 'run' ? lockRun(RUN) : lockMining(MINING),
+              second: async () => undefined,
+            },
+            [],
+          );
+          expect(run.failures).toEqual([]);
+          expect((await rowOf(STEP.id)).status).toBe('pending');
+          expect((await runOf(RUN)).supersededAt).not.toBeNull();
+          expect(await db.$count(schema.taskStepAgentMinings)).toBe(0);
+          expect((await taskOf(taskId)).orchestrationEpoch).toBe(4);
+        },
+        TEST_TIMEOUT,
+      );
+
       const shapes = [
         ['R ended with an error', 'ended'],
         ['R live', 'live'],
@@ -904,7 +938,7 @@ describe.skipIf(!url)(
 
       for (const [label, shape] of shapes) {
         it(
-          `A7 (${label}): refuses at once instead of waiting for the run a pass holds, so the pass that then wants the step row does not deadlock it`,
+          `A7 (${label}): refuses within its bound while waiting for the run a pass holds, so the pass that then wants the step row does not deadlock it`,
           async () => {
             const { taskId, step } = await seedLateRow(shape);
 
@@ -912,10 +946,10 @@ describe.skipIf(!url)(
               () => lateSweep(taskId, step),
               passPeer,
               lateProbes(taskId),
-              { mayRefuseAtOnce: true },
+              { mayRefuse: true },
             );
 
-            expectRefusedAtOnce(run);
+            expectBoundedRefusal(run, isRefusal, CYCLE_LOCK_WAIT_MS);
             await expectPassLanded(taskId, shape);
           },
           TEST_TIMEOUT,
@@ -937,7 +971,7 @@ describe.skipIf(!url)(
       }
 
       it(
-        'A7e: refuses at once instead of waiting for the agent row a pass holds, so the pass that then wants the step row does not deadlock it',
+        'A7e: refuses within its bound while waiting for the agent row a pass holds, so the pass that then wants the step row does not deadlock it',
         async () => {
           const { taskId, step } = await seedLateRow('live');
           await seedMining({ status: 'running' });
@@ -946,10 +980,10 @@ describe.skipIf(!url)(
             () => lateSweep(taskId, step),
             agentRowPassPeer,
             lateProbes(taskId),
-            { mayRefuseAtOnce: true },
+            { mayRefuse: true },
           );
 
-          expectRefusedAtOnce(run);
+          expectBoundedRefusal(run, isRefusal, CYCLE_LOCK_WAIT_MS);
           expect((await rowOf(STEP.id)).statusMessage, 'the pass wrote its step row').toBe(
             AGENT_ROW_HOLDER,
           );
@@ -961,7 +995,7 @@ describe.skipIf(!url)(
       );
 
       it(
-        'A7c: refuses at once instead of waiting for the live run a Stop has ended, so the Stop that then wants the step rows finishes',
+        'A7c: refuses within its bound while waiting for the live run a Stop has ended, so the Stop that then wants the step rows finishes',
         async () => {
           const { taskId, step } = await seedLateRow('live');
 
@@ -969,17 +1003,17 @@ describe.skipIf(!url)(
             () => lateSweep(taskId, step),
             stopPeer(taskId),
             lateProbes(taskId),
-            { mayRefuseAtOnce: true },
+            { mayRefuse: true },
           );
 
-          expectRefusedAtOnce(run);
+          expectBoundedRefusal(run, isRefusal, CYCLE_LOCK_WAIT_MS);
           await expectStopFinished(taskId);
         },
         TEST_TIMEOUT,
       );
 
       it(
-        'A7d: the Retry action answers 503 at once when the run of a row a pass activated meanwhile is held, instead of waiting for it with the step rows and the task row held',
+        'A7d: the Retry action refuses a cyclic hold of a late run within its bound',
         async () => {
           const taskId = await seedTask('failed', { currentStepId: STEP.stepId, currentRound: 0 });
           await seedStep(taskId, { status: 'failed' });
@@ -1035,7 +1069,7 @@ describe.skipIf(!url)(
           ]);
 
           expect(stallOutcome.ok, 'the peer that stalled the Retry').toBe(true);
-          expectRefusedAtOnce(
+          expectBoundedRefusal(
             {
               deadlocked: [
                 ...killedByPostgres(passOutcome, 'peer'),

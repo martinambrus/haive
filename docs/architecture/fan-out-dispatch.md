@@ -129,6 +129,13 @@ otherwise set its row back to `running`. What follows that transaction (learning
 model limit, the recap, `markCliParkBegin` and handing the step back) sits outside the `try` whose
 catch records a failed run, so a queue error there no longer rewrites a finished run as exit -1.
 
+A login hint after a recorded CLI failure is best effort. If its separate transaction
+fails (including SQLSTATE 40P01), cli-exec logs the structured error and still calls
+`markCliParkBegin` and `resumeStepIfLinked` with the original failure. The original error
+is rethrown by identity; the hint cannot replace it or suppress the continuation. The
+hint's existing run/step ownership checks remain. A lasting database outage can still
+fail the later park write, which remains subject to normal recovery.
+
 **A refusal is one agent's failure, an outage is the step's.** The barrier's fail-fast and the
 DAG's sibling cancel key on `isProviderOutage` (`rate_limit`, `auth`, `server_error`), not on every
 fatal class: a `content_filter` refusal degrades that agent like any other failed agent, and a DAG

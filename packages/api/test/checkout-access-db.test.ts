@@ -112,6 +112,7 @@ describe.skipIf(!url)('checkout mutation lifetime on real filesystem, Git and Po
     await exec('git', ['init', '-q', template]);
     await exec('git', ['-C', template, 'remote', 'add', 'origin', 'https://old.test/repo']);
     vi.spyOn(configService, 'getNumber').mockResolvedValue(1024);
+    vi.spyOn(configService, 'getFresh').mockResolvedValue('normal');
   });
   beforeEach(async () => {
     h.beforeGit = undefined;

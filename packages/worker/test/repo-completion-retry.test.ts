@@ -28,6 +28,7 @@ vi.mock('../src/repo/clone.js', () => ({
   handleInit: h.prepare,
   handleScan: h.prepare,
   completePreparationImports: h.imports,
+  withRootClaim: (_db: unknown, _id: string, run: () => Promise<unknown>) => run(),
 }));
 import { startRepoWorker } from '../src/queues/repo-queue.js';
 
@@ -148,3 +149,45 @@ it.each([1, 3])(
     });
   },
 );
+
+it.each([
+  ['foreign_container', 0, false],
+  ['container_remains', 0, false],
+  ['docker_unknown', 0, true],
+  ['drain_timeout', 31 * 60_000, false],
+])('session suspension %s at age %i has bounded defer=%s', async (reason, age, deferred) => {
+  const { CheckoutSessionsBusyError } = await import('../src/repo/interactive-checkout.js');
+  const { DelayedError, UnrecoverableError } = await import('bullmq');
+  const fake = createFakeDb({ repositories: schema.repositories });
+  const repositoryId = randomUUID();
+  const jobId = randomUUID();
+  fake.insert(schema.repositories, {
+    id: repositoryId,
+    status: 'cloning',
+    refreshPending: true,
+    refreshJobId: jobId,
+  });
+  h.db = fake.db;
+  h.prepare.mockRejectedValue(new CheckoutSessionsBusyError(reason));
+  startRepoWorker('/fixture');
+  const moveToDelayed = vi.fn();
+  const job = {
+    id: jobId,
+    name: REPO_JOB_NAMES.SCAN,
+    data: { repositoryId, userId: 'fixture-user' },
+    timestamp: Date.now() - age,
+    attemptsMade: 0,
+    opts: { attempts: 3 },
+    moveToDelayed,
+  };
+  await expect(h.processor!(job)).rejects.toBeInstanceOf(
+    deferred ? DelayedError : UnrecoverableError,
+  );
+  expect(fake.rows(schema.repositories)[0]).toMatchObject({
+    status: deferred ? 'cloning' : 'error',
+    checkoutSessionReason: reason,
+    refreshPending: deferred,
+    refreshJobId: deferred ? jobId : null,
+  });
+  expect(moveToDelayed).toHaveBeenCalledTimes(deferred ? 1 : 0);
+});

@@ -19,6 +19,9 @@ export type CheckoutAvailability = 'ready' | 'repair';
 export type CheckoutAccess =
   | { mode: 'read'; availability?: CheckoutAvailability }
   | { mode: 'mutation'; owner?: RootClaimHandle; availability?: CheckoutAvailability }
+  // Short projection sections hold task/domain/repository locks; owed preparation alone does
+  // not own the root. Read-only scans can import after ready while their pending marker remains.
+  | { mode: 'projection'; owner?: RootClaimHandle }
   | { mode: 'preparation'; owner: RootClaimHandle };
 
 export class CheckoutUnavailableError extends HttpError {
@@ -64,13 +67,16 @@ export async function requireCheckoutAccess(db: Db, repositoryId: string, access
     return repo;
   }
   if (
-    (repo.status !== 'ready' && !(access.availability === 'repair' && repo.status === 'error')) ||
+    (repo.status !== 'ready' &&
+      !('availability' in access && access.availability === 'repair' && repo.status === 'error')) ||
     (access.mode === 'mutation' && repo.refreshPending && !own) ||
-    (access.mode === 'mutation' && isRootClaimLive(repo.rootClaimedAt) && !own)
+    ((access.mode === 'mutation' || access.mode === 'projection') &&
+      isRootClaimLive(repo.rootClaimedAt) &&
+      !own)
   )
     throw new CheckoutUnavailableError();
   if (
-    access.mode === 'mutation' &&
+    (access.mode === 'mutation' || access.mode === 'projection') &&
     access.owner !== undefined &&
     (!own || !isRootClaimLive(repo.rootClaimedAt))
   )

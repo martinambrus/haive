@@ -1,6 +1,8 @@
 import { Redis, ReplyError } from 'ioredis';
 import { mailSeedDefaults } from './mail.js';
 import {
+  assertKeyReadsSystemSecrets,
+  ENCRYPTION_KEY_REDIS_KEY,
   generateBootEncryptionKey,
   PENDING_ENCRYPTION_KEY,
   PENDING_ENCRYPTION_KEY_WAIT_MS,
@@ -359,7 +361,7 @@ export const CONFIG_KEYS = {
 
   APP_URL: 'config:app:url',
 
-  ENCRYPTION_KEY: 'bootstrap:encryptionKey',
+  ENCRYPTION_KEY: ENCRYPTION_KEY_REDIS_KEY,
 
   MAINTENANCE_MODE: 'config:deployment:maintenanceMode',
   MAINTENANCE_MESSAGE: 'config:deployment:maintenanceMessage',
@@ -983,7 +985,24 @@ export class ConfigService {
 
     if (!exists) {
       if (envKey) {
-        const seeded = await this.seedEnvEncryptionKey(envKey, 'ensureEncryptionKey');
+        // Seeding makes this key the install's. Without a database (callers that never held
+        // ciphertext) there is nothing to check it against.
+        const bootDb = typeof db === 'function' ? db() : db;
+        let seeded: boolean | undefined;
+        if (bootDb) {
+          // Redis decides which key is the install's, and another process may have seeded it
+          // since the read above. A discard seeds first and runs only if Redis then holds this
+          // key; otherwise it deletes nothing and the mismatch check below applies.
+          await assertKeyReadsSystemSecrets(bootDb, envKey, 'env', async () => {
+            seeded = await this.seedEnvEncryptionKey(envKey, 'ensureEncryptionKey');
+            if (seeded) return true;
+            const held = await this.redisCall('ensureEncryptionKey', (redis) =>
+              redis.get(CONFIG_KEYS.ENCRYPTION_KEY),
+            );
+            return held === envKey;
+          });
+        }
+        seeded ??= await this.seedEnvEncryptionKey(envKey, 'ensureEncryptionKey');
         logger.info(
           seeded
             ? 'Seeded encryption key from CONFIG_ENCRYPTION_KEY'

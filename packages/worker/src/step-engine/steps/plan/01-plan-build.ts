@@ -1,5 +1,5 @@
 import { and, eq } from 'drizzle-orm';
-import { schema } from '@haive/database';
+import { LATE_LOCK_WAIT_MS, schema } from '@haive/database';
 import {
   CONFIG_KEYS,
   configService,
@@ -859,6 +859,7 @@ export function createPlanBuildStep(
                   {
                     repositoryId,
                     sourceTaskId: ctx.taskId,
+                    repositoryLockTimeoutMs: LATE_LOCK_WAIT_MS,
                     derivedAtCommit,
                     ...(expanding ? { selfNodeId: expanding } : {}),
                   },
@@ -889,7 +890,9 @@ export function createPlanBuildStep(
           // is stamped below so a later wave asks it again with fresh versions.
           if (
             err instanceof PlanPatchError &&
-            (err.kind === 'busy' || (err.kind === 'conflict' && !hasCallerPlanVersion(patch.ops)))
+            (err.kind === 'repository_gone' ||
+              err.kind === 'busy' ||
+              (err.kind === 'conflict' && !hasCallerPlanVersion(patch.ops)))
           )
             throw err;
           notApplied += 1;

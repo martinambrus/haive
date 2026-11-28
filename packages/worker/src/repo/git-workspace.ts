@@ -1,5 +1,5 @@
 import path from 'node:path';
-import { isPathContainmentError, lstatNoFollow } from '@haive/shared/fs-safe';
+import { isPathContainmentError, lstatNoFollow, readFileNoFollow } from '@haive/shared/fs-safe';
 import { workspaceAnchor } from './worktree-paths.js';
 import { gitExec, gitRun } from './git-exec.js';
 
@@ -89,10 +89,12 @@ export async function isWorktreeRegistered(
 }
 
 /** The worktrees git lists for `repoPath` with `branchRef` (`refs/heads/<name>`) checked out.
- *  `-z` keeps paths literal. A list git could not give throws, never reads as "nobody holds it". */
+ *  `-z` keeps paths literal. A list git could not give throws, never reads as "nobody holds it".
+ *  Cleanup also checks detached rebase/bisect holders through their administrative state. */
 export async function worktreesHoldingBranch(
   repoPath: string,
   branchRef: string,
+  includeDetachedOperations = false,
 ): Promise<string[]> {
   const list = await gitRun(repoPath, ['worktree', 'list', '--porcelain', '-z']);
   if (list.code !== 0) {
@@ -102,9 +104,38 @@ export async function worktreesHoldingBranch(
   }
   const holders: string[] = [];
   let worktree = '';
+  const detached: string[] = [];
   for (const field of list.stdout.split('\0')) {
     if (field.startsWith('worktree ')) worktree = field.slice(9);
     if (field === `branch ${branchRef}`) holders.push(worktree);
+    if (field === 'detached') detached.push(worktree);
+  }
+  if (includeDetachedOperations) {
+    for (const dir of detached) {
+      const located = await gitRun(dir, ['rev-parse', '--absolute-git-dir']);
+      if (located.code !== 0 || !located.stdout.trim())
+        throw new Error('Worktree git dir is unreadable');
+      // The repository root is trusted; a git-provided path is never an anchor.
+      const rel = path.relative(repoPath, located.stdout.trim());
+      if (!rel || rel === '..' || rel.startsWith('../') || path.isAbsolute(rel)) {
+        throw new Error('Worktree git dir is outside the repository');
+      }
+      for (const marker of ['rebase-merge/head-name', 'rebase-apply/head-name', 'BISECT_START']) {
+        const state = await readFileNoFollow(repoPath, `${rel}/${marker}`, {
+          strict: true,
+          maxBytes: 65536,
+        });
+        if (state?.truncated) throw new Error('Worktree operation state is too large');
+        const ref = state?.data.toString('utf8').trim();
+        if (
+          ref === branchRef ||
+          (marker === 'BISECT_START' && ref === branchRef.slice('refs/heads/'.length))
+        ) {
+          holders.push(dir);
+          break;
+        }
+      }
+    }
   }
   return holders;
 }

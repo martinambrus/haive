@@ -40,11 +40,8 @@ export interface ProviderUsageConfig {
  *  Absent providers (amp, ollama, grok, antigravity) have no readable window -> the
  *  chip simply hides for them.
  *
- *  `satisfies` against the shared union is a drift guard, not decoration: the WEB keeps its own
- *  map of the same CLIs (lib/usage-chip-state) to tell "no endpoint exists" from "endpoint
- *  exists but this provider never reported", and it cannot import this file. Adding a fetcher
- *  here without adding the name to USAGE_WINDOW_PROVIDERS fails to compile here; adding it
- *  there without a fetcher fails to compile in web. */
+ *  `satisfies` keeps this registry exhaustive against the shared list. All row-level
+ *  eligibility decisions use the shared hasUsageWindow predicate, including the web. */
 const FETCHERS = {
   'claude-code': {
     fetch: fetchClaudeUsage,

@@ -192,3 +192,97 @@ it.each([
   expect(Object.keys(servers).includes('git')).toBe(kept);
   expect(servers.other).toBeDefined();
 });
+
+it.each([
+  ['1:999', true, SCOPE],
+  ['', false, SCOPE],
+  ['', false, '_scratch/task'],
+])(
+  'warm shell identity=%s recreates=%s while preserving auth volumes',
+  async (mounted, recreate, subpath) => {
+    vi.stubEnv('CONFIG_ENCRYPTION_KEY', '');
+    const root = await import('node:fs/promises');
+    const path = await import('node:path');
+    const storage = await root.mkdtemp('/tmp/terminal-checkout-');
+    vi.stubEnv('REPO_STORAGE_ROOT', storage);
+    await root.mkdir(path.join(storage, USER, subpath), { recursive: true });
+    const stop = vi.fn(async () => {});
+    const remove = vi.fn(async () => {});
+    let reads = 0;
+    const absent = Object.assign(new Error('arbitrary text'), { statusCode: 404 });
+    const container = {
+      start: async () => {},
+      stop,
+      remove,
+      inspect: async () => {
+        if (++reads > 1) throw absent;
+        return {
+          State: { Running: true },
+          Created: '2026-11-27T10:00:00Z',
+          Config: { Labels: { 'haive.checkout.identity': mounted } },
+        };
+      },
+      exec: async () => ({
+        start: async (opts: { stdin?: boolean }) => {
+          const stream = new PassThrough();
+          if (!opts.stdin) setImmediate(() => stream.end());
+          return stream;
+        },
+        inspect: async () => ({ ExitCode: 0 }),
+      }),
+    };
+    const create = vi.fn(async () => container);
+    const docker = {
+      getContainer: () => container,
+      createContainer: create,
+      getNetwork: () => ({ connect: async () => {} }),
+    } as unknown as Docker;
+    const db = {
+      query: {
+        cliProviders: {
+          findFirst: async () => ({
+            id: PROVIDER,
+            userId: USER,
+            name: 'codex',
+            enabled: true,
+            authMode: 'subscription',
+            isolateAuth: false,
+          }),
+        },
+      },
+    } as unknown as Database;
+    try {
+      const result = await ensureShellContainer({
+        db,
+        docker,
+        userId: USER,
+        scope: 'repo',
+        scopeId: SCOPE,
+        providerId: PROVIDER,
+        repoMount: {
+          source: 'haive_repos',
+          target: '/haive/workdir',
+          subpath: `${USER}/${subpath}`,
+        },
+        mcpServers: [],
+      });
+      expect(result.created).toBe(recreate);
+      expect(stop).toHaveBeenCalledTimes(recreate ? 1 : 0);
+      expect(remove).toHaveBeenCalledTimes(recreate ? 1 : 0);
+      if (!recreate) {
+        expect(create).not.toHaveBeenCalled();
+        return;
+      }
+      expect(remove).toHaveBeenCalledExactlyOnceWith({ force: false });
+      expect(create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          Labels: expect.objectContaining({
+            'haive.checkout.identity': expect.stringMatching(/^\d+:\d+$/),
+          }),
+        }),
+      );
+    } finally {
+      await root.rm(storage, { recursive: true, force: true });
+    }
+  },
+);

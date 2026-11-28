@@ -1,3 +1,4 @@
+import { checkoutSessionCanRetry } from './repo/interactive-checkout.js';
 import { bundleArchiveRel } from './repo/bundle-ingest.js';
 import {
   clearReplacementRecord,
@@ -43,9 +44,11 @@ import {
   FACET_VALUE_ALIAS_PAIRS,
   globalKbEntries,
   GlobalKbDeadlineError,
+  rethrowIfGlobalKbTimeout,
   type GlobalKbCallOptions,
   resolveGlobalKbEnabled,
   withGlobalKb,
+  globalKbCallOptions,
 } from '@haive/shared/global-kb';
 import { loadPlanSkeletons } from '@haive/shared/plan';
 import { scrubErrorPaths } from '@haive/shared/logger';
@@ -191,7 +194,11 @@ export const DATA_MIGRATIONS: DataMigration[] = [
   // It issues a raw `DELETE FROM ai_rag_embeddings` against the global KB store —
   // a SEPARATE database, so outside any core-DB transaction and outside a core-DB snapshot.
   // Nothing can undo it.
-  { id: 'dropHeadingOnlyGlobalKbChunks', kind: 'destructive', run: dropHeadingOnlyGlobalKbChunks },
+  {
+    id: 'dropHeadingOnlyGlobalKbChunks',
+    kind: 'destructive',
+    run: dropHeadingOnlyGlobalKbChunks,
+  },
   // Removes the plain envVars copy of a secret the boot half copied: the previous release reads only
   // envVars, so this waits until the upgrade is kept.
   {
@@ -542,6 +549,7 @@ export async function reconcileStrandedCloningRepos(db: Database): Promise<void>
       id: schema.repositories.id,
       status: schema.repositories.status,
       errorCode: schema.repositories.errorCode,
+      checkoutSessionReason: schema.repositories.checkoutSessionReason,
     })
     .from(schema.repositories)
     .where(
@@ -575,7 +583,16 @@ export async function reconcileStrandedCloningRepos(db: Database): Promise<void>
   const stillQueued = new Set<string>();
   for (const job of jobs) {
     const repositoryId = (job?.data as { repositoryId?: unknown } | undefined)?.repositoryId;
-    if (typeof repositoryId === 'string') stillQueued.add(repositoryId);
+    if (typeof repositoryId === 'string') {
+      const row = cloning.find((candidate) => candidate.id === repositoryId);
+      if (
+        row?.checkoutSessionReason &&
+        row.checkoutSessionReason !== 'draining' &&
+        !checkoutSessionCanRetry(row.checkoutSessionReason, job.timestamp ?? 0)
+      )
+        continue;
+      stillQueued.add(repositoryId);
+    }
   }
 
   const strandedRows = cloning.filter((row) => !stillQueued.has(row.id));
@@ -614,6 +631,7 @@ export async function reconcileStrandedCloningRepos(db: Database): Promise<void>
     .update(schema.repositories)
     .set({
       status: 'error',
+      checkoutSessionReason: null,
       refreshPending: false,
       refreshJobId: null,
       // Keep a repair signal (check-only or recovery preparation), just as the processor's catch does.
@@ -786,6 +804,7 @@ async function recomputeAliasedTopicKeys(
   db: Database,
   opts: GlobalKbCallOptions = {},
 ): Promise<void> {
+  if (!(await resolveGlobalKbEnabled(configService))) return;
   const norm = (v: string): string => v.toLowerCase().replace(/[^a-z0-9]+/g, '');
   await withGlobalKb(
     db,
@@ -834,7 +853,7 @@ async function recomputeAliasedTopicKeys(
         log.info({ updated }, 'recomputed topic keys whose tech segment predated the facet alias');
       }
     },
-    opts,
+    globalKbCallOptions(opts),
   );
 }
 
@@ -1269,24 +1288,35 @@ const HEADING_ONLY_PREFILTER_CHARS = 1024;
  *  The per-repo indexes need no equivalent — `_rag-index.ts` re-extracts every
  *  file on each run and sweeps section keys it no longer produces.
  *
- *  Idempotent: a second run matches nothing. Best-effort and flag-gated — a
- *  global KB that is disabled or unreachable must never fail worker boot, and a
- *  disabled one must not be connected to (that would create its database). */
-async function dropHeadingOnlyGlobalKbChunks(db: Database): Promise<void> {
+ *  Idempotent and flag-gated: a disabled KB is never connected to (that would
+ *  create its database). Ordinary store errors warn and skip; cancellation, coded
+ *  deadlines and typed config outages propagate to the caller, including the
+ *  destructive updater, which fails rather than reporting incomplete cleanup as done. */
+async function dropHeadingOnlyGlobalKbChunks(
+  db: Database,
+  opts: GlobalKbCallOptions = {},
+): Promise<void> {
   try {
     if (!(await resolveGlobalKbEnabled(configService))) return;
-    await withGlobalKb(db, async ({ conn, settings }) => {
-      const rows = (await conn.pg.unsafe(
-        `SELECT id, content FROM ai_rag_embeddings WHERE namespace = $1 AND length(content) < $2`,
-        [settings.namespace, HEADING_ONLY_PREFILTER_CHARS],
-      )) as unknown as Array<{ id: number; content: string }>;
-      const stale = rows.filter((r) => isHeadingOnlyChunk(r.content)).map((r) => r.id);
-      if (stale.length === 0) return;
-      const placeholders = stale.map((_, i) => `$${i + 1}`).join(', ');
-      await conn.pg.unsafe(`DELETE FROM ai_rag_embeddings WHERE id IN (${placeholders})`, stale);
-      log.info({ deleted: stale.length }, 'removed heading-only global KB chunks');
-    });
+    await withGlobalKb(
+      db,
+      async ({ conn, settings }) => {
+        const rows = (await conn.pg.unsafe(
+          `SELECT id, content FROM ai_rag_embeddings WHERE namespace = $1 AND length(content) < $2`,
+          [settings.namespace, HEADING_ONLY_PREFILTER_CHARS],
+        )) as unknown as Array<{ id: number; content: string }>;
+        const stale = rows.filter((r) => isHeadingOnlyChunk(r.content)).map((r) => r.id);
+        if (stale.length === 0) return;
+        const placeholders = stale.map((_, i) => `$${i + 1}`).join(', ');
+        await conn.pg.unsafe(`DELETE FROM ai_rag_embeddings WHERE id IN (${placeholders})`, stale);
+        log.info({ deleted: stale.length }, 'removed heading-only global KB chunks');
+      },
+      globalKbCallOptions(opts),
+    );
   } catch (err) {
+    opts.signal?.throwIfAborted();
+    rethrowIfGlobalKbTimeout(err);
+    rethrowIfConfigUnavailable(err);
     log.warn({ err }, 'heading-only global KB chunk cleanup skipped');
   }
 }

@@ -6,6 +6,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } 
 import { schema, type Database } from '@haive/database';
 import {
   SECRET_KEYS,
+  SecretUnreadableError,
   computeEmailBlindIndex,
   configService,
   encrypt,
@@ -121,9 +122,19 @@ describe.skipIf(!url)('admin recovery on PostgreSQL', () => {
       vi.spyOn(configService, 'close').mockResolvedValue(undefined);
       // The service is a process singleton; an earlier test left it on a closed client.
       Object.assign(secretsService, { initialized: false });
-      await expect(main(['--email', options.email, '--force'])).rejects.toThrow(
-        /does not decrypt the stored email pepper/,
+      const error = await main(['--email', options.email, '--force']).then(
+        () => null,
+        (rejected: unknown) => rejected,
       );
+      expect(error).toBeInstanceOf(Error);
+      const cause = (error as Error).cause;
+      expect(cause).toBeInstanceOf(SecretUnreadableError);
+      expect((cause as SecretUnreadableError).secretKeys).toContain(
+        SECRET_KEYS.EMAIL_BLIND_INDEX_PEPPER,
+      );
+      // The operator text names the files to check and never offers the discard override.
+      expect((error as Error).message).toContain('DATABASE_URL');
+      expect((error as Error).message).not.toContain('HAIVE_DISCARD_UNREADABLE_SECRETS');
       const [row] = await db
         .select()
         .from(schema.systemSecrets)

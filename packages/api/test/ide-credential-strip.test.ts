@@ -44,6 +44,7 @@ vi.mock('../src/queues.js', () => ({
 }));
 vi.mock('../src/redis.js', () => {
   const fake = () => ({
+    get: async () => null,
     hincrby: async () => 1,
     hset: async () => 1,
     scan: async () => ['0', []],
@@ -75,8 +76,8 @@ function seedDb(owned = true): void {
   });
   fake.insert(schema.users, { id: USER, status: 'active', tokenVersion: 0 });
   if (owned) {
-    fake.insert(schema.tasks, { id: TASK, userId: USER });
-    fake.insert(schema.repositories, { id: TASK, userId: USER });
+    fake.insert(schema.tasks, { id: TASK, userId: USER, status: 'ready' });
+    fake.insert(schema.repositories, { id: TASK, userId: USER, status: 'ready' });
   }
   h.db = fake.db;
 }

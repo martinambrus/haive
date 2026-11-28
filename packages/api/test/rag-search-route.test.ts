@@ -397,7 +397,7 @@ beforeEach(() => {
       h.events.push(isGlobal ? 'embed:global' : 'embed:local');
       if (embed.delayMs) await new Promise((resolve) => setTimeout(resolve, embed.delayMs));
       if (embed.fail) throw new Error('connection refused');
-      return { ok: true, json: async () => ({ embeddings: [embed.vector] }) };
+      return Response.json({ embeddings: [embed.vector] });
     }),
   );
 });
@@ -513,6 +513,7 @@ describe('rag_search, the global store', () => {
       {
         connectTimeoutSeconds: 3,
         deadlineMs: DEADLINE_MS,
+        signal: expect.any(AbortSignal),
         settings: expect.objectContaining({ ollamaUrl: GLOBAL_OLLAMA, embedModel: 'global-model' }),
       },
     ]);

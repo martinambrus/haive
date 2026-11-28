@@ -3,6 +3,8 @@ import { configService, logger, rethrowIfConfigUnavailable } from '@haive/shared
 import {
   resolveGlobalKbEnabled,
   withGlobalKb,
+  globalKbCallOptions,
+  rethrowIfGlobalKbTimeout,
   type GlobalKbCallOptions,
 } from '@haive/shared/global-kb';
 import { cosineSimilarity, hashEmbed } from '@haive/shared/rag';
@@ -27,8 +29,8 @@ function vectorOf(value: unknown): number[] | null {
  *  Convergent: it selects only rows still NULL and writes only rows still NULL, so a second run
  *  and a concurrent sync change nothing; it never deletes. A row whose vector cannot be read stays
  *  NULL (excluded from dense ranking, still found by words). Best-effort: a disabled, unconfigured
- *  or unreachable store is logged and left for the next sweep. Background boot passes a signal
- *  and owns all retries; a configuration-store outage propagates to the sweep's owner too. */
+ *  or unreachable store is logged and left for the next sweep. Abort and coded deadlines
+ *  propagate to the retry owner; a configuration-store outage propagates to that owner too. */
 export async function classifyGlobalKbVectorProvenance(
   db: Database,
   opts: GlobalKbCallOptions = {},
@@ -78,11 +80,11 @@ export async function classifyGlobalKbVectorProvenance(
           log.info({ hashed, model }, 'classified global KB vectors written before provenance');
         }
       },
-      opts,
+      globalKbCallOptions(opts),
     );
   } catch (err) {
-    // Background boot owns retries and shutdown; the periodic sweep keeps its best-effort contract.
-    if (opts.signal) throw err;
+    opts.signal?.throwIfAborted();
+    rethrowIfGlobalKbTimeout(err);
     rethrowIfConfigUnavailable(err);
     log.warn({ err }, 'global KB vector provenance classification skipped');
   }

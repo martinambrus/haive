@@ -38,6 +38,7 @@ import {
 } from '@haive/shared/project-state';
 import { branchOutcomeParts, worktreeCleanupStep } from './12-worktree-cleanup.js';
 import * as gitPush from '../../../repo/git-push.js';
+import * as gitExec from '../../../repo/git-exec.js';
 import {
   haltFailed,
   loadOutstandingMergeGuidance,
@@ -345,6 +346,7 @@ function makeDb(
   const stateWrites: MergeResolveState[] = [];
   const taskWrites: Record<string, unknown>[] = [];
   const invocationInserts: { prompt?: string; truncationRetry?: boolean }[] = [];
+  const invocationRows: Record<string, unknown>[] = [];
   const applyPatch = (patch: Record<string, unknown>) => {
     if ('mergeResolveState' in patch) {
       mergeState = patch.mergeResolveState as MergeResolveState;
@@ -358,6 +360,12 @@ function makeDb(
   const db = {
     transaction: async (fn: (tx: unknown) => unknown) => fn(db),
     query: {
+      taskEvents: {
+        findMany: async () =>
+          events
+            .filter((e) => e.eventType === 'worktree.branch_leftovers')
+            .map((e) => ({ payload: e.payload })),
+      },
       users: {
         findFirst: async (opts: { columns?: { role?: boolean } }) =>
           opts?.columns?.role ? { role: 'admin' } : undefined,
@@ -375,27 +383,35 @@ function makeDb(
       set: (patch: Record<string, unknown>) => {
         if (table === schema.tasks) taskWrites.push(patch);
         return {
-          where: (cond: unknown) => ({
-            returning: async () => {
-              const values = conditionValues(cond);
-              const guarded = values.includes('pending') && values.includes('skipped');
-              if (guarded && (status === 'pending' || status === 'skipped')) return [];
-              applyPatch(patch);
-              return [{ id: 'step1', status, errorMessage, warningMessage }];
-            },
-            then: (resolve: (v: unknown) => void) => {
-              applyPatch(patch);
-              resolve(undefined);
-            },
-          }),
+          where: (cond: unknown) => {
+            if (table === schema.cliInvocations) {
+              const id = conditionValues(cond)[0];
+              for (const row of invocationRows) if (row.id === id) Object.assign(row, patch);
+            }
+            return {
+              returning: async () => {
+                const values = conditionValues(cond);
+                const guarded = values.includes('pending') && values.includes('skipped');
+                if (guarded && (status === 'pending' || status === 'skipped')) return [];
+                applyPatch(patch);
+                return [{ id: 'step1', status, errorMessage, warningMessage }];
+              },
+              then: (resolve: (v: unknown) => void) => {
+                applyPatch(patch);
+                resolve(undefined);
+              },
+            };
+          },
         };
       },
     }),
     insert: (table?: unknown) => ({
       values: (v: { eventType: string; payload: unknown }) => {
         if (table === schema.taskEvents) events.push(v);
-        if (table === schema.cliInvocations)
+        if (table === schema.cliInvocations) {
           invocationInserts.push(v as { prompt?: string; truncationRetry?: boolean });
+          invocationRows.push({ ...v, id: 'inv1', endedAt: null, supersededAt: null });
+        }
         return {
           returning: async () => {
             if (opts.insertRejects) throw opts.insertRejects;
@@ -475,6 +491,7 @@ function makeDb(
     },
     events,
     invocationInserts,
+    invocationRows,
   };
 }
 
@@ -1807,6 +1824,24 @@ describe('12 merge fix-agent dispatch', () => {
       // failed, so a crash right there still leaves the run tracked rather than orphaned.
       expect(h.getState()?.fixInvocationId).toBe('inv1');
       expect(h.getState()?.phase).toBe('resolving');
+      expect(h.invocationRows).toHaveLength(1);
+      expect(h.invocationRows[0]!.supersededAt).toBeInstanceOf(Date);
+      // Retry/recovery reads the saved id, consumes the superseded run and refunds it.
+      const released = h.invocationRows[0]!;
+      vi.spyOn(h.db.query.cliInvocations, 'findFirst').mockResolvedValue(released as never);
+      const recovered = await resolveMergePhase(
+        h.db as never,
+        step,
+        mkCurrent(det(wt), { action: 'merge_remove' }, h.getState()),
+        ctx,
+        mkParams(h.db, dispatching),
+      );
+      expect(recovered.resolved).toBe(false);
+      if (!recovered.resolved) expect(recovered.result.status).toBe('waiting_cli');
+      expect(released.consumedAt).toBeInstanceOf(Date);
+      expect(h.invocationRows).toHaveLength(2);
+      expect(h.invocationRows[1]!.supersededAt).toBeNull();
+      expect(h.getState()?.conflictRetries).toBe(1);
     } finally {
       await rm(parent, { recursive: true, force: true });
     }
@@ -3704,6 +3739,237 @@ describe('12 merge clarification', () => {
     ]);
     expect(await loadOutstandingMergeGuidance(reAsked, 't1')).toBe('');
   });
+});
+
+it('T316 M1 removes pushed upstream config before the branch name is reused', async () => {
+  const { parent, wt } = await setupWorktree();
+  let bare: string | undefined;
+  try {
+    bare = await pushParentMainToOrigin(parent);
+    await git(wt, ['push', '-u', 'origin', 'feature/x']);
+    expect((await git(wt, ['rev-parse', '--abbrev-ref', '@{upstream}'])).trim()).toBe(
+      'origin/feature/x',
+    );
+    const { applyOut } = await mergeThenApply(parent, det(wt), {
+      action: 'merge_remove',
+      deleteBranch: true,
+    });
+    expect(applyOut?.branchDeleted).toBe(true);
+    await git(parent, ['branch', 'feature/x']);
+    expect.soft(await gitCode(parent, ['config', '--get', 'branch.feature/x.remote'])).toBe(1);
+    expect
+      .soft(await gitCode(parent, ['rev-parse', '--verify', 'feature/x@{upstream}']))
+      .not.toBe(0);
+  } finally {
+    await rm(parent, { recursive: true, force: true });
+    if (bare) await rm(bare, { recursive: true, force: true });
+  }
+});
+
+it.each(['rebase-merge', 'rebase-apply', 'bisect', 'broken-ref', 'symbolic-ref'] as const)(
+  'T316 fix2 retains a branch on %s',
+  async (kind) => {
+    const { parent, wt } = await setupWorktree();
+    try {
+      if (kind === 'bisect') {
+        await writeFile(path.join(wt, 'middle.txt'), 'middle\n');
+        await git(wt, ['add', '-A']);
+        await git(wt, ['commit', '-m', 'middle']);
+      }
+      const h = makeDb();
+      const detected = det(wt);
+      const ctx = mkCtx(parent, h.db);
+      const values = {
+        action: 'merge_remove',
+        deleteBranch: true,
+        discardUncommitted: kind === 'broken-ref',
+      };
+      expect(
+        (
+          await resolveMergePhase(
+            h.db as never,
+            step,
+            mkCurrent(detected, values),
+            ctx,
+            mkParams(h.db),
+          )
+        ).resolved,
+      ).toBe(true);
+      const tip = (await git(parent, ['rev-parse', 'feature/x'])).trim();
+      let reason: string;
+      let holder: string | undefined;
+      if (kind.startsWith('rebase-') || kind === 'bisect') {
+        holder = path.join(parent, '.haive/worktrees/holder');
+        await git(parent, ['worktree', 'add', '--force', holder, 'feature/x']);
+        if (kind === 'bisect') {
+          await git(holder, ['bisect', 'start', 'feature/x', 'feature/x~2']);
+        } else {
+          await writeFile(path.join(parent, 'feature.txt'), 'conflicting base\n');
+          await git(parent, ['commit', '-am', 'conflicting base']);
+          expect(
+            await gitCode(holder, [
+              'rebase',
+              kind === 'rebase-apply' ? '--apply' : '--merge',
+              '--onto',
+              'main',
+              'feature/x^',
+            ]),
+          ).not.toBe(0);
+        }
+        expect(await gitCode(holder, ['symbolic-ref', '-q', 'HEAD'])).toBe(1);
+        expect(await git(parent, ['worktree', 'list', '--porcelain'])).toContain('detached');
+        expect(await gitCode(parent, ['branch', '-D', 'feature/x'])).not.toBe(0);
+        reason = 'checked-out';
+      } else if (kind === 'broken-ref') {
+        await writeFile(path.join(parent, '.git/refs/heads/feature/x'), 'junk\n');
+        expect(await gitCode(parent, ['rev-parse', '-q', '--verify', 'refs/heads/feature/x'])).toBe(
+          1,
+        );
+        reason = 'unreadable-branch';
+      } else {
+        await git(parent, ['branch', 'real-feature', tip]);
+        await git(parent, ['symbolic-ref', 'refs/heads/feature/x', 'refs/heads/real-feature']);
+        reason = 'symbolic-ref';
+      }
+      const main = await git(parent, ['rev-parse', 'main']);
+      const applied = await worktreeCleanupStep.apply(ctx, applyArgs(detected, values));
+      expect(applied).toMatchObject({
+        removed: true,
+        merged: true,
+        branchDeleted: false,
+        branchLeftovers: [{ branch: 'feature/x', reason }],
+      });
+      expect(await git(parent, ['rev-parse', 'main'])).toBe(main);
+      if (kind === 'broken-ref') {
+        expect(await readFile(path.join(parent, '.git/refs/heads/feature/x'), 'utf8')).toBe(
+          'junk\n',
+        );
+      } else {
+        expect((await git(parent, ['rev-parse', 'feature/x'])).trim()).toBe(tip);
+      }
+      if (kind === 'symbolic-ref') {
+        expect((await git(parent, ['symbolic-ref', 'refs/heads/feature/x'])).trim()).toBe(
+          'refs/heads/real-feature',
+        );
+        expect((await git(parent, ['rev-parse', 'real-feature'])).trim()).toBe(tip);
+      }
+      if (holder)
+        await git(holder, kind === 'bisect' ? ['bisect', 'reset'] : ['rebase', '--abort']);
+    } finally {
+      await rm(parent, { recursive: true, force: true });
+    }
+  },
+);
+
+it('T316 keeps feature and DAG branches advanced after the recorded squash', async () => {
+  const { parent, wt } = await setupWorktree();
+  try {
+    const h = makeDb();
+    const detected = det(wt);
+    const ctx = mkCtx(parent, h.db);
+    const values = { action: 'merge_remove', deleteBranch: true };
+    const outcome = await resolveMergePhase(
+      h.db as never,
+      step,
+      mkCurrent(detected, values),
+      ctx,
+      mkParams(h.db),
+    );
+    expect(outcome.resolved).toBe(true);
+    expect(h.getState()?.squashCommitSha).toBeTruthy();
+    const main = (await git(parent, ['rev-parse', 'main'])).trim();
+    await writeFile(path.join(wt, 'personal.txt'), 'after the squash\n');
+    await git(wt, ['add', 'personal.txt']);
+    await git(wt, ['commit', '-m', 'personal work after squash']);
+    const personal = (await git(wt, ['rev-parse', 'HEAD'])).trim();
+    // This DAG branch is contained in today's feature, but not in the recorded merge.
+    await git(parent, ['branch', 'feature/x--later', personal]);
+    const applied = await worktreeCleanupStep.apply(ctx, applyArgs(detected, values));
+    expect(applied.removed).toBe(true);
+    expect.soft(applied.branchDeleted).toBe(false);
+    expect.soft(await gitCode(parent, ['show-ref', '--verify', 'refs/heads/feature/x'])).toBe(0);
+    expect.soft(await gitCode(parent, ['reflog', 'exists', 'refs/heads/feature/x'])).toBe(0);
+    expect
+      .soft(await gitCode(parent, ['show-ref', '--verify', 'refs/heads/feature/x--later']))
+      .toBe(0);
+    // Includes every surviving ref and reflog: red means the personal commit is unreachable.
+    expect.soft(await git(parent, ['rev-list', '--all', '--reflog'])).toContain(personal);
+    expect(await git(parent, ['rev-parse', 'main'])).toBe(`${main}\n`);
+    expect(applied).toMatchObject({
+      branchLeftovers: [
+        { branch: 'feature/x--later', reason: 'not-contained-in-squash' },
+        { branch: 'feature/x', reason: 'not-contained-in-squash' },
+      ],
+    });
+    expect(h.events).toContainEqual(
+      expect.objectContaining({
+        eventType: 'worktree.branch_leftovers',
+        payload: expect.objectContaining({
+          branches: expect.arrayContaining([
+            { branch: 'feature/x', reason: 'not-contained-in-squash' },
+          ]),
+        }),
+      }),
+    );
+    expect(h.getWarning()).toContain('feature/x');
+  } finally {
+    await rm(parent, { recursive: true, force: true });
+  }
+});
+
+it('T316 compare-and-delete retains a branch advanced after the ancestry proof', async () => {
+  const { parent, wt } = await setupWorktree();
+  let spy: ReturnType<typeof vi.spyOn> | undefined;
+  try {
+    const h = makeDb();
+    const detected = det(wt);
+    const ctx = mkCtx(parent, h.db);
+    const values = { action: 'merge_remove', deleteBranch: true };
+    expect(
+      (
+        await resolveMergePhase(
+          h.db as never,
+          step,
+          mkCurrent(detected, values),
+          ctx,
+          mkParams(h.db),
+        )
+      ).resolved,
+    ).toBe(true);
+    const main = await git(parent, ['rev-parse', 'main']);
+    const originalTip = (await git(parent, ['rev-parse', 'feature/x'])).trim();
+    const expectedTip = (
+      await git(parent, [
+        'commit-tree',
+        'feature/x^{tree}',
+        '-p',
+        originalTip,
+        '-m',
+        'concurrent personal commit',
+      ])
+    ).trim();
+    const real = gitExec.gitRun;
+    spy = vi.spyOn(gitExec, 'gitRun').mockImplementation(async (dir, argv, ...rest) => {
+      if (argv[0] === 'update-ref' && argv[1] === '-d' && argv[2] === 'refs/heads/feature/x') {
+        // Move after proof, immediately before the real compare-and-delete.
+        await git(parent, ['update-ref', 'refs/heads/feature/x', expectedTip]);
+      }
+      return real(dir, argv, ...rest);
+    });
+    const applied = await worktreeCleanupStep.apply(ctx, applyArgs(detected, values));
+    expect(applied).toMatchObject({
+      removed: true,
+      branchDeleted: false,
+      branchLeftovers: [{ branch: 'feature/x', reason: 'delete-refused' }],
+    });
+    expect((await git(parent, ['rev-parse', 'feature/x'])).trim()).toBe(expectedTip);
+    expect(await gitCode(parent, ['reflog', 'exists', 'refs/heads/feature/x'])).toBe(0);
+    expect(await git(parent, ['rev-list', '--all', '--reflog'])).toContain(expectedTip);
+    expect(await git(parent, ['rev-parse', 'main'])).toBe(main);
+  } finally {
+    spy?.mockRestore();
+    await rm(parent, { recursive: true, force: true });
+  }
 });
 
 describe('12 squash merge (real git)', () => {

@@ -199,6 +199,15 @@ describe('foldCoverageResults', () => {
     vi.mocked(applyAgentPatch).mockResolvedValue(applied);
   });
 
+  it('propagates repository deletion without a failed-apply stamp', async () => {
+    const gone = new PlanPatchError('repository_gone', 'gone');
+    vi.mocked(applyAgentPatch).mockRejectedValue(gone);
+    const { db, claims, stamps } = fakeDb();
+    await expect(foldCoverageResults(ctx(db), detected, [reply])).rejects.toBe(gone);
+    expect(claims).toHaveLength(1);
+    expect(stamps).toEqual([]);
+  });
+
   it('retries a conflict with fresh semantic input and the whole claim', async () => {
     vi.mocked(ensureSemanticExpansionResolution).mockClear();
     vi.mocked(applyAgentPatch).mockRejectedValueOnce(new PlanPatchError('conflict', 'raced'));
@@ -264,6 +273,9 @@ describe('foldCoverageResults', () => {
     expect(
       (vi.mocked(applyAgentPatch).mock.calls[0]![0] as { inTransaction?: boolean }).inTransaction,
     ).toBe(true);
+    expect(vi.mocked(applyAgentPatch).mock.calls[0]![2]).toMatchObject({
+      repositoryLockTimeoutMs: 250,
+    });
     expect(out.hadFailure).toBe(false);
   });
 

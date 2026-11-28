@@ -23,7 +23,11 @@ export async function withCliAuthWrite<T>(
       where: eq(schema.cliProviders.id, provider.id),
       columns: { id: true, userId: true, name: true, authMode: true, isolateAuth: true },
     });
-    if (!current || cliAuthScope(current) !== cliAuthScope(provider)) {
+    if (
+      !current ||
+      current.authMode !== provider.authMode ||
+      cliAuthScope(current) !== cliAuthScope(provider)
+    ) {
       throw new HttpError(
         409,
         'CLI authentication settings changed. Reload and try again.',

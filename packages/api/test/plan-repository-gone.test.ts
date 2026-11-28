@@ -2,6 +2,21 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const USER = vi.hoisted(() => '00000000-0000-4000-8000-0000000000a1');
 const h = vi.hoisted(() => ({ db: undefined as unknown }));
+// The fence's own transaction is covered by admitted-checkout-mutation.test.ts; here it would
+// be taken for the route's transaction by these tests' spies on `db.transaction`.
+vi.mock('../src/lib/admitted-checkout-mutation.js', async () => {
+  const { withCheckoutMutation } = await import('@haive/shared/checkout-access');
+  const { assertNewWorkAllowed } = await import('../src/middleware/maintenance.js');
+  return {
+    admitUnderFence: async (): Promise<void> => undefined,
+    withAdmittedCheckoutMutation: async (
+      ...args: Parameters<typeof withCheckoutMutation>
+    ): Promise<unknown> => {
+      await assertNewWorkAllowed();
+      return withCheckoutMutation(...args);
+    },
+  };
+});
 vi.mock('../src/db.js', () => ({ getDb: () => h.db }));
 vi.mock('../src/queues.js', () => ({ getTaskQueue: vi.fn() }));
 vi.mock('../src/lib/plan-mirror.js', () => ({
@@ -42,6 +57,7 @@ app.onError(errorHandler);
 
 beforeEach(() => {
   vi.clearAllMocks();
+  vi.spyOn(configService, 'getFresh').mockResolvedValue('normal');
 });
 
 afterEach(() => vi.restoreAllMocks());
@@ -147,6 +163,49 @@ describe('deleting a plan after its repository disappears', () => {
     expect(await response.json()).toMatchObject({ code: 'plan_repository_gone' });
     expect(enqueuePlanMirrorRefresh).not.toHaveBeenCalled();
   });
+});
+
+describe('deleting the whole plan while the system drains', () => {
+  it.each(['draining', 'maintenance'])(
+    'answers 503 while %s, with no claim, no plan write and no mirror removal',
+    async (state) => {
+      const fake = createFakeDb({
+        repositories: schema.repositories,
+        tasks: schema.tasks,
+        planNodes: schema.planNodes,
+        planNodeEdges: schema.planNodeEdges,
+        planMirrorState: schema.planMirrorState,
+      });
+      fake.insert(schema.repositories, { id: REPO, userId: USER, name: 'repo', status: 'ready' });
+      fake.insert(schema.planNodes, {
+        id: FROM,
+        repositoryId: REPO,
+        parentId: null,
+        title: 'Plan',
+        path: `/${FROM}/`,
+        version: 1,
+      });
+      h.db = fake.db;
+      vi.spyOn(configService, 'getFresh').mockResolvedValue(state);
+      const patch = vi.spyOn(fake.db, 'transaction').mockResolvedValue({ deleted: [FROM] });
+      let writes = 0;
+      fake.hooks.beforeUpdate = (table) => {
+        if (table === schema.repositories) writes += 1;
+      };
+      fake.hooks.beforeDelete = () => {
+        writes += 1;
+      };
+      const response = await app.request(`/${REPO}/plan`, {
+        method: 'DELETE',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ confirm: 'repo' }),
+      });
+      expect(response.status).toBe(503);
+      expect(writes).toBe(0);
+      expect(patch).not.toHaveBeenCalled();
+      expect(enqueuePlanMirrorRefresh).not.toHaveBeenCalled();
+    },
+  );
 });
 
 describe('snapshot action failure text', () => {

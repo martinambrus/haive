@@ -557,7 +557,13 @@ async function runCliExecJob(
       return;
     }
     if (err instanceof CliLoginRequiredError && payload.taskStepId) {
-      await writeLoginHint(db, row.id, payload.taskStepId, err.hint);
+      try {
+        await writeLoginHint(db, row.id, payload.taskStepId, err.hint);
+      } catch (hintError) {
+        // The run's failure is already durable. A display hint must not replace that
+        // error or prevent idle accounting and the step's continuation.
+        log.warn({ err: hintError, invocationId: row.id }, 'failed to record CLI login hint');
+      }
     }
     // Park-begin candidate (mirror of the success path): a failed invocation — including a
     // rate-limit/allowance fatal — that leaves the step in waiting_cli should have the ensuing

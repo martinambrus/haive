@@ -35,6 +35,8 @@ const redis = {
 let storedSecret: string | null = null;
 let beforeSecretRead: (() => Promise<void>) | null = null;
 const db = {
+  // The boot key check reads the stored secrets; this fake holds none at boot.
+  execute: async () => [],
   query: {
     systemSecrets: {
       findFirst: async () => {

@@ -9,7 +9,7 @@ import {
 } from '../modules/loader.js';
 import { deactivatedModuleIds } from '../modules/activation.js';
 import { syncModuleIntent } from '../modules/intent.js';
-import { getRedis } from '../redis.js';
+import { getPatientRedis, getRedis } from '../redis.js';
 import { CORE_COMPOSABLE_STEPS, assertCoreComposableCatalog } from './composable-core.js';
 import { stepRegistry } from './registry.js';
 import { syncStepCatalog } from './step-catalog.js';
@@ -65,7 +65,7 @@ export async function bootStepEngine(db: Database): Promise<{
   // Before the seed: a module's task types read module-missing while its row is absent or missing.
   await syncModuleIntent(db, loaded);
   const taskTypes = await syncTaskTypeDefinitions(db, stepRegistry, loaded);
-  await publishWorkerBootReport(getRedis(), loaded, schemas, taskTypes);
+  await publishWorkerBootReport(getPatientRedis(), loaded, schemas, taskTypes, getRedis());
   // Held back like a deactivated module: the first pass ensures its schema again, then starts its jobs.
   const stillEnsuring = Object.keys(schemas).filter((id) => schemas[id] === 'pending');
   return { loaded, entries, deactivated: new Set([...deactivated, ...stillEnsuring]) };

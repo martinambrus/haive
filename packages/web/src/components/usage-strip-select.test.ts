@@ -216,6 +216,44 @@ describe('selectStripMeters', () => {
 });
 
 describe('selectMetersForProviderIds', () => {
+  it.each(['codex', 'gemini', 'zai', 'claude-code'] as const)(
+    'keeps the %s snapshot when the provider list failed to load',
+    (providerName) => {
+      const snapshot = snap({ providerName, fiveHour: { usedPct: 40, resetsAt: null } });
+      expect(selectMetersForProviderIds(['p1'], [snapshot], undefined, [])).toEqual([
+        { allowanceKey: 'provider:p1', snapshot, status: 'ok' },
+      ]);
+    },
+  );
+
+  it('filters only known rows when the provider list is incomplete', () => {
+    const unknown = snap({ providerId: 'x1', providerName: 'codex' });
+    const subscription = snap({ providerId: 'c2' });
+    const meters = selectMetersForProviderIds(
+      ['x1', 'c1', 'c2'],
+      [unknown, snap({ providerId: 'c1' }), subscription],
+      undefined,
+      [
+        { id: 'c1', name: 'claude-code', authMode: 'api_key' },
+        { id: 'c2', name: 'claude-code', authMode: 'subscription' },
+      ],
+    );
+    expect(meters).toEqual([
+      { allowanceKey: 'provider:c2', snapshot: subscription, status: 'ok' },
+      { allowanceKey: 'provider:x1', snapshot: unknown, status: 'ok' },
+    ]);
+  });
+
+  it.each(['api_key', 'subscription'] as const)(
+    'gates readable Claude snapshots on known auth mode (%s)',
+    (authMode) => {
+      const meters = selectMetersForProviderIds(['c1'], [CLAUDE[0]!], KEYS, [
+        { id: 'c1', name: 'claude-code', authMode },
+      ]);
+      expect(meters).toHaveLength(authMode === 'subscription' ? 1 : 0);
+    },
+  );
+
   it('collapses seats sharing a subscription into one meter', () => {
     // 08c with three seats pointed at three rows of the same Claude login: one meter, not
     // three copies of the same number sitting beside each other in the header.
@@ -245,3 +283,16 @@ describe('selectMetersForProviderIds', () => {
     expect(selectMetersForProviderIds(['c1'], null, KEYS)).toEqual([]);
   });
 });
+
+it.each(['api_key', 'subscription'] as const)(
+  'header meters structurally gate Claude repair prompts (%s)',
+  (authMode) => {
+    const meters = selectMetersForProviderIds(
+      ['c1'],
+      [snap({ providerId: 'c1', status: 'needs_reconnect' })],
+      KEYS,
+      [{ id: 'c1', name: 'claude-code', authMode }],
+    );
+    expect(meters).toHaveLength(authMode === 'subscription' ? 1 : 0);
+  },
+);

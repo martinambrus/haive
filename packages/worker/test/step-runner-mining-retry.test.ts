@@ -838,6 +838,47 @@ describe('advanceStep apply-to-form continuation', () => {
     ).toMatchObject({ pauseFormOnRetry: false, waitingStartedAt: expect.any(Date) });
   });
 
+  it('reuses refused answers as defaults through the existing reconciliation hook', async () => {
+    const state = freshState([miningRow('prior-batch-agent', 1)]);
+    state.taskStepRow.formSchema = { title: 'Old', fields: [] };
+    state.taskStepRow.formValues = { decision: 'accept', secretTick: true };
+    const base = reopeningFormStep();
+    const reconcile = vi.fn((_ctx, _detected, _values) => ({ decision: 'continue' }));
+    const step = {
+      ...base,
+      humanOnlyFormFields: ['secretTick'],
+      reconcileReusedFormValues: reconcile,
+      form(ctx, detected) {
+        const form = base.form!(ctx, detected)!;
+        form.fields.push({ type: 'checkbox', id: 'secretTick', label: 'Replace', default: false });
+        return form;
+      },
+      async apply() {
+        throw new ReopenStepFormError('Review; replacement was reset.', {
+          notice: true,
+          reuseFormValues: true,
+        });
+      },
+    } as StepDefinition;
+    expect((await run(makeMockDb(state), step, [])).status).toBe('waiting_form');
+    expect(reconcile).toHaveBeenCalledWith(
+      expect.anything(),
+      { remaining: 42 },
+      { decision: 'accept' },
+    );
+    expect(state.taskStepRow.formSchema).toMatchObject({
+      fields: expect.arrayContaining([
+        expect.objectContaining({ id: 'decision', default: 'accept' }),
+        expect.objectContaining({ id: 'secretTick', default: false }),
+        expect.objectContaining({
+          id: 'reopenedFormNotice',
+          body: 'Review; replacement was reset.',
+        }),
+      ]),
+    });
+    expect(state.taskStepRow.formValues).toBeNull();
+  });
+
   it('leaves a row a Retry reset alone when the form would have reopened', async () => {
     const state = freshState([miningRow('prior-batch-agent', 1)]);
     state.taskStepRow.formSchema = { title: 'Old form', fields: [] };
@@ -4288,7 +4329,7 @@ describe('08e implementer dispatch and recovery', () => {
             via: 'reset_at',
             watchSince: null,
           }),
-        ).toBe(true);
+        ).toEqual({ epoch: 1 });
         // Feed the actual auto-resume's persisted rows to the continuation, translating only
         // the UUID keys into this harness's existing symbolic keys.
         state.taskStepRow = { ...fake.rows(schema.taskSteps)[0]!, id: 'ts-1', taskId: 'task-1' };

@@ -8,6 +8,9 @@ const h = vi.hoisted(() => ({
   error: vi.fn(),
   info: vi.fn(),
   task: vi.fn(),
+  ensure: vi.fn(),
+  repoStatus: { value: 'ready' },
+  repoFail: { value: undefined as Error | undefined },
 }));
 vi.mock('@haive/shared', async (original) => ({
   ...(await original<typeof import('@haive/shared')>()),
@@ -30,20 +33,33 @@ vi.mock('../db.js', () => ({
   getDb: () => ({
     query: {
       tasks: { findFirst: h.task },
-      repositories: { findFirst: async () => ({ storagePath: '/repos/user/repo' }) },
+      repositories: {
+        findFirst: async () => {
+          if (h.repoFail.value) throw h.repoFail.value;
+          return { storagePath: '/repos/user/repo', status: h.repoStatus.value };
+        },
+      },
     },
   }),
 }));
-vi.mock('../step-engine/steps/workflow/_app-runtime.js', () => ({ classifyRuntime: h.classify }));
+vi.mock('../step-engine/steps/workflow/_app-runtime.js', () => ({
+  classifyRuntime: h.classify,
+  ensureAppServing: h.ensure,
+}));
 vi.mock('../sandbox/ddev-runner.js', async (original) => ({
   ...(await original<typeof import('../sandbox/ddev-runner.js')>()),
   rebuildDdevRunner: h.rebuild,
 }));
 vi.mock('./safe-processor.js', () => ({ safeProcessor: (fn: unknown) => fn }));
+import { CheckoutUnavailableError } from '@haive/shared/checkout-access';
+import { interactiveCheckouts } from '../repo/interactive-checkout.js';
 import { rebuildDdevForTask, startRuntimeEnsureWorker } from './runtime-ensure-queue.js';
 const payload = { taskId: 'task', userId: 'owner' };
 beforeEach(() => {
   vi.clearAllMocks();
+  h.repoStatus.value = 'ready';
+  h.repoFail.value = undefined;
+  h.ensure.mockResolvedValue(null);
   h.task.mockResolvedValue({ repositoryId: 'repo' });
   h.classify.mockResolvedValue({ mode: 'ddev', repoSubpath: 'user/repo' });
   h.rebuild.mockImplementation(async (_task, _workspace, _user, enqueue) => {
@@ -159,4 +175,96 @@ it('returns an unknown probe as a retryable refusal', async () => {
     'DDEV rebuild refused',
   );
   expect(h.error).not.toHaveBeenCalled();
+});
+
+const pinnedJobs = ['ensure-runtime', 'navigate-mailpit', 'rebuild-ddev'];
+const rejectedJobs = ['ensure-runtime', 'navigate-mailpit'];
+const refusedRebuild = {
+  ok: false,
+  url: null,
+  mode: 'none',
+  rebuildRefusal: {
+    reason: 'checkout-unavailable',
+    message: new CheckoutUnavailableError().message,
+    retryable: true,
+  },
+};
+const runner = () => {
+  startRuntimeEnsureWorker();
+  return h.worker.mock.calls[0]![0] as (job: unknown) => Promise<unknown>;
+};
+it.each(rejectedJobs)(
+  '%s rejects with checkout_unavailable while the repository is cloning',
+  async (name) => {
+    h.repoStatus.value = 'cloning';
+    await expect(runner()({ name, data: payload })).rejects.toMatchObject({
+      code: 'checkout_unavailable',
+    });
+    expect(h.ensure).not.toHaveBeenCalled();
+    expect(h.classify).not.toHaveBeenCalled();
+    expect(h.rebuild).not.toHaveBeenCalled();
+  },
+);
+const expectRefused = async () => {
+  await expect(runner()({ name: 'rebuild-ddev', data: payload })).resolves.toEqual(refusedRebuild);
+  expect(h.rebuild).not.toHaveBeenCalled();
+  expect(h.classify).not.toHaveBeenCalled();
+  expect(h.ensure).not.toHaveBeenCalled();
+  expect(h.info).toHaveBeenCalledExactlyOnceWith(
+    { taskId: 'task', reason: 'checkout-unavailable' },
+    'DDEV rebuild refused',
+  );
+};
+it('rebuild-ddev resolves a typed refusal while the repository is cloning', async () => {
+  h.repoStatus.value = 'cloning';
+  await expectRefused();
+});
+it('rebuild-ddev resolves a typed refusal while the process barrier is suspended', async () => {
+  const release = await interactiveCheckouts.suspend('repo', async () => {});
+  try {
+    await expectRefused();
+  } finally {
+    release();
+  }
+});
+it('rebuildDdevForTask refuses, not fails, when its own first read finds the checkout unavailable', async () => {
+  h.repoStatus.value = 'cloning';
+  await expect(rebuildDdevForTask(payload)).resolves.toEqual(refusedRebuild);
+  expect(h.classify).not.toHaveBeenCalled();
+  expect(h.rebuild).not.toHaveBeenCalled();
+  expect(h.info).toHaveBeenCalledExactlyOnceWith(
+    { taskId: 'task', reason: 'checkout-unavailable' },
+    'DDEV rebuild refused',
+  );
+  expect(h.error).not.toHaveBeenCalled();
+});
+it('rebuildDdevForTask refuses the same when classifying the runtime finds it unavailable', async () => {
+  h.classify.mockRejectedValueOnce(new CheckoutUnavailableError());
+  await expect(rebuildDdevForTask(payload)).resolves.toEqual(refusedRebuild);
+  expect(h.rebuild).not.toHaveBeenCalled();
+  expect(h.add).not.toHaveBeenCalled();
+  expect(h.error).not.toHaveBeenCalled();
+});
+it('rebuildDdevForTask keeps the generic failure once the rebuild has started', async () => {
+  h.rebuild.mockRejectedValueOnce(new CheckoutUnavailableError());
+  await expect(rebuildDdevForTask(payload)).resolves.toMatchObject({
+    ok: false,
+    mode: 'ddev',
+    rebuildFailure: { message: 'DDEV rebuild failed. Try again; recovery may still be needed.' },
+  });
+  expect(h.rebuild).toHaveBeenCalledOnce();
+  expect(h.error).toHaveBeenCalledOnce();
+  expect(h.info).not.toHaveBeenCalled();
+});
+it('rebuild-ddev still rejects when the durable read fails for an unknown reason', async () => {
+  h.repoFail.value = new Error('boom');
+  await expect(runner()({ name: 'rebuild-ddev', data: payload })).rejects.toThrow('boom');
+  expect(h.rebuild).not.toHaveBeenCalled();
+});
+
+it.each(pinnedJobs)('%s dispatches when the repository is ready', async (name) => {
+  startRuntimeEnsureWorker();
+  const run = h.worker.mock.calls[0]![0] as (job: unknown) => Promise<unknown>;
+  await run({ name, data: payload });
+  expect(name === 'rebuild-ddev' ? h.rebuild : h.ensure).toHaveBeenCalled();
 });

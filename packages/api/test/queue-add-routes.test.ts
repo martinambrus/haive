@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { Hono } from 'hono';
 import { schema } from '@haive/database';
@@ -84,6 +85,33 @@ it.each(['hang', 'reject'])(
     expect(fake.rows(schema.auditEvents)).toHaveLength(1);
   },
 );
+
+it('builds the module fetch job from the row id when the request spells it upper case', async () => {
+  const sourceId = randomUUID();
+  const upper = sourceId.toUpperCase();
+  expect(upper).not.toBe(sourceId);
+  fake.insert(schema.moduleSources, {
+    id: sourceId,
+    moduleId: 'beta',
+    kind: 'git',
+    fetchStatus: 'fetched',
+    updatedAt: new Date(),
+  });
+  h.add.mockResolvedValue({});
+  const response = await app.request(`/sources/${upper}/fetch`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: '{}',
+  });
+  expect(response.status).toBe(202);
+  const body = (await response.json()) as { id: string; updatedAt: string };
+  expect(body.id).toBe(sourceId);
+  expect(h.add).toHaveBeenCalledTimes(1);
+  expect(h.add.mock.calls[0]?.[1]).toMatchObject({ sourceId });
+  expect(h.add.mock.calls[0]?.[2]).toMatchObject({
+    jobId: `source-${sourceId}-${new Date(body.updatedAt).getTime()}`,
+  });
+});
 
 it.each(['access-urls', 'db-access', 'open-mailpit'])(
   'bounds %s and preserves its 202 pending response',

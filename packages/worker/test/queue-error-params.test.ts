@@ -16,6 +16,7 @@ vi.mock('bullmq', async (original) => ({
     on() {
       return this;
     }
+    async close() {}
   },
 }));
 vi.mock('../src/db.js', () => ({

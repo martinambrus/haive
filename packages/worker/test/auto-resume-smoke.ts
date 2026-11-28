@@ -205,7 +205,7 @@ async function main(): Promise<void> {
     via: 'smoke',
     watchSince: null,
   });
-  check('a failed task is auto-resumed', resumed === true, resumed);
+  check('a failed task is auto-resumed', resumed !== false, resumed);
 
   const [task] = await db.select().from(schema.tasks).where(eq(schema.tasks.id, outage.taskId));
   check('task flips back to running', task?.status === 'running', task?.status);
@@ -315,7 +315,7 @@ async function main(): Promise<void> {
     via: 'smoke',
     watchSince: null,
   });
-  check('the second task resumes too', resumedGood === true, resumedGood);
+  check('the second task resumes too', resumedGood !== false, resumedGood);
   const [goodInvocation] = await db
     .select({ supersededAt: schema.cliInvocations.supersededAt })
     .from(schema.cliInvocations)

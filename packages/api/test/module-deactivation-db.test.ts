@@ -1,3 +1,4 @@
+import { deactivateUrgently } from '../src/modules/activation.js';
 import {
   finalizeModuleDrain,
   guardModuleAdmission,
@@ -41,7 +42,7 @@ vi.mock('../src/lib/task-events.js', async (importOriginal) => {
 vi.mock('../src/lib/sandbox-kill.js', () => ({
   killTaskSandboxes: async (taskId: string) => {
     h.bestEffortKills.push(taskId);
-    return 0;
+    return { killed: 0, killConfirmed: true };
   },
   killTaskSandboxesOrThrow: async (taskId: string) => {
     h.kills.push(taskId);
@@ -1345,7 +1346,9 @@ describe.skipIf(!url)('module deactivation on Postgres', () => {
           .set({ status: 'failed', errorMessage: 'It broke', completedAt: failedOn })
           .where(eq(schema.tasks.id, own.id));
       };
-      const body = (await (await patchUrgent('alpha')).json()) as Body;
+      // One slot preserves this between-Stops cut; the default concurrent path is covered above.
+      const body = await deactivateUrgently(db, 'alpha', ACTOR, { concurrency: 1 });
+      if (body.kind !== 'ok') throw new Error('Urgent deactivation must find its module');
       expect(body.stopped.filter((s) => s.id === own.id)).toEqual([
         { id: own.id, title: 'Failed itself', killed: 0, cancelled: 1, stopped: 1, failedAt: null },
       ]);

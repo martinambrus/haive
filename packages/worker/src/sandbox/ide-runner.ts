@@ -1,3 +1,9 @@
+import {
+  CHECKOUT_IDENTITY_LABEL,
+  checkoutIdentity,
+  runnerCheckoutMatches,
+} from './checkout-identity.js';
+import { withInteractiveCheckout } from '../repo/interactive-checkout.js';
 import { requireRunnerPresence, RunnerProbeError } from './runner-probe.js';
 import { SANDBOX_CORE_IMAGE } from './image-composer.js';
 import { execFile } from 'node:child_process';
@@ -240,6 +246,7 @@ export async function startIdeRunner(params: {
   taskId: string;
   repositoryId?: string;
   workspaceSubpath: string;
+  checkoutIdentity?: string;
   /** The workspace's own `.git`, mounted back read-only (`repoGitDataBoundary`). code-server runs
    *  repository-supplied code — tasks, extensions — and host-side git later runs in this tree as
    *  root. Empty where `.git` is not a directory: a worktree's gitfile names a host path that
@@ -270,6 +277,8 @@ export async function startIdeRunner(params: {
       `${RUNNER_SUBPATH_LABEL}=${params.workspaceSubpath}`,
       '--label',
       `${IDE_LAUNCH_SPEC_LABEL}=${IDE_LAUNCH_SPEC}`,
+      '--label',
+      `${CHECKOUT_IDENTITY_LABEL}=${params.checkoutIdentity ?? (await checkoutIdentity(params.workspaceSubpath))}`,
       // Built by `buildMountArgs`, not spelled out here. This is the THIRD site to need
       // `volume-nocopy` on a subpath mount and the third to have been written without it — the
       // sandbox had it, the terminal did not, and neither did this. Docker seeds an empty subpath
@@ -379,6 +388,28 @@ export async function ensureIdeRunnerStarted(
   settingsJson: string,
   repositoryId?: string,
 ): Promise<IdeRunnerHandle | null> {
+  const repoId =
+    repositoryId ??
+    (
+      await db.query.tasks.findFirst({
+        where: eq(schema.tasks.id, taskId),
+        columns: { repositoryId: true },
+      })
+    )?.repositoryId;
+  return withInteractiveCheckout(db, repoId, async (check) => {
+    const handle = await ensureIdeRunnerCoalesced(db, taskId, userId, settingsJson, repositoryId);
+    await check();
+    return handle;
+  });
+}
+
+async function ensureIdeRunnerCoalesced(
+  db: Database,
+  taskId: string,
+  userId: string,
+  settingsJson: string,
+  repositoryId?: string,
+): Promise<IdeRunnerHandle | null> {
   const inFlight = inFlightIdeBoots.get(taskId);
   if (inFlight) return inFlight;
   const boot = ensureIdeRunnerStartedInner(db, taskId, userId, settingsJson, repositoryId);
@@ -402,6 +433,7 @@ async function ensureIdeRunnerStartedInner(
     : await resolveIdeWorkspaceSubpath(db, taskId);
   if (!workspaceSubpath) return null;
 
+  const identity = await checkoutIdentity(workspaceSubpath);
   const name = ideRunnerName(taskId);
   // An editor replaced for its launch is removed by startIdeRunner, right before the new one is
   // launched: a failure while the volumes and mounts are prepared then leaves it running.
@@ -410,7 +442,8 @@ async function ensureIdeRunnerStartedInner(
     // The editor mounts ONE workspace, and the resolved subpath can change under it (a Retry that
     // clears 01-worktree-setup's output re-resolves to the repository root). Reuse only while the
     // running container is the one for this workspace; its `.git` mount is that workspace's too.
-    const verdict = await runnerSubpathVerdict(name, workspaceSubpath);
+    const checkoutMatches = await runnerCheckoutMatches(name, workspaceSubpath, { identity });
+    const verdict = checkoutMatches ? await runnerSubpathVerdict(name, workspaceSubpath) : 'other';
     if (verdict === 'absent') {
       // What docker cannot be asked is neither another workspace nor stale, as `launchIsStale`
       // treats an unreadable spec: the editor is kept, not replaced on a guess.
@@ -446,9 +479,10 @@ async function ensureIdeRunnerStartedInner(
       );
       replacingStale = true;
     } else {
+      await stopIdeRunner(taskId, true);
       log.info(
         { taskId, container: name, workspaceSubpath },
-        'ide runner holds another workspace; recreating',
+        'ide runner checkout identity or workspace changed; recreating',
       );
     }
   }
@@ -481,6 +515,7 @@ async function ensureIdeRunnerStartedInner(
     taskId,
     repositoryId,
     workspaceSubpath,
+    checkoutIdentity: identity,
     gitDataMounts,
     extVolume,
     udataVolume,
@@ -607,7 +642,7 @@ async function startIdeForward(
  *  idle-grace reaper. Returns true when a container was stopped. Throws
  *  `RunnerProbeError` when whether the container exists, or whose it is, cannot
  *  be read, so a caller keeps the session and its volumes for a later retry. */
-export async function stopIdeRunner(taskId: string): Promise<boolean> {
+export async function stopIdeRunner(taskId: string, strict = false): Promise<boolean> {
   const name = ideRunnerName(taskId);
   if (!(await containerExists(name))) return false;
   try {
@@ -616,11 +651,23 @@ export async function stopIdeRunner(taskId: string): Promise<boolean> {
       ['inspect', '-f', `{{index .Config.Labels "${INSTALL_LABEL}"}}`, name],
       { timeout: 15_000 },
     );
-    if (!(await ownsNamedIdeRunner(name, stdout.trim()))) return false;
+    if (!(await ownsNamedIdeRunner(name, stdout.trim()))) {
+      if (strict) throw new RunnerProbeError(name, new Error('Foreign editor'));
+      return false;
+    }
   } catch (cause) {
     // Existence was established, but ownership is still unknown. Let callers keep
     // the idle-session key and repository user-data volume until a later retry.
     throw new RunnerProbeError(name, cause);
+  }
+  if (strict) {
+    const presence = await requireRunnerPresence(name);
+    if (presence.state === 'present' && presence.running)
+      await exec('docker', ['stop', '--time', '10', name], { timeout: 30_000 });
+    await exec('docker', ['rm', '-v', name], { timeout: 30_000 });
+    if ((await requireRunnerPresence(name)).state !== 'absent')
+      throw new RunnerProbeError(name, new Error('Editor remains'));
+    return true;
   }
   await exec('docker', ['stop', '--time', '10', name], { timeout: 30_000 }).catch(() => {});
   await exec('docker', ['rm', '-f', '-v', name], { timeout: 30_000 }).catch(() => {});

@@ -1,10 +1,11 @@
+import { randomBytes } from 'node:crypto';
 import { EventEmitter } from 'node:events';
 import type { Sql } from 'postgres';
 import {
   encryptionKeyBootDatabase,
   PENDING_ENCRYPTION_KEY_WAIT_MS,
 } from '../src/config/encryption-key-boot.js';
-import type { SQL } from 'drizzle-orm';
+import { sql, type SQL } from 'drizzle-orm';
 import type { Database } from '@haive/database';
 import { PgDialect } from 'drizzle-orm/pg-core';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -17,6 +18,8 @@ vi.mock('../src/logger/index.js', () => ({
 import { CONFIG_KEYS, ConfigService } from '../src/config/config.service.js';
 import { logger } from '../src/logger/index.js';
 import { ConfigUnavailableError } from '../src/config/config-unavailable.js';
+import { SecretUnreadableError } from '../src/config/secret-unreadable.js';
+import { encrypt, tryDecrypt } from '../src/crypto/index.js';
 
 const PENDING = 'bootstrap:pendingEncryptionKey';
 const SOURCES = [
@@ -34,12 +37,16 @@ class RedisFake extends EventEmitter {
   disconnect = vi.fn();
   failPublish = false;
   beforeReserve: (() => void) | null = null;
+  /** Runs right after a read found the key absent: another process may seed before the caller acts. */
+  afterEmptyRead: (() => void) | null = null;
   async quit() {}
   async get(key: string) {
     return this.store.get(key) ?? null;
   }
   async exists(key: string) {
-    return Number(this.store.has(key));
+    const present = this.store.has(key);
+    if (!present) this.afterEmptyRead?.();
+    return Number(present);
   }
   async set(key: string, value: string, mode?: string) {
     if (mode === 'NX' && this.store.has(key)) return null;
@@ -97,21 +104,37 @@ class RedisFake extends EventEmitter {
   }
 }
 
-function database(counts: Record<string, number> = {}) {
+interface StoredSecret {
+  key: string;
+  encrypted_value: string;
+}
+
+function database(counts: Record<string, number> = {}, systemSecrets: StoredSecret[] = []) {
   const audit = new Map<string, Record<string, unknown>>();
-  const state = { counts: { ...counts }, failAudit: false };
-  const execute = vi.fn(async (query: SQL) =>
-    new PgDialect().sqlToQuery(query).sql.includes('to_regclass')
-      ? [{ providers: true, connections: true }]
-      : SOURCES.map((source) => ({ source, count: String(state.counts[source] ?? 0) })),
-  );
+  const state = {
+    counts: { ...counts },
+    failAudit: false,
+    systemSecrets: [...systemSecrets],
+    onAudit: null as (() => void) | null,
+  };
+  const execute = vi.fn(async (query: SQL) => {
+    const text = new PgDialect().sqlToQuery(query).sql;
+    if (text.includes('to_regclass')) return [{ providers: true, connections: true }];
+    if (text.toLowerCase().includes('lock table')) return [];
+    // The probe that reads the stored system secrets so the boot can test the key against them.
+    if (text.includes('system_secrets') && text.includes('encrypted_value'))
+      return [...state.systemSecrets];
+    return SOURCES.map((source) => ({ source, count: String(state.counts[source] ?? 0) }));
+  });
   const remove = vi.fn(async () => {
     state.counts.system_secrets = 0;
+    state.systemSecrets = [];
   });
   const insert = vi.fn(() => ({
     values: (row: Record<string, unknown>) => ({
       onConflictDoNothing: () => ({
         returning: async () => {
+          state.onAudit?.();
           if (state.failAudit) throw new Error('audit refused');
           const id = row.id as string;
           if (audit.has(id)) return [];
@@ -132,6 +155,21 @@ function database(counts: Record<string, number> = {}) {
 
 function boot(service: ConfigService, db?: Parameters<ConfigService['initialize']>[1]) {
   return service.initialize('redis://unit.invalid', db);
+}
+
+const randomKey = () => randomBytes(32).toString('hex');
+/** Rows in the shape the boot probe reads, each encrypted under the given key. */
+function storedRows(key: string, count = 3): StoredSecret[] {
+  return ['master_kek', 'jwt_secret', 'email_blind_index_pepper', 'global_kb_connection_string']
+    .slice(0, count)
+    .map((name) => ({ key: name, encrypted_value: encrypt(randomBytes(16).toString('hex'), key) }));
+}
+/** A rejection settled to its error, so a resolved boot never leaks a value into a message. */
+async function settleBoot(promise: Promise<unknown>) {
+  return promise.then(
+    () => ({ kind: 'resolved' as const }),
+    (error: unknown) => ({ kind: 'rejected' as const, error }),
+  );
 }
 
 let redis: RedisFake;
@@ -265,14 +303,22 @@ describe('boot encryption key safety', () => {
     expect(getDb).toHaveBeenCalledTimes(1);
   });
 
-  it('preserves the environment-key path without querying the database', async () => {
-    const key = 'ab'.repeat(32);
+  it('checks an environment key against the stored system secrets with one probe and no inventory', async () => {
+    const key = randomKey();
     vi.stubEnv('CONFIG_ENCRYPTION_KEY', key);
-    const fixture = database({ system_secrets: 4 });
+    const fixture = database({ system_secrets: 4 }, storedRows(key, 4));
     const svc = service();
     await boot(svc, fixture.db);
     expect(await svc.getEncryptionKey()).toBe(key);
-    expect(fixture.execute).not.toHaveBeenCalled();
+    const statements = fixture.execute.mock.calls.map(
+      ([query]) => new PgDialect().sqlToQuery(query).sql,
+    );
+    expect(
+      statements.filter(
+        (text) => text.includes('system_secrets') && text.includes('encrypted_value'),
+      ),
+    ).toHaveLength(1);
+    expect(statements.some((text) => text.toLowerCase().includes('union all'))).toBe(false);
     expect(fixture.audit.size).toBe(0);
   });
 
@@ -459,5 +505,138 @@ describe('boot encryption key safety', () => {
     expect(await retry.getEncryptionKey()).toBe(pending.key);
     expect(fixture.audit.size).toBe(1);
     expect(fixture.remove).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('an environment key that cannot read the stored system secrets', () => {
+  const NAMES = ['master_kek', 'jwt_secret', 'email_blind_index_pepper'];
+
+  function expectB1(
+    outcome: Awaited<ReturnType<typeof settleBoot>>,
+    fixture: ReturnType<typeof database>,
+  ) {
+    expect(outcome.kind).toBe('rejected');
+    const error = (outcome as { error: SecretUnreadableError }).error;
+    expect(error).toBeInstanceOf(SecretUnreadableError);
+    expect([...error.secretKeys].sort()).toEqual([...NAMES].sort());
+    expect(error.message).toContain('CONFIG_ENCRYPTION_KEY');
+    expect(error.message).toContain('HAIVE_DISCARD_UNREADABLE_SECRETS=1');
+    // Redis is empty on this path, so there is no stored key to tell the operator to remove.
+    expect(error.message).not.toContain(CONFIG_KEYS.ENCRYPTION_KEY);
+    expect(redis.store.has(CONFIG_KEYS.ENCRYPTION_KEY)).toBe(false);
+    expect(redis.store.has(PENDING)).toBe(false);
+    expect(fixture.audit.size).toBe(0);
+    expect(fixture.remove).not.toHaveBeenCalled();
+  }
+
+  it.each(['development', 'production'])('B1 refuses to seed it under NODE_ENV=%s', async (env) => {
+    vi.stubEnv('NODE_ENV', env);
+    vi.stubEnv('CONFIG_ENCRYPTION_KEY', randomKey());
+    const fixture = database({ system_secrets: 3 }, storedRows(randomKey()));
+    expectB1(await settleBoot(boot(service(), fixture.db)), fixture);
+  });
+
+  it('B1 self-check: the same assertions hold for a hand-built correct double', async () => {
+    const key = randomKey();
+    const fixture = database({ system_secrets: 3 }, storedRows(randomKey()));
+    const correctBoot = async () => {
+      const rows = (await fixture.db.execute(
+        sql`select key, encrypted_value from system_secrets`,
+      )) as unknown as StoredSecret[];
+      const unreadable = rows.filter((row) => tryDecrypt(row.encrypted_value, key) === null);
+      if (unreadable.length > 0)
+        throw new SecretUnreadableError(
+          'CONFIG_ENCRYPTION_KEY cannot read the stored secrets; set HAIVE_DISCARD_UNREADABLE_SECRETS=1 to discard them',
+          unreadable.map((row) => row.key),
+        );
+    };
+    expectB1(await settleBoot(correctBoot()), fixture);
+  });
+
+  it.each([
+    ['rows it can read', true],
+    ['no rows', false],
+  ])('B2 boots and holds the key with %s', async (_label, withRows) => {
+    const key = randomKey();
+    vi.stubEnv('CONFIG_ENCRYPTION_KEY', key);
+    const fixture = database({ system_secrets: withRows ? 3 : 0 }, withRows ? storedRows(key) : []);
+    const svc = service();
+    await boot(svc, fixture.db);
+    expect(redis.store.get(CONFIG_KEYS.ENCRYPTION_KEY)).toBe(key);
+    expect(await svc.getEncryptionKey()).toBe(key);
+    expect(fixture.audit.size).toBe(0);
+  });
+
+  it('B3 with the override settles the key first, then audits and discards', async () => {
+    const key = randomKey();
+    vi.stubEnv('CONFIG_ENCRYPTION_KEY', key);
+    vi.stubEnv('HAIVE_DISCARD_UNREADABLE_SECRETS', '1');
+    const fixture = database({ system_secrets: 3 }, storedRows(randomKey()));
+    let seededAtAudit: boolean | null = null;
+    fixture.state.onAudit = () => {
+      seededAtAudit = redis.store.has(CONFIG_KEYS.ENCRYPTION_KEY);
+    };
+    const svc = service();
+    await boot(svc, fixture.db);
+    expect(fixture.audit.size).toBe(1);
+    expect([...fixture.audit.values()][0]).toMatchObject({
+      actorUserId: '00000000-0000-0000-0000-000000000000',
+      action: 'config.discard_unreadable_secrets',
+      targetType: 'system',
+      metadata: { discardedSystemSecretCount: 3, keyPresent: true },
+    });
+    expect(fixture.remove).toHaveBeenCalledTimes(1);
+    // A discard rewrites the install, so this key is the install's before the first write.
+    expect(seededAtAudit).toBe(true);
+    expect(redis.store.get(CONFIG_KEYS.ENCRYPTION_KEY)).toBe(key);
+    expect(await svc.getEncryptionKey()).toBe(key);
+  });
+
+  it.each(['production', 'development'])(
+    'B7 with the override, a key that lost the Redis race discards nothing under NODE_ENV=%s',
+    async (env) => {
+      const original = randomKey();
+      vi.stubEnv('NODE_ENV', env);
+      vi.stubEnv('CONFIG_ENCRYPTION_KEY', randomKey());
+      vi.stubEnv('HAIVE_DISCARD_UNREADABLE_SECRETS', '1');
+      const fixture = database({ system_secrets: 3 }, storedRows(original));
+      // The process holding the original key seeds Redis right after this one read it empty.
+      redis.afterEmptyRead = () => redis.store.set(CONFIG_KEYS.ENCRYPTION_KEY, original);
+      const outcome = await settleBoot(boot(service(), fixture.db));
+      if (env === 'production') {
+        expect(outcome.kind).toBe('rejected');
+        expect((outcome as { error: Error }).error.message).toContain('does not match');
+      } else {
+        expect(outcome.kind).toBe('resolved');
+      }
+      expect(redis.store.get(CONFIG_KEYS.ENCRYPTION_KEY)).toBe(original);
+      expect(fixture.audit.size).toBe(0);
+      expect(fixture.remove).not.toHaveBeenCalled();
+      expect(fixture.state.systemSecrets).toHaveLength(3);
+    },
+  );
+
+  it('B4 seeds the key without a database argument and without a query', async () => {
+    const key = randomKey();
+    vi.stubEnv('CONFIG_ENCRYPTION_KEY', key);
+    const svc = service();
+    await boot(svc);
+    expect(redis.store.get(CONFIG_KEYS.ENCRYPTION_KEY)).toBe(key);
+    expect(await svc.getEncryptionKey()).toBe(key);
+  });
+
+  it('B5 calls the database factory once when Redis is empty and an environment key is set', async () => {
+    vi.stubEnv('CONFIG_ENCRYPTION_KEY', randomKey());
+    const getDb = vi.fn(() => database().db);
+    await boot(service(), getDb);
+    expect(getDb).toHaveBeenCalledTimes(1);
+  });
+
+  it('B5 never calls the database factory when Redis already holds a key', async () => {
+    redis.store.set(CONFIG_KEYS.ENCRYPTION_KEY, randomKey());
+    vi.stubEnv('CONFIG_ENCRYPTION_KEY', randomKey());
+    const getDb = vi.fn(() => database().db);
+    await boot(service(), getDb);
+    expect(getDb).not.toHaveBeenCalled();
   });
 });

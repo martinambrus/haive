@@ -53,6 +53,7 @@ function database(plan: Plan, repository: Record<string, unknown> = {}) {
     customBundleItems: schema.customBundleItems,
   });
   fake.insert(schema.repositories, {
+    status: 'ready',
     id: REPO,
     userId: USER,
     name: 'acme',

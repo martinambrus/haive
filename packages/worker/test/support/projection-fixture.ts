@@ -31,15 +31,18 @@ export function fixtureDb(record: ProjectStateRecord): Database {
       from: (table: unknown) => ({
         where: () => {
           const rows =
-            table === schema.projectStateSync
-              ? [{ baseSnapshot: record }]
-              : table === schema.planNodes
-                ? [{ id: 'plan' }]
-                : table === schema.planMirrorState
-                  ? [{ syncedHash: hash('{"pending":true}\n') }]
-                  : [];
+            table === schema.repositories
+              ? [{ id: 'repo', userId: 'user' }]
+              : table === schema.projectStateSync
+                ? [{ baseSnapshot: record }]
+                : table === schema.planNodes
+                  ? [{ id: 'plan' }]
+                  : table === schema.planMirrorState
+                    ? [{ syncedHash: hash('{"pending":true}\n') }]
+                    : [];
           return Object.assign(Promise.resolve(rows), {
             limit: async () => rows,
+            for: async () => rows,
             orderBy: async () => rows,
           });
         },

@@ -1,6 +1,10 @@
+vi.mock('../src/repo/interactive-checkout.js', async (original) => ({
+  ...(await original<typeof import('../src/repo/interactive-checkout.js')>()),
+  suspendCheckoutSessions: async () => () => {},
+}));
 import { execFile } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { cp, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
+import { cp, mkdir, mkdtemp, readFile, readdir, rename, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
@@ -73,6 +77,8 @@ const row: {
   id: string;
   status: string;
   statusMessage?: string;
+  checkoutAsidePaths?: string[];
+  checkoutAsideJobId?: string | null;
   errorCode?: string | null;
   refreshPending: boolean;
   refreshJobId: string | null;
@@ -121,6 +127,8 @@ beforeEach(async () => {
   vi.clearAllMocks();
   row.status = 'cloning';
   delete row.statusMessage;
+  delete row.checkoutAsidePaths;
+  delete row.checkoutAsideJobId;
   row.errorCode = 'stale';
   row.refreshPending = false;
   row.refreshJobId = null;
@@ -188,7 +196,7 @@ async function refreshJob(payload: RepoJobPayload): Promise<Job> {
   const jobId = randomUUID();
   row.refreshPending = true;
   row.refreshJobId = jobId;
-  worker = startRepoWorker(root);
+  worker ??= startRepoWorker(root);
   await worker.waitUntilReady();
   const job = await queue!.add(REPO_JOB_NAMES.REFRESH, payload, {
     jobId,
@@ -239,6 +247,70 @@ async function endedAfterOneRun(job: Job, dest: string) {
 }
 
 describe.skipIf(!redisUrl)('a refresh job with attempts: 3 on a real queue', () => {
+  it('keeps the aside notice in page copy when a bound-query failure is sanitized', async () => {
+    const { dest } = await fixture();
+    const secret = 'never-publish-this-bound-value';
+    failBuilding(
+      'clone',
+      Object.assign(new Error(`query failed: ${secret}`), {
+        query: 'update repository set secret=$1',
+        params: [secret],
+        code: 'XX000',
+      }),
+    );
+    await refreshJob(remote);
+    const kept = await asides(dest);
+    expect(kept).toHaveLength(1);
+    expect(row.status).toBe('error');
+    expect(row.checkoutAsidePaths).toEqual(kept);
+    expect(row.statusMessage).toContain('Database operation failed');
+    expect(row.statusMessage).toContain(kept[0]);
+    expect(row.statusMessage).not.toContain(secret);
+  });
+
+  it('persists every aside as structured data and in the failure shown by the repository page', async () => {
+    const { dest } = await fixture();
+    const original = `${REPO}.aside-2026-01-01T00-00-00-000Z`;
+    await rename(dest, path.join(path.dirname(dest), original));
+    await mkdir(dest);
+    await writeFile(path.join(dest, 'half.txt'), 'an older interrupted clone');
+    failBuilding('clone', new Error('clone failed again'));
+    const job = await refreshJob(remote);
+    const kept = (await asides(dest)).sort();
+    expect(kept).toHaveLength(2);
+    expect(row.checkoutAsidePaths).toEqual(kept);
+    expect(row.status).toBe('error');
+    for (const name of kept) expect(row.statusMessage).toContain(name);
+    expect(job.failedReason).toBe(row.statusMessage);
+    expect(job.attemptsMade).toBe(1);
+    expect(await readFile(path.join(path.dirname(dest), original, 'notes.md'), 'utf8')).toBe(
+      'keep me\n',
+    );
+  });
+
+  it('a real BullMQ retry retains the rebuild notice and a later refresh clears it', async () => {
+    const { dest, payload } = await fixture();
+    const publish = h.persist.getMockImplementation()!;
+    h.persist.mockImplementationOnce(async (...args) => {
+      await publish(...args);
+      throw new Error('detection import failed after ready');
+    });
+    const job = await refreshJob(payload);
+    expect(await job.getState()).toBe('completed');
+    expect(job.attemptsMade).toBe(2);
+    expect(row.status).toBe('ready');
+    const kept = await asides(dest);
+    expect(kept).toHaveLength(1);
+    expect(row.checkoutAsidePaths).toEqual(kept);
+    expect(row.statusMessage).toContain(kept[0]);
+    expect(h.persist).toHaveBeenCalledTimes(2);
+    const next = await refreshJob(payload);
+    expect(await next.getState()).toBe('completed');
+    expect(next.attemptsMade).toBe(1);
+    expect(row.statusMessage).toBeNull();
+    expect(row.checkoutAsidePaths).toEqual(kept);
+  });
+
   it('a dead folder source leaves the checkout where it was, whichever attempt runs', async () => {
     const { source, dest, payload } = await fixture();
     await rm(path.join(source, '.git/objects'), { recursive: true });
@@ -311,11 +383,25 @@ describe.skipIf(!redisUrl)('a source folder that needs repair', () => {
     expect(await asides(dest)).toEqual([]);
     expect(h.persist).not.toHaveBeenCalled();
   });
+
+  it('a recovery that proves the source folder needs repair records that cause', async () => {
+    const { source, dest, payload } = await fixture();
+    row.errorCode = 'checkout_repair_needed';
+    await writeFile(path.join(dest, '.git/HEAD'), 'ref: refs/heads/main\n');
+    await writeFile(path.join(dest, '.git/config'), '[core\n');
+    await writeFile(path.join(source, '.git/config'), '[core\n');
+    const job = await refreshJob({ ...payload, recoverCheckout: true });
+    expect(await job.getState()).toBe('failed');
+    expect(row).toMatchObject({ status: 'error', errorCode: 'source_repair_needed' });
+    expect(await asides(dest)).toEqual([]);
+    expect(h.persist).not.toHaveBeenCalled();
+  });
 });
 
 describe.skipIf(!redisUrl)('failed explicit recovery', () => {
   it('keeps recovery explicit after a build failure, without importing mirrors on Retry', async () => {
     const { dest, payload } = await fixture();
+    row.errorCode = 'checkout_repair_needed';
     failBuilding('copy', new Error('copy failed'));
     const job = await refreshJob({ ...payload, recoverCheckout: true });
     expect(await job.getState()).toBe('failed');

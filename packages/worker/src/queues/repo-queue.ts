@@ -1,3 +1,8 @@
+import {
+  CheckoutSessionsBusyError,
+  checkoutSessionCanRetry,
+  CHECKOUT_SESSION_RETRY_MS,
+} from '../repo/interactive-checkout.js';
 import { RootClaimBusyError } from '../repo/root-claim-busy.js';
 import path from 'node:path';
 import {
@@ -7,18 +12,11 @@ import {
   withRepoJobOwner,
 } from '../repo/job-owner.js';
 import { CheckoutRepairNeededError } from '../repo/repair-needed.js';
-import { scrubErrorPaths } from '@haive/shared/logger';
 import { safeProcessor } from './safe-processor.js';
 import { Worker, DelayedError, UnrecoverableError, type Job } from 'bullmq';
 import { and, eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
-import {
-  QUEUE_NAMES,
-  REPO_JOB_NAMES,
-  REPOSITORY_ERROR_CODES,
-  logger,
-  type RepoJobPayload,
-} from '@haive/shared';
+import { QUEUE_NAMES, REPO_JOB_NAMES, logger, type RepoJobPayload } from '@haive/shared';
 import { getDb } from '../db.js';
 import { getBullRedis } from '../redis.js';
 import {
@@ -28,8 +26,9 @@ import {
   handleExtract,
   handleInit,
   handleScan,
+  withRootClaim,
 } from '../repo/clone.js';
-import { handleRefresh } from '../repo/refresh.js';
+import { checkoutFailureMessage, handleRefresh } from '../repo/refresh.js';
 
 export function startRepoWorker(repoStorageRoot: string): Worker {
   const worker = new Worker<RepoJobPayload>(
@@ -61,12 +60,18 @@ export function startRepoWorker(repoStorageRoot: string): Worker {
             REPO_JOB_NAMES.EXTRACT,
           ].some((name) => name === job.name);
           // Ready precedes imports. A redelivery must finish that obligation without
-          // replacing a checkout that may already carry user work or task worktrees.
+          // replacing a checkout that may already carry user work or task worktrees. It takes the
+          // claim the handlers take, so a crashed predecessor's live claim or a reset, edit,
+          // verify or mutation makes it wait (RootClaimBusyError) instead of running the imports
+          // held and partial, and the imports run under that claim's preparation access.
           if (initialOnly && owned.status === 'ready') {
-            await completePreparationImports(
-              db,
-              payload.repositoryId,
-              owned.storagePath ?? path.join(repoStorageRoot, payload.userId, payload.repositoryId),
+            await withRootClaim(db, payload.repositoryId, () =>
+              completePreparationImports(
+                db,
+                payload.repositoryId,
+                owned.storagePath ??
+                  path.join(repoStorageRoot, payload.userId, payload.repositoryId),
+              ),
             );
           } else if (job.name === REPO_JOB_NAMES.CLONE) {
             await handleClone(payload, db, repoStorageRoot);
@@ -91,6 +96,24 @@ export function startRepoWorker(repoStorageRoot: string): Worker {
             );
             return;
           }
+          const sessionFailure = err instanceof CheckoutSessionsBusyError;
+          if (sessionFailure) {
+            logger.warn({ repositoryId: payload.repositoryId, reason: err.reason }, err.message);
+            if (checkoutSessionCanRetry(err.reason, job.timestamp ?? 0)) {
+              await db
+                .update(schema.repositories)
+                .set({
+                  status: 'cloning',
+                  checkoutSessionReason: err.reason,
+                  statusMessage: err.message,
+                })
+                .where(repoJobPredicate(payload.repositoryId));
+              await job.moveToDelayed(Date.now() + CHECKOUT_SESSION_RETRY_MS, token);
+              throw new DelayedError();
+            }
+            // Permanent blocks and exhausted transient waits are terminal for this owner.
+            // A manual Retry admits a fresh job; no rename has occurred.
+          }
           if (err instanceof RootClaimBusyError) {
             logger.info(
               { repositoryId: payload.repositoryId, jobId: job.id, kind: err.kind },
@@ -99,7 +122,7 @@ export function startRepoWorker(repoStorageRoot: string): Worker {
             await job.moveToDelayed(Date.now() + 5_000, token);
             throw new DelayedError();
           }
-          const message = scrubErrorPaths(err);
+          const message = checkoutFailureMessage(err);
           logger.error(
             { repositoryId: payload.repositoryId, jobName: job.name, err },
             'Repo job failed',
@@ -108,18 +131,17 @@ export function startRepoWorker(repoStorageRoot: string): Worker {
             .update(schema.repositories)
             .set({
               status: 'error',
-              // A check-only job runs for a repair code and keeps it whatever failed, so its
-              // Retry stays a check and a rebuild still needs the explicit recovery.
+              checkoutSessionReason: sessionFailure ? err.reason : null,
+              // A check-only job keeps its repair code whatever failed, so its Retry stays a
+              // check. A recovery keeps the admitted cause unless its failure proves one (the
+              // source folder fails its proof before any move); detection clears it on success.
               ...(payload.checkCheckoutOnly
                 ? {}
-                : {
-                    errorCode:
-                      err instanceof CheckoutRepairNeededError
-                        ? err.code
-                        : payload.recoverCheckout
-                          ? REPOSITORY_ERROR_CODES.CHECKOUT_REPAIR_NEEDED
-                          : null,
-                  }),
+                : err instanceof CheckoutRepairNeededError
+                  ? { errorCode: err.code }
+                  : payload.recoverCheckout
+                    ? {}
+                    : { errorCode: null }),
               statusMessage: message,
               updatedAt: new Date(),
             })
@@ -127,10 +149,11 @@ export function startRepoWorker(repoStorageRoot: string): Worker {
           // A delayed retry still owes work; only its final failure releases its own marker.
           if (
             (job.attemptsMade ?? 0) + 1 >= (job.opts?.attempts ?? 1) ||
-            err instanceof UnrecoverableError
+            err instanceof UnrecoverableError ||
+            sessionFailure
           )
             await clearRefreshPending();
-          throw err;
+          throw sessionFailure ? new UnrecoverableError(message) : err;
         }
         // Completion cleanup is separate from handler failure. Keep the ready result
         // if this write fails so an owned retry resumes imports instead of rebuilding

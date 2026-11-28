@@ -1,3 +1,4 @@
+import { createPlanCheckoutDb, PLAN_REPO_ID, PLAN_USER_ID } from './support/plan-checkout-db.js';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const h = vi.hoisted(() => ({
@@ -92,26 +93,7 @@ beforeEach(() => {
   h.recover.mockImplementation(async (...a: unknown[]) => {
     throw a[5];
   });
-  const db = {
-    query: {
-      repositories: {
-        findFirst: async () => ({
-          id: 'r1',
-          userId: 'u1',
-          credentialsSecretId: null,
-          storagePath: '/repo',
-          localPath: null,
-          branch: 'main',
-        }),
-      },
-      planMirrorState: { findFirst: async () => ({ revision: 1, writtenRevision: 1 }) },
-    },
-    select: () => ({ from: () => ({ where: () => ({ limit: async () => [] }) }) }),
-    execute: async () => {},
-    transaction: async (fn: (conn: unknown) => Promise<unknown>) => fn(db),
-    insert: () => ({ values: async () => {} }),
-  };
-  h.db = db;
+  h.db = createPlanCheckoutDb();
 });
 
 describe('plan pull reads the whole-checkout git status', () => {
@@ -128,20 +110,22 @@ describe('plan pull reads the whole-checkout git status', () => {
   ])('refuses to pull when status fails: %j', async (status, output) => {
     h.status = status;
     const message = `git status failed in /repo: ${output}`;
-    await expect(pull({ repositoryId: 'r1', userId: 'u1' })).rejects.toThrow(message);
+    await expect(pull({ repositoryId: PLAN_REPO_ID, userId: PLAN_USER_ID })).rejects.toThrow(
+      message,
+    );
     expect(h.fetch).not.toHaveBeenCalled();
     expect(h.recover).toHaveBeenCalledTimes(1);
     expect(h.recover.mock.calls[0]?.[5]).toEqual(expect.objectContaining({ message }));
   });
 
   it('pulls when status is clean', async () => {
-    await expect(pull({ repositoryId: 'r1', userId: 'u1' })).resolves.toBeDefined();
+    await expect(pull({ repositoryId: PLAN_REPO_ID, userId: PLAN_USER_ID })).resolves.toBeDefined();
     expect(h.fetch).toHaveBeenCalledTimes(1);
   });
 
   it('refuses a checkout with modified tracked files', async () => {
     h.status = { code: 0, stdout: ' M tracked.txt\n', stderr: '' };
-    await expect(pull({ repositoryId: 'r1', userId: 'u1' })).rejects.toThrow(
+    await expect(pull({ repositoryId: PLAN_REPO_ID, userId: PLAN_USER_ID })).rejects.toThrow(
       /^this checkout has uncommitted changes; commit or discard them first$/,
     );
     expect(h.fetch).not.toHaveBeenCalled();
@@ -157,7 +141,7 @@ describe('plan pull reads the current branch', () => {
     [{ code: 1, stderr: '', stdout: 'detail on stdout' }, 'detail on stdout'],
   ])('refuses to pull when branch fails: %j', async (branch, output) => {
     h.branch = branch;
-    await expect(pull({ repositoryId: 'r1', userId: 'u1' })).rejects.toThrow(
+    await expect(pull({ repositoryId: PLAN_REPO_ID, userId: PLAN_USER_ID })).rejects.toThrow(
       `git branch failed in /repo: ${output}`,
     );
     expect(h.fetch).not.toHaveBeenCalled();
@@ -166,14 +150,14 @@ describe('plan pull reads the current branch', () => {
 
   it('still calls an empty answer a detached HEAD', async () => {
     h.branch = { code: 0, stdout: '', stderr: '' };
-    await expect(pull({ repositoryId: 'r1', userId: 'u1' })).rejects.toThrow(
+    await expect(pull({ repositoryId: PLAN_REPO_ID, userId: PLAN_USER_ID })).rejects.toThrow(
       'cannot pull onto a detached HEAD',
     );
   });
 });
 
 describe('plan pull reads the origin remote', () => {
-  const pullIt = () => pull({ repositoryId: 'r1', userId: 'u1' });
+  const pullIt = () => pull({ repositoryId: PLAN_REPO_ID, userId: PLAN_USER_ID });
 
   it('rejects with the origin read error and does nothing further', async () => {
     const message = 'git remote get-url origin failed in /repo: boom';
@@ -182,7 +166,11 @@ describe('plan pull reads the origin remote', () => {
     await expect(pullIt()).rejects.toThrow(new RegExp(`^${message}$`));
 
     expect(h.recordError).toHaveBeenCalledTimes(1);
-    expect(h.recordError).toHaveBeenCalledWith(h.db, 'r1', expect.objectContaining({ message }));
+    expect(h.recordError).toHaveBeenCalledWith(
+      h.db,
+      PLAN_REPO_ID,
+      expect.objectContaining({ message }),
+    );
     expect(h.fetch).not.toHaveBeenCalled();
     expect(h.recover).not.toHaveBeenCalled();
   });
@@ -209,7 +197,7 @@ describe('plan pull reads the origin remote', () => {
 });
 
 describe('plan pull reads git before it acts', () => {
-  const pullIt = () => pull({ repositoryId: 'r1', userId: 'u1' });
+  const pullIt = () => pull({ repositoryId: PLAN_REPO_ID, userId: PLAN_USER_ID });
   const failure = (): Promise<Error | null> =>
     pullIt().then(
       () => null,

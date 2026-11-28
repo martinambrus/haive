@@ -1,4 +1,6 @@
 import { and, desc, eq, lte, or, sql } from 'drizzle-orm';
+import { logger } from '@haive/shared';
+import { TaskCancelledError } from '@haive/shared/step';
 import { schema, type Database } from '@haive/database';
 import type { StepDefinition } from '../step-engine/step-definition.js';
 import {
@@ -124,7 +126,7 @@ export async function validationSuccessor(
     before = (validated.output as { validationSnapshot?: ValidationSnapshot | null } | null)
       ?.validationSnapshot;
   }
-  const after = await readValidationSnapshot({ db, taskId: ctx.taskId });
+  const after = await readQueueValidationSnapshot(db, ctx);
   if (after === null) throw new ValidationSnapshotError();
   const affectedFiles = affectedValidationFiles(before, after);
   if (stepId !== VALIDATE && before && affectedFiles.length === 0) return ordinary;
@@ -136,4 +138,44 @@ export async function validationSuccessor(
     round: round + 1,
     recheck: { sourceStepId: stepId, resumeStepId, affectedFiles },
   };
+}
+
+/** The step's cancellation poll ends before its queue handoff. Give this bounded read its own
+ * task/epoch poll, including the insight continuation path, and always release the timer. */
+async function readQueueValidationSnapshot(db: Database, ctx: ResolvedTaskContext) {
+  const controller = new AbortController();
+  let reading = false;
+  const timer = setInterval(() => {
+    if (reading || controller.signal.aborted) return;
+    reading = true;
+    void db.query.tasks
+      .findFirst({
+        where: eq(schema.tasks.id, ctx.taskId),
+        columns: { status: true, orchestrationEpoch: true },
+      })
+      .then((task) => {
+        if (
+          task?.status === 'cancelled' ||
+          task?.status === 'failed' ||
+          (task && task.orchestrationEpoch > ctx.orchestrationEpoch)
+        )
+          controller.abort();
+      })
+      .catch((err: unknown) => {
+        logger.warn({ err, taskId: ctx.taskId }, 'validation snapshot cancel poll failed');
+      })
+      .finally(() => {
+        reading = false;
+      });
+  }, 2_000);
+  const throwIfCancelled = () => {
+    if (controller.signal.aborted) throw new TaskCancelledError();
+  };
+  try {
+    const snapshot = await readValidationSnapshot({ db, taskId: ctx.taskId, throwIfCancelled });
+    throwIfCancelled();
+    return snapshot;
+  } finally {
+    clearInterval(timer);
+  }
 }

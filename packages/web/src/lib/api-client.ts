@@ -1,3 +1,4 @@
+import { REDIS_UNAVAILABLE_CODE } from '@haive/shared/constants';
 import type { LegacyStepRoleId as StepRoleId } from '@haive/shared/step-outputs';
 import type {
   RepositoryErrorCode,
@@ -157,10 +158,10 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     };
     const isOutage =
       res.status === 503 &&
-      (body.code === 'config_unavailable' || body.code === 'redis_unavailable');
+      (body.code === 'config_unavailable' || body.code === REDIS_UNAVAILABLE_CODE);
     const outcomeUnknown = res.status === 503 && body.code === 'queue_outcome_unknown';
     const baseMsg = outcomeUnknown
-      ? 'The action may still complete. It is safe to retry.'
+      ? (body.error ?? 'The action may still complete. It is safe to retry.')
       : isOutage
         ? 'Temporary service outage. Please try again in a moment.'
         : (body.error ?? `HTTP ${res.status}`);
@@ -253,6 +254,11 @@ export function releaseGlobalKbEmbedModel(): void {
 /** A user-uploaded reference file attached to a task. Mirrors the shared
  *  TaskAttachment shape locally to keep the @haive/shared barrel out of the
  *  browser bundle. */
+export interface CliProviderRestriction {
+  code: 'no_provider' | 'multiple_providers' | 'unverified_provider' | 'disabled_provider';
+  message: string;
+}
+
 export interface TaskAttachment {
   id: string;
   taskId: string;
@@ -374,6 +380,7 @@ export interface Repository {
   status: 'cloning' | 'ready' | 'error';
   statusMessage: string | null;
   errorCode?: RepositoryErrorCode | null;
+  checkoutSessionReason?: string | null;
   /** List-only retry capability. Absent means unknown; the API still checks admission. */
   canRetry?: boolean;
   /** List-only: recorded reason an errored repository cannot be retried. Absent means unknown. */
@@ -818,6 +825,8 @@ export interface Task {
   parentTaskId?: string | null;
   cliProviderId: string | null;
   effectiveCliProviderId?: string | null;
+  /** API verdicts for explicit picks this environment refuses. */
+  cliProviderRestrictions?: Record<string, CliProviderRestriction>;
   /** Which CLI writes the per-step recap. NULL means INHERIT the step's own chain, which is
    *  a real choice and not "unset" — see `summaryCliChoiceRecorded` server-side. Optional so
    *  an older api renders as inherit. */
@@ -1597,7 +1606,7 @@ export type TaskAction = 'cancel' | 'retry' | 'pause' | 'resume' | 'start';
 
 export type StepAction = 'retry' | 'retry_ai' | 'resume' | 'skip' | 'abort';
 
-export interface StepActionResponse {
+export interface StepActionResponse extends Partial<StopActivityResult> {
   ok: boolean;
   status: string;
   nextStepId?: string | null;
@@ -2305,7 +2314,10 @@ export function endPlanChat(taskId: string): Promise<unknown> {
 
 /** Point a live conversation at a different CLI. Refused by the API while the
  *  step is running or waiting on a CLI. */
-export function setPlanChatProvider(taskId: string, cliProviderId: string): Promise<unknown> {
+export function setPlanChatProvider(
+  taskId: string,
+  cliProviderId: string,
+): Promise<Partial<StopActivityResult>> {
   return api.patch(`/tasks/${taskId}/steps/${PLAN_CHAT_STEP_ID}/cli-provider`, { cliProviderId });
 }
 
@@ -2546,6 +2558,9 @@ export interface AdminInviteCreated {
 export type MaintenanceState = 'normal' | 'draining' | 'maintenance';
 
 export interface StopActivityResult {
+  /** Absent from older APIs; false means Docker cleanup was not confirmed. */
+  killConfirmed?: boolean;
+  killError?: string;
   killed: number;
   cancelled: number;
   stopped: number;

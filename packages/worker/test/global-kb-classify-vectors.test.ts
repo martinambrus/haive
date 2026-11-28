@@ -165,7 +165,7 @@ describe('classifying global KB vectors when the store is not there', () => {
   });
 });
 
-it('lets background boot own store failures so its loop retries them', async () => {
+it('keeps ordinary classify failures best effort even with a sweep signal', async () => {
   const err = new Error('store unavailable');
   h.storeError = err;
   await expect(
@@ -173,5 +173,21 @@ it('lets background boot own store failures so its loop retries them', async () 
       deadlineMs: 20,
       signal: new AbortController().signal,
     }),
-  ).rejects.toBe(err);
+  ).resolves.toBeUndefined();
+});
+
+it.each(['57014', 'GLOBAL_KB_DEADLINE'])('propagates coded classify deadline %s', async (code) => {
+  h.storeError = Object.assign(new Error('private store details'), { code });
+  await expect(
+    classifyGlobalKbVectorProvenance({} as never, { signal: new AbortController().signal }),
+  ).rejects.toMatchObject({ code: 'GLOBAL_KB_DEADLINE' });
+});
+it('propagates owner cancellation even when the store throws a different error', async () => {
+  const controller = new AbortController();
+  const reason = new Error('shutdown');
+  controller.abort(reason);
+  h.storeError = new Error('pool closed');
+  await expect(
+    classifyGlobalKbVectorProvenance({} as never, { signal: controller.signal }),
+  ).rejects.toBe(reason);
 });

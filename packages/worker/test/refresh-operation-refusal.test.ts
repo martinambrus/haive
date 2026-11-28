@@ -1,3 +1,11 @@
+vi.mock('../src/repo/interactive-checkout.js', async (original) => ({
+  ...(await original<typeof import('../src/repo/interactive-checkout.js')>()),
+  suspendCheckoutSessions: vi.fn(async () => () => {}),
+}));
+import {
+  suspendCheckoutSessions,
+  CheckoutSessionsBusyError,
+} from '../src/repo/interactive-checkout.js';
 import { execFile } from 'node:child_process';
 import {
   cp,
@@ -120,12 +128,14 @@ const row: {
   errorCode?: string | null;
   refreshPending?: boolean;
   refreshJobId?: string | null;
+  checkoutSessionReason?: string | null;
 } = {
   status: 'ready',
 };
 const db = {
   execute: async () => {},
   query: {
+    repositories: { findFirst: async () => row },
     taskSteps: { findMany: async () => h.legacyWorktrees },
     users: { findFirst: async () => ({ role: 'admin' }) },
     tasks: {
@@ -139,6 +149,8 @@ const db = {
   select: () => ({
     from: (table: unknown) => ({
       where: () => ({
+        for: async () =>
+          table === schema.repositories ? [{ id: 'r1', userId: 'u1', ...row }] : [],
         limit: async () =>
           table === schema.planNodes
             ? [{ id: 'node' }]
@@ -171,6 +183,7 @@ beforeEach(async () => {
   h.restore.mockReset().mockResolvedValue(undefined);
   delete row.statusMessage;
   delete row.errorCode;
+  delete row.checkoutSessionReason;
   h.persist.mockImplementation(async (_db, _id, _dest, note) => {
     row.status = 'ready';
     row.statusMessage = note;
@@ -303,6 +316,22 @@ async function runRefresh(payload: RepoJobPayload) {
   startRepoWorker(root);
   return h.processor!({ id: 'refresh-job', name: REPO_JOB_NAMES.REFRESH, data: payload } as Job);
 }
+
+it.each(['checkout_repair_needed', 'source_repair_needed'])(
+  'T602 member 6: keeps %s after a failed recovery build',
+  async (errorCode) => {
+    const { dest, payload } = await fixture();
+    row.errorCode = errorCode;
+    await rm(path.join(dest, '.git'), { recursive: true });
+    h.copyFault = async () => {
+      throw new Error('recovery copy failed');
+    };
+    await expect(runRefresh({ ...payload, recoverCheckout: true })).rejects.toThrow(
+      'recovery copy failed',
+    );
+    expect(row).toMatchObject({ status: 'error', errorCode, refreshPending: false });
+  },
+);
 
 it.each(['usable', 'unusable', 'unknown', 'holding', 'refused'] as const)(
   'refresh %s reaches a terminal repository status',
@@ -590,7 +619,9 @@ it.each(['copy', 'clone'] as const)(
     expect(more).toEqual([]);
     expect(err).toBeInstanceOf(UnrecoverableError);
     expect((err as Error).message).toContain(path.basename(aside!));
-    expect((err as Error).message).toMatch(/the rebuilt checkout is not usable\.$/);
+    expect((err as Error).message).toMatch(
+      /the rebuilt checkout is not usable\.\n\nThe previous folder was kept next to the checkout as r1\.aside-[\dTZ-]+\. Its files and unpushed commits are retained there\.$/,
+    );
     expect(row.status).toBe('error');
     expect(row.statusMessage).toContain(`kept next to the checkout as ${path.basename(aside!)}`);
     expect(row.statusMessage).toBe((err as Error).message);
@@ -610,7 +641,7 @@ it('a rebuilt tree git gave no answer about ends the job unrecoverably too, and 
   expect(err).toBeInstanceOf(UnrecoverableError);
   expect((err as Error).message).toContain(path.basename(aside!));
   expect((err as Error).message).toMatch(
-    /the rebuilt checkout could not be examined \(.*SIGKILL.*\)\.$/,
+    /the rebuilt checkout could not be examined \(.*SIGKILL.*\)\.\n\nThe previous folder was kept next to the checkout as r1\.aside-[\dTZ-]+\. Its files and unpushed commits are retained there\.$/,
   );
   expect(row.status).toBe('error');
   expect(h.persist).not.toHaveBeenCalled();
@@ -647,19 +678,26 @@ it('the credential built before the move reaches the clone that follows it', asy
   await rm(path.join(dest, '.git/HEAD'));
   const auth = { argv: ['-c', 'credential.helper=x'], env: { GIT_HAIVE_USER: 'u' }, secret: 's' };
   h.helper.mockResolvedValueOnce(auth);
-  h.clone.mockImplementationOnce(async () => {
+  h.clone.mockImplementationOnce(async (_url, to) => {
     const siblings = await readdir(path.dirname(dest));
     expect(siblings.filter((entry) => entry.startsWith('r1.aside-'))).toHaveLength(1);
     expect(siblings).not.toContain('r1');
     // What a real clone leaves, since the rebuild reads what it built.
-    await git(root, ['clone', path.join(root, 'source'), dest]);
+    expect(to).toMatch(/r1\.rebuild-[0-9a-f-]{36}$/);
+    await git(root, ['clone', path.join(root, 'source'), to]);
   });
   await handleRefresh(remotePayload, db, root);
   expect(h.helper).toHaveBeenCalledWith(db, 'cred-1', 'u1', 'https://git.example.test/r1.git');
-  expect(h.clone).toHaveBeenCalledWith('https://git.example.test/r1.git', dest, 'main', auth, {
-    db,
-    userId: 'u1',
-  });
+  expect(h.clone).toHaveBeenCalledWith(
+    'https://git.example.test/r1.git',
+    expect.stringMatching(/r1\.rebuild-[0-9a-f-]{36}$/),
+    'main',
+    auth,
+    {
+      db,
+      userId: 'u1',
+    },
+  );
   expect(row.status).toBe('ready');
 });
 
@@ -905,6 +943,7 @@ it('recounts checkout holders under the task lock after credentials are prepared
     'Not refreshed: 1 task is using this repository. Refresh once it finishes.',
   );
   expect(h.clone).not.toHaveBeenCalled();
+  expect(suspendCheckoutSessions).not.toHaveBeenCalled();
   await untouched(dest);
 });
 
@@ -916,6 +955,16 @@ it('holds the task lock for the rename and releases the transaction before cloni
   const tx = { ...db };
   const fenced = {
     ...db,
+    update: () => ({
+      set: (values: Record<string, unknown>) => {
+        return {
+          where: () =>
+            Object.assign(Promise.resolve(Object.assign(row, values)), {
+              returning: async () => [row],
+            }),
+        };
+      },
+    }),
     transaction: async (fn: (conn: typeof tx) => Promise<unknown>) => {
       inTransaction = true;
       try {
@@ -927,7 +976,9 @@ it('holds the task lock for the rename and releases the transaction before cloni
   } as unknown as Database;
   const rename = fsSafe.renameNoFollow;
   vi.spyOn(fsSafe, 'renameNoFollow').mockImplementation(async (...args) => {
-    expect(inTransaction).toBe(true);
+    // The old checkout's move holds the task key; publication of the complete private build
+    // follows the clone with the renewing root claim still held, outside a database transaction.
+    expect(inTransaction).toBe(args[1] === 'u1/r1');
     expect(lock).toHaveBeenCalledWith(tx, 'r1');
     return rename(...args);
   });
@@ -939,7 +990,7 @@ it('holds the task lock for the rename and releases the transaction before cloni
     await git(root, ['clone', payload.localPath!, to]);
   });
   await handleRefresh(remotePayload, fenced, root);
-  expect(lock).toHaveBeenCalledOnce();
+  expect(lock).toHaveBeenCalledTimes(2);
   expect(h.clone).toHaveBeenCalledOnce();
   expect(await asidesOf(dest)).toHaveLength(1);
   expect(row.status).toBe('ready');
@@ -1070,4 +1121,86 @@ it('T594 R1: clears pending refresh work only after its handler succeeds', async
   row.refreshPending = true;
   await runRefresh(payload);
   expect(row).toMatchObject({ status: 'ready', refreshPending: false });
+});
+
+it('drains sessions after cloning commits and before the first rename', async () => {
+  const { dest, payload } = await fixture();
+  await rm(path.join(dest, '.git/HEAD'));
+  let entered!: () => void;
+  const captured = new Promise<void>((resolve) => {
+    entered = resolve;
+  });
+  let resume!: () => void;
+  const gate = new Promise<void>((resolve) => {
+    resume = resolve;
+  });
+  const release = vi.fn();
+  vi.mocked(suspendCheckoutSessions).mockImplementationOnce(async () => {
+    expect(row.status).toBe('cloning');
+    expect(row.checkoutSessionReason).toBe('draining');
+    entered();
+    await gate;
+    return release;
+  });
+  const refresh = handleRefresh(payload, db, root);
+  await captured;
+  expect(await readFile(path.join(dest, '.haive-data/plan.md'), 'utf8')).toBe('pending\n');
+  expect(await asidesOf(dest)).toEqual([]);
+  resume();
+  await refresh;
+  expect(await asidesOf(dest)).toHaveLength(1);
+  expect(release).toHaveBeenCalledOnce();
+});
+
+it('a Docker stop that cannot be verified leaves the checkout in place and defers the owned queue job', async () => {
+  const { dest, payload } = await fixture();
+  await rm(path.join(dest, '.git/HEAD'));
+  vi.mocked(suspendCheckoutSessions).mockRejectedValueOnce(
+    new CheckoutSessionsBusyError('docker_unknown'),
+  );
+  await expect(handleRefresh(payload, db, root)).rejects.toMatchObject({
+    code: 'checkout_sessions_busy',
+  });
+  expect(await asidesOf(dest)).toEqual([]);
+  expect(await readFile(path.join(dest, '.haive-data/plan.md'), 'utf8')).toBe('pending\n');
+});
+
+it('defers an unverifiable Docker stop without failing the repository or spending an attempt', async () => {
+  const { dest, payload } = await fixture();
+  await rm(path.join(dest, '.git/HEAD'));
+  row.refreshPending = true;
+  row.refreshJobId = 'refresh-job';
+  vi.mocked(suspendCheckoutSessions).mockRejectedValueOnce(
+    new CheckoutSessionsBusyError('docker_unknown'),
+  );
+  startRepoWorker(root);
+  const moveToDelayed = vi.fn();
+  const job = {
+    id: 'refresh-job',
+    name: REPO_JOB_NAMES.REFRESH,
+    data: payload,
+    attemptsMade: 0,
+    timestamp: Date.now(),
+    opts: { attempts: 1 },
+    moveToDelayed,
+  };
+  await expect(h.processor!(job as unknown as Job, 'token')).rejects.toMatchObject({
+    name: 'DelayedError',
+  });
+  expect(moveToDelayed).toHaveBeenCalledWith(expect.any(Number), 'token');
+  expect(row).toMatchObject({
+    status: 'cloning',
+    refreshPending: true,
+    refreshJobId: 'refresh-job',
+  });
+  expect(await asidesOf(dest)).toEqual([]);
+});
+
+it('injects suspension in the Git/SQL smoke seam without contacting Docker or Redis', async () => {
+  const { dest, payload } = await fixture();
+  await rm(path.join(dest, '.git/HEAD'));
+  const suspend = vi.fn(async () => () => {});
+  await handleRefresh(payload, db, root, suspend);
+  expect(suspend).toHaveBeenCalledOnce();
+  expect(suspendCheckoutSessions).not.toHaveBeenCalled();
 });

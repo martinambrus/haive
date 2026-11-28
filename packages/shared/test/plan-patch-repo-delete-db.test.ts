@@ -30,7 +30,8 @@ if (url && !new URL(url).pathname.startsWith('/plan_patch_repo_delete_test'))
 // code link, or a NEW plan_mirror_state row) takes KEY SHARE on the repositories row for that insert's
 // foreign key, behind the delete's FOR UPDATE: the delete waits for the patch's row, the patch waits for the
 // delete's row (40P01). A patch that inserts first holds KEY SHARE before the delete's FOR UPDATE, so the
-// delete waits for it and nothing cycles. An UPDATE of a node or of an existing mirror row takes no KEY SHARE.
+// delete waits for it and nothing cycles. An UPDATE itself takes no repository KEY SHARE;
+// every production patch now takes it explicitly before plan rows, including update-only patches.
 //
 // The race cases run the real applyPlanPatch with a Proxy over its transaction that awaits a promise before
 // the statement named, then runs the untouched builder. The patch runs its writes up to that statement and
@@ -43,15 +44,13 @@ if (url && !new URL(url).pathname.startsWith('/plan_patch_repo_delete_test'))
 //   P1-P3  the patch holds a plan row (update, delete, or none with the mirror row missing) and then needs
 //          the repositories row: the delete must wait for the patch, never cycle with it
 //   P4     the patch inserts first: the delete waits for it
-//   P5     an update-only patch beside a long holder of the repositories row must not wait for it
+//   P5     an update-only patch beside a NO KEY UPDATE project-state writer must not wait for it
 //   P6     a patch that inserts beside the same holder waits for it and then lands
 //   P7     a patch that starts after the delete ends as PlanPatchError repository_gone
 const BLIND_INDEX = 'plan-patch-repo-delete-test-user';
 const BLOCKED_WITHIN_MS = 10_000;
 const GUARD_MS = 20_000;
 const TEST_TIMEOUT = 40_000;
-const HOLD_MS = 1_500;
-const NO_WAIT_MS = 400;
 const FOR_UPDATE = 'repositories row FOR UPDATE';
 const CASCADE = 'DELETE FROM repositories (cascade)';
 const NO_ROWS = {
@@ -467,8 +466,8 @@ describe.skipIf(!url)('a plan patch beside a repository delete, on Postgres', ()
       applyPlanPatch(gated, patchInput, userOptions(ids.repositoryId)),
     );
 
-  /** A transaction that holds the repositories row FOR UPDATE until `release`, as a project-state write does. */
-  const holdRepositoryRow = (repositoryId: string) => {
+  /** Hold an admission/delete FOR UPDATE, or a project-state FOR NO KEY UPDATE, until release. */
+  const holdRepositoryRow = (repositoryId: string, mode: 'update' | 'no key update' = 'update') => {
     const held = Promise.withResolvers<void>();
     const release = Promise.withResolvers<void>();
     const state = { pid: 0, released: false };
@@ -479,7 +478,7 @@ describe.skipIf(!url)('a plan patch beside a repository delete, on Postgres', ()
           .select({ id: schema.repositories.id })
           .from(schema.repositories)
           .where(eq(schema.repositories.id, repositoryId))
-          .for('update');
+          .for(mode);
         held.resolve();
         await release.promise;
         state.released = true;
@@ -644,18 +643,16 @@ describe.skipIf(!url)('a plan patch beside a repository delete, on Postgres', ()
     );
 
     it(
-      'P5: an update-only patch of a plan with a mirror row does not wait for a holder of the repositories row',
+      'P5: an update-only patch remains compatible with a project-state NO KEY UPDATE holder',
       async () => {
         const ids = await seedRepository();
         const edit = { ops: [{ op: 'upsert', nodeRef: ids.a, title: 'A (edited)' }] };
         // The first run pays for the connection and the first parse; the measured one does not.
         await applyPlanPatch(patchDb, edit, userOptions(ids.repositoryId));
-        const holder = holdRepositoryRow(ids.repositoryId);
-        const releaseLater = setTimeout(holder.release, HOLD_MS);
+        const holder = holdRepositoryRow(ids.repositoryId, 'no key update');
 
         try {
           await holder.holding;
-          const startedAt = performance.now();
           const outcome = await settle(
             applyPlanPatch(
               patchDb,
@@ -663,16 +660,13 @@ describe.skipIf(!url)('a plan patch beside a repository delete, on Postgres', ()
               userOptions(ids.repositoryId),
             ),
           );
-          const tookMs = performance.now() - startedAt;
 
           expect(describeOutcome(outcome)).toMatch(/^ok /);
           expect(
             holder.state.released,
             'the patch must finish while the holder still holds the row; true means it waited for the holder',
           ).toBe(false);
-          expect(tookMs, 'ms the patch took beside a holder of the row').toBeLessThan(NO_WAIT_MS);
         } finally {
-          clearTimeout(releaseLater);
           holder.release();
           await holder.ended;
         }

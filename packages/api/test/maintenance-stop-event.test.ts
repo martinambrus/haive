@@ -7,7 +7,9 @@ const EARLIER = new Date('2026-10-15T09:00:00.000Z');
 const h = vi.hoisted(() => ({ db: undefined as unknown }));
 
 vi.mock('../src/db.js', () => ({ getDb: () => h.db }));
-vi.mock('../src/lib/sandbox-kill.js', () => ({ killTaskSandboxes: async () => 0 }));
+vi.mock('../src/lib/sandbox-kill.js', () => ({
+  killTaskSandboxes: async () => ({ killed: 0, killConfirmed: true }),
+}));
 vi.mock('../src/middleware/auth.js', () => ({
   requireAuth: async (c: { set: (key: string, value: string) => void }, next: () => unknown) => {
     c.set('userId', ADMIN);
@@ -77,6 +79,7 @@ describe('POST /admin/maintenance/tasks/:id/action stop', () => {
           byAdmin: true,
           reason: 'maintenance',
           killed: 0,
+          killConfirmed: true,
           cancelled: 1,
           stopped: 1,
           failedAt,

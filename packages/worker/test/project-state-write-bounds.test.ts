@@ -67,7 +67,13 @@ async function setup(claims: number) {
     cliProviders: schema.cliProviders,
     tasks: schema.tasks,
   });
-  fake.insert(schema.repositories, { id: REPO, userId: USER, name: 'acme', source: 'blank' });
+  fake.insert(schema.repositories, {
+    id: REPO,
+    userId: USER,
+    name: 'acme',
+    source: 'blank',
+    status: 'ready',
+  });
   for (let i = 0; i < claims; i++) {
     fake.insert(schema.onboardingArtifacts, {
       userId: USER,

@@ -1,4 +1,4 @@
-import type { Job } from 'bullmq';
+import { DelayedError, type Job } from 'bullmq';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ConfigUnavailableError, configService, logger, TASK_JOB_NAMES } from '@haive/shared';
 import {
@@ -10,6 +10,7 @@ import {
   setContainerCleanupRunner,
 } from '../src/queues/task-queue.js';
 import { resetStepAndDownstream } from '../src/queues/_step-reset.js';
+import { RevivalBusy } from '../src/queues/_revive-check.js';
 import * as runList from '../src/queues/run-list.js';
 import * as stepOwnership from '../src/step-engine/step-ownership.js';
 import { advanceStep } from '../src/step-engine/index.js';
@@ -137,6 +138,8 @@ const h = vi.hoisted(() => {
     /** Set to fail the step's error-hint write and the usage-snapshot read. */
     hintWriteFails: false,
     snapshotReadFails: false,
+    usageSnapshot: null as Record<string, unknown> | null,
+    providerAuthMode: 'subscription',
     /** What the skip-first step's shouldRun answers. */
     shouldRun: (async () => true) as () => Promise<boolean>,
     /** What classifyRuntime reports for an if-serving step. */
@@ -195,7 +198,9 @@ const db = {
       findFirst: async () =>
         h.state.repoGone ? undefined : { storagePath: '/tmp/repo', localPath: null },
     },
-    cliProviders: { findFirst: async () => ({ name: 'claude-code' }) },
+    cliProviders: {
+      findFirst: async () => ({ name: 'claude-code', authMode: h.state.providerAuthMode }),
+    },
     // The root merge fence a reopen checks: no setup row, no merge claim, no merge left open.
     taskSteps: { findFirst: async () => undefined, findMany: async () => [] },
     mergeDirClaims: { findFirst: async () => undefined },
@@ -221,6 +226,8 @@ const db = {
                 if (name === 'usage_window_snapshots' && h.state.snapshotReadFails) {
                   throw new Error('the usage snapshot read failed');
                 }
+                if (name === 'usage_window_snapshots' && h.state.usageSnapshot)
+                  return [h.state.usageSnapshot];
                 if (name === 'modules') {
                   h.state.moduleReads += 1;
                   return h.state.moduleReads > 1 && h.state.laterModuleRows
@@ -244,6 +251,8 @@ const db = {
                     ? [{ integrationWait: h.state.currentIntegrationWait }]
                     : [];
                 }
+                if (name === 'usage_window_snapshots' && h.state.usageSnapshot)
+                  return [h.state.usageSnapshot];
                 if (name === 'modules') {
                   h.state.moduleReads += 1;
                   return h.state.moduleReads > 1 && h.state.laterModuleRows
@@ -514,6 +523,8 @@ afterEach(() => {
   h.state.endedRuns = [];
   h.state.hintWriteFails = false;
   h.state.snapshotReadFails = false;
+  h.state.usageSnapshot = null;
+  h.state.providerAuthMode = 'subscription';
   h.state.shouldRun = async () => true;
   h.state.runtimeMode = 'none';
   h.state.moduleRows = [];
@@ -676,6 +687,56 @@ describe("a failed step's hand-off", () => {
     expect(hints()).toEqual([]);
   });
 
+  it.each(['rate_limit', 'server_error'] as const)(
+    'API-key Claude arms only the server-error watch (%s)',
+    async (reason) => {
+      outage(reason);
+      h.state.providerAuthMode = 'api_key';
+      h.state.snapshotReadFails = true;
+      vi.spyOn(configService, 'get').mockResolvedValue('notify');
+      await expect(finish()).resolves.toBe(true);
+      expect(armed()).toHaveLength(reason === 'server_error' ? 1 : 0);
+      expect(pollTicks()).toHaveLength(reason === 'server_error' ? 1 : 0);
+    },
+  );
+
+  it.each(['error', 'needs_reconnect', 'ok'])(
+    'captures reset times only from ok snapshots (%s)',
+    async (status) => {
+      outage('rate_limit');
+      vi.spyOn(configService, 'get').mockResolvedValue('notify');
+      const reset = new Date(0);
+      h.state.usageSnapshot = {
+        status,
+        fetchedAt: new Date(),
+        fiveHourPct: 100,
+        fiveHourResetAt: reset,
+      };
+      await expect(finish()).resolves.toBe(true);
+      expect(armed()).toEqual([
+        expect.objectContaining({
+          awaitingProviderReason: 'rate_limit',
+          allowanceResetAt: status === 'ok' ? reset : null,
+        }),
+      ]);
+    },
+  );
+
+  it('arms without a reset from a stale ok snapshot', async () => {
+    outage('rate_limit');
+    vi.spyOn(configService, 'get').mockResolvedValue('notify');
+    h.state.usageSnapshot = {
+      status: 'ok',
+      fetchedAt: new Date(Date.now() - 13 * 60_000 - 1),
+      fiveHourPct: 100,
+      fiveHourResetAt: new Date(0),
+    };
+    await expect(finish()).resolves.toBe(true);
+    expect(armed()).toEqual([
+      expect.objectContaining({ awaitingProviderReason: 'rate_limit', allowanceResetAt: null }),
+    ]);
+  });
+
   it('arms it with no reset time when the usage snapshot cannot be read', async () => {
     outage('rate_limit');
     h.state.snapshotReadFails = true;
@@ -776,6 +837,86 @@ describe('a job that resets steps itself', () => {
     sourceStepId: 'epoch-job-step',
     uncapped: true,
   };
+
+  it('delays a busy revise reset without spending an attempt, then re-drives the saved verdict', async () => {
+    vi.useFakeTimers();
+    const source = stepRegistry.require('epoch-job-step');
+    const evaluate = vi.fn((output: unknown) =>
+      (output as { rejected?: boolean })?.rejected ? { targetStepId: 'epoch-job-target' } : null,
+    );
+    stepRegistry.override({ ...source, reviseLoop: { evaluate } });
+    h.state.readsAnswer = true;
+    h.state.existingRow = {
+      id: 'ts-1',
+      stepId: source.metadata.id,
+      round: 0,
+      status: 'done',
+      endedAt: new Date(),
+      output: { rejected: true },
+      errorMessage: null,
+      formValues: null,
+    };
+    const reset = vi.mocked(resetStepAndDownstream);
+    reset.mockClear();
+    const busy = new RevivalBusy(Object.assign(new Error('opaque'), { code: '55P03' }));
+    reset.mockRejectedValueOnce(busy).mockImplementationOnce(async () => {
+      h.state.taskEpoch = 7;
+      return { downstreamReset: 1, newEpoch: 7 };
+    });
+    const job = {
+      id: 'busy-revise',
+      name: TASK_JOB_NAMES.ADVANCE_STEP,
+      data: { taskId: 'task-1', userId: 'user-1', stepId: source.metadata.id, round: 0, epoch: 5 },
+      timestamp: Date.now(),
+      opts: { attempts: 1 },
+      attemptsMade: 0,
+      moveToDelayed: vi.fn(async () => undefined),
+    };
+    try {
+      // BullMQ's DelayedError follows moveToDelayed without counting a failed attempt.
+      await expect(processTaskJob(job as unknown as Job, 'tok')).rejects.toBeInstanceOf(
+        DelayedError,
+      );
+      expect(job.moveToDelayed).toHaveBeenCalledExactlyOnceWith(Date.now() + 30_000, 'tok');
+      expect(job.attemptsMade).toBe(0);
+      expect(reset).toHaveBeenCalledTimes(1);
+      expect(h.state.taskWrites).toEqual([]);
+      expect(h.state.events).toEqual([]);
+      expect(h.state.add).not.toHaveBeenCalled();
+      expect(h.state.currentStepId).toBe(source.metadata.id);
+      expect(h.state.existingRow.status).toBe('done');
+
+      await vi.advanceTimersByTimeAsync(30_000);
+      await expect(processTaskJob(job as unknown as Job, 'tok')).resolves.toBeUndefined();
+      expect(reset).toHaveBeenCalledTimes(2);
+      expect(reset.mock.calls.map((call) => call.slice(1, 5))).toEqual([
+        ['task-1', 'epoch-job-target', 1, 5],
+        ['task-1', 'epoch-job-target', 1, 5],
+      ]);
+      expect(evaluate.mock.calls).toEqual([[{ rejected: true }], [{ rejected: true }]]);
+      expect(advanceStep).not.toHaveBeenCalled();
+      expect(h.state.landedTaskPatches).toEqual([
+        expect.objectContaining({
+          status: 'running',
+          currentStepId: 'epoch-job-target',
+          currentRound: 1,
+        }),
+      ]);
+      expect(h.state.events).toEqual(['step.revise']);
+      expect(h.state.add).toHaveBeenCalledTimes(1);
+      expect(h.state.add.mock.lastCall?.[1]).toMatchObject({
+        stepId: 'epoch-job-target',
+        round: 1,
+        epoch: 7,
+      });
+      expect(job.moveToDelayed).toHaveBeenCalledTimes(1);
+      expect(job.attemptsMade).toBe(0);
+    } finally {
+      stepRegistry.override(source);
+      reset.mockReset().mockResolvedValue({ downstreamReset: 0, newEpoch: 7 });
+      vi.useRealTimers();
+    }
+  });
 
   it('keeps the original epoch when the revise transaction throws', async () => {
     const ctx = workflowTaskContext();

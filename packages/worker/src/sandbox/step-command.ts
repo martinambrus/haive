@@ -1,3 +1,4 @@
+import { REDIS_UNAVAILABLE_CODE } from '@haive/shared/constants';
 import { BINARY_MISSING_EXIT } from './binary-missing.js';
 import { randomBytes } from 'node:crypto';
 import path from 'node:path';
@@ -95,7 +96,16 @@ export async function runStepCommandInSandbox(
   try {
     lease = await acquireAgentLease(
       { db: ctx.db, agentCap: agentPoolCap },
-      { signal: ctx.signal, ...(options.onWait ? { onWait: options.onWait } : {}) },
+      {
+        signal: ctx.signal,
+        onWait: (busy, cap, reason) => {
+          if (reason === REDIS_UNAVAILABLE_CODE) {
+            void ctx
+              .emitProgress('Waiting for Redis to recover before acquiring an agent slot...')
+              .catch(() => undefined);
+          } else options.onWait?.(busy, cap);
+        },
+      },
     );
   } catch (err) {
     if (err instanceof AgentLeaseTimeoutError) {

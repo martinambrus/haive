@@ -29,7 +29,7 @@ const h = vi.hoisted(() => ({
 
 vi.mock('../src/lib/sandbox-kill.js', async (original) => ({
   ...(await original<object>()),
-  killTaskSandboxes: async () => 0,
+  killTaskSandboxes: async () => ({ killed: 0, killConfirmed: true }),
 }));
 vi.mock('../src/queues.js', () => ({
   getTaskQueue: () => ({ add: h.add }),

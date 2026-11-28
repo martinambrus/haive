@@ -105,7 +105,7 @@ it.each(['EMFILE', 'ENFILE'])('never stamps an unread plan as absent on %s', asy
     planNodeEdges: schema.planNodeEdges,
     planNodeCodeLinks: schema.planNodeCodeLinks,
   });
-  fake.insert(schema.repositories, { id: REPO, storagePath: root });
+  fake.insert(schema.repositories, { id: REPO, storagePath: root, status: 'ready' });
   fake.insert(schema.planMirrorState, {
     repositoryId: REPO,
     revision: 1,

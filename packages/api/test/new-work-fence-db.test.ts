@@ -54,7 +54,9 @@ vi.mock('../src/queues.js', () => {
     getUsagePollQueue: queue,
   };
 });
-vi.mock('../src/lib/sandbox-kill.js', () => ({ killTaskSandboxes: async () => 0 }));
+vi.mock('../src/lib/sandbox-kill.js', () => ({
+  killTaskSandboxes: async () => ({ killed: 0, killConfirmed: true }),
+}));
 vi.mock('../src/middleware/auth.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../src/middleware/auth.js')>()),
   requireAuth: async (c: { set: (key: string, value: string) => void }, next: () => unknown) => {
@@ -93,6 +95,11 @@ import {
 import { bundleRoutes } from '../src/routes/bundles.js';
 import { cliProviderRoutes } from '../src/routes/cli-providers.js';
 import { maintenanceRoutes } from '../src/routes/maintenance.js';
+import {
+  acquireAdmittedRootClaim,
+  withAdmittedCheckoutMutation,
+} from '../src/lib/admitted-checkout-mutation.js';
+import { NewWorkRefused } from '../src/middleware/maintenance.js';
 import { repoRoutes } from '../src/routes/repos.js';
 import { taskRoutes } from '../src/routes/tasks/index.js';
 import { retryTaskAtStep } from '../src/routes/tasks/steps.js';
@@ -1128,4 +1135,44 @@ describe.skipIf(!url)('the new-work fence on Postgres', () => {
       });
     },
   );
+
+  it('counts a checkout claim taken before the updater and refuses once the state turns', async () => {
+    const claimed = async () => {
+      const [row] = await db.execute<{ n: number }>(
+        sql`select count(*)::int as n from repositories
+             where id = ${repositoryId} and root_claimed_at is not null`,
+      );
+      return row!.n === 1;
+    };
+    await holdFence();
+    const run = vi.fn();
+    const admitted = withAdmittedCheckoutMutation(db, repositoryId, USER, run).catch(
+      (err: unknown) => err,
+    );
+    await untilBlocked();
+    expect(await claimed()).toBe(true);
+    await drain();
+    expect(await admitted).toBeInstanceOf(NewWorkRefused);
+    expect(await claimed()).toBe(false);
+    expect(run).not.toHaveBeenCalled();
+  });
+
+  it('counts a root claim taken before the updater and clears it once the state turns', async () => {
+    const claimed = async () => {
+      const [row] = await db.execute<{ n: number }>(
+        sql`select count(*)::int as n from repositories
+             where id = ${repositoryId} and root_claimed_at is not null`,
+      );
+      return row!.n === 1;
+    };
+    await holdFence();
+    const admitted = acquireAdmittedRootClaim(db, repositoryId, 'verify', USER).catch(
+      (err: unknown) => err,
+    );
+    await untilBlocked();
+    expect(await claimed()).toBe(true);
+    await drain();
+    expect(await admitted).toBeInstanceOf(NewWorkRefused);
+    expect(await claimed()).toBe(false);
+  });
 });

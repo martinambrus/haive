@@ -61,6 +61,7 @@ import {
 } from '../../_retire-install-manifest.js';
 import { loadLiveArtifacts, unionExpandedFor } from '../../_upgrade-render.js';
 import {
+  failIfCheckoutUnavailable,
   failIfColumnStale,
   ProjectStateImportDeferredError,
   lockProjectState,
@@ -841,7 +842,7 @@ export const upgradeApplyStep: StepDefinition<UpgradePlanOutput, UpgradeApplyOut
             .select({ renderContext: schema.repositories.renderContext })
             .from(schema.repositories)
             .where(eq(schema.repositories.id, plan.repositoryId))
-            .for('update');
+            .for('no key update');
           await tx.execute(sql`select set_config('lock_timeout', ${previousWait!.value}, true)`);
           await refuseReleasedCheckout(tx, ctx.taskId, plan.repositoryId);
           await refuseMovedColumn(tx, plan.repositoryId, plannedColumns(plan));
@@ -2010,6 +2011,7 @@ export const upgradeApplyStep: StepDefinition<UpgradePlanOutput, UpgradeApplyOut
       await listRetired(await retireLegacyMirrors(ctx, warnings, keepTooling, recordRetired));
     } catch (err) {
       failIfColumnStale(err);
+      failIfCheckoutUnavailable(err);
       if (err instanceof ProjectStateMovedError) throw new Error(PLAN_NO_LONGER_HOLDS);
       // The files stand on disk whatever the database kept, and the commit stages what is listed here.
       if (err instanceof ProjectStateWriteError) {

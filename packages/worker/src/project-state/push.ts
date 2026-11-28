@@ -1,3 +1,5 @@
+import { requireCheckoutAccess, assertCheckoutMutationOwner } from '@haive/shared/checkout-access';
+import type { RootClaimHandle } from '@haive/database';
 import { GIT_OPERATION_STATE_ENTRIES } from '@haive/shared/git-args';
 import { gitRun } from '../repo/git-exec.js';
 import { CHECKOUT_HOLDING_TASK_STATUSES } from '@haive/shared';
@@ -126,6 +128,7 @@ export async function commitProjectStatePush(
     targetPath: string;
     identity: Record<string, string>;
     taskId?: string;
+    checkoutOwner?: RootClaimHandle;
   },
 ): Promise<HaiveProjectionCommit | null> {
   const { repositoryId, sourcePath, targetPath, identity } = args;
@@ -140,7 +143,13 @@ export async function commitProjectStatePush(
       .for('no key update');
     if (!repo || (repo.storagePath ?? repo.localPath) !== sourcePath)
       throw new Error('project state push checkout changed');
-    if (isRootClaimLive(repo.rootClaimedAt))
+    if (args.checkoutOwner) {
+      await requireCheckoutAccess(tx, repositoryId, {
+        mode: 'mutation',
+        owner: args.checkoutOwner,
+      });
+      assertCheckoutMutationOwner(args.checkoutOwner);
+    } else if (isRootClaimLive(repo.rootClaimedAt))
       throw new Error('project state push held by root claim');
     if (args.taskId) await refuseReleasedCheckout(tx, args.taskId, repositoryId);
     const holders = await tx

@@ -2,7 +2,7 @@ import { isDeepStrictEqual } from 'node:util';
 import { UserPostgresDsnError } from '@haive/shared/egress';
 import { Hono } from 'hono';
 import { and, desc, eq, isNull, or, sql, inArray } from 'drizzle-orm';
-import { isRootClaimLive, lockRepositoryTasksKey, schema } from '@haive/database';
+import { canonicalUuid, isRootClaimLive, lockRepositoryTasksKey, schema } from '@haive/database';
 import { z } from 'zod';
 import {
   deriveRenderTargets,
@@ -1044,13 +1044,13 @@ toolingUpgradeRoutes.patch('/:id/tooling', async (c) => {
     };
     assertRagLockHeld(lock);
     await db.transaction(async (tx) => {
-      // A relink holds this row through its git work: give up with 409 busy rather than queue behind it.
+      // Serialize settings writers without conflicting with relink's KEY SHARE hold.
       const [stored] = await boundedLockWait(tx, () =>
         tx
           .select()
           .from(schema.repositories)
           .where(eq(schema.repositories.id, repositoryId))
-          .for('update'),
+          .for('no key update'),
       );
       if (!stored) throw new HttpError(404, 'Repository not found');
       if (typeof body.rtkEnabled === 'boolean' && stored.rtkEnabled !== body.rtkEnabled)
@@ -1096,7 +1096,7 @@ toolingUpgradeRoutes.patch('/:id/tooling', async (c) => {
       } catch (err) {
         if (!(err instanceof HttpError && err.status === 409 && err.message === REPOSITORY_BUSY))
           throw err;
-        // The save already committed: keep its answer. If a relink holds the row,
+        // The save already committed: keep its answer. If a conflicting row writer holds the row,
         // the flag stays cleared until the next sync rather than waiting without a bound.
         logger.warn({ repositoryId }, 'retry degraded flag restore deferred by repository lock');
       }
@@ -1130,10 +1130,21 @@ toolingUpgradeRoutes.post('/:id/cli-targets/remove', async (c) => {
   const db = getDb();
   const repositoryId = c.req.param('id');
   const cliTargets = await db.transaction(async (tx) => {
+    // Read before the keys are taken, so a caller who does not own the repository never queues on them.
+    const [owned] = await tx
+      .select({ id: schema.repositories.id })
+      .from(schema.repositories)
+      .where(
+        and(
+          eq(schema.repositories.id, repositoryId),
+          eq(schema.repositories.userId, c.get('userId')),
+        ),
+      );
+    if (!owned) throw new HttpError(404, 'Repository not found');
     const [repo] = await boundedLockWait(tx, async () => {
       await lockRepositoryTasksKey(tx, repositoryId);
       await tx.execute(
-        sql`select pg_advisory_xact_lock(hashtextextended(${`project-state:${repositoryId}`}, 0))`,
+        sql`select pg_advisory_xact_lock(hashtextextended(${`project-state:${canonicalUuid(repositoryId)}`}, 0))`,
       );
       return tx
         .select({
@@ -1147,7 +1158,7 @@ toolingUpgradeRoutes.post('/:id/cli-targets/remove', async (c) => {
             eq(schema.repositories.userId, c.get('userId')),
           ),
         )
-        .for('update');
+        .for('no key update');
     });
     if (!repo) throw new HttpError(404, 'Repository not found');
     if (isRootClaimLive(repo.claimedAt))

@@ -1,3 +1,4 @@
+import { assertPlanCheckoutOwner } from './checkout-access-scope.js';
 import { execFile, spawn, type ChildProcess } from 'node:child_process';
 import { promisify } from 'node:util';
 import { gitSubcommandIndex, hardenGitArgs } from '@haive/shared/git-args';
@@ -175,6 +176,7 @@ export async function gitRun(
     guardedRemote?: Record<string, string>;
   },
 ): Promise<GitRunResult> {
+  assertPlanCheckoutOwner();
   const { input, allowFileTransport, guardedRemote, ...output } = io ?? {};
   const argv = hardenGitArgs(args, { allowFileTransport });
   const timeout = output.timeout ?? gitDefaultTimeoutMs(argv);
@@ -288,6 +290,7 @@ export async function gitExec(
   args: string[],
   opts: GitExecOptions = {},
 ): Promise<{ stdout: string; stderr: string }> {
+  assertPlanCheckoutOwner();
   const { env, ...rest } = opts;
   const argv = hardenGitArgs(args);
   const timeout = rest.timeout ?? gitDefaultTimeoutMs(argv);

@@ -75,6 +75,7 @@ describe('the plan snapshot state', () => {
     'does not return a bound query value from %s',
     async (operation) => {
       vi.spyOn(configService, 'get').mockResolvedValue('true');
+      vi.spyOn(configService, 'getFresh').mockResolvedValue('normal');
       const fake = createFakeDb({ repositories: schema.repositories, tasks: schema.tasks });
       fake.insert(schema.repositories, { id: REPO, userId: USER, name: 'repo', storagePath: root });
       h.db = fake.db;

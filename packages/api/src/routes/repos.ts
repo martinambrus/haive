@@ -1,7 +1,6 @@
 import {
   assertCheckoutMutationOwner,
   CheckoutUnavailableError,
-  withCheckoutMutation,
 } from '@haive/shared/checkout-access';
 import type { RootClaimHandle, DbTx } from '@haive/database';
 import { DerivedRunPlanError, pinnedTaskStepIds } from '@haive/shared/modularity';
@@ -27,7 +26,6 @@ import {
 } from 'drizzle-orm';
 import {
   schema,
-  acquireRootClaim,
   isRootClaimLive,
   lockRepositoryTasksKey,
   readLiveRootClaim,
@@ -53,6 +51,10 @@ import {
   writeFileNoFollow,
   type ReadResult,
 } from '@haive/shared/fs-safe';
+import {
+  acquireAdmittedRootClaim,
+  withAdmittedCheckoutMutation,
+} from '../lib/admitted-checkout-mutation.js';
 import { containmentHttpError } from '../lib/fs-http.js';
 import { writeBodyToHeld } from '../lib/held-write.js';
 import { withUploadChunkLock } from '../lib/upload-chunk-lock.js';
@@ -134,10 +136,16 @@ import {
   reconcileRemote,
   isRemoteConnectionError,
   beginRelinkWriter,
+  lockRemoteRelink,
 } from '../lib/remote-reconcile.js';
 import { insertAuditEvent, logAuditEvent, type AuditEvent } from '../lib/audit.js';
 import { summarizeScopeChange } from '@haive/shared/audit';
 import { getRepoQueue, type RepoJobPayload } from '../queues.js';
+import {
+  boundedAdd,
+  QueueAddTimeoutError,
+  QueueOutcomeUnknownError,
+} from '../lib/queue-bounded.js';
 import { requireAuth } from '../middleware/auth.js';
 import { enqueueCheckoutSync, observeCheckoutBranchForReset } from '../lib/plan-mirror.js';
 import {
@@ -234,6 +242,10 @@ function deriveTopLevelPaths(fileTree: string[] | null): string[] {
   return Array.from(set).sort();
 }
 
+/** A repeat of a create makes a second repository, so the default "safe to retry" would mislead. */
+const REPO_OUTCOME_UNKNOWN_MESSAGE =
+  "The repository's job may still start. Reload the repositories list before trying again: adding it again creates a second repository.";
+
 /** Enqueue a repository job, and mark the row `error` if the ENQUEUE itself fails.
  *
  *  The row is committed at `cloning` or with refreshPending before these calls run, so a throwing `queue.add` —
@@ -243,6 +255,9 @@ function deriveTopLevelPaths(fileTree: string[] | null): string[] {
  *  indistinguishable from one whose enqueue is still in flight. So it is closed here, where the
  *  failure actually happens. All enqueue failures compare the admission
  *  job id too, since a lost acknowledgement can outlive that job and a newer admission.
+ *
+ *  A deadline on the add leaves its outcome unknown: the job can still land, so the row stays as
+ *  admitted for that job, or for the stranded-preparation sweep, and the request answers 503.
  *
  *  Rethrows, because the caller's request really did fail and must say so. The status write is
  *  best-effort: if the database is unreachable too there is nothing to be done, and masking the
@@ -255,8 +270,12 @@ export async function addRepoJobOrMarkError(
   refreshJobId: string,
 ): Promise<void> {
   try {
-    await add();
+    await boundedAdd(add);
   } catch (err) {
+    if (err instanceof QueueAddTimeoutError) {
+      logger.warn({ err, repositoryId }, 'repository job enqueue outcome unknown');
+      throw new QueueOutcomeUnknownError(REPO_OUTCOME_UNKNOWN_MESSAGE);
+    }
     await db
       .update(schema.repositories)
       .set({
@@ -1047,9 +1066,13 @@ repoRoutes.patch('/:id/exclusions', async (c) => {
 
   let event: AuditEvent | undefined;
   const updated = await db.transaction(async (tx) => {
-    // A relink holds this row through its git work: give up with 409 busy rather than queue behind it.
+    // Serialize settings writers without conflicting with relink's KEY SHARE hold.
     const [stored] = await boundedLockWait(tx, () =>
-      tx.select().from(schema.repositories).where(eq(schema.repositories.id, id)).for('update'),
+      tx
+        .select()
+        .from(schema.repositories)
+        .where(eq(schema.repositories.id, id))
+        .for('no key update'),
     );
     if (!stored) throw new HttpError(404, 'Repository not found');
     const { addedCount, removedCount } = summarizeScopeChange(
@@ -2755,7 +2778,7 @@ const remoteCheckoutAccess: MiddlewareHandler<AppEnv> = async (c, next) => {
     columns: { id: true },
   });
   if (!repo) throw new HttpError(404, 'Repository not found');
-  await withCheckoutMutation(
+  await withAdmittedCheckoutMutation(
     db,
     id,
     userId,
@@ -2839,6 +2862,7 @@ repoRoutes.post('/:id/remote', remoteCheckoutAccess, async (c) => {
   let intentWritten = true;
   let clearIntent = false;
   let gitStarted = false;
+  let rowChanged = false;
   const settleOwnIntent = () => {
     if (intent.created) {
       // Clear after rollback, outside the transaction that holds the repository row.
@@ -2873,15 +2897,14 @@ repoRoutes.post('/:id/remote', remoteCheckoutAccess, async (c) => {
     }
     // Without a successful undo, a signalled first write may already have
     // changed Git. Leave the intent so reconciliation can settle that outcome.
-    if (intentWritten && restored && lockHeld) {
+    if (intentWritten && restored && lockHeld && !rowChanged) {
       settleOwnIntent();
     }
     throw err;
   };
-  // Git follows the committed row: lock the repository row first (a wait past the
-  // repository lock bound answers 409 busy, before any Git write), insert its
-  // audit, change Git, then write the column. Callback-visible failures restore
-  // Git while that row is still locked, before a queued relink can snapshot it.
+  // The relink key serializes Git writers; KEY SHARE keeps deletion out without
+  // pinning ordinary row writers. Upgrade only for the final compare-and-set.
+  // Callback-visible failures restore Git before releasing the relink key.
   // A connection error has an unknown outcome: reconcile on a fresh connection.
   // The durable intent also survives process death between the Git write and COMMIT.
   // Other COMMIT failures may restore after the lock is released: a concurrent
@@ -2897,12 +2920,13 @@ repoRoutes.post('/:id/remote', remoteCheckoutAccess, async (c) => {
         settle = resolve;
       });
       try {
+        await lockRemoteRelink(tx, id);
         const [stored] = await boundedLockWait(tx, () =>
           tx
             .select()
             .from(schema.repositories)
             .where(and(eq(schema.repositories.id, id), eq(schema.repositories.userId, userId)))
-            .for('no key update'),
+            .for('key share'),
         );
         if (!stored) throw new HttpError(404, 'Repository not found');
         // The sweep may have settled the autocommitted intent before we took this lock.
@@ -3014,6 +3038,36 @@ repoRoutes.post('/:id/remote', remoteCheckoutAccess, async (c) => {
             }
           }
 
+          const [current] = await boundedLockWait(tx, () =>
+            tx
+              .select()
+              .from(schema.repositories)
+              .where(and(eq(schema.repositories.id, id), eq(schema.repositories.userId, userId)))
+              .for('no key update'),
+          );
+          // Compare only what this request will replace. Omitted credentials/branch
+          // belong to concurrent writers; never write the old snapshot back.
+          if (
+            !current ||
+            current.remoteRelinkIntent !== intent.token ||
+            current.remoteUrl !== stored.remoteUrl ||
+            current.storagePath !== stored.storagePath ||
+            current.localPath !== stored.localPath ||
+            (body.credentialsId !== undefined &&
+              current.credentialsSecretId !== stored.credentialsSecretId) ||
+            (body.branch && current.branch !== stored.branch)
+          ) {
+            // The old Git snapshot may no longer match the newly committed remote.
+            // Retain repair intent even when restoring that snapshot succeeds.
+            rowChanged = true;
+            throw new HttpError(409, 'Repository remote settings changed; retry the request');
+          }
+          await requireFittingCredential(
+            tx,
+            body.credentialsId === undefined ? current.credentialsSecretId : body.credentialsId,
+          );
+          // The compared patch fields also prove the pre-Git audit's fields and
+          // credentialsChanged/branchChanged still describe the final locked row.
           await tx
             .update(schema.repositories)
             .set({
@@ -3162,7 +3216,7 @@ repoRoutes.post('/:id/mark-onboarded', async (c) => {
   // without advancing `onboarding_reset_at` — leaving the predicate below satisfied by evidence
   // that no longer exists. Holding the root is what makes "the tree I looked at" and "the tree I
   // am vouching for" the same tree.
-  const held = await acquireRootClaim(db, id, 'verify', userId);
+  const held = await acquireAdmittedRootClaim(db, id, 'verify', userId);
   if (held === null) {
     throw new HttpError(409, rootClaimRefusal((await readLiveRootClaim(db, id))?.kind ?? null));
   }
@@ -3290,7 +3344,7 @@ repoRoutes.delete('/:id/onboarding-artifacts', async (c) => {
   // worker share one connection pool, so a lock held across the walk deadlocks it.
   // Acquired as a LEASE: a reset of a large knowledge base can outlive any fixed expiry, and a
   // claim that expires under a still-running holder re-admits the very `rm -rf` it excludes.
-  const claim = await acquireRootClaim(db, id, 'reset', userId);
+  const claim = await acquireAdmittedRootClaim(db, id, 'reset', userId);
   if (claim === null) {
     // The CAS refuses for three different reasons and answering 409 to all of them would turn a
     // wrong id and someone else's repository into "already being reset". Ownership is resolved
@@ -3619,7 +3673,8 @@ repoRoutes.delete('/:id', async (c) => {
     await boundedLockWait(tx, () => lockRepositoryTasksKey(tx, id));
     // Locked, so a clone or a reset that has not claimed the root yet claims it only after this
     // commits, and finds no row: every writer of the root runs under that claim. The row's wait has
-    // its own bound: a relink holds the row through its git work, and the key above is held meanwhile.
+    // its own bound: a relink holds KEY SHARE through Git, conflicting with this FOR UPDATE,
+    // and the task-creation key above is held meanwhile.
     const repoRows = await boundedLockWait(tx, () =>
       tx
         .select({
@@ -3863,6 +3918,7 @@ async function refreshRepository(c: Context<AppEnv>, recovery = false) {
         refreshPending: true,
         refreshJobId,
         statusMessage: null,
+        checkoutSessionReason: null,
         // Keep the repair signal until recovery settles: even before enqueue, another refresh
         // must remain check-only rather than rebuild without restoring this install's data.
         errorCode: checkCheckoutOnly || recovery ? repairErrorCode : null,
@@ -3928,11 +3984,7 @@ async function refreshRepository(c: Context<AppEnv>, recovery = false) {
               backoff: { type: 'exponential', delay: 5000 },
             },
       ),
-    recovery
-      ? REPOSITORY_ERROR_CODES.CHECKOUT_REPAIR_NEEDED
-      : checkCheckoutOnly
-        ? repairErrorCode
-        : null,
+    repairErrorCode,
     refreshJobId,
   );
 

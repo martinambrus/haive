@@ -1,5 +1,10 @@
 import { and, desc, eq, sql } from 'drizzle-orm';
-import { isLockNotAvailable, REPOSITORY_TASKS_LOCK_TIMEOUT_MS, schema } from '@haive/database';
+import {
+  isLockNotAvailable,
+  remoteRelinkKey,
+  REPOSITORY_TASKS_LOCK_TIMEOUT_MS,
+  schema,
+} from '@haive/database';
 import { insertAuditEvent, logAuditEvent, type AuditEvent } from '../../../audit.js';
 import type { FormSchema } from '@haive/shared';
 import { gitRemoteUrlSchema, parseScpLikeGitUrl, redactGitUrl } from '@haive/shared/schemas';
@@ -82,6 +87,11 @@ async function persistPushOrigin(
         await tx.execute(
           sql.raw(`SET LOCAL lock_timeout = '${REPOSITORY_TASKS_LOCK_TIMEOUT_MS}ms'`),
         );
+        // Relink holds KEY SHARE during Git, so the row alone cannot exclude its config writes.
+        // Match its order: remote advisory key first, then repository row.
+        await tx.execute(
+          sql`select pg_advisory_xact_lock(hashtextextended(${remoteRelinkKey(repositoryId)}, 0))`,
+        );
         const [stored] = await readStored(tx).for('no key update');
         await tx.execute(sql.raw('SET LOCAL lock_timeout = DEFAULT'));
         if (!stored) throw new Error('Repository no longer exists');
@@ -155,7 +165,7 @@ async function persistPushOrigin(
               .set({ ...patch, updatedAt: new Date() })
               .where(eq(schema.repositories.id, repositoryId));
         } catch (err) {
-          // Restore before a queued relink can acquire the repository row.
+          // Restore while the remote advisory key still excludes a queued relink's Git.
           await restore(err);
         }
         return true;

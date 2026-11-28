@@ -1,4 +1,6 @@
 'use client';
+import { TaskActionNotice } from '@/components/task-action-notice';
+import type { TaskActionNotice as ActionNotice } from '@/lib/task-state';
 
 import { PromptTierUnknownList } from '@/components/prompt-tier-unknown';
 
@@ -23,6 +25,7 @@ import {
   getPlanOverview,
   postUserActive,
   type CliProvider,
+  type CliProviderRestriction,
   type CliProvidersResponse,
   type CliProviderName,
   type EnvDepPreset,
@@ -99,6 +102,7 @@ import {
   taskNotStarted,
   taskStoppedAt,
   stopResultNotice,
+  sandboxKillNotice,
 } from '@/lib/task-state';
 import { useGlobalPause } from '@/lib/use-global-pause';
 import {
@@ -803,7 +807,7 @@ export default function TaskDetailPage() {
   const submittedPark = useRef<string | null>(null);
   const [submitError, setSubmitError] = useState<{ stepId: string; message: string } | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
-  const [actionNotice, setActionNotice] = useState<string | null>(null);
+  const [actionNotice, setActionNotice] = useState<ActionNotice | null>(null);
   const [stepActionBusy, setStepActionBusy] = useState<string | null>(null);
   const [stepActionError, setStepActionError] = useState<{
     stepId: string;
@@ -1399,7 +1403,10 @@ export default function TaskDetailPage() {
           return;
         }
       } else {
-        await api.post(`/tasks/${id}/action`, { action });
+        const result = await api.post<Partial<StopActivityResult>>(`/tasks/${id}/action`, {
+          action,
+        });
+        setActionNotice(sandboxKillNotice(result));
       }
       await reload();
     } catch (err) {
@@ -1475,12 +1482,16 @@ export default function TaskDetailPage() {
     setStepActionError(null);
     setActionNotice(null);
     try {
-      await api.post<StepActionResponse>(`/tasks/${id}/steps/${step.stepId}/action`, {
-        action,
-        round: step.round,
-        overrideLocalModel: opts?.overrideLocalModel,
-        timeoutMinutes: opts?.timeoutMinutes,
-      });
+      const result = await api.post<StepActionResponse>(
+        `/tasks/${id}/steps/${step.stepId}/action`,
+        {
+          action,
+          round: step.round,
+          overrideLocalModel: opts?.overrideLocalModel,
+          timeoutMinutes: opts?.timeoutMinutes,
+        },
+      );
+      setActionNotice(sandboxKillNotice(result));
       await reload();
     } catch (err) {
       setStepActionError({
@@ -1517,10 +1528,14 @@ export default function TaskDetailPage() {
     setStepActionError(null);
     setActionNotice(null);
     try {
-      await api.post<StepActionResponse>(`/tasks/${id}/steps/${step.stepId}/action`, {
-        action: 'retry',
-        round: step.round,
-      });
+      const result = await api.post<StepActionResponse>(
+        `/tasks/${id}/steps/${step.stepId}/action`,
+        {
+          action: 'retry',
+          round: step.round,
+        },
+      );
+      setActionNotice(sandboxKillNotice(result));
       await reload();
     } catch (err) {
       setStepActionError({
@@ -1542,6 +1557,7 @@ export default function TaskDetailPage() {
   ) {
     setStepProviderBusy(stepId);
     setStepProviderError(null);
+    setActionNotice(null);
     // Paint the pick before the round-trip; the 2s poll reconciles either way, same as
     // the auto-continue flip above. A choice is keyed by (task, step, role) with no
     // round, so every round's row of this step moves together — matching what the
@@ -1566,13 +1582,17 @@ export default function TaskDetailPage() {
       // effortLevel omitted (a CLI-only change) clears the stored effort server-side,
       // so the dropdown resets to the new CLI's default on reload; sent (an effort
       // change) pins the effective CLI + the chosen effort for this (step, role).
-      await api.patch(`/tasks/${id}/steps/${stepId}/cli-provider`, {
-        cliProviderId,
-        round,
-        ...(role ? { role } : {}),
-        ...(effortLevel !== undefined ? { effortLevel } : {}),
-        ...(remember ? { remember: true } : {}),
-      });
+      const result = await api.patch<Partial<StopActivityResult>>(
+        `/tasks/${id}/steps/${stepId}/cli-provider`,
+        {
+          cliProviderId,
+          round,
+          ...(role ? { role } : {}),
+          ...(effortLevel !== undefined ? { effortLevel } : {}),
+          ...(remember ? { remember: true } : {}),
+        },
+      );
+      setActionNotice(sandboxKillNotice(result));
       await reload();
     } catch (err) {
       // Resync rather than restoring a captured snapshot: a poll may have landed while
@@ -2188,11 +2208,7 @@ export default function TaskDetailPage() {
         </div>
       )}
 
-      {actionNotice && (
-        <Card role="status" className="px-3 py-2 text-sm text-neutral-400">
-          <InlineMarkdown body={actionNotice} />
-        </Card>
-      )}
+      <TaskActionNotice notice={actionNotice} />
 
       {deadNote && <DeadTaskBanner text={deadNote.text} />}
 
@@ -2346,6 +2362,7 @@ export default function TaskDetailPage() {
                     onStop={() => void stopActiveCli()}
                     onCliLogin={() => openCliLoginForStep(step)}
                     providers={providers}
+                    providerRestrictions={task.cliProviderRestrictions}
                     taskCliProviderId={task.cliProviderId ?? null}
                     fallbackProviderId={taskEffectiveCliProviderId}
                     cliBusy={stepProviderBusy === step.stepId}
@@ -2466,6 +2483,7 @@ export default function TaskDetailPage() {
         <div className="flex flex-col gap-3">
           <SummaryCliCard
             providers={providers}
+            providerRestrictions={task.cliProviderRestrictions}
             summaryCliProviderId={task.summaryCliProviderId ?? null}
             summaryLlmEnabled={task.summaryLlmEnabled ?? true}
             busy={summaryCliBusy}
@@ -2475,6 +2493,7 @@ export default function TaskDetailPage() {
           <UpcomingCliPanel
             steps={upcomingCliSteps}
             providers={providers}
+            providerRestrictions={task.cliProviderRestrictions}
             taskCliProviderId={task.cliProviderId ?? null}
             fallbackProviderId={taskEffectiveCliProviderId}
             busyStepId={stepProviderBusy}
@@ -2573,6 +2592,7 @@ export default function TaskDetailPage() {
  *  cancelled or completed run. */
 function SummaryCliCard({
   providers,
+  providerRestrictions,
   summaryCliProviderId,
   summaryLlmEnabled,
   busy,
@@ -2580,6 +2600,7 @@ function SummaryCliCard({
   onChange,
 }: {
   providers: CliProvider[];
+  providerRestrictions?: Record<string, CliProviderRestriction>;
   summaryCliProviderId: string | null;
   summaryLlmEnabled: boolean;
   busy: boolean;
@@ -2632,8 +2653,14 @@ function SummaryCliCard({
             </option>
           )}
           {usable.map((p) => (
-            <option key={p.id} value={p.id}>
+            <option
+              key={p.id}
+              value={p.id}
+              disabled={providerRestrictions?.[p.id]?.code !== undefined}
+              title={providerRestrictions?.[p.id]?.message}
+            >
               {p.label}
+              {providerRestrictions?.[p.id]?.code ? ' — unavailable for this environment' : ''}
             </option>
           ))}
         </select>
@@ -2671,6 +2698,7 @@ function SummaryCliCard({
 function UpcomingCliPanel({
   steps,
   providers,
+  providerRestrictions,
   taskCliProviderId,
   fallbackProviderId,
   busyStepId,
@@ -2680,6 +2708,7 @@ function UpcomingCliPanel({
 }: {
   steps: UpcomingCliStep[];
   providers: CliProvider[];
+  providerRestrictions?: Record<string, CliProviderRestriction>;
   taskCliProviderId: string | null;
   fallbackProviderId: string | null;
   busyStepId: string | null;
@@ -2717,6 +2746,7 @@ function UpcomingCliPanel({
           </div>
           <CliPickerGrid
             providers={providers}
+            providerRestrictions={providerRestrictions}
             idPrefix={`upcoming-cli-${s.stepId}`}
             roles={s.cliRoles}
             seats={s.miningSeats}
@@ -2882,6 +2912,7 @@ interface StepCardProps {
   ) => Promise<void>;
   onCliLogin: () => void;
   providers: CliProvider[];
+  providerRestrictions?: Record<string, CliProviderRestriction>;
   /** Task-level fallback when this step has no per-step preference set. */
   taskCliProviderId: string | null;
   fallbackProviderId: string | null;
@@ -3253,7 +3284,7 @@ function HeaderUsageChip({
   // Narrowing guard, not a duplicate of the resolver's own: the fault fallback below indexes
   // providerIds[0], and only this early return proves it exists to tsc.
   if (providerIds.length === 0) return null;
-  const meters = selectMetersForProviderIds(providerIds, snapshots, allowanceKeys);
+  const meters = selectMetersForProviderIds(providerIds, snapshots, allowanceKeys, providers);
 
   const rowOf = (providerId: string) => providers.find((p) => p.id === providerId) ?? null;
   /** Short CLI name for a chip, from the provider row where there is one — the snapshot's own
@@ -3321,6 +3352,7 @@ function HeaderUsageChip({
     const state = resolveUsageChipState({
       providerId: primaryId,
       providerName: row?.name ?? null,
+      providerAuthMode: row?.authMode,
       snapshots,
     });
     if (state.kind !== 'fault') return null;
@@ -3680,6 +3712,7 @@ function StepCardImpl({
   canStop,
   onCliLogin,
   providers,
+  providerRestrictions,
   taskCliProviderId,
   fallbackProviderId,
   cliBusy,
@@ -3928,6 +3961,7 @@ function StepCardImpl({
           {showCliPicker && (
             <CliPickerGrid
               providers={providers}
+              providerRestrictions={providerRestrictions}
               idPrefix={cliPickerId}
               roles={step.cliRoles}
               seats={step.miningSeats}

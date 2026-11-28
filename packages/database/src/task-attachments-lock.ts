@@ -1,4 +1,5 @@
 import { withSettledTransaction } from './settled-transaction.js';
+import { canonicalUuid } from './canonical-uuid.js';
 import { sql } from 'drizzle-orm';
 import type { Database } from './index.js';
 
@@ -45,7 +46,7 @@ export async function withTaskAttachmentsLock<T>(
   return withSettledTransaction(handle, async (tx) => {
     await tx.execute(sql.raw(`SET LOCAL lock_timeout = '${TASK_ATTACHMENTS_LOCK_TIMEOUT_MS}ms'`));
     await tx.execute(
-      sql`select pg_advisory_xact_lock(hashtextextended(${`task-attachments:${taskId}`}, 0))`,
+      sql`select pg_advisory_xact_lock(hashtextextended(${`task-attachments:${canonicalUuid(taskId)}`}, 0))`,
     );
     return fn(tx);
   });

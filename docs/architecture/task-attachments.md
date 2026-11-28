@@ -218,7 +218,8 @@ filters out the handled ones, so the remainder is the next round's list. The on-
 reader for the names it could not fit.
 
 API attachment mutations also hold `withCheckoutMutation`'s renewing repository root claim
-before any attachment lock, from directory/name creation through streamed body, row finalization,
+(taken through `withAdmittedCheckoutMutation`: while the system drains or is in maintenance they
+answer 503 before claiming) before any attachment lock, from directory/name creation through streamed body, row finalization,
 manifest and cleanup, as kind `mutation`. No pooled connection spans the body. Every physical
 step checks the owner for lease loss; a failed post-stream access recheck takes back the upload
 by identity while its descriptor is open, as a failed stream/insert does. A moved aside retains
@@ -228,7 +229,7 @@ use the policy's read admission and failed-acquisition recheck; a verified old h
 The DB-only list stays available during cloning. Error checkouts retain raw download and deletion
 for repair; upload refuses. A task with no repository removes rows DB-only and never touches disk.
 Worker expansion and sidecar writers still rely on their task's checkout holder; independent background projection coverage is a follow-up (see
-[Repository refresh](repository-refresh.md#checkout-access-during-replacement-t780-pr2-reduced-scope)).
+[Repository refresh](repository-refresh.md#checkout-access-during-replacement)).
 
 The attachment-lock helper drains its entire callback even if postgres.js rejects the transaction
 first. A lost SQL lock is not retained, but the API's renewing root lease stays held until the

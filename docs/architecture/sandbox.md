@@ -1301,6 +1301,27 @@ Undo: revert the code change. No schema or data rollback is needed. The output f
 `worker/test/fixtures/version-token-baseline.json` records origin/main's renderer bytes for
 representative valid pins, so unchanged versions keep their Dockerfile bodies and image hashes.
 
+### Stored tooling pin audit (T562)
+
+The earlier unchecked-pin finding is superseded by commit `7164a86ca` (#1246).
+Controls on main (`8749f9e46`) bypass the Tooling PATCH by seeding repository,
+environment-dependency and cached-feed rows directly. Shell substitutions, Dockerfile
+newlines, extra arguments, `file:`, `git+https:`, URL and npm-alias specs do not reach
+the Chrome MCP config, dependency copy/reuse, RTK composition or pinnable LSP recipes.
+Chrome's shared MCP surface refuses before npm-cache warming; config rendering checks
+again. RTK composition checks repository pins, cache-head/latest fallbacks and retained
+composition inputs at the runtime-tools renderer. The upgrade route checks both cached
+head and cached latest before writing; a candidate without a numeric version prefix is
+skipped by `isNewer` first. Its pinnable siblings are Intelephense (both keys), vtsls,
+Pyright, gopls and Solargraph; rust-analyzer and jdtls install no stored version pin.
+
+These controls require no Docker or live stores. No executable bypass reproduced, so
+T562 changes tests and documentation only: it does not narrow the documented safe-token
+policy to exact semver, replace a refused explicit pin with a default, or rewrite data.
+Token acceptance still does not prove that the named release exists. Repository pin
+columns default to NULL; boot does not seed them. The core Dockerfile's RTK ARG comes
+from the shipped default/operator build environment, never a repository pin.
+
 ## Optional composed LSP recipes
 
 `ComposeInput.lspInstallContractVersion` selects the installation owner. Absent/1 ignores
@@ -1590,7 +1611,8 @@ the row id and rerun generation, and one entry matching the current provider, pl
 identity and the retained effective reference. 04 evidence is never a fallback. Missing, pending,
 failed, skipped, reset, malformed or unsupported final evidence is unready. An unready plugin
 result, such as a skipped or missing PHP plugin, still completes the checks with `bridgeReady`
-false and guidance to upgrade the plugin files and Retry 01b; nothing retries automatically.
+false and guidance to install or repair the selected language-server plugins, upgrade any missing
+local plugin files and Retry 01b; this guidance applies to every language, and nothing retries automatically.
 
 `composedLspRunListEligible` (`@haive/shared/run-list`) accepts a run list only when 04, worktree
 setup, 01b and the final step each occur once, in that order. `taskSupportsComposedLspFinal`
@@ -1655,7 +1677,12 @@ one reads nothing further:
   run list. The set is a superset of what resolution can pick, so a doubtful case stays legacy.
 
 The form shows `keepLegacyLspInstall` ("Install language servers in the environment image") only
-when detect finds the task adoptable. Reused prior-task form values drop the field
+when detect finds the task's run list and providers adoptable and either there is no repository
+selection override or that override supports adoption. Without an override the editable picker can
+make any suggestion adoptable, so mixed and empty suggestions must offer the opt-out too. The copy
+explains that separate installation applies only to supported PHP-only selections; apply still
+decides eligibility from the submitted selection. A fixed incompatible or empty repository override
+keeps the opt-out hidden, since picker edits cannot enable adoption. Reused prior-task form values drop the field
 (`reconcileStaleDeps`), so each task derives its own default and an opt-out is never inherited;
 Auto-continue therefore adopts. An environment that is not adopted writes no contract key, so its
 template hash and image tag are those of the legacy path. Once the cheap checks pass, step 01 logs
@@ -1665,7 +1692,7 @@ lock), from the task row's CLI read under it. A task with no own CLI uses the ol
 among the provider rows that decision reads (`composedLspAdoptable`), never the CLI resolved when
 the step started: provider rows are written without the task lock, so that value can be stale. A
 choice, default CLI or provider change that landed in between demotes the new row to the legacy
-variant, stored without the key, and the log says so. Apply also refreshes LSP capability
+variant, stored without the key. `appendStepWarning` also records the demotion on the step, so the task page shows why the environment uses legacy installation. Apply also refreshes LSP capability
 (`cliSupportsLsp`) from the task row and provider rows it reads at apply time (a null own CLI
 resolves to the oldest enabled provider, as at detect), rather than trusting the flag detect
 computed, so a default or provider change after detect is honoured. Replacement re-evaluates
@@ -1679,15 +1706,15 @@ absent/1 and the adoption conditions above hold for the default selection
 mandatory because a contract-2 link restricts dispatch at once). A plain Retry of 01 stops at the
 form; no route or page offers the action. Only a person ticks it: 01 lists the field in
 `humanOnlyFormFields`, and the runner drops listed keys from the task's pre-answers for the step and
-from reused prior-task values before they are overlaid or auto-submitted, so a task-type preset,
+from reused prior-task values before they are overlaid or auto-submitted, and from job-carried values on redelivery. Saved answers are durable owner decisions: a running or CLI-wait redrive keeps them intact, and a redelivered job cannot replace them. The stalled-sweep control seeds a pass interrupted after submission, redrives the unchanged running row and proves the saved tick still commits replacement. Thus a task-type preset,
 prior-task reuse and auto-continue never replace a template. Apply re-decides from the submitted
 form and never trusts detect. A refusal throws `ComposedLspReplacementRefusedError` (code
 `composed_lsp_replacement_refused`, closed `reason`: `rollout_off`, `cli_unsupported`, `selection`,
 `run_list`, `providers`) before any write, and again inside the transaction below, where it rolls
-the inserted row back.
+the inserted row back. The `selection` reason instead raises `ReopenStepFormError` with a notice: changing the dependency selection and ticking replacement together re-parks the form for review rather than failing the step. It opts into `reuseFormValues`: the runner uses the existing reuse reconciliation hook and form-default overlay to preserve the refused dependency, version, container and database edits as defaults. Human-only fields reset, and the notice explains that the replacement tick must be chosen again. Saved answers are cleared for the new decision, which requires a fresh submit.
 
-On acceptance one transaction inserts a NEW template row, takes the task row lock (see Provider
-lock) and decides again from the task's current CLI (the oldest enabled provider when it has none)
+On acceptance one transaction inserts a NEW template row, locks the owned step (status and rerun generation), then takes the task row lock (see Provider
+lock), checks owner, epoch, live/nondead status, current step and round, and decides again from the task's current CLI (the oldest enabled provider when it has none)
 and choices, links only the acting task to the
 row and writes a `task_events` row `env_template.replaced` with `sourceTemplateId` and
 `candidateTemplateId`. The row holds the form's deps plus contract 2 and no Dockerfile, so 02
@@ -1706,6 +1733,8 @@ re-declared by step 01) while its own build form, shown before the fork, offers 
 tag. A contract-2 row built before
 this rule keeps its stored tag until step 03 rebuilds it, which moves the tag and removes the
 superseded image by id.
+Retrying dependency declaration sets the existing template to `pending` and clears its hash and tag even when the dependency values and saved Dockerfile are unchanged. Step 02 restores the same hash and step 03 builds because the row is no longer ready; the old image id stays available for cleanup. Both contracts take this path. A control drives 01 → 02 → 03 with a fake Docker runner and pins that the contract-2 default tag is identical before and after, while 03 calls the build and records its new image id. This rebuild is not caused by the id-suffix tag rule, so that rule and the existing invalidation behavior remain unchanged. The reported legacy reuse was not reproduced on the same-row path; step 02 can separately relink onto an already-ready hash match, which has its own reuse controls. No real image build is needed for this control.
+
 The task picks the replacement up on that Retry: it resets 01 and every later step, so 02, 03, 04,
 01b and 01b1 build and verify the new row. Other tasks keep what they link, and a task that is
 not retried stays on the old row. The old row can end up unlinked, so repository delete also
@@ -1715,14 +1744,14 @@ Provider lock. A task whose template is contract 2 can launch only a provider th
 retained effective composed image. A switch is refused with 409 `composed_lsp_provider_locked` on
 the step-CLI choice route and the summary CLI route, and a fix-round choice is refused with
 `FixRoundCliLocked`, whose message the escalation gate shows; the gate offers only providers the
-lock accepts. `@haive/shared/composed-lsp-provider-lock` allows exactly one enabled
+lock accepts. `fixRoundOptionProviders` remains an advisory read: it holds no lock across a human decision. The transactional writer re-reads under the task lock and refuses a choice that became incompatible. The task detail exposes `cliProviderRestrictions`, per-provider `{ code, message }` refusals from `composedLspProviderRestrictions`, the same pure decision the locked writer uses. Both derive the retained-image set from `composedLspAllowedSet`, as dispatch does; an effective image anchors the provider row instead of a conflicting task default, while before the first image the task default still anchors the one-row rule. Web gates on the reason code, even when its display message is empty. The task page disables and annotates those options in summary, default, role and seat pickers; the server remains authoritative. `@haive/shared/composed-lsp-provider-lock` allows exactly one enabled
 `claude-code` provider. The dispatcher refuses the rest of the way: `composedLspProviderIds` holds
 the providers with an effective reference, a preferred provider outside it returns a skip plan
 with a named reason (the user's saved pick is the one exception, below), and with no preference the
 choice floats only inside the set, so no capability gap falls through to another CLI. A prior or
 verifying reference does not count. Before the first
 build makes any reference effective, the set is the lock's verified providers, so the environment
-steps that build the image, and their AI repair, can run; LSP readiness stays false until then. A launch follows the same rule: until some provider holds an effective reference the task's CLI launch uses the provider sandbox image, as a legacy task does before its environment is built; once one exists, a changed input, a vanished image, an unverified provider or a changed provider is refused. Work is refused, never moved to another CLI (a saved pick, below, is skipped and said so), and LSP is never dropped silently.
+steps that build the image, and their AI repair, can run; LSP readiness stays false until then. A launch follows the same rule: until some provider holds an effective reference the task's CLI launch uses the provider sandbox image, as a legacy task does before its environment is built. A skipped 04 keeps this fallback for later work: Skip is the user's explicit choice and LSP readiness stays false, since only a matching completed 01b1 establishes it; refusing every later launch would turn Skip into a dead end. Once an effective reference exists, a changed input, a vanished image, an unverified provider or a changed provider is refused. Work is refused, never moved to another CLI (a saved pick, below, is skipped and said so), and LSP is never dropped silently.
 
 A saved pick is skipped, not refused. The one preferred provider the dispatcher does not refuse is
 the user's saved user-wide choice (`user_step_cli_preferences` and `user_step_cli_role_preferences`,
@@ -1757,8 +1786,7 @@ be skipped. The persona pin check (`personaProviderNameFor`, `task-queue.ts`) as
 function, so on a composed task it names the substitute that will run, for an enabled and a disabled
 saved pick alike. The api readers parse the retained image references with the shared parser
 (`@haive/shared` `composed-image-references`); a task whose `composedLspImageRefs` pin is malformed
-is logged by id only and left on its pre-lock view in the listing, the task detail, the step cards
-and the disable preview, so it can still be opened and stopped. Dispatch stays strict and refuses
+is logged by id only and left on its pre-lock view in the listing, the task detail, the step cards and the disable preview, so it can still be opened and stopped. The task detail separately keeps coded picker restrictions for the known contract-2 task, using the writer's conservative pre-image rule; this does not change those read-only fallback views. Dispatch stays strict and refuses
 it.
 
 A composed task whose lock set has members but none enabled, with no saved or own CLI to hold on,
@@ -1772,7 +1800,7 @@ taken `FOR NO KEY UPDATE` by `lockTaskForComposedLsp` (`@haive/shared/composed-l
 Every writer of a provider choice takes it, reads the task's CLI and its template's contract again
 inside it, and only then checks and writes: the step-CLI choice write (the step card and the CLIs
 tab), the summary CLI route, the model-health default rewrite that the step-CLI route makes with its
-choice, and the fix-round choice. So do both writers that give a task a contract-2 link, step 01's
+choice, the fix-round choice, and onboarding skill verification's repair/regeneration pick. The API, skill gate and fix-round gate use `writeLockedStepCliChoice`; the fix-round gate retains its capability checks and typed refusal. So do both writers that give a task a contract-2 link, step 01's
 replacement and its new-environment adoption. Whoever takes the lock second sees the first one's
 committed write: a switch is refused 409 `composed_lsp_provider_locked`, a replacement is refused
 `providers` and its inserted row rolls back, an adoption stores its row without the key. Step 02's
@@ -1791,7 +1819,7 @@ credential refresh status write, `markProvidersReady`) never take a task or step
 order before the insert, so it matches those writers. One inversion remains: deleting a provider
 holds its row and then needs the task rows its SET NULL rewrites, while a holder of the task row
 needs that provider's share lock (the choice inserts through their foreign key, the summary
-route's update); Postgres aborts one of them (`40P01`) and the state stays consistent. Saved
+route's update); Postgres aborts one of them (`40P01`) and the state stays consistent. A top-level choice/summary transaction retries that SQLSTATE once, re-reading its inputs on the new transaction. A supplied transaction handle reports busy after its first failed savepoint: rolling back a savepoint cannot release the outer task lock. Only the caller can retry that outer transaction. The retry logs the original deadlock as its cause, and an exhausted busy error retains the cause too. A second deadlock, or a selected provider lost before the retried write, returns `composed_lsp_write_busy` with retry guidance. The API maps this to 503 `composed_lsp_write_busy`; a raw deletion-side `40P01` answers 503 `transaction_retry_required`. Both carry `Retry-After: 1` and `retryable: true`. A persistently disabled provider instead raises `cli_provider_disabled` (API 400); onboarding skill verification catches that code and re-parks its decision form with a notice instead of failing with a concurrency 503. Other SQLSTATEs and prose never trigger a retry. Real-Postgres controls cover contention and both deadlock victims, including rollback of the aborted side. Saved
 preferences are user-wide, so a remembered pick made on another task is not ordered against this
 task's decision.
 
@@ -1871,3 +1899,20 @@ Undo: revert the code commit. No schema/data rollback is needed. Already-built
 images keep their installed modules; remove the package from the editable body
 and rebuild only if removing it is desired. The optional declared-deps key is
 ignored by the older generator.
+
+## Checkout replacement and interactive sessions
+
+A checkout rebuild suspends interactive mounts before the host directory is renamed; see
+[Repository refresh](repository-refresh.md#interactive-mounts-at-replacement).
+This stop path is distinct from repository/task deletion: it never removes `/udata`, extensions
+or provider authentication volumes. It gives code-server ten seconds to flush hot-exit state,
+removes the container and verifies absence. A Docker failure defers replacement. Hot-exit state is
+retained for review, not permission to save old buffers into rebuilt files automatically.
+
+A changed stamped inode requires identity repair. Legacy unstamped mounts and device-only
+remount differences are kept. No replacement history is recorded. Identity repair uses ordinary
+runner recovery, including during a running step; a stale stamped Editor is removed even if held.
+An unreadable Docker identity label keeps app/Editor runners; DDEV raises the retryable
+`RunnerProbeError`. An unreadable filesystem identity still refuses admission without removal. Existing workspace/spec rules remain.
+Removal uses `-v` for anonymous volumes; named Editor hot-exit, extensions and auth volumes
+survive. See the repository topic for bounded defer codes and deployment.

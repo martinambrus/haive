@@ -1,3 +1,5 @@
+import { REDIS_UNAVAILABLE_CODE } from '@haive/shared/constants';
+import { ReplyError, type Redis } from 'ioredis';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import {
@@ -20,7 +22,7 @@ import { clampVoteScore, TASK_VOTE_MAX } from '@haive/shared/fair-priority';
 import { eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import { getDb } from '../db.js';
-import { getRedis } from '../redis.js';
+import { getRedis, RedisUnavailableError } from '../redis.js';
 import {
   RUNTIME_WEIGHT_LABEL,
   hostCpuCount,
@@ -48,12 +50,12 @@ const exec = promisify(execFile);
 const log = logger.child({ module: 'runtime-admission' });
 
 /** How long a cold-boot waits for a free slot before proceeding regardless. */
-const ADMISSION_TIMEOUT_MS = 8 * 60_000;
+export const ADMISSION_TIMEOUT_MS = 8 * 60_000;
 /** Re-evaluate waiters periodically so capacity freed OUTSIDE the gate (a runner reaped or
  *  torn down at task end) gets picked up without waiting for the full timeout. */
 const REPUMP_INTERVAL_MS = 15_000;
 /** How often a cold-boot re-reads an unreadable config store while it waits. */
-const CONFIG_RETRY_MS = 2_000;
+export const CONFIG_RETRY_MS = 2_000;
 
 type ReleaseFn = () => void;
 const NOOP_RELEASE: ReleaseFn = () => {};
@@ -314,12 +316,14 @@ async function reserveRuntimeSlot(taskId: string, weightMb: number): Promise<voi
   }
 }
 
-/** Whether this task holds a reservation right now. */
-async function hasReservation(taskId: string): Promise<boolean> {
+/** Unknown is not absence: a boot must not queue behind its own task-level reservation. */
+async function hasReservation(taskId: string): Promise<{ held: boolean } | { error: unknown }> {
   try {
-    return (await getRedis().hexists(RESERVE_KEY, taskId)) === 1;
-  } catch {
-    return false;
+    return { held: (await getRedis().hexists(RESERVE_KEY, taskId)) === 1 };
+  } catch (error) {
+    // Even a server refusal leaves this gate input unreadable. Keep the client's ReplyError
+    // identity contract elsewhere; this read retries it without parsing server wording.
+    return { error: error instanceof ReplyError ? new RedisUnavailableError(error) : error };
   }
 }
 
@@ -335,9 +339,9 @@ export async function releaseRuntimeReservation(taskId: string): Promise<void> {
 
 /** Wipe every reservation. Called on worker boot, where the boot reaper removes all runtime
  *  runners — so any reservation left by the previous process is stale by definition. */
-export async function clearRuntimeReservations(): Promise<void> {
+export async function clearRuntimeReservations(redis?: Redis): Promise<void> {
   try {
-    await getRedis().del(RESERVE_KEY);
+    await (redis ?? getRedis()).del(RESERVE_KEY);
   } catch (err) {
     log.warn({ err }, 'clearing runtime reservations on boot failed');
   }
@@ -393,9 +397,9 @@ export async function markBrowserDesktopDown(container: string): Promise<void> {
 
 /** Wipe every surcharge. Called on worker boot beside clearRuntimeReservations, where the boot
  *  reaper removes all runtime runners — so every entry is stale by definition. */
-export async function clearBrowserSurcharges(): Promise<void> {
+export async function clearBrowserSurcharges(redis?: Redis): Promise<void> {
   try {
-    await getRedis().del(BROWSER_KEY);
+    await (redis ?? getRedis()).del(BROWSER_KEY);
   } catch (err) {
     log.warn({ err }, 'clearing browser surcharges on boot failed');
   }
@@ -881,35 +885,55 @@ async function pump(): Promise<void> {
   }
 }
 
-/** Wait for the master switch and the sizing to be readable; true when the governor is on.
- *  Bounded by ADMISSION_TIMEOUT_MS, after which the ConfigUnavailableError is thrown (retryable).
- *  Any other error propagates, an abort rejects as RuntimeSlotAbortedError. */
-async function awaitReadableLimits(taskId: string, signal?: AbortSignal): Promise<boolean> {
+export interface RuntimeGateReadTuning {
+  readWaitMs?: number;
+  readPollMs?: number;
+}
+
+/** Wait for a readable gate input under the admission bound, then throw the typed outage.
+ *  Unknown reservation state never becomes absence or admission. */
+async function awaitReadableGate<T>(
+  taskId: string,
+  read: () => Promise<T>,
+  signal?: AbortSignal,
+  tuning: RuntimeGateReadTuning = {},
+): Promise<T> {
   const start = Date.now();
   let warned = false;
   for (;;) {
     try {
-      const enabled = await resourceLimitsEnabled({ strict: true });
-      if (enabled) await resolveRuntimeCaps();
-      if (warned) log.info({ taskId }, 'runtime slot: config store readable again');
-      return enabled;
-    } catch (err) {
-      if (!(err instanceof ConfigUnavailableError)) throw err;
       if (signal?.aborted) throw new RuntimeSlotAbortedError(taskId);
-      if (Date.now() >= start + ADMISSION_TIMEOUT_MS) throw err;
+      const value = await read();
+      if (signal?.aborted) throw new RuntimeSlotAbortedError(taskId);
+      if (warned) log.info({ taskId }, 'runtime slot: gate readable again');
+      return value;
+    } catch (err) {
+      if (
+        !(err instanceof ConfigUnavailableError) &&
+        (err as { code?: unknown } | null)?.code !== REDIS_UNAVAILABLE_CODE
+      )
+        throw err;
+      if (signal?.aborted) throw new RuntimeSlotAbortedError(taskId);
+      if (Date.now() >= start + (tuning.readWaitMs ?? ADMISSION_TIMEOUT_MS)) throw err;
       if (!warned) {
         warned = true;
-        log.warn({ err, taskId }, 'runtime slot: config store unreadable; waiting');
+        log.warn({ err, taskId }, 'runtime slot: gate unreadable; waiting');
       }
       await new Promise<void>((resolve) => {
         const onAbort = () => {
           clearTimeout(timer);
           resolve();
         };
-        const timer = setTimeout(() => {
-          signal?.removeEventListener('abort', onAbort);
-          resolve();
-        }, CONFIG_RETRY_MS);
+        const timer = setTimeout(
+          () => {
+            signal?.removeEventListener('abort', onAbort);
+            resolve();
+          },
+          Math.min(
+            tuning.readPollMs ?? CONFIG_RETRY_MS,
+            Math.max(0, start + (tuning.readWaitMs ?? ADMISSION_TIMEOUT_MS) - Date.now()),
+          ),
+        );
         signal?.addEventListener('abort', onAbort, { once: true });
       });
     }
@@ -926,8 +950,19 @@ export async function acquireRuntimeSlot(
   kind: RuntimeKind,
   onWait?: (busyMb: number, budgetMb: number) => void,
   signal?: AbortSignal,
+  tuning: RuntimeGateReadTuning = {},
 ): Promise<ReleaseFn> {
-  if (!(await awaitReadableLimits(taskId, signal))) return NOOP_RELEASE;
+  const enabled = await awaitReadableGate(
+    taskId,
+    async () => {
+      const enabled = await resourceLimitsEnabled({ strict: true });
+      if (enabled) await resolveRuntimeCaps();
+      return enabled;
+    },
+    signal,
+    tuning,
+  );
+  if (!enabled) return NOOP_RELEASE;
   // Already stopped before we even queued — don't take capacity at all.
   if (signal?.aborted) throw new RuntimeSlotAbortedError(taskId);
 
@@ -937,7 +972,17 @@ export async function acquireRuntimeSlot(
   // is done: by then the container exists and counts on its own, or the boot failed and the
   // capacity is genuinely free. inFlight is deliberately NOT incremented — the reservation is
   // the count.
-  if (await hasReservation(taskId)) {
+  const reservation = await awaitReadableGate(
+    taskId,
+    async () => {
+      const reservation = await hasReservation(taskId);
+      if ('error' in reservation) throw reservation.error;
+      return reservation;
+    },
+    signal,
+    tuning,
+  );
+  if (reservation.held) {
     let released = false;
     return () => {
       if (released) return;

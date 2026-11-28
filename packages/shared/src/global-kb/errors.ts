@@ -4,8 +4,10 @@ export type GlobalKbErrorClass = 'timeout' | 'refused' | 'auth' | 'other';
 export class GlobalKbDeadlineError extends Error {
   readonly code = 'GLOBAL_KB_DEADLINE';
 
-  constructor(deadlineMs: number) {
-    super(`global KB call exceeded ${deadlineMs} ms`);
+  constructor(deadlineMs?: number) {
+    super(
+      `[GLOBAL_KB_DEADLINE] ${deadlineMs === undefined ? 'global KB operation timed out' : `global KB call exceeded ${deadlineMs} ms`}; retry the operation.`,
+    );
     this.name = 'GlobalKbDeadlineError';
   }
 }
@@ -41,4 +43,10 @@ export function classifyGlobalKbError(err: unknown): GlobalKbErrorClass {
     current = cause;
   }
   return 'other';
+}
+
+/** Optional KB work may skip ordinary outages, but a timed-out step must remain retryable. */
+export function rethrowIfGlobalKbTimeout(err: unknown): void {
+  if (err instanceof GlobalKbDeadlineError) throw err;
+  if (classifyGlobalKbError(err) === 'timeout') throw new GlobalKbDeadlineError();
 }

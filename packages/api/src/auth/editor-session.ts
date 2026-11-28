@@ -23,6 +23,7 @@ const claimsSchema = z.object({
   target: editorTargetSchema,
   runtimeSessionId: z.string(),
   editorOrigin: z.string(),
+  checkoutEpoch: z.string().nullable().optional(),
   exp: z.number(),
 });
 export type EditorSessionPayload = Omit<z.infer<typeof claimsSchema>, 'exp'>;

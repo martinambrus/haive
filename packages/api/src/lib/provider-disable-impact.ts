@@ -75,6 +75,7 @@ export async function providerDisableImpact(db: Database, userId: string, provid
   let taskCount = 0;
   let stepCount = 0;
   const nextHeldTaskIds = new Set<string>();
+  const remainingCliTaskIds = new Set<string>();
   const invalidTasks: Array<{ id: string; code: DerivedRunPlanError['code'] }> = [];
   for (const task of tasks) {
     try {
@@ -122,6 +123,8 @@ export async function providerDisableImpact(db: Database, userId: string, provid
           return !row || row.status === 'pending';
         })
         .map((stepId) => ({ stepId, round: task.currentRound }));
+      if (candidates.some((s) => flags.get(s.stepId)?.dispatchesStepCli))
+        remainingCliTaskIds.add(task.id);
       const steps = await enrichStepsWithCliPreferences(
         db,
         flags,
@@ -152,7 +155,7 @@ export async function providerDisableImpact(db: Database, userId: string, provid
   }
   // Only a hold on the next remaining CLI/provider-sensitive step precedes dispatch failure.
   const composedLspFailureTasks = composedLspFailureCandidates.filter(
-    (task) => !nextHeldTaskIds.has(task.id),
+    (task) => remainingCliTaskIds.has(task.id) && !nextHeldTaskIds.has(task.id),
   );
   return {
     taskCount,

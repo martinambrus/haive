@@ -13,7 +13,9 @@ vi.mock('../src/middleware/auth.js', async (importOriginal) => ({
   },
 }));
 vi.mock('../src/queues.js', () => ({ getTaskQueue: () => ({ add: vi.fn() }) }));
-vi.mock('../src/lib/sandbox-kill.js', () => ({ killTaskSandboxes: vi.fn(async () => 0) }));
+vi.mock('../src/lib/sandbox-kill.js', () => ({
+  killTaskSandboxes: vi.fn(async () => ({ killed: 0, killConfirmed: true })),
+}));
 
 import { Hono } from 'hono';
 import { eq, isNull } from 'drizzle-orm';

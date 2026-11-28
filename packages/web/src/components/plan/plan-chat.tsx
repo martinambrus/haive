@@ -1,4 +1,6 @@
 'use client';
+import { TaskActionNotice } from '@/components/task-action-notice';
+import { sandboxKillNotice, type TaskActionNotice as ActionNotice } from '@/lib/task-state';
 import { PLAN_CHAT_MESSAGE_MAX_CHARS, PLAN_CHAT_MESSAGE_LIMIT_TEXT } from '@haive/shared/schemas';
 import type { FormSchema } from '@haive/shared';
 import { LinkButton } from '@/components/ui';
@@ -132,6 +134,7 @@ export function PlanChat({
     };
   }, [drafts]);
   const [sending, setSending] = useState(false);
+  const [providerNotice, setProviderNotice] = useState<ActionNotice | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [providers, setProviders] = useState<CliProvider[]>([]);
   // Read by the poll below, which is not re-created when the list loads.
@@ -189,6 +192,7 @@ export function PlanChat({
     markedRef.current = null;
     setUnreadAtOpen(unreadCount);
     setError(null);
+    setProviderNotice(null);
     void reloadMessages().catch(() => {
       /* an empty transcript is the normal case, not an error worth showing */
     });
@@ -411,10 +415,12 @@ export function PlanChat({
   }
 
   async function changeProvider(id: string): Promise<void> {
+    setProviderNotice(null);
     setProviderId(id);
     if (!liveTaskId || !id) return;
     try {
-      await setPlanChatProvider(liveTaskId, id);
+      const result = await setPlanChatProvider(liveTaskId, id);
+      setProviderNotice(sandboxKillNotice(result));
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to change the CLI');
     }
@@ -577,6 +583,7 @@ export function PlanChat({
         className="text-xs text-neutral-500"
       />
       <FormError message={error} />
+      <TaskActionNotice notice={providerNotice} />
       <div className="flex gap-2">
         <Button size="sm" onClick={() => void send()} disabled={sending || locked || !draft.trim()}>
           {sending ? 'Sending…' : 'Send'}

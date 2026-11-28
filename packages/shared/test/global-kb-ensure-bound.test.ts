@@ -88,3 +88,50 @@ describe.skipIf(!ADMIN_URL)('the schema ensure of a bounded call', () => {
     expect(waiting, 'backends of this test still waiting on the schema lock').toHaveLength(0);
   }, 30_000);
 });
+
+// Run only with the gated runner's throwaway server. Refuse an existing built-in database:
+// the test owns only the database it creates, even if someone supplies the wrong admin URL.
+describe.skipIf(!ADMIN_URL)('internal database readiness after a drop', () => {
+  it('recreates a dropped store on the next bare connection call', async () => {
+    const { GLOBAL_KB_DB_NAME } = await import('../src/global-kb/connection.js');
+    const { withGlobalKbConnection } = await import('../src/global-kb/client.js');
+    const admin = postgres(ADMIN_URL, { max: 1, onnotice: () => {} });
+    const before = process.env.DATABASE_URL;
+    let owned = false;
+    try {
+      const existing = await admin`SELECT 1 FROM pg_database WHERE datname = ${GLOBAL_KB_DB_NAME}`;
+      expect(existing, 'refusing to touch an existing built-in KB database').toHaveLength(0);
+      process.env.DATABASE_URL = ADMIN_URL;
+      const settings: GlobalKbSettings = {
+        enabled: true,
+        digestEnabled: true,
+        mode: 'internal',
+        namespace: 'drop-control',
+        connectionString: null,
+        ollamaUrl: null,
+        embedModel: null,
+        embeddingDimensions: 8,
+        archiveRetentionDays: 30,
+      };
+      const run = () =>
+        withGlobalKbConnection(
+          {} as never,
+          async ({ conn }) => {
+            const rows = await conn.pg`SELECT current_database() AS name`;
+            return rows[0]!.name;
+          },
+          { settings, deadlineMs: 5000 },
+        );
+      owned = true;
+      expect(await run()).toBe(GLOBAL_KB_DB_NAME);
+      await admin.unsafe(`DROP DATABASE "${GLOBAL_KB_DB_NAME}" WITH (FORCE)`);
+      await expect(run()).rejects.toMatchObject({ code: '3D000' });
+      expect(await run(), 'next call must bootstrap the missing database').toBe(GLOBAL_KB_DB_NAME);
+    } finally {
+      if (before === undefined) delete process.env.DATABASE_URL;
+      else process.env.DATABASE_URL = before;
+      if (owned) await admin.unsafe(`DROP DATABASE IF EXISTS "${GLOBAL_KB_DB_NAME}" WITH (FORCE)`);
+      await admin.end({ timeout: 5 });
+    }
+  });
+});

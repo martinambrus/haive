@@ -6,9 +6,10 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
-import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { eq, and } from 'drizzle-orm';
 import { Hono } from 'hono';
+import { configService } from '@haive/shared';
 import { hardenGitArgs } from '@haive/shared/git-args';
 import {
   acquireRootClaim,
@@ -123,6 +124,9 @@ probe('remote relink at real PostgreSQL commit and process-death boundaries', ()
     template = await mkdtemp(join(tmpdir(), 'relink-template-'));
     await git(template, ['init', '-q']);
     await git(template, ['remote', 'add', 'origin', oldUrl]);
+  });
+  beforeEach(() => {
+    vi.spyOn(configService, 'getFresh').mockResolvedValue('normal');
   });
   afterEach(async () => {
     if (child && child.exitCode === null && child.signalCode === null) {

@@ -1,3 +1,4 @@
+import { PlanPatchError } from '@haive/shared/plan';
 import { describe, expect, it, vi } from 'vitest';
 import { schema, type Database } from '@haive/database';
 import { createFakeDb } from '@haive/database/testing';
@@ -184,6 +185,14 @@ describe('plan chat reply', () => {
     await answer(db);
     expect(turns[0]?.body).toBe('Added it.');
     expect(turns[0]?.patchJson).toMatchObject({ outcome: { applied: 2 } });
+  });
+
+  it('propagates repository deletion before recording a failed apply turn', async () => {
+    const gone = new PlanPatchError('repository_gone', 'gone');
+    vi.mocked(applyAgentPatch).mockRejectedValueOnce(gone);
+    const { db, turns } = fakeDb();
+    await expect(answer(db)).rejects.toBe(gone);
+    expect(turns).toEqual([]);
   });
 
   it('records a patch the applier refused as having landed nothing', async () => {

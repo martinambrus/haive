@@ -1,3 +1,4 @@
+import { randomBytes } from 'node:crypto';
 import { GLOBAL_KB_JOB_NAMES } from '@haive/shared';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -11,6 +12,7 @@ type Entry = {
 type Row = { entryId: string; kind: string | null; model: string | null; width?: number };
 
 const h = vi.hoisted(() => ({
+  url: 'http://ollama.invalid:11434',
   model: 'model-b',
   entries: [] as Array<{
     id: string;
@@ -66,7 +68,7 @@ vi.mock('@haive/shared/global-kb', async (importOriginal) => ({
   retryOwedGlobalIdentifierBackfill: async () => {},
   resolveGlobalKbSettings: async () => ({
     enabled: true,
-    ollamaUrl: 'http://ollama.invalid:11434',
+    ollamaUrl: h.url,
     embedModel: h.model,
     namespace: 'house',
     embeddingDimensions: 4,
@@ -323,4 +325,18 @@ describe('the reconcile sweep re-embeds entries whose vectors drifted', () => {
     expect(await sweep()).toEqual(['e1']);
     expect(h.statements.find((t) => t.includes('IS DISTINCT FROM'))).toContain('e.namespace = $2');
   });
+});
+
+it('M3 hides every private URL component in the unreachable sweep warning', async () => {
+  const secret = randomBytes(24).toString('hex');
+  h.url = `https://user:${secret}@embed.example:11434/${secret}?token=${secret}#${secret}`;
+  h.entries = [entry('e1')];
+  h.rows = [rowOf('e1', 'model-a')];
+  h.ollamaUp = false;
+  await sweep();
+  expect(h.warn).toHaveBeenCalledWith(
+    { ollamaUrl: 'https://***@embed.example:11434/***?***#***' },
+    'global KB re-embed skipped: the embedder does not answer',
+  );
+  expect(JSON.stringify(h.warn.mock.calls)).not.toContain(secret);
 });

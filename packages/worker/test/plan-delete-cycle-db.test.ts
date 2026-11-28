@@ -1,0 +1,507 @@
+import { mkdir, mkdtemp, readFile, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { randomUUID } from 'node:crypto';
+import { setImmediate } from 'node:timers/promises';
+import { eq, sql } from 'drizzle-orm';
+import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import {
+  createDatabase,
+  hasPgCode,
+  LATE_LOCK_WAIT_MS,
+  lockRepositoryRow,
+  lockRepositoryTasksKey,
+  schema,
+  type Database,
+} from '@haive/database';
+import { HAIVE_DATA_FILES } from '@haive/shared';
+import { applyPlanPatch, PlanPatchError } from '@haive/shared/plan';
+import { resolveProjectStateConflict } from '../src/project-state/resolve.js';
+import { answerPlanQuestion } from '../src/plan/answer.js';
+import {
+  importPlanMirror,
+  lockPlanMirror,
+  PlanMirrorHeldError,
+  reconcilePlanFromCheckout,
+  writePlanMirror,
+} from '../src/plan/mirror.js';
+import { syncPlanFromCheckout } from '../src/plan/sync-checkout.js';
+
+const url = process.env.PLAN_DELETE_CYCLE_TEST_URL;
+if (url && !new URL(url).pathname.startsWith('/plan_delete_cycle_test'))
+  throw new Error('Use a dedicated plan_delete_cycle_test database');
+type Tx = Parameters<Parameters<Database['transaction']>[0]>[0];
+type Method = (...args: unknown[]) => unknown;
+const settle = <T>(p: Promise<T>) =>
+  p.then(
+    (value) => ({ ok: true as const, value }),
+    (error: unknown) => ({ ok: false as const, error }),
+  );
+
+// Gate the real query builder just before it executes, retaining SQL, parameters and transaction.
+function gateBuilder(builder: object, hook: (text: string) => Promise<void>): object {
+  return new Proxy(builder, {
+    get(target, prop) {
+      const member: unknown = Reflect.get(target, prop, target);
+      if (typeof member !== 'function') return member;
+      if (prop === 'then')
+        return (resolve: Method, reject: Method) => {
+          void hook((target as { toSQL(): { sql: string } }).toSQL().sql)
+            .then(() => (member as Method).call(target, resolve, reject))
+            .catch(reject);
+        };
+      return (...args: unknown[]) => {
+        const out = (member as Method).apply(target, args);
+        return typeof out === 'object' && out !== null ? gateBuilder(out, hook) : out;
+      };
+    },
+  });
+}
+function gateTx(tx: Tx, hook: (text: string) => Promise<void>): Tx {
+  return new Proxy(tx, {
+    get(target, prop) {
+      const member: unknown = Reflect.get(target, prop, target);
+      if (typeof member !== 'function') return member;
+      if (prop === 'transaction')
+        return (callback: (nested: Tx) => Promise<unknown>) =>
+          target.transaction((nested) => callback(gateTx(nested, hook)));
+      if (['select', 'insert', 'update', 'delete'].includes(String(prop)))
+        return (...args: unknown[]) =>
+          gateBuilder((member as Method).apply(target, args) as object, hook);
+      return (member as Method).bind(target);
+    },
+  });
+}
+
+// Promise gates and pg_blocking_pids establish the races. Only the benign one-second
+// admission control models an external holder with a server-side wait.
+// The 10s statement timeout is a cleanup backstop, not the race scheduler.
+describe.skipIf(!url)('update-only plan writers beside repository deletion', () => {
+  let root: string;
+  let db: Database;
+  let writerDb: Database;
+  let deleteDb: Database;
+  const userId = randomUUID();
+  beforeAll(async () => {
+    root = await mkdtemp(join(tmpdir(), 'plan-delete-cycle-'));
+    db = createDatabase(url!);
+    writerDb = createDatabase(url!);
+    deleteDb = createDatabase(url!);
+    await db.insert(schema.users).values({
+      id: userId,
+      emailEncrypted: 'test',
+      emailBlindIndex: userId,
+      passwordHash: 'test',
+    });
+  });
+  afterAll(async () => {
+    await rm(root, { recursive: true, force: true });
+    await db.delete(schema.users).where(eq(schema.users.id, userId));
+    await Promise.all([db, writerDb, deleteDb].map((d) => d.$client.end({ timeout: 5 })));
+  });
+  async function seed() {
+    const repositoryId = randomUUID();
+    await db
+      .insert(schema.repositories)
+      .values({ id: repositoryId, userId, name: 'delete-cycle', source: 'blank' });
+    const built = await applyPlanPatch(
+      db,
+      {
+        ops: [
+          { op: 'upsert', nodeRef: 'root', parentRef: null, title: 'root' },
+          { op: 'upsert', nodeRef: 'a', parentRef: 'root', title: 'A' },
+          { op: 'upsert', nodeRef: 'b', parentRef: 'root', title: 'B' },
+        ],
+      },
+      { repositoryId, origin: 'user' },
+    );
+    const repoPath = join(root, repositoryId);
+    await mkdir(repoPath);
+    const nodeId = built.refs.a!;
+    const [conflict] = await db
+      .insert(schema.projectStateConflicts)
+      .values({
+        repositoryId,
+        unit: `plan/${nodeId}#title`,
+        base: { v: 'base' },
+        local: { v: 'A' },
+        incoming: { v: 'theirs' },
+      })
+      .returning();
+    return { repositoryId, repoPath, nodeId, conflictId: conflict!.id, otherId: built.refs.b! };
+  }
+  type Ids = Awaited<ReturnType<typeof seed>>;
+  async function pid(tx: Tx) {
+    const [row] = await tx.execute<{ pid: number }>(sql`select pg_backend_pid() as pid`);
+    return row!.pid;
+  }
+  async function untilBlocked(waiter: number, holder: number, ended: () => boolean) {
+    const deadline = Date.now() + 8_000;
+    for (;;) {
+      const [row] = await db.execute<{ blocked: boolean }>(
+        sql`select ${holder}::int = any(pg_blocking_pids(${waiter}::int)) as blocked`,
+      );
+      if (row?.blocked) return;
+      if (ended() || Date.now() > deadline) throw new Error('peer did not reach the held lock');
+      await setImmediate();
+    }
+  }
+  const write = async (
+    kind: string,
+    tx: Tx,
+    ids: Ids,
+    repositoryLockTimeoutMs = LATE_LOCK_WAIT_MS,
+  ) =>
+    kind === 'patch'
+      ? applyPlanPatch(
+          tx,
+          {
+            ops: [
+              { op: 'upsert', nodeRef: ids.nodeId, title: 'edited' },
+              { op: 'upsert', nodeRef: ids.otherId, title: 'also edited' },
+            ],
+          },
+          { repositoryId: ids.repositoryId, origin: 'user', repositoryLockTimeoutMs },
+        )
+      : kind === 'flush'
+        ? writePlanMirror(tx as unknown as Database, ids.repositoryId, ids.repoPath)
+        : answerPlanQuestion(tx, { ...ids, userId, answer: 'take_theirs' });
+
+  it.each(['patch', 'answer', 'flush'])(
+    '%s first: delete waits before its cascade, both commit',
+    async (kind) => {
+      const ids = await seed();
+      const paused = Promise.withResolvers<void>();
+      const release = Promise.withResolvers<void>();
+      const peerStarted = Promise.withResolvers<number>();
+      let writerPid = 0;
+      let phase = '';
+      let deleteEnded = false;
+      let blockedAt = '';
+      const writer = settle(
+        writerDb.transaction(async (tx) => {
+          await tx.execute(sql`set local statement_timeout = '10s'`);
+          writerPid = await pid(tx);
+          if (kind === 'answer') await lockPlanMirror(tx, ids.repositoryId);
+          return write(
+            kind,
+            gateTx(tx, async (text) => {
+              if (!/^(insert into|update) "plan_mirror_state"/.test(text)) return;
+              paused.resolve();
+              await release.promise;
+            }),
+            ids,
+          );
+        }),
+      );
+      let deletion: ReturnType<typeof settle> | undefined;
+      try {
+        await Promise.race([
+          paused.promise,
+          writer.then(() => {
+            throw new Error('writer missed its gate');
+          }),
+        ]);
+        deletion = settle(
+          deleteDb.transaction(async (tx) => {
+            await tx.execute(sql`set local statement_timeout = '10s'`);
+            peerStarted.resolve(await pid(tx));
+            phase = 'task key';
+            await lockRepositoryTasksKey(tx, ids.repositoryId);
+            phase = 'repository';
+            await tx
+              .select()
+              .from(schema.repositories)
+              .where(eq(schema.repositories.id, ids.repositoryId))
+              .for('update');
+            phase = 'cascade';
+            await tx
+              .delete(schema.repositories)
+              .where(eq(schema.repositories.id, ids.repositoryId));
+          }),
+        );
+        void deletion.then(() => {
+          deleteEnded = true;
+        });
+        await untilBlocked(await peerStarted.promise, writerPid, () => deleteEnded);
+        blockedAt = phase;
+      } finally {
+        release.resolve();
+      }
+      const results = await Promise.all([writer, deletion]);
+      const failures = results.flatMap((r) =>
+        r && !r.ok ? [hasPgCode(r.error, '40P01') ? '40P01' : r.error] : [],
+      );
+      expect(failures, `delete blocked at ${phase}`).toEqual([]);
+      expect(blockedAt).toBe(kind === 'flush' ? 'task key' : 'repository');
+      expect(phase).toBe('cascade');
+      expect(
+        await db
+          .select()
+          .from(schema.repositories)
+          .where(eq(schema.repositories.id, ids.repositoryId)),
+      ).toEqual([]);
+      for (const table of [schema.planNodes, schema.planMirrorState, schema.projectStateConflicts])
+        expect(
+          await db.select().from(table).where(eq(table.repositoryId, ids.repositoryId)),
+        ).toEqual([]);
+    },
+  );
+  it.each(['patch', 'answer'])(
+    '%s: a delete holding R causes bounded busy, then a named gone outcome',
+    async (kind) => {
+      const ids = await seed();
+      const held = Promise.withResolvers<void>();
+      const release = Promise.withResolvers<void>();
+      const deletion = deleteDb.transaction(async (tx) => {
+        await lockRepositoryTasksKey(tx, ids.repositoryId);
+        await tx
+          .select()
+          .from(schema.repositories)
+          .where(eq(schema.repositories.id, ids.repositoryId))
+          .for('update');
+        held.resolve();
+        await release.promise;
+        await tx.delete(schema.repositories).where(eq(schema.repositories.id, ids.repositoryId));
+      });
+      try {
+        await held.promise;
+        const result = await settle(writerDb.transaction((tx) => write(kind, tx, ids)));
+        expect(result).toMatchObject({ ok: false, error: { kind: 'busy' } });
+        if (!result.ok) expect(result.error).toBeInstanceOf(PlanPatchError);
+        // Refusal happens with the delete STILL holding R. No partial write survives it.
+        const [node] = await db
+          .select()
+          .from(schema.planNodes)
+          .where(eq(schema.planNodes.id, ids.nodeId));
+        const [question] = await db
+          .select()
+          .from(schema.projectStateConflicts)
+          .where(eq(schema.projectStateConflicts.id, ids.conflictId));
+        const [mirror] = await db
+          .select()
+          .from(schema.planMirrorState)
+          .where(eq(schema.planMirrorState.repositoryId, ids.repositoryId));
+        expect(node).toMatchObject({ title: 'A', version: 1 });
+        expect(question).toMatchObject({ resolution: null, resolvedAt: null });
+        expect(mirror?.revision).toBe(1);
+      } finally {
+        release.resolve();
+        await deletion;
+      }
+      const gone = await settle(writerDb.transaction((tx) => write(kind, tx, ids)));
+      if (kind === 'patch')
+        expect(gone).toMatchObject({ ok: false, error: { kind: 'repository_gone' } });
+      else expect(gone).toMatchObject({ ok: true, value: { kind: 'not_found' } });
+    },
+  );
+
+  it('a pool-backed node edit waits through a one-second admission hold and commits', async () => {
+    const ids = await seed();
+    const held = Promise.withResolvers<number>();
+    const release = Promise.withResolvers<void>();
+    const started = Promise.withResolvers<number>();
+    let ended = false;
+    const holder = deleteDb.transaction(async (tx) => {
+      await lockRepositoryRow(tx, ids.repositoryId);
+      held.resolve(await pid(tx));
+      await release.promise;
+      // This real server wait models the external holder's duration; no elapsed assertion.
+      await tx.execute(sql`select pg_sleep(1)`);
+    });
+    await held.promise;
+    const patch = settle(
+      writerDb.transaction(async (tx) => {
+        await tx.execute(sql`set local statement_timeout = '10s'`);
+        started.resolve(await pid(tx));
+        return applyPlanPatch(
+          tx,
+          { ops: [{ op: 'upsert', nodeRef: ids.nodeId, title: 'patient edit' }] },
+          { repositoryId: ids.repositoryId, origin: 'user' },
+        );
+      }),
+    );
+    void patch.then(() => {
+      ended = true;
+    });
+    try {
+      await untilBlocked(await started.promise, await held.promise, () => ended);
+    } finally {
+      release.resolve();
+      await holder;
+    }
+    expect(await patch).toMatchObject({ ok: true });
+    expect(
+      await db.query.planNodes.findFirst({ where: eq(schema.planNodes.id, ids.nodeId) }),
+    ).toMatchObject({ title: 'patient edit', version: 2 });
+  });
+
+  it.each(['import', 'reconcile'])(
+    '%s maps repository busy to held and deletion to a clean no-op',
+    async (kind) => {
+      const ids = await seed();
+      await writePlanMirror(db, ids.repositoryId, ids.repoPath);
+      const json = await readFile(join(ids.repoPath, HAIVE_DATA_FILES.plan), 'utf8');
+      const before = (await db.query.planMirrorState.findFirst({
+        where: eq(schema.planMirrorState.repositoryId, ids.repositoryId),
+      }))!;
+      // The flush above wrote everything, so the row is clean.
+      expect(before.writtenRevision).toBe(before.revision);
+      if (kind === 'import')
+        await db
+          .delete(schema.planNodes)
+          .where(eq(schema.planNodes.repositoryId, ids.repositoryId));
+      const run = () =>
+        kind === 'import'
+          ? importPlanMirror(writerDb, ids.repositoryId, ids.repoPath)
+          : reconcilePlanFromCheckout(writerDb, ids.repositoryId, ids.repoPath);
+      const held = Promise.withResolvers<void>();
+      const release = Promise.withResolvers<void>();
+      const deletion = deleteDb.transaction(async (tx) => {
+        await lockRepositoryRow(tx, ids.repositoryId);
+        held.resolve();
+        await release.promise;
+        await tx.delete(schema.repositories).where(eq(schema.repositories.id, ids.repositoryId));
+      });
+      try {
+        await held.promise;
+        await expect(run()).rejects.toBeInstanceOf(PlanMirrorHeldError);
+        // A hold on a clean row makes it dirty (one bump), so the sweep retries the held
+        // import or reconcile; a hold on a row that is already dirty leaves its revision as it is.
+        expect(
+          await db.query.planMirrorState.findFirst({
+            where: eq(schema.planMirrorState.repositoryId, ids.repositoryId),
+          }),
+        ).toMatchObject({
+          revision: before.revision + 1,
+          writtenRevision: before.writtenRevision,
+        });
+        // The production sync caller (watcher and clone recovery) must see that same hold.
+        await expect(
+          syncPlanFromCheckout(writerDb, ids.repositoryId, ids.repoPath),
+        ).rejects.toBeInstanceOf(PlanMirrorHeldError);
+      } finally {
+        release.resolve();
+        await deletion;
+      }
+      const gone = await run();
+      if (kind === 'import') expect(gone).toMatchObject({ imported: false, code: 'no_mirror' });
+      else expect(gone).toMatchObject({ nodesCreated: 0, nodesUpdated: 0, skipped: null });
+      await expect(
+        syncPlanFromCheckout(writerDb, ids.repositoryId, ids.repoPath),
+      ).resolves.toBeUndefined();
+      expect(await readFile(join(ids.repoPath, HAIVE_DATA_FILES.plan), 'utf8')).toBe(json);
+      expect(
+        await db.query.planMirrorState.findFirst({
+          where: eq(schema.planMirrorState.repositoryId, ids.repositoryId),
+        }),
+      ).toBeUndefined();
+    },
+  );
+
+  it.each([LATE_LOCK_WAIT_MS, 25])(
+    'bounds the mining-claim -> repository inversion against onboarding Retry and rolls the claim back (%s ms)',
+    async (repositoryLockTimeoutMs) => {
+      const ids = await seed();
+      const [task] = await db
+        .insert(schema.tasks)
+        .values({
+          userId,
+          repositoryId: ids.repositoryId,
+          type: 'onboarding',
+          title: 'retry',
+          status: 'failed',
+        })
+        .returning();
+      const [step] = await db
+        .insert(schema.taskSteps)
+        .values({ taskId: task!.id, stepId: '10_8-plan-build', stepIndex: 14.5, title: 'plan' })
+        .returning();
+      const [mining] = await db
+        .insert(schema.taskStepAgentMinings)
+        .values({ taskStepId: step!.id, agentId: 'planner', status: 'done' })
+        .returning();
+      const claimed = Promise.withResolvers<void>();
+      const release = Promise.withResolvers<void>();
+      const peerStarted = Promise.withResolvers<number>();
+      let writerPid = 0;
+      let peerEnded = false;
+      const writer = settle(
+        writerDb.transaction(async (tx) => {
+          await tx.execute(sql`set local deadlock_timeout = '10s'`);
+          writerPid = await pid(tx);
+          await tx
+            .update(schema.taskStepAgentMinings)
+            .set({ consumedAt: new Date() })
+            .where(eq(schema.taskStepAgentMinings.id, mining!.id));
+          claimed.resolve();
+          await release.promise;
+          return write('patch', tx, ids, repositoryLockTimeoutMs);
+        }),
+      );
+      await claimed.promise;
+      const rollback = new Error('test-only Retry rollback');
+      const peer = settle(
+        deleteDb.transaction(async (tx) => {
+          await tx.execute(sql`set local statement_timeout = '10s'`);
+          await tx.execute(sql`set local deadlock_timeout = '10s'`);
+          await lockRepositoryRow(tx, ids.repositoryId);
+          peerStarted.resolve(await pid(tx));
+          await tx
+            .delete(schema.taskStepAgentMinings)
+            .where(eq(schema.taskStepAgentMinings.id, mining!.id));
+          throw rollback;
+        }),
+      );
+      void peer.then(() => {
+        peerEnded = true;
+      });
+      try {
+        await untilBlocked(await peerStarted.promise, writerPid, () => peerEnded);
+      } finally {
+        release.resolve();
+      }
+      const [result, retried] = await Promise.all([writer, peer]);
+      expect(result).toMatchObject({ ok: false, error: { kind: 'busy' } });
+      expect(retried).toMatchObject({ ok: false, error: rollback });
+      const [row] = await db
+        .select()
+        .from(schema.taskStepAgentMinings)
+        .where(eq(schema.taskStepAgentMinings.id, mining!.id));
+      expect(row?.consumedAt).toBeNull();
+      const [node] = await db
+        .select()
+        .from(schema.planNodes)
+        .where(eq(schema.planNodes.id, ids.nodeId));
+      expect(node).toMatchObject({ title: 'A', version: 1 });
+    },
+  );
+  it('the production answer caller returns coded busy after rolling back its bounded wait', async () => {
+    const ids = await seed();
+    const held = Promise.withResolvers<void>();
+    const release = Promise.withResolvers<void>();
+    const holder = deleteDb.transaction(async (tx) => {
+      await tx
+        .select()
+        .from(schema.repositories)
+        .where(eq(schema.repositories.id, ids.repositoryId))
+        .for('update');
+      held.resolve();
+      await release.promise;
+    });
+    try {
+      await held.promise;
+      expect(
+        await resolveProjectStateConflict(writerDb, { ...ids, userId, answer: 'take_theirs' }),
+      ).toEqual({ kind: 'busy' });
+      const [question] = await db
+        .select()
+        .from(schema.projectStateConflicts)
+        .where(eq(schema.projectStateConflicts.id, ids.conflictId));
+      expect(question?.resolvedAt).toBeNull();
+    } finally {
+      release.resolve();
+      await holder;
+    }
+  });
+});

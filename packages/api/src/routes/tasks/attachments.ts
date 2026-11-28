@@ -2,7 +2,6 @@ import {
   CheckoutUnavailableError,
   assertCheckoutMutationOwner,
   requireCheckoutAccess,
-  withCheckoutMutation,
   withCheckoutRead,
 } from '@haive/shared/checkout-access';
 import type { RootClaimHandle } from '@haive/database';
@@ -46,6 +45,7 @@ import {
   settleExpansionAttempts,
   settleExpansionIntents,
 } from '@haive/shared/attachments-fs';
+import { withAdmittedCheckoutMutation } from '../../lib/admitted-checkout-mutation.js';
 import { attachmentRemovalPlan } from '../../lib/attachment-removal.js';
 import { containmentHttpError } from '../../lib/fs-http.js';
 import { writeBodyToHeld } from '../../lib/held-write.js';
@@ -89,7 +89,7 @@ const checkoutAccess: MiddlewareHandler<AttachmentEnv> = async (c, next) => {
     await requireCheckoutAccess(db, repositoryId, { mode: 'read', availability: 'repair' });
     return next();
   }
-  await withCheckoutMutation(
+  await withAdmittedCheckoutMutation(
     db,
     repositoryId,
     c.get('userId'),
@@ -116,7 +116,7 @@ const NODE_GID = 1000;
 async function resolveTaskUploadsDir(
   taskId: string,
   userId: string,
-): Promise<{ dir: string; anchor: string; rel: string }> {
+): Promise<{ dir: string; anchor: string; rel: string; taskId: string }> {
   const db = getDb();
   const task = await db.query.tasks.findFirst({
     where: and(eq(schema.tasks.id, taskId), eq(schema.tasks.userId, userId)),
@@ -137,18 +137,20 @@ async function resolveTaskUploadsDir(
   if (!repo.storagePath) {
     throw new HttpError(409, 'Task repository is not ready yet');
   }
-  const rel = taskUploadsRel(taskId);
-  return { dir: join(repo.storagePath, rel), anchor: repo.storagePath, rel };
+  const rel = taskUploadsRel(task.id);
+  return { dir: join(repo.storagePath, rel), anchor: repo.storagePath, rel, taskId: task.id };
 }
 
-/** 404 unless the task exists and belongs to the user. */
-async function requireOwnedTask(taskId: string, userId: string): Promise<void> {
+/** 404 unless the task exists and belongs to the user. Returns the row's id: the only spelling a
+ *  path or key may use, since the database matches any uuid spelling. */
+async function requireOwnedTask(taskId: string, userId: string): Promise<string> {
   const db = getDb();
   const row = await db.query.tasks.findFirst({
     where: and(eq(schema.tasks.id, taskId), eq(schema.tasks.userId, userId)),
     columns: { id: true },
   });
   if (!row) throw new HttpError(404, 'Task not found');
+  return row.id;
 }
 
 async function findAttachment(taskId: string, userId: string, attachmentId: string) {
@@ -489,10 +491,14 @@ async function finalizeAttachment(args: {
 
 attachmentRoutes.post('/:id/attachments', async (c) => {
   const userId = c.get('userId');
-  const taskId = c.req.param('id');
   const checkout = c.get('checkout');
   const beforeWrite = () => assertCheckoutMutationOwner(checkout.owner!);
-  const { dir, anchor, rel: uploadsRel } = await resolveTaskUploadsDir(taskId, userId);
+  const {
+    dir,
+    anchor,
+    rel: uploadsRel,
+    taskId,
+  } = await resolveTaskUploadsDir(c.req.param('id'), userId);
 
   const query = uploadTaskAttachmentQuerySchema.parse({
     filename: c.req.query('filename'),
@@ -567,8 +573,7 @@ attachmentRoutes.post('/:id/attachments', async (c) => {
 
 attachmentRoutes.get('/:id/attachments', async (c) => {
   const userId = c.get('userId');
-  const taskId = c.req.param('id');
-  await requireOwnedTask(taskId, userId);
+  const taskId = await requireOwnedTask(c.req.param('id'), userId);
 
   const db = getDb();
   const rows = await db.query.taskAttachments.findMany({
@@ -583,9 +588,8 @@ attachmentRoutes.get('/:id/attachments', async (c) => {
 
 attachmentRoutes.get('/:id/attachments/:attachmentId/raw', async (c) => {
   const userId = c.get('userId');
-  const taskId = c.req.param('id');
   const attachmentId = c.req.param('attachmentId');
-  await requireOwnedTask(taskId, userId);
+  const taskId = await requireOwnedTask(c.req.param('id'), userId);
   const row = await findAttachment(taskId, userId, attachmentId);
 
   // The uploads dir sits at `<storagePath>/.haive/task-uploads/<taskId>`, and `.haive` is
@@ -627,9 +631,8 @@ attachmentRoutes.get('/:id/attachments/:attachmentId/raw', async (c) => {
 
 attachmentRoutes.delete('/:id/attachments/:attachmentId', async (c) => {
   const userId = c.get('userId');
-  const taskId = c.req.param('id');
   const attachmentId = c.req.param('attachmentId');
-  await requireOwnedTask(taskId, userId);
+  const taskId = await requireOwnedTask(c.req.param('id'), userId);
   const row = await findAttachment(taskId, userId, attachmentId);
 
   const db = getDb();
@@ -697,8 +700,7 @@ attachmentRoutes.delete('/:id/attachments/:attachmentId', async (c) => {
  *  a time from the UI, and the directory itself has to go with the rows. */
 attachmentRoutes.delete('/:id/attachments', async (c) => {
   const userId = c.get('userId');
-  const taskId = c.req.param('id');
-  await requireOwnedTask(taskId, userId);
+  const taskId = await requireOwnedTask(c.req.param('id'), userId);
   const raw = c.req.query('prefix');
   if (!raw) throw new HttpError(400, 'prefix query parameter is required');
   const prefix = safeAttachmentPath(raw);

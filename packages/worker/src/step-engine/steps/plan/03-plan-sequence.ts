@@ -1,6 +1,6 @@
 import { applyPlanPatchWithRetry as applyPlanPatch } from '../../../plan/patch-retry.js';
 import { and, eq, inArray, isNull } from 'drizzle-orm';
-import { schema } from '@haive/database';
+import { LATE_LOCK_WAIT_MS, schema } from '@haive/database';
 import {
   PLAN_PATCH_MAX_OPS,
   SEQUENCE_CONTEXT_ARMS,
@@ -716,6 +716,7 @@ export async function foldSequenceResults(
               {
                 repositoryId,
                 sourceTaskId: ctx.taskId,
+                repositoryLockTimeoutMs: LATE_LOCK_WAIT_MS,
                 ...(self ? { selfNodeId: self } : {}),
               },
             ),
@@ -728,7 +729,8 @@ export async function foldSequenceResults(
       applied += outcome.updated.length;
     } catch (err) {
       // Busy retries are exhausted; fail this pass before classifying the reply as unusable.
-      if (err instanceof PlanPatchError && err.kind === 'busy') throw err;
+      if (err instanceof PlanPatchError && (err.kind === 'busy' || err.kind === 'repository_gone'))
+        throw err;
       const message = err instanceof Error ? err.message : String(err);
       ctx.logger.warn({ err, agentId: result.agentId }, 'plan sequencing patch failed');
       await stampMiningError(ctx, result.agentId, `${APPLY_FAILURE_PREFIX} ${message}`);

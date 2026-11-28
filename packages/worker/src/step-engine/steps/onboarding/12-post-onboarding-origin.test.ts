@@ -72,6 +72,7 @@ async function ctxForRecording(root: string) {
     userId: USER,
     name: 'acme',
     source: 'upload',
+    status: 'ready',
   });
   await ctx.db
     .update(schema.tasks)

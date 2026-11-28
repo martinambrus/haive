@@ -9,6 +9,14 @@ continuation that finds its answers saved uses them as they are, and the row sta
 Values the job carries are ignored there, since a parked step's only source of them is a submit
 redelivered after it was applied. A submission, a retry and a first run still flip to `running`.
 
+Human-only form values saved on a row remain valid across a stalled-sweep redrive of a running
+step, including a replacement tick saved before a worker died ahead of its transaction. The runner
+strips only job-carried human-only values on redelivery; it never writes a stripped saved answer
+back. A job redelivered beside those durable values cannot replace them.
+A refused decision can request `ReopenStepFormError({ reuseFormValues: true })`: the existing
+`reconcileReusedFormValues` and default overlay prefill the refreshed form, excluding human-only
+fields. These freshly submitted values take precedence over reconciled defaults, including an explicit "none". It still parks with null answers and a fresh marker, so only a new submit can continue.
+
 **Nothing starts before the configuration store answers.** `bootstrap()` runs through
 `retryWhileConfigUnavailable` (see [Error diagnostics](error-diagnostics.md), "Configuration store
 outage"), and the step engine, the sandbox reap, the reconcile, the queues, the module jobs and
@@ -16,6 +24,11 @@ outage"), and the step engine, the sandbox reap, the reconcile, the queues, the 
 starting. The boot data migrations are part of the retried `bootstrap()`, except the two global-store
 repairs, which start after `haive-worker ready` and retry in their own loop (see
 [Global knowledge base](global-kb.md)). Any error other than the typed outage still exits 1.
+
+The worker's own boot bookkeeping uses its patient Redis client, independently of the
+configuration connection's ready check: runtime version and initial module report writes,
+reservation/agent-lease/browser-surcharge clears, and the boot-requeue counter all wait through
+LOADING or reconnect. Steady-state commands keep their finite deadline.
 
 **Boot hands a dead worker's active jobs back before it starts its own.** BullMQ keeps a job
 `active` under its lock when its worker dies, and the task and cli-exec locks are 30 minutes, so
@@ -223,6 +236,8 @@ a running task that is neither paused nor dead. Reset paths that close the park 
 cannot keep the badge alive. The task list explicitly selects this column; detail reads the
 whole step row.
 
+A disable preview's composed-LSP failure list includes a task only when its effective run list still has a fresh CLI-dispatching step at or after the current pointer. A live task with only deterministic work left is not described as failing at a next CLI step. The existing provider-sensitive hold counts remain separate.
+
 Before saving a provider disable, Save and Rebuild read the authenticated, owner-scoped
 `GET /cli-providers/:id/disable-impact`. It counts remaining fresh default-slot bindings to that
 provider on non-dead, nonterminal tasks (including tasks waiting to start or resume), using the same
@@ -269,7 +284,7 @@ its result and run the step a second time. The hold lives exactly as long as the
 empty at boot; a second worker process is not covered, since the hold is per process. A re-drive of a
 running or parked row is an epoch bump and an advance, never a reset and never a write to the row
 (the producers it repairs rely on the passes, agent rows and fix context the row keeps): the epoch
-stales a stamped job queued earlier, while an unstamped one (a form submit, the usage poller's own) is
+stales a stamped job queued earlier, while an unstamped one (a form submit or clarification) is
 serialised by `holdStepAdvance` and re-enters by status. The "redrove a stalled task" line carries
 `shape`: `parked`, `running`, `waiting_cli` or `handoff`. A `waiting_cli` row whose runs have all
 ended is a candidate too (`idleWaitingCliRow`): the run that ended last queues the step's
@@ -307,7 +322,7 @@ task-level cutoff gives way to the row's, since the pull-request poller rewrites
 every few minutes. For a `waiting_user` or `waiting_pr` task the fence stamps the row's `updated_at`,
 so an advance dropped before pickup is re-driven once per cutoff rather than on every pass, and it
 locks that row before the task row, the order a Retry takes (the other order deadlocked); an action
-whose NOWAIT re-check meets that lock answers 503 and can be sent again. A
+whose bounded late-row re-check cannot take that lock within 250 ms answers 503 and can be sent again. A
 `running` task's fence locks only the task row: it reads the row inside the update its epoch guards,
 and that update's stamp on the task throttles the next pass. A dead `waiting_user` or `waiting_pr` task revived
 with an answered form gets that advance at revival (`jobAfterRevive`).
@@ -619,6 +634,7 @@ for a page of the list in one query, both reading a task's newest 50 stops), sin
 written after the kill and a Retry that failed in between would otherwise read as the stop's. The same `failedAt` goes to the
 settlement a Stop owes: after the commit and the kill, the owner's Stop, an administrator's stop and
 an urgent module deactivation each queue one `settle-stopped-task` job (`enqueueStopSettle`),
+with urgent deactivation starting all enqueues together after its Stop batch finishes,
 because a Stop that finds no pass never reaches the pass's own `settleFailedTask`. The wait is
 bounded to 2 s and the helper never throws, so a Redis outage never delays or fails the answer. A job the queue never took is not lost: the request event the Stop wrote is re-driven by the stalled sweep (above). The
 worker (`handleSettleStoppedTask`) settles only while the task still reads `failed` with a
@@ -658,8 +674,8 @@ transaction then reads the task under the job's fence (`taskWriteTarget`: its ep
 or finished) FOR SHARE and rolls the flip back when the fence fails. A reset's epoch bump in flight
 holds that read until it commits, so no row is ever activated at an epoch a reset has moved past. A
 claim that committed before the bump is on the rows the reset reads after it: the api Retry and the
-fan-out Resume reset every row still active once they have bumped (`rowsActivatedMeanwhile`, NOWAIT,
-since they hold the task row, answering 503 when a pass is mid-write on a row they do not hold already,
+fan-out Resume reset every row still active once they have bumped (`rowsActivatedMeanwhile`, with a 250 ms LOCAL lock timeout,
+since they hold the task row, answering 503 when a pass still holds a row after that bound,
 see the batch below). Both kill the task's CLI
 sandboxes only once that has committed: a refused action then leaves every run alive, and a dying
 run's completion finds its invocation already superseded.
@@ -678,7 +694,12 @@ A task Retry re-runs the step the task stopped on, at its round (`retryTaskAtSte
 replaying the task from START, which re-derives every stored loop_back and pays each fix round
 again. One transaction ends the task's live runs, re-offers a parked row as it was (a form keeps its
 schema and answers except a fix-loop gate's, which loses its saved answer and asks again; a runtime
-park its detection), resets the failed or live row, its downstream
+park its detection). Re-offer leaves an accepted `waiting_form` answer alone when its
+`waiting_started_at` is NULL and `form_values` is non-NULL: the row and its attested
+`rerun_generation` survive until worker pickup, and the answer applies once. An open marker,
+missing values or a fix-loop decision still re-offers as before; message text grants nothing.
+A step Retry explicitly resets the clicked row and its generation, so the next fresh park still
+needs a new submit. A task Retry then resets the failed or live row, its downstream
 and any other live row, and moves the task back through `moveTaskToStep` under a bump fenced on
 `failed`, so a Cancel that landed first stands (409) and nothing is reset. A `done` or `skipped`
 row is left as it is: its advance re-drives the hand-off it finished with. A park's wait is booked
@@ -735,8 +756,9 @@ already issued before expiry; it cannot retract that operation, but starts no fu
 call after observing transaction termination. A removal completing after rollback can therefore
 leave no `auth_volumes.destroyed` audit row (the next probe finds the volume absent).
 
-Resource-section failures are logged and still allow the Stop or Cancel finish marker, as on main.
-Those markers acknowledge that the teardown pass ran, not that every resource disappeared.
+Resource-section failures are logged and normally allow the Stop or Cancel finish marker,
+except for the Cancel safety failures below, including terminal reap exhaustion.
+A written marker acknowledges that the teardown pass ran, not that every resource disappeared.
 Auth-volume leftovers are retried by the last terminal summary and boot's `reapOrphanedAuthVolumes`;
 stopped helper containers are removed by that boot reaper before the volumes. Shell containers and
 registry keys stay for `TerminalSessionReaper` once disconnected and idle; the next shell ensure
@@ -747,7 +769,17 @@ an evicted model again. A wedged volume existence probe still looks like absence
 cleanup until boot. Cancel still withholds its finish marker when a CLI sandbox remains or its
 listing is unknown, or no-change directory discard fails, since merge-directory safety depends
 on those checks. The existing Cancel re-drive is capped at three, as described above; resource
-section failure alone no longer consumes that recovery path. Volume existence
+section failures normally do not consume that recovery path. Terminal reap exhaustion is an
+exception: on Cancel it defers the whole resource section to that capped re-drive: merge
+reports and claim release, plan-merge discard, task-end re-sync, scratch and no-change directory
+cleanup, and worktree removal. Model unloads and KB cleanup still run, then Cancel rethrows
+before its finish marker so the re-drive repeats the teardown. A checkout rebuild is refused
+for that task while its cancellation remains unfinished. The abandon pass described above
+can later write an `abandoned: true` finish marker while the worktree is still on disk.
+Completion instead records `worktree.cleanup_deferred` with the retained path and structural
+reason in Activity only when its ordinary cleanup policy would remove the worktree; a workflow
+or custom type with its own cleanup step records no such event. It remains completed and has
+no automatic teardown re-drive. Volume existence
 probes and the embed live-task scan run before the transaction; the task's settlement is
 rechecked after those reads, under the row lock. Auth sync-back remains outside
 the row lock: it may wait for the CLI auth session lock, which must never be awaited while
@@ -872,13 +904,40 @@ held there, since `markTaskCancelled` committed before it. The batch goes behind
 runs and agent rows and its DAG reset, since a pass holds a run and then wants its step row, and before its
 first step write. The rows stay held until the action commits, so a pass that goes to flip or lock one of them
 waits for the action, and a claim then finds the epoch moved past it, instead of activating the row between the
-batch and the bump. The batch is never a waiting statement once the task row has been written, since a pass
+batch and the bump. The batch never waits indefinitely once the task row has been written, since a pass
 holding a step row waits for the task row: the Retry, the fan-out Resume and `moveTaskToStep` reset what a pass
-activated meanwhile with the rows already held (`rowsActivatedMeanwhile` stays NOWAIT, and `resetRowsForRerun`
-takes `rowsHeld` there) and sweep those rows' runs and agent rows without waiting as well (`sweepRunsOf` with
-`noWait`: runs FOR NO KEY UPDATE, agent rows FOR UPDATE), since a pass holds a run and then wants its step row
+activated meanwhile with the rows already held (`rowsActivatedMeanwhile` uses the bounded wait below, and `resetRowsForRerun`
+takes `rowsHeld` there) and sweep those rows' runs and agent rows with that same bound (`sweepRunsOf` with
+`lockFirst`: runs FOR NO KEY UPDATE, agent rows FOR UPDATE), since a pass holds a run and then wants its step row
 (`writeLoginHint`) and a Stop holds the runs it ended and then wants the step rows, and a FOR UPDATE on a row
-held FOR NO KEY UPDATE is an upgrade that conflicts with that run insert. The 503 of that NOWAIT is therefore
+held FOR NO KEY UPDATE is an upgrade that conflicts with that run insert.
+
+Plan folds also bound their repository KEY SHARE by `LATE_LOCK_WAIT_MS`: they already
+hold a mining claim, while onboarding/upgrade Retry and revival hold the repository FOR UPDATE
+before sweeping agent rows. A timeout rolls the entire claim-and-patch transaction back and
+worker retry backs off after releasing it. Every multi-row plan writer takes repository KEY
+SHARE before plan rows, excluding the repository delete's cascade; the complete caller order
+and deterministic PostgreSQL controls are in [Plan canvas](plan-canvas.md#plan-writes-and-repository-deletion-t483).
+
+The late sweeps use the database's `boundedLockWait` with the shared, injectable
+`LATE_LOCK_WAIT_MS` (250 ms), including `rowsActivatedMeanwhile`, held guard-reset
+additions in both reset helpers, and retained Resume rows under an existing batch.
+The helper sets LOCAL `lock_timeout` and restores DEFAULT on success; timeout aborts
+roll back the whole transaction. SQLSTATE 55P03 maps to HTTP 503 in the API and a
+`RevivalBusy` hold in the worker: job callers delay for 30 s without spending an
+attempt, then re-drive the handoff; boot reconcile logs the failure and leaves it
+to the stalled sweep. Longer benign holds still refuse.
+The bound is below the default 1 s `deadlock_timeout`, allowing up to 750 ms of
+earlier waiting before a reverse-tier wait begins. Earlier benign waits in the same
+transaction consume that budget: each bounded block can run several statements,
+each with its own 250 ms lock timeout, and an action can run several blocks.
+The remaining margin can approach zero. This is not an absolute deadlock guarantee:
+if a pass or Stop has already waited 750–1000 ms when the reverse-tier wait begins,
+its detector can fire first and choose that peer as the 40P01 victim. Deployments
+must retain the timeout ordering; increasing the late bound shrinks that margin.
+Ordinary first and second sweeps retain their wait policy.
+
+The 503 after that timeout is therefore
 left to a row created after the batch that a pass has activated and still writes when the bump lands, to a run
 or agent row of such a late row that a pass or a Stop holds, and to an action that took no batch (a fan-out
 Resume with nothing to reset, the loop Resume, `retry_ai`, Skip or a CLI switch with no row left active), which
@@ -898,9 +957,34 @@ step form (`holdReopenedForm`) consumes its agent rows before it writes the step
 fan-out Resume that also resets downstream or left-active rows still writes the clicked step's agent rows before
 the sweep of THOSE rows' runs; it meets a Retry-family action only through a worker reset of the same range or
 on a task with no repository (every other Retry-family action takes the repository's creation key first).
+
 Statements that match several runs or agent rows are not batched: each locks its rows in heap order (MEASURED at
 96,000 runs: a Seq Scan or Bitmap Heap Scan, rows locked in ctid order), the same order for all of them, so an
 id-ordered batch on some of them would be inconsistent with the rest.
+
+**API sandbox cleanup reports confirmation separately from the committed action.**
+`killTaskSandboxes` returns `killed`, `killConfirmed` and optional `killError`. A failed
+listing, unconfirmed removal, spawn or Docker deadline returns zero confirmed kills and
+`killConfirmed: false`; it does not roll back Stop or a committed recovery reset.
+An empty successful listing is confirmed with count zero. Stop, task/step Retry,
+both Resumes, Retry with AI, Skip and the step CLI switch expose that result whenever
+cleanup was attempted; recovery actions also warn on an unconfirmed result. Callers
+must use the boolean, never error wording or a zero count, to decide confirmation.
+The task page, CLI stream and maintenance Stop notices prioritize an explicit
+`killConfirmed: false` over zero counts; task and step recovery controls show the same
+warning after a committed action, including a CLI switch, the global-KB Retry and
+plan-chat CLI switch. The warning uses an amber banner distinct from the neutral empty-Stop notice;
+its tone is structural notice metadata, never inferred from copy. Older APIs without the field
+retain their existing behavior. Both API kill helpers list all container states (`docker ps -a --format` with ID and State fields), including
+created and exited sandboxes, and retain the task label AND CLI-family name filter
+so DDEV/app runners survive. Both helpers re-list after a failed removal under the same task label and CLI-family name
+filters, polling for up to three seconds. Confirmation requires no created, running,
+restarting or paused sandbox to remain, including a new id; exited, removing and dead
+leftovers cannot run a CLI. An unreadable, unknown or malformed state remains unconfirmed.
+The result and the strict helper’s rejection carry only `sandbox_listing_failed` or
+`sandbox_removal_failed`; Docker diagnostics stay in sanitized logs. Docker failures already return normally from the ordinary helper:
+controls on owner and maintenance Stop confirm 200 after commit, with maintenance's
+event and audit intact. No new event rule is introduced for those producers.
 
 **A cancel ends only the step rows it locked.** Every task cancel the api commits goes through one core
 (`cancelStillOpen`, `api/src/lib/cancel-task.ts`): the Cancel action, the step `abort` and
@@ -949,25 +1033,52 @@ reopened-form path and merge resolver each write `waiting_started_at` with `wait
 `handleResult` checks row ownership without stamping again, so a submit or clarify that read the
 park before the hand-off still matches it, and the hand-off cannot reopen a marker an accepted
 answer cleared. The answer routes compare the row's status and original marker under the row lock
-(`stillParkedAsRead`); a real re-park is refused with `step_form_not_waiting`. Legacy NULL markers
-remain answerable by status. Idle folds use the held current row or a single SQL update, never a
-pre-transaction idle value; CLI/provider switches likewise re-read their decision state under lock.
+(`stillParkedAsRead`); a real re-park is refused with `step_form_not_waiting`. A legacy NULL
+marker with NULL `form_values` remains answerable by status. A NULL marker with saved `form_values` is an already accepted
+answer even while the row stays `waiting_form`: the submit route locks and reads the row,
+retries the advance enqueue for an identical normalized JSON answer without any values,
+event or task-state write, and refuses a conflicting replacement with 409 `step_form_not_waiting`.
+The retry carries the task epoch read FOR SHARE while the accepted step row is still locked,
+so a later Retry/reset makes it stale. It carries no form values, so it never reopens a failed
+task at pickup either. The first enqueue and
+identical retries share a live-job deduplication id bound to the step row, its accepted
+`updated_at` and that epoch; another accepted park or epoch gets a new id. `queued` reports
+whether this enqueue attempt succeeded (including deduplication); a refusal leaves the saved
+answer for another retry or the stalled sweep.
+Object key order does not change answer identity, and an empty object is a saved answer.
+This also covers a second submit whose pre-read saw the wait still open. Clarification keeps
+its separate event-based contract; it does not replace `form_values`. Idle folds use the held
+current row or a single SQL update, never a pre-transaction idle value; CLI/provider switches likewise re-read their decision state under lock.
 
-A form submit carries no epoch on purpose, so it cannot be fenced. `isStaleSubmit` drops one that
+The auto-continue toggle queues the pointer, round and epoch returned by its task UPDATE,
+in the same transaction as the toggle. Its earlier authorization read is not the enqueue's
+snapshot. The PR poller's auto-finalize closes the step's wait and reads the task epoch
+FOR SHARE in one transaction, step row before task row, so Retry cannot fall between those
+operations. Both advances carry that epoch and a same-step Retry makes them stale.
+The allowance auto-resume increments the epoch with its guarded failed-to-running UPDATE
+and returns `{ epoch }` only after commit (or `false` when no reopen committed). The usage
+poller stamps that returned epoch directly: reading it back after commit could adopt a
+concurrent Retry's epoch or lose the stamp on a read failure. A failed transaction retains
+the old epoch and watch, and its caller queues nothing.
+
+A first form submit carries no epoch on purpose, so it cannot be fenced. `isStaleSubmit` drops one that
 lands on a form parked after the job was queued, such as a form a `ReopenStepFormError` reopened,
 which would otherwise answer the new form with what was typed into the old one.
 
 A latched insight gate (gate 2 while a failed insight check awaits re-approval or inside a gate-3
 insight cycle where it is kept for deferred QA findings, gate 3 after that re-approval or after any
 gate-3 insight cycle) also binds its answer to the form it was rendered for. The body carries
-`stepRowId` and `waitingStartedAt`; unless both equal the row the route found, and that row's
-marker is still set (an answered wait has none), the route answers 409 `step_form_stale` and
-writes nothing. The latch is read from the latest `insight.check` event and, for both gates, from
+`stepRowId` and `waitingStartedAt`. For an unanswered park, both must equal the row id and
+live marker the route found; otherwise the route answers 409 `step_form_stale` and writes
+nothing. A closed wait has no marker: an identical retry of its saved normalized answer
+instead requires the same row id and a string timestamp, and may retry the enqueue without
+any mutation. A conflicting answer does not qualify for this exception.
+The latch is read from the latest `insight.check` event and, for both gates, from
 the task's `insight.continuation` events, and fails closed: an event it cannot read counts as
 latched, and the worker's settled exemption is not repeated, so gate 2 and gate 3 of a task that
 ever had a gate-3 insight cycle need the fields. Only these two steps require the fields; every
 other step ignores them, so older tabs and automation keep working there. The web sends them on
-every step submit and reloads the steps on this code. A client that omits them,
+every step submit and reloads the steps on this code. A client that omits these fields,
 such as an old tab, cannot answer a latched gate until it reloads.
 
 An LLM preparation hook may return `false` when refreshed inputs make the
@@ -988,6 +1099,28 @@ ended, superseded and other-step runs cannot justify it. Ordinary prepare throws
 and errors from other hooks retain their existing behavior. This adds no polling
 chain or durable state; the winner's completion and the existing recovery sweep
 own the next advance. Revert module consumers before removing this host support.
+
+Singleton LLM, Retry-with-AI and both merge-fixer dispatches (`merge-resolver.ts`
+and the DAG level merge in `dag-executor.ts`) use `enqueueReservedInvocation` to
+release only their exact inserted reservation when enqueue throws, just as a
+`prepareWorkspace` failure does. They stamp `cli_invocations.superseded_at` before
+propagating the original queue error. Without that release the ghost row remains
+live in `cliBacklogCounts`, which has no task-status filter, skewing fair priority
+and the user's backlog and showing a never-queued run on a failed step. Retry's
+reset already supersedes runs; failed tasks retain scratch by design.
+
+A lost queue acknowledgement may have queued the job; its ordinary supersede
+checks refuse or stop that invocation too. A release failure is logged through
+`serializeError` and never replaces the original queue error; existing orphan
+recovery remains responsible. This is not an atomic database/queue commit.
+Successful enqueues keep the reservation until the normal run lifecycle ends it.
+Both merge fixers retain their saved `fixInvocationId`: recovery reads that exact
+superseded row as a run that never answered, consumes it, aborts/reopens the merge
+and refunds the conflict attempt before dispatching again under the ordinary
+retry/auto-resolve policy. Mining and recap retain their own release handlers.
+Other DAG issue/reviewer/advisor/fix-coder and replanner dispatches are outside
+this merge-fixer change; their enqueue-failure cleanup is not covered by this
+contract.
 
 ## Task scratch cleanup
 
@@ -1309,7 +1442,8 @@ gate-3 insight cycle and a gate 2 kept for deferred QA findings inside one: the 
 `commit` or `decision`, owner and rerun generation must match its submit event, newer than the
 approval and than the cycle's `insight.continuation` event.
 The durable approval and cycle events hold that pass across Retry, Resume and epoch takeover;
-synthetic saved values or a job payload repark through the existing approval guard.
+a task Retry's re-offer preserves an accepted answer awaiting pickup at that same generation.
+Synthetic saved values or a job payload repark through the existing approval guard.
 Gate-3 batch intents carry a bounded SHA-256 digest plus an incomplete flag; outcomes carry
 the unchanged comparison. The continuation's original gate-3 intent remains the baseline
 across 08e Retry, so an interrupted writer's unchecked edits cannot become a fresh baseline.
@@ -1321,6 +1455,10 @@ its batch and check shortcut settle. Finishing a batch alone does not make an ol
 reader compatible, since journal loading reads historical records too.
 Report snapshots stay immutable
 per source generation and readable after completion.
+
+Rollback of the accepted-answer re-offer fix needs no data change or migration. Reverting it can
+ask again if task Retry lands between submit and worker pickup; retain the owner-attestation
+guard, which fails closed on that older generation.
 
 Rollback stops offering new gate-3 picks and automatic batches, then retains capable
 workers until active continuations and pending new gate forms are settled. Retain check
@@ -1373,15 +1511,15 @@ Explicit upstream reruns (API task/step Retry and worker revise/recheck/fix rese
 clear forward decisions and their skips, including pending entries read after the
 ordered batch. They advance affected generations in the same transaction as the
 ordinary reset and epoch fence. Newly included rows have their runs and agents
-swept under NOWAIT, so a busy writer rolls back the reset rather than crossing
-lock tiers. A full START Retry invalidates recorded branches
+swept under the shared 250 ms bound in both worker and API, so a lasting hold rolls back
+the reset rather than crossing lock tiers indefinitely. A full START Retry invalidates recorded branches
 too. A degraded done fan-out's Resume cascade regenerates downstream producers,
 so it invalidates their decisions/skips too. The forward rescan starts at the
 clicked producer under the ordered batch even when the initial downstream reset
 selection was empty. One boolean both supplies the batch-forcing rescan anchor
 and marks that batch held for the retained-row sweep. Guarded done-producer controls
 with an empty initial downstream reset set interleave Resume with a Retry-order peer
-and a decision writer (step batch before task SHARE), and exercise NOWAIT refusal
+and a decision writer (step batch before task SHARE), and exercise bounded refusal
 beside a pass and Stop holding a retained row's run. They assert no 40P01,
 committed-decision invalidation and complete rollback on contention. Only retained
 left-active and loop Resume work preserves guards. Recovery keeps guard state and generations and
@@ -1403,13 +1541,14 @@ pins. Ordinary resets omit guard_state from SET and ordinary START adds no full
 step-row SELECT. Both reset helpers accept the caller's immutable executionContract
 and only project it when the argument is undefined (worker before its transaction,
 API on its supplied transaction). Every production caller supplies the loaded pin;
-orphan reconcile adds it to the existing joined read. Ordinary resets therefore
-add no statement; literal all-table query captures pin the main statement list,
+orphan reconcile adds it to the existing joined read. Passing the loaded pin therefore
+adds no projection statement; literal all-table query captures pin the main statement list,
 lock predicates, reads and complete SET key sets for null and inert pins.
-No reset lock_timeout is added. API resets report extra rows
+Ordinary first and second run sweeps add no lock timeout; held late sweeps use the shared bound above.
+Every API Retry also sets and restores that bound around `rowsActivatedMeanwhile`. API resets report extra rows
 with their pre-reset statuses, so every caller includes their sandbox cleanup
 and audit even if a guard row was claimed after its initial selection. Retained
-Resume rows reset after a held batch use NOWAIT run sweeps to avoid reversing
+Resume rows reset after a held batch use bounded run sweeps to avoid an indefinite wait in reverse
 lock tiers.
 
 ## No-change cleanup recovery
@@ -1534,3 +1673,25 @@ since they have no invocation; Resume and Retry with AI keep that output, so onl
 it. Retry clears start/output and gives a fresh allowance; a failed row cannot automatically
 reopen. No new state machine, table, queue or fence is introduced.
 Existing login refusals, auth-lock serialization and settlement guards are unchanged.
+
+## Interactive checkout replacement recovery
+
+A rebuild stops and verifies interactive containers before its first rename. Its private restore
+and publication share one database commit: state and plan bases cannot commit
+before the replacement's rename. Death before that rename leaves the old bases and retained
+private output; death after it but before commit leaves complete public output with old bases.
+Once the dead root claim expires, the next owned Retry rebuilds the absent checkout or imports
+the usable one respectively. Worker and enqueue failures preserve the exact
+repair code admitted for recovery. No new recovery marker or migration is needed.
+
+On worker death,
+committed checkout availability and Docker root device/inode labels are the recovery evidence;
+in-memory boot/session maps and matching path strings grant no reuse permission. Legacy unstamped
+containers are always kept; stamped labels compare inode only across device remounts.
+Identity repair uses ordinary runner recovery without a running-task or held-Editor override.
+An unverifiable Docker stop delays the owned job for at most 30 minutes; permanent reason codes
+and expired deferrals return the row to visible error/Retry with no directory moved. The stranded
+sweep does not count these deferrals as live forever. The single-worker barrier bounds its open/boot
+drain without holding a pool connection. See
+[Repository refresh](repository-refresh.md#interactive-mounts-at-replacement) for deployment,
+rollback, Redis stale-cookie limitations and anonymous versus named volume lifetimes.

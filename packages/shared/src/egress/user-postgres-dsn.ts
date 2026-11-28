@@ -130,7 +130,8 @@ export function userPostgresErrorMessage(err: unknown): string {
   const code = err && typeof err === 'object' && 'code' in err ? err.code : undefined;
   if (code === 'ECONNREFUSED') return 'PostgreSQL connection refused';
   if (code === 'ENOTFOUND' || code === 'EAI_AGAIN') return 'PostgreSQL host could not be resolved';
-  if (code === 'CONNECT_TIMEOUT' || code === 'ETIMEDOUT') return 'PostgreSQL connection timed out';
+  if (code === 'CONNECT_TIMEOUT' || code === 'ETIMEDOUT' || code === 'GLOBAL_KB_DEADLINE')
+    return 'PostgreSQL connection timed out';
   if (code === '28P01' || code === '28000') return 'PostgreSQL authentication failed';
   return 'PostgreSQL connection failed';
 }

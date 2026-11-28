@@ -161,9 +161,11 @@ export async function probeOpenRouterModelCompat(opts: {
     return { compatible: true };
   }
 
-  if (resp.ok) return { compatible: true };
-  // 401/403/429 say something about the KEY or the quota, not the model shape.
-  if (resp.status !== 400) return { compatible: true };
+  // Success and 401/403/429 say nothing about a rejected model shape.
+  if (resp.status !== 400) {
+    await resp.body?.cancel().catch(() => {});
+    return { compatible: true };
+  }
 
   let answer: { text: string; truncated: boolean };
   try {

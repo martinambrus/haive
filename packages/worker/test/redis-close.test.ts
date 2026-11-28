@@ -1,10 +1,14 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
-const h = vi.hoisted(() => ({ conns: {} as { redis?: unknown; bull?: unknown } }));
+const h = vi.hoisted(() => ({
+  conns: {} as { redis?: unknown; bull?: unknown; patient?: unknown },
+}));
 
 vi.mock('@haive/shared', () => ({
-  createRedisConnection: () => h.conns.redis,
+  createRedisConnection: (_url: string, options?: unknown) =>
+    options ? h.conns.redis : h.conns.patient,
   createBullRedisConnection: () => h.conns.bull,
+  logger: { warn: vi.fn() },
 }));
 
 const QUIT_WAIT_MS = 1_000;
@@ -14,13 +18,15 @@ const answers = async () => 'OK';
 const fakeConnection = (quit: () => Promise<unknown>) => ({
   quit: vi.fn(quit),
   disconnect: vi.fn(),
+  sendCommand: vi.fn(),
+  on: vi.fn(),
 });
 
 async function initWith(
   redis: ReturnType<typeof fakeConnection>,
   bull: ReturnType<typeof fakeConnection>,
 ) {
-  h.conns = { redis, bull };
+  h.conns = { redis, bull, patient: fakeConnection(answers) };
   vi.resetModules();
   const mod = await import('../src/redis.js');
   mod.initRedis('redis://unused:6379');
@@ -68,6 +74,29 @@ describe('closeRedis', () => {
     expect(closed.settled).toBe(true);
     expect(redis.disconnect).not.toHaveBeenCalled();
     expect(bull.disconnect).toHaveBeenCalledTimes(1);
+  });
+
+  it('disconnects a finite client immediately when QUIT rejects while offline', async () => {
+    const redis = fakeConnection(async () => {
+      throw new Error('offline');
+    });
+    const bull = fakeConnection(answers);
+    const { closeRedis } = await initWith(redis, bull);
+    await closeRedis();
+    expect(redis.disconnect).toHaveBeenCalledTimes(1);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('also disconnects the patient connection when its QUIT never answers', async () => {
+    const redis = fakeConnection(answers);
+    const bull = fakeConnection(answers);
+    const { closeRedis } = await initWith(redis, bull);
+    const patient = h.conns.patient as ReturnType<typeof fakeConnection>;
+    patient.quit.mockImplementation(hangs);
+    const closed = track(closeRedis());
+    await vi.advanceTimersByTimeAsync(QUIT_WAIT_MS);
+    expect(closed.settled).toBe(true);
+    expect(patient.disconnect).toHaveBeenCalledTimes(1);
   });
 
   it('returns at once without a disconnect when both connections quit', async () => {

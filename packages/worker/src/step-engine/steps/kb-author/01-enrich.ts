@@ -1,3 +1,4 @@
+import { globalKbCallOptions } from '@haive/shared/global-kb';
 import { and, desc, eq, inArray, isNull, ne, sql } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import {
@@ -17,7 +18,11 @@ import {
   confirmSupersedeByEmbedding,
   SUPERSEDE_CANDIDATE_LIMIT,
 } from '../_global-kb-similarity.js';
-import { globalKbTopicKey, inheritDescription } from '../_global-kb-promote.js';
+import {
+  GLOBAL_KB_STEP_DEADLINE_MS,
+  globalKbTopicKey,
+  inheritDescription,
+} from '../_global-kb-promote.js';
 import {
   bodyUsesRepoSymbol,
   collectRepoBasenames,
@@ -404,68 +409,72 @@ export const kbAuthorEnrichStep: StepDefinition<KbAuthorDetect, KbAuthorApply> =
   async detect(ctx): Promise<KbAuthorDetect> {
     const { entryId, hasRepo, authorFacets, authorDescription } = await loadTaskAnchor(ctx);
     if (!entryId) throw new Error('kb_author task is missing metadata.globalKbEntryId');
-    return withGlobalKb(ctx.db, async ({ db }) => {
-      const entry = await db.query.globalKbEntries.findFirst({
-        where: eq(globalKbEntries.id, entryId),
-      });
-      if (!entry) throw new Error(`global KB entry ${entryId} not found`);
-      // An approval stops this: a retry would demote the entry, and a cancel would then delete it.
-      const [demoted] = await db
-        .update(globalKbEntries)
-        .set({ status: 'enriching', updatedAt: new Date() })
-        .where(and(eq(globalKbEntries.id, entryId), isNull(globalKbEntries.enforcedHash)))
-        .returning({ id: globalKbEntries.id });
-      if (!demoted) {
-        throw new Error(
-          `global KB entry ${entryId} carries an admin's approval as a house rule; enriching it again would demote it, so an admin has to remove that approval first`,
-        );
-      }
-      const rows = await db
-        .select({
-          id: globalKbEntries.id,
-          title: globalKbEntries.title,
-          category: globalKbEntries.category,
-          facets: globalKbEntries.facets,
-          body: globalKbEntries.body,
-        })
-        .from(globalKbEntries)
-        .where(
-          and(
-            eq(globalKbEntries.namespace, entry.namespace),
-            inArray(globalKbEntries.status, ['active', 'draft']),
-            ne(globalKbEntries.id, entryId),
-          ),
-        )
-        .orderBy(desc(globalKbEntries.updatedAt), desc(globalKbEntries.id))
-        .limit(EXISTING_LIMIT + 1);
-      if (rows.length > EXISTING_LIMIT) {
-        ctx.logger.warn(
-          { count: rows.length },
-          `global KB de-dup context capped at ${EXISTING_LIMIT} entries`,
-        );
-      }
-      const existing: ExistingEntry[] = rows.slice(0, EXISTING_LIMIT).map((r) => ({
-        id: r.id,
-        title: r.title,
-        category: r.category,
-        facets: r.facets ?? {},
-        excerpt: (r.body ?? '').slice(0, 400),
-      }));
-      return {
-        entryId,
-        namespace: entry.namespace,
-        title: entry.title,
-        seedText: entry.seedText ?? entry.body,
-        existing,
-        hasRepo,
-        // Whatever the author stated when creating the entry. The skeleton is inserted with
-        // `facets: {}` when they state nothing, so this is empty in that case and the model
-        // decides every dimension. Taken from the TASK, which never changes; the entry's own
-        // column is rewritten by apply() and so reports the model's scope on a retry.
-        authorFacets: authorFacets ?? entry.facets ?? {},
-        authorDescription,
-      };
-    });
+    return withGlobalKb(
+      ctx.db,
+      async ({ db }) => {
+        const entry = await db.query.globalKbEntries.findFirst({
+          where: eq(globalKbEntries.id, entryId),
+        });
+        if (!entry) throw new Error(`global KB entry ${entryId} not found`);
+        // An approval stops this: a retry would demote the entry, and a cancel would then delete it.
+        const [demoted] = await db
+          .update(globalKbEntries)
+          .set({ status: 'enriching', updatedAt: new Date() })
+          .where(and(eq(globalKbEntries.id, entryId), isNull(globalKbEntries.enforcedHash)))
+          .returning({ id: globalKbEntries.id });
+        if (!demoted) {
+          throw new Error(
+            `global KB entry ${entryId} carries an admin's approval as a house rule; enriching it again would demote it, so an admin has to remove that approval first`,
+          );
+        }
+        const rows = await db
+          .select({
+            id: globalKbEntries.id,
+            title: globalKbEntries.title,
+            category: globalKbEntries.category,
+            facets: globalKbEntries.facets,
+            body: globalKbEntries.body,
+          })
+          .from(globalKbEntries)
+          .where(
+            and(
+              eq(globalKbEntries.namespace, entry.namespace),
+              inArray(globalKbEntries.status, ['active', 'draft']),
+              ne(globalKbEntries.id, entryId),
+            ),
+          )
+          .orderBy(desc(globalKbEntries.updatedAt), desc(globalKbEntries.id))
+          .limit(EXISTING_LIMIT + 1);
+        if (rows.length > EXISTING_LIMIT) {
+          ctx.logger.warn(
+            { count: rows.length },
+            `global KB de-dup context capped at ${EXISTING_LIMIT} entries`,
+          );
+        }
+        const existing: ExistingEntry[] = rows.slice(0, EXISTING_LIMIT).map((r) => ({
+          id: r.id,
+          title: r.title,
+          category: r.category,
+          facets: r.facets ?? {},
+          excerpt: (r.body ?? '').slice(0, 400),
+        }));
+        return {
+          entryId,
+          namespace: entry.namespace,
+          title: entry.title,
+          seedText: entry.seedText ?? entry.body,
+          existing,
+          hasRepo,
+          // Whatever the author stated when creating the entry. The skeleton is inserted with
+          // `facets: {}` when they state nothing, so this is empty in that case and the model
+          // decides every dimension. Taken from the TASK, which never changes; the entry's own
+          // column is rewritten by apply() and so reports the model's scope on a retry.
+          authorFacets: authorFacets ?? entry.facets ?? {},
+          authorDescription,
+        };
+      },
+      globalKbCallOptions({ signal: ctx.signal }, GLOBAL_KB_STEP_DEADLINE_MS),
+    );
   },
 
   llm: {
@@ -583,37 +592,17 @@ export const kbAuthorEnrichStep: StepDefinition<KbAuthorDetect, KbAuthorApply> =
     // never overwrite a good article. topicKey is the lock key ONLY, never stored on
     // the entry, so enrich stays isolated from the promote path's topicKey dedup.
     const lockTopic = globalKbTopicKey(category, facets) ?? `kbauthor:${category}`;
-    const { confirmedUpdate } = await withGlobalKb(ctx.db, async ({ db }) =>
-      db.transaction(async (tx) => {
-        const lockKey = `${detected.namespace}:${lockTopic}`;
-        await tx.execute(
-          sql`SELECT pg_advisory_xact_lock(hashtext('gkb_enrich'), hashtext(${lockKey}))`,
-        );
-        // Live entries newer than this task's detect snapshot (not already shown to the
-        // model); capped for the embed batch. These catch a concurrent enrich's result.
-        const appeared = await tx
-          .select({
-            id: globalKbEntries.id,
-            status: globalKbEntries.status,
-            title: globalKbEntries.title,
-            body: globalKbEntries.body,
-            description: globalKbEntries.description,
-          })
-          .from(globalKbEntries)
-          .where(
-            and(
-              eq(globalKbEntries.namespace, detected.namespace),
-              inArray(globalKbEntries.status, ['active', 'draft']),
-              ne(globalKbEntries.id, skeletonId),
-            ),
-          )
-          .orderBy(desc(globalKbEntries.updatedAt), desc(globalKbEntries.id))
-          .limit(SUPERSEDE_CANDIDATE_LIMIT);
-        const candidates = appeared.filter((c) => !existingIds.has(c.id));
-        // Keep the model's proposed target in the running even if it's an older entry
-        // outside the recent-window query above.
-        if (intent.isUpdate && !candidates.some((c) => c.id === intent.targetId)) {
-          const [tgt] = await tx
+    const { confirmedUpdate } = await withGlobalKb(
+      ctx.db,
+      async ({ db }) =>
+        db.transaction(async (tx) => {
+          const lockKey = `${detected.namespace}:${lockTopic}`;
+          await tx.execute(
+            sql`SELECT pg_advisory_xact_lock(hashtext('gkb_enrich'), hashtext(${lockKey}))`,
+          );
+          // Live entries newer than this task's detect snapshot (not already shown to the
+          // model); capped for the embed batch. These catch a concurrent enrich's result.
+          const appeared = await tx
             .select({
               id: globalKbEntries.id,
               status: globalKbEntries.status,
@@ -624,79 +613,102 @@ export const kbAuthorEnrichStep: StepDefinition<KbAuthorDetect, KbAuthorApply> =
             .from(globalKbEntries)
             .where(
               and(
-                eq(globalKbEntries.id, intent.targetId),
                 eq(globalKbEntries.namespace, detected.namespace),
+                inArray(globalKbEntries.status, ['active', 'draft']),
+                ne(globalKbEntries.id, skeletonId),
               ),
             )
-            .limit(1);
-          if (tgt) candidates.push(tgt);
-        }
-        // Confirm identity with real embeddings BEFORE letting anything supersede: the
-        // coarse lock key groups a whole tech, so it can't decide the SAME article.
-        const matchId =
-          candidates.length > 0
-            ? await confirmSupersedeByEmbedding(
-                { ollamaUrl: settings.ollamaUrl, embedModel: settings.embedModel },
-                // The SCRUBBED article, not the model's raw answer. `finalBody` is what gets
-                // saved and reviewed, and if scrubbing removed repo-specific material that
-                // dominated the original text, superseding on that text archives an existing
-                // entry over content nobody will ever see published.
-                `${title}\n\n${finalBody}`,
-                candidates.map((c) => ({
-                  id: c.id,
-                  status: c.status,
-                  text: `${c.title}\n\n${c.body}`,
-                })),
+            .orderBy(desc(globalKbEntries.updatedAt), desc(globalKbEntries.id))
+            .limit(SUPERSEDE_CANDIDATE_LIMIT);
+          const candidates = appeared.filter((c) => !existingIds.has(c.id));
+          // Keep the model's proposed target in the running even if it's an older entry
+          // outside the recent-window query above.
+          if (intent.isUpdate && !candidates.some((c) => c.id === intent.targetId)) {
+            const [tgt] = await tx
+              .select({
+                id: globalKbEntries.id,
+                status: globalKbEntries.status,
+                title: globalKbEntries.title,
+                body: globalKbEntries.body,
+                description: globalKbEntries.description,
+              })
+              .from(globalKbEntries)
+              .where(
+                and(
+                  eq(globalKbEntries.id, intent.targetId),
+                  eq(globalKbEntries.namespace, detected.namespace),
+                ),
               )
-            : null;
-        const isUpdate = matchId != null;
-        // The SKELETON row carries the article either way. A confirmed match additionally
-        // records what it supersedes, so review can show the diff; the target itself is left
-        // untouched until the user activates.
-        await tx
-          .update(globalKbEntries)
-          .set({
-            title,
-            category,
-            facets,
-            description: inheritDescription(
-              described.description,
-              candidates.find((c) => c.id === matchId)?.description,
-            ),
-            body: finalBody,
-            // ALWAYS a draft. A brand-new article is the riskiest thing that enters a store
-            // shared by every project, and it used to be the one case that skipped review
-            // while an UPDATE — a change to something already reviewed — was held. That is
-            // backwards, and it is what the endpoint's own contract says ("the user reviews +
-            // activates the draft"). Activation embeds it, through the API's enqueueSync.
-            status: 'draft',
-            supersedesEntryId: matchId,
-            embedStatus: 'pending',
-            updatedAt: new Date(),
-          })
-          .where(eq(globalKbEntries.id, skeletonId));
-        // Drop any vectors this entry still owns, IN THE SAME TRANSACTION as the demotion.
-        //
-        // "Drafts hold no vectors" is an invariant, and an invariant asserted in a comment is
-        // how the retry path came to violate it. A NEW entry was never embedded, but a RETRIED
-        // one was: a step that completed under the old auto-activate behaviour left its entry
-        // `active` WITH chunks, and this update rewrites the body and demotes the row while
-        // those chunks stay. Retrieval has no status predicate — `ragHybridSearch` filters on
-        // namespace and facets, and the body expansion joins a chunk to its entry and returns
-        // the entry's CURRENT body — so a survivor serves the new, explicitly unreviewed text
-        // to every project.
-        //
-        // Atomic rather than enqueued or called afterwards, and that is the point: the body
-        // change and the chunk removal commit together or not at all, so there is no window in
-        // which the new text is live against old vectors, and no failure mode that leaves the
-        // two disagreeing. A queue would have both. Both tables live on this connection, so the
-        // transaction already spans them. Cheap and a no-op for a new entry, which owns none.
-        await tx.execute(
-          sql`DELETE FROM ai_rag_embeddings
+              .limit(1);
+            if (tgt) candidates.push(tgt);
+          }
+          // Confirm identity with real embeddings BEFORE letting anything supersede: the
+          // coarse lock key groups a whole tech, so it can't decide the SAME article.
+          const matchId =
+            candidates.length > 0
+              ? await confirmSupersedeByEmbedding(
+                  { ollamaUrl: settings.ollamaUrl, embedModel: settings.embedModel },
+                  // The SCRUBBED article, not the model's raw answer. `finalBody` is what gets
+                  // saved and reviewed, and if scrubbing removed repo-specific material that
+                  // dominated the original text, superseding on that text archives an existing
+                  // entry over content nobody will ever see published.
+                  `${title}\n\n${finalBody}`,
+                  candidates.map((c) => ({
+                    id: c.id,
+                    status: c.status,
+                    text: `${c.title}\n\n${c.body}`,
+                  })),
+                )
+              : null;
+          const isUpdate = matchId != null;
+          // The SKELETON row carries the article either way. A confirmed match additionally
+          // records what it supersedes, so review can show the diff; the target itself is left
+          // untouched until the user activates.
+          await tx
+            .update(globalKbEntries)
+            .set({
+              title,
+              category,
+              facets,
+              description: inheritDescription(
+                described.description,
+                candidates.find((c) => c.id === matchId)?.description,
+              ),
+              body: finalBody,
+              // ALWAYS a draft. A brand-new article is the riskiest thing that enters a store
+              // shared by every project, and it used to be the one case that skipped review
+              // while an UPDATE — a change to something already reviewed — was held. That is
+              // backwards, and it is what the endpoint's own contract says ("the user reviews +
+              // activates the draft"). Activation embeds it, through the API's enqueueSync.
+              status: 'draft',
+              supersedesEntryId: matchId,
+              embedStatus: 'pending',
+              updatedAt: new Date(),
+            })
+            .where(eq(globalKbEntries.id, skeletonId));
+          // Drop any vectors this entry still owns, IN THE SAME TRANSACTION as the demotion.
+          //
+          // "Drafts hold no vectors" is an invariant, and an invariant asserted in a comment is
+          // how the retry path came to violate it. A NEW entry was never embedded, but a RETRIED
+          // one was: a step that completed under the old auto-activate behaviour left its entry
+          // `active` WITH chunks, and this update rewrites the body and demotes the row while
+          // those chunks stay. Retrieval has no status predicate — `ragHybridSearch` filters on
+          // namespace and facets, and the body expansion joins a chunk to its entry and returns
+          // the entry's CURRENT body — so a survivor serves the new, explicitly unreviewed text
+          // to every project.
+          //
+          // Atomic rather than enqueued or called afterwards, and that is the point: the body
+          // change and the chunk removal commit together or not at all, so there is no window in
+          // which the new text is live against old vectors, and no failure mode that leaves the
+          // two disagreeing. A queue would have both. Both tables live on this connection, so the
+          // transaction already spans them. Cheap and a no-op for a new entry, which owns none.
+          await tx.execute(
+            sql`DELETE FROM ai_rag_embeddings
                WHERE namespace = ${detected.namespace} AND entry_id = ${skeletonId}`,
-        );
-        return { confirmedUpdate: isUpdate };
-      }),
+          );
+          return { confirmedUpdate: isUpdate };
+        }),
+      globalKbCallOptions({ signal: ctx.signal }, GLOBAL_KB_STEP_DEADLINE_MS),
     );
 
     if (intent.isUpdate && !confirmedUpdate) {

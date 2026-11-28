@@ -4,6 +4,7 @@ const h = vi.hoisted(() => ({
   kinds: [] as Array<'embedded' | 'hashed'>,
   inserts: [] as Array<{ sql: string; params: unknown[] }>,
   hasVector: true,
+  options: undefined as unknown,
 }));
 
 const ENTRY = {
@@ -27,7 +28,8 @@ vi.mock('../src/step-engine/steps/_rag-embed-health.js', async (importOriginal) 
 }));
 vi.mock('@haive/shared/global-kb', async (importOriginal) => ({
   ...(await importOriginal<object>()),
-  withGlobalKb: async (_db: unknown, fn: (ctx: unknown) => Promise<void>) => {
+  withGlobalKb: async (_db: unknown, fn: (ctx: unknown) => Promise<void>, opts: unknown) => {
+    h.options = opts;
     const tx = {
       unsafe: async (sql: string, params: unknown[] = []) => {
         if (sql.includes('SELECT status, title, body, facets')) {
@@ -97,4 +99,9 @@ describe('the global KB sync records how each vector was made', () => {
       ['model', 'embed-model'],
     ]);
   });
+});
+
+it('keeps the long sync connect allowance at 30 s with its 60 minute deadline', async () => {
+  await sync();
+  expect(h.options).toMatchObject({ connectTimeoutSeconds: 30, deadlineMs: 60 * 60_000 });
 });

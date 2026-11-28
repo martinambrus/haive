@@ -742,3 +742,12 @@ describe('onboarding populate per-file budgets', () => {
     expect(rowsOf(kb)).toBe(150);
   });
 });
+
+it('fix2 L4 preserves the repository owner gateway path in the population form status', async () => {
+  const target = 'https://gateway.example/ollama';
+  const form = await ragPopulateStep.form!(
+    ctx,
+    detected({ ollamaUrl: target, ollamaReachable: true }),
+  );
+  expect(form?.description).toContain(`Ollama: reachable at ${target}`);
+});

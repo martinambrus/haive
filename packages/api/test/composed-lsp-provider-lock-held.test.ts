@@ -14,7 +14,9 @@ vi.mock('../src/middleware/auth.js', () => ({
   },
   requireAdmin: async (_c: unknown, next: () => unknown) => next(),
 }));
-vi.mock('../src/lib/sandbox-kill.js', () => ({ killTaskSandboxes: vi.fn(async () => 0) }));
+vi.mock('../src/lib/sandbox-kill.js', () => ({
+  killTaskSandboxes: vi.fn(async () => ({ killed: 0, killConfirmed: true })),
+}));
 
 import { Hono } from 'hono';
 import type { PgTable } from 'drizzle-orm/pg-core';
@@ -202,5 +204,22 @@ describe('the task row lock is held at every CLI-choice write', () => {
     expect(res.status).toBe(200);
     expect(fake.rows(schema.taskStepCliChoices)).toMatchObject([{ cliProviderId: CODEX }]);
     check(schema.taskStepCliChoices, 'choice insert on the re-run path');
+  });
+});
+
+describe('composed contract read is made after the task lock', () => {
+  it('refuses a contract that became composed while waiting for the lock', async () => {
+    const fake = setup();
+    const reads: boolean[] = [];
+    fake.hooks.beforeLock = () => {
+      fake.patch(schema.envTemplates, TEMPLATE, { declaredDeps: { lspInstallContractVersion: 2 } });
+    };
+    fake.hooks.beforeRead = (table) => {
+      if (table === schema.envTemplates) reads.push(fake.rowLocked(schema.tasks, TASK));
+    };
+    expect((await patch('summary-cli', { summaryCliProviderId: CODEX })).status).toBe(409);
+    expect(fake.rows(schema.tasks)[0]?.summaryCliProviderId ?? null).toBeNull();
+    expect(reads.length).toBeGreaterThan(0);
+    expect(reads).not.toContain(false);
   });
 });

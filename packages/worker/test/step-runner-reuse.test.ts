@@ -45,6 +45,7 @@ function makeMockDb(state: MockState): Database {
           // upsertRow: task_steps where(...).limit(1). cli_invocations is never
           // queried here (the synthetic step dispatches no CLI).
           where: (_cond: unknown) => ({
+            then: (resolve: (rows: unknown[]) => unknown) => Promise.resolve([]).then(resolve),
             limit: async (_n: number) => {
               if (tableName === 'task_steps') {
                 return state.taskStepRow.id ? [state.taskStepRow] : [];
@@ -448,6 +449,83 @@ describe('advanceStep reuse of human-only form fields', () => {
     ],
   };
   const prior = { name: 'Acme', secretTick: true };
+
+  it.each([
+    { status: 'running', payload: false },
+    { status: 'waiting_cli', payload: false },
+    { status: 'running', payload: true },
+  ])(
+    'preserves saved human answers on $status redelivery, payload=$payload',
+    async ({ status, payload }) => {
+      const state = freshState();
+      Object.assign(state.taskStepRow, {
+        status,
+        formValues: prior,
+        formSchema: SECRET_FORM,
+        detectOutput: { ready: true },
+      });
+      const step = {
+        ...reuseFormStep({ form: SECRET_FORM }),
+        humanOnlyFormFields: ['secretTick'],
+      } as StepDefinition;
+      expect(
+        (
+          await advanceStep({
+            ...runParams(state, step),
+            ...(payload ? { formValues: { name: 'Acme' } } : {}),
+          })
+        ).status,
+      ).toBe('done');
+      expect((state.taskStepRow.output as { received: FormValues }).received).toEqual(prior);
+      expect(
+        state.updates.some(
+          (u) => u.patch.formValues && !('secretTick' in (u.patch.formValues as FormValues)),
+        ),
+      ).toBe(false);
+    },
+  );
+
+  it.each([
+    { status: 'running', payload: prior },
+    { status: 'waiting_cli', payload: prior },
+    { status: 'running', payload: { secretTick: true } },
+  ])(
+    'ignores job-carried human-only values on a saved $status redelivery: $payload',
+    async ({ status, payload }) => {
+      const state = freshState();
+      Object.assign(state.taskStepRow, {
+        status,
+        formValues: { name: 'Saved' },
+        formSchema: SECRET_FORM,
+        detectOutput: { ready: true },
+      });
+      const step = { ...reuseFormStep({ form: SECRET_FORM }), humanOnlyFormFields: ['secretTick'] };
+      expect((await advanceStep({ ...runParams(state, step), formValues: payload })).status).toBe(
+        'done',
+      );
+      expect((state.taskStepRow.output as { received: FormValues }).received).toEqual({
+        name: 'Saved',
+      });
+      expect(state.taskStepRow.formValues).toEqual({ name: 'Saved' });
+      expect(state.updates.some((u) => u.patch.formValues != null)).toBe(false);
+    },
+  );
+
+  it('keeps an owner answer saved on the parked form', async () => {
+    const state = freshState();
+    Object.assign(state.taskStepRow, {
+      status: 'waiting_form',
+      formValues: prior,
+      formSchema: SECRET_FORM,
+      detectOutput: { ready: true },
+    });
+    const step = {
+      ...reuseFormStep({ form: SECRET_FORM }),
+      humanOnlyFormFields: ['secretTick'],
+    } as StepDefinition;
+    expect((await advanceStep(runParams(state, step))).status).toBe('done');
+    expect((state.taskStepRow.output as { received: FormValues }).received).toEqual(prior);
+  });
 
   it('B7 does not replay a human-only key and keeps the others', async () => {
     const state = freshState({ priorFormValues: prior });

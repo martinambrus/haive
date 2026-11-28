@@ -23,7 +23,21 @@ import {
   fixRoundCliRole,
 } from '../src/step-engine/steps/workflow/_fix-round-cli.js';
 
-const h = vi.hoisted(() => ({ db: undefined as unknown, adds: [] as unknown[] }));
+const h = vi.hoisted(() => ({
+  db: undefined as unknown,
+  adds: [] as unknown[],
+  beforeChoice: undefined as (() => Promise<void>) | undefined,
+}));
+vi.mock('@haive/shared/composed-lsp-provider-lock', async (original) => {
+  const real = await original<typeof import('@haive/shared/composed-lsp-provider-lock')>();
+  return {
+    ...real,
+    writeLockedStepCliChoice: async (...args: Parameters<typeof real.writeLockedStepCliChoice>) => {
+      await h.beforeChoice?.();
+      return real.writeLockedStepCliChoice(...args);
+    },
+  };
+});
 vi.mock('../src/db.js', () => ({ getDb: () => h.db }));
 vi.mock('../src/redis.js', async (importOriginal) => ({
   ...(await importOriginal<object>()),
@@ -108,6 +122,7 @@ describe.skipIf(!url)('next-round CLI transaction on Postgres', () => {
   });
   beforeEach(async () => {
     h.adds.length = 0;
+    h.beforeChoice = undefined;
     vi.spyOn(configService, 'getFresh').mockResolvedValue('normal');
     await db.delete(schema.tasks).where(eq(schema.tasks.userId, userId));
   });
@@ -545,6 +560,112 @@ describe.skipIf(!url)('next-round CLI transaction on Postgres', () => {
         );
         expect(h.adds).toHaveLength(1);
       } finally {
+        stepRegistry.override(target);
+        await db.delete(schema.cliProviders).where(eq(schema.cliProviders.id, picked!.id));
+      }
+    },
+  );
+
+  it.each(['disabled', 'locked'] as const)(
+    'reopens the gate when the choice becomes %s after loadRoundProvider',
+    async (state) => {
+      const target = stepRegistry.require(FIX_LOOP_TARGET_STEP_ID);
+      stepRegistry.override({
+        ...target,
+        llm: { requiredCapabilities: ['tool_use'], buildPrompt: () => 'fix' },
+      });
+      const [picked] = await db
+        .insert(schema.cliProviders)
+        .values({ userId, name: 'codex', label: 'was offered' })
+        .returning();
+      const [template] = await db
+        .insert(schema.envTemplates)
+        .values({
+          userId,
+          repositoryId,
+          name: 'race control',
+          baseImage: 'ubuntu:24.04',
+          declaredDeps: { lspInstallContractVersion: 1 },
+        })
+        .returning();
+      try {
+        const { id, gate } = await parked(REVIEW, LOOP, {
+          status: 'waiting_user',
+          cliProviderId: picked!.id,
+          envTemplateId: template!.id,
+        });
+        const values = { fixLoopAction: 'continue', fixRoundCliProviderId: picked!.id };
+        await db
+          .update(schema.taskSteps)
+          .set({
+            formSchema: buildFixLoopEscalationSchema(REVIEW, 'defect', 0, undefined, false, {
+              round: 1,
+              providers: [picked!],
+            }),
+            formValues: values,
+            waitingStartedAt: null,
+          })
+          .where(eq(schema.taskSteps.id, gate.id));
+        let raced = false;
+        // The real writer runs after loadRoundProvider; commit the competing change
+        // through the pool before it re-reads under the task lock. No timed sleeps.
+        h.beforeChoice = async () => {
+          raced = true;
+          h.beforeChoice = undefined;
+          if (state === 'disabled') {
+            await db
+              .update(schema.cliProviders)
+              .set({ enabled: false })
+              .where(eq(schema.cliProviders.id, picked!.id));
+          } else {
+            await db
+              .update(schema.envTemplates)
+              .set({ declaredDeps: { lspInstallContractVersion: 2 } })
+              .where(eq(schema.envTemplates.id, template!.id));
+          }
+        };
+        await processTaskJob(
+          job(TASK_JOB_NAMES.ADVANCE_STEP, {
+            taskId: id,
+            userId,
+            stepId: REVIEW,
+            round: 0,
+            formValues: values,
+          }),
+        );
+        expect(raced).toBe(true);
+        await expectParked(id, gate);
+        const row = await stepRow(gate.id);
+        expect(row).toMatchObject({ formValues: null, waitingStartedAt: expect.any(Date) });
+        const form = row.formSchema as {
+          fields: { id: string; options?: { value: string }[] }[];
+          infoSections: { title: string; body: string; defaultOpen: boolean }[];
+        };
+        expect(form.fields.find((f) => f.id === 'fixRoundCliProviderId')?.options).toEqual([
+          { value: 'same', label: 'The same CLI' },
+        ]);
+        expect(form.infoSections[0]).toMatchObject({
+          title: 'CLI choice could not be applied',
+          body:
+            state === 'disabled'
+              ? 'The selected CLI is no longer available for the next fix round. Choose another CLI or keep the same CLI, then submit again.'
+              : expect.stringContaining('composed image'),
+          defaultOpen: true,
+        });
+        expect(await db.query.tasks.findFirst({ where: eq(schema.tasks.id, id) })).toMatchObject({
+          status: 'waiting_user',
+          currentStepId: REVIEW,
+          currentRound: 0,
+          orchestrationEpoch: 3,
+          errorMessage: null,
+        });
+        expect(
+          await db.query.taskStepCliChoices.findMany({
+            where: eq(schema.taskStepCliChoices.taskId, id),
+          }),
+        ).toEqual([]);
+      } finally {
+        h.beforeChoice = undefined;
         stepRegistry.override(target);
         await db.delete(schema.cliProviders).where(eq(schema.cliProviders.id, picked!.id));
       }

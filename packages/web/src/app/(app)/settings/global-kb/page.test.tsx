@@ -1,3 +1,5 @@
+import { randomBytes } from 'node:crypto';
+import { TaskActionNotice } from '@/components/task-action-notice';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { isValidElement, type ComponentProps, type ReactElement, type ReactNode } from 'react';
 import { Dialog } from '@/components/dialog';
@@ -93,6 +95,7 @@ type El = ReactElement<{
   'data-testid'?: string;
   open?: boolean;
   message?: string | null;
+  notice?: ComponentProps<typeof TaskActionNotice>['notice'];
   title?: string;
   role?: string;
   onClick?: (event?: { stopPropagation: () => void }) => void;
@@ -746,6 +749,32 @@ describe('entry management controls', () => {
     expect(api.post).not.toHaveBeenCalled();
   });
 
+  it.each([false, true, undefined])(
+    'reports cleanup after enrichment Retry (%s)',
+    async (killConfirmed) => {
+      api.post.mockResolvedValue({ killConfirmed });
+      const ui = await mount(
+        {},
+        [],
+        [entry({ sourceTaskId: 'enrich-task', sourceTaskStatus: 'failed', status: 'failed' })],
+      );
+      await ui.press('Retry');
+      expect(api.post).toHaveBeenCalledWith('/tasks/enrich-task/steps/01-kb-enrich/action', {
+        action: 'retry',
+      });
+      const notice = ui.all().find((e) => e.type === TaskActionNotice)?.props.notice;
+      expect(notice ?? null).toEqual(
+        killConfirmed === false
+          ? {
+              message:
+                'Sandbox cleanup could not be confirmed. A CLI process may still be running.',
+              warning: true,
+            }
+          : null,
+      );
+    },
+  );
+
   it('does not cancel a task after an unconfirmed deletion', async () => {
     vi.mocked(window.confirm).mockReturnValueOnce(false);
     const ui = await mount({}, [], [entry({ sourceTaskId: 'enrich-task', status: 'failed' })]);
@@ -779,4 +808,25 @@ describe('entry management controls', () => {
       expect(api.delete).not.toHaveBeenCalled();
     },
   );
+});
+
+describe('the write-only Ollama URL replacement', () => {
+  it('starts blank, keeps the stored target on unrelated saves and sends a typed replacement once', async () => {
+    const redacted = 'http://***@embed.example:11434/';
+    const view = await mount({ ollamaUrl: redacted });
+    expect(view.field('cfg-ollama').props.value).toBe('');
+    expect(view.field('cfg-ollama').props).toMatchObject({
+      type: 'password',
+      placeholder: redacted,
+    });
+    view.choose('cfg-namespace', 'other');
+    await view.press('Save connection');
+    expect(configPuts()).toEqual([[CONFIG_PATH, { namespace: 'other' }]]);
+    api.put.mockClear();
+    const replacement = `http://user:${randomBytes(24).toString('hex')}@new.example:11434`;
+    view.choose('cfg-ollama', replacement);
+    await view.press('Save connection');
+    expect(configPuts()).toEqual([[CONFIG_PATH, { ollamaUrl: replacement }]]);
+    expect(view.field('cfg-ollama').props.value).toBe('');
+  });
 });

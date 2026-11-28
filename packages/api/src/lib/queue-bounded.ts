@@ -51,10 +51,11 @@ export async function addBestEffort(
   }
 }
 
-/** A deadline is not evidence that an accepted action was cancelled. */
+/** A deadline is not evidence that an accepted action was cancelled. The default says a retry is
+ *  safe. A site where a repeat does something else gives its own message; the web shows it. */
 export class QueueOutcomeUnknownError extends HttpError {
-  constructor() {
-    super(503, 'The action may still complete. It is safe to retry.', 'queue_outcome_unknown');
+  constructor(message = 'The action may still complete. It is safe to retry.') {
+    super(503, message, 'queue_outcome_unknown');
   }
 }
 

@@ -1,4 +1,8 @@
-import { assertCheckoutMutationOwner, withCheckoutMutation } from '@haive/shared/checkout-access';
+import { assertCheckoutMutationOwner } from '@haive/shared/checkout-access';
+import {
+  admitUnderFence,
+  withAdmittedCheckoutMutation,
+} from '../lib/admitted-checkout-mutation.js';
 import { scrubErrorPaths } from '@haive/shared/logger';
 import { Hono } from 'hono';
 import { z } from 'zod';
@@ -510,13 +514,14 @@ async function refuseWhileMergeOpen(repositoryId: string): Promise<void> {
   }
 }
 
-planRoutes.post('/:id/plan/snapshot/save', async (c) => {
+planRoutes.post('/:id/plan/snapshot/save', requireNewWorkAllowed, async (c) => {
   const { userId, repositoryId } = await requireOwnedRepo(c);
   await requirePlanCanvasEnabled();
   const body = planSnapshotSaveRequestSchema.parse(await readOptionalJsonObject(c.req));
   // A merge conversation owns the scratch worktree and is the thing that will land
   // the remote; saving underneath it would race its checkout.
   await refuseWhileMergeOpen(repositoryId);
+  await admitUnderFence(getDb());
   try {
     return c.json(
       await savePlanMirror({
@@ -541,10 +546,11 @@ planRoutes.post('/:id/plan/snapshot/save', async (c) => {
  *  Additive — a node that exists only here is KEPT and reported, never deleted,
  *  because "someone added it locally" and "the other side removed it" look
  *  identical from the snapshot and only one of those is reversible. */
-planRoutes.post('/:id/plan/snapshot/pull', async (c) => {
+planRoutes.post('/:id/plan/snapshot/pull', requireNewWorkAllowed, async (c) => {
   const { userId, repositoryId } = await requireOwnedRepo(c);
   await requirePlanCanvasEnabled();
   await refuseWhileMergeOpen(repositoryId);
+  await admitUnderFence(getDb());
   try {
     return c.json(await pullPlanMirror({ repositoryId, userId }));
   } catch (err) {
@@ -1072,7 +1078,7 @@ planRoutes.delete('/:id/plan', async (c) => {
   const root = await findPlanRoot(db, repositoryId);
   if (!root) return c.json({ deletedNodes: 0, mirrorRemoved: true });
 
-  return withCheckoutMutation(db, repositoryId, userId, async (owner) => {
+  return withAdmittedCheckoutMutation(db, repositoryId, userId, async (owner) => {
     // Through applyPlanPatch like every other write; the subtree goes by the
     // parent_id cascade. No expectedVersion: the user is deleting the whole
     // plan, so a concurrent edit to one node does not change their intent, and a

@@ -1,3 +1,5 @@
+const controlPath = new URL('../../api/src/lib/task-control.ts', import.meta.url).href;
+const { reofferParkedSteps } = await import(controlPath);
 import { loadUnactedInsights } from '../src/step-engine/steps/workflow/_insight-loader.js';
 import * as stepCommands from '../src/sandbox/step-command.js';
 import * as appRuntime from '../src/step-engine/steps/workflow/_app-runtime.js';
@@ -7,6 +9,7 @@ import { registerStepsOnce } from '../src/step-engine/boot.js';
 import { persistInsightReport } from '../src/step-engine/steps/workflow/_insight-summary.js';
 import {
   gate3InsightCycle,
+  gate3QaDeferred,
   recordGate3Check,
   pendingInsightApproval,
 } from '../src/queues/insight-gate3-return.js';
@@ -2757,6 +2760,43 @@ describe.skipIf(!url)('manual insight batch journal on Postgres', () => {
       }
     },
   );
+  it('QA ordering in SQL uses run_seq then created_at for defensive same-round ties', async () => {
+    await db.transaction(async (tx) => {
+      // The permanent table forbids duplicate (task, step, round). Shadow only on this transaction's
+      // connection to exercise the defensive tie-break without weakening the production index.
+      await tx.execute(
+        sql`create temporary table task_steps (like public.task_steps including defaults) on commit drop`,
+      );
+      const taskId = randomUUID();
+      const base = {
+        taskId,
+        stepId: '08d2-adversarial-qa-review',
+        stepIndex: 8.92,
+        title: 'QA',
+        round: 2,
+        status: 'done' as const,
+      };
+      const [, winner] = await tx
+        .insert(schema.taskSteps)
+        .values([
+          { ...base, runSeq: 2, createdAt: new Date('2026-01-02'), output: { decision: 'fix' } },
+          { ...base, runSeq: 3, createdAt: new Date('2026-01-01'), output: { decision: 'accept' } },
+        ])
+        .returning();
+      expect(await gate3QaDeferred(tx as unknown as Database, taskId, 1, 2)).toBe(true);
+      await tx
+        .update(schema.taskSteps)
+        .set({ runSeq: 2, createdAt: new Date('2026-01-03') })
+        .where(eq(schema.taskSteps.id, winner!.id));
+      expect(await gate3QaDeferred(tx as unknown as Database, taskId, 1, 2)).toBe(true);
+      await tx
+        .update(schema.taskSteps)
+        .set({ status: 'skipped' })
+        .where(eq(schema.taskSteps.id, winner!.id));
+      expect(await gate3QaDeferred(tx as unknown as Database, taskId, 1, 2)).toBe(false);
+    });
+  });
+
   type QaRow = { status: 'done' | 'skipped'; round: number; decision?: 'accept' | 'fix' };
   async function runInsightCheckWithQa(qa: QaRow[]) {
     const { ctx, round } = await gateCheckRound();
@@ -3300,6 +3340,24 @@ describe.skipIf(!url)('manual insight batch journal on Postgres', () => {
           expect(parked.row.waitingStartedAt, reentry).not.toBeNull();
           expect(apply, reentry).not.toHaveBeenCalled();
         }
+      });
+
+      it('an accepted gate-3 submit survives the SQL re-offer and applies exactly once', async () => {
+        const { ctx, params, apply } = await seedGate3('cycle', 1, CYCLE_AT);
+        const parked = await advanceStep(params);
+        expectParked(parked, apply);
+        await answerAsOwner(ctx.taskStepId, ctx.taskId);
+        const before = await db.query.taskSteps.findFirst({
+          where: eq(schema.taskSteps.id, ctx.taskStepId),
+        });
+        await db.transaction((tx) => reofferParkedSteps(tx, ctx.taskId, new Date(), [], null));
+        const after = await db.query.taskSteps.findFirst({
+          where: eq(schema.taskSteps.id, ctx.taskStepId),
+        });
+        expect(after).toEqual(before);
+        expect((await advanceStep(params)).status).toBe('done');
+        expect((await advanceStep(params)).status).toBe('done');
+        expect(apply).toHaveBeenCalledOnce();
       });
 
       it('an answered gate 3 is not parked again: apply runs once and a duplicate advance does nothing', async () => {

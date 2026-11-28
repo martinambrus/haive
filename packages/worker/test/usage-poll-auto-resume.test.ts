@@ -111,11 +111,12 @@ function setup() {
     providerId: PROVIDER,
     reason: 'rate_limit',
     since,
-    resetAt: new Date(0),
+    resetAt: new Date(0) as Date | null,
     currentStepId: 'fan-out',
     currentRound: 0,
     autoResumeCount: 0,
     providerName: 'claude-code',
+    providerAuthMode: 'subscription',
   };
   const next: (typeof armed)[] = [];
   const db = {
@@ -145,7 +146,61 @@ beforeEach(() => {
   h.tries = 0;
 });
 
+describe('auth-aware server-error recovery', () => {
+  afterEach(() => vi.restoreAllMocks());
+  it.each(['auto', 'notify'])(
+    'recovers unpolled API-key Claude through cool-off (%s)',
+    async (mode) => {
+      config(mode, 'normal');
+      const t = setup();
+      Object.assign(t.armed, {
+        reason: 'server_error',
+        providerAuthMode: 'api_key',
+        since: new Date(Date.now() - 5 * 60_000),
+      });
+      await checkProviderRecovery(t.db);
+      expect(t.task().status).toBe(mode === 'auto' ? 'running' : 'failed');
+      expect(t.fake.rows(schema.taskEvents)).toHaveLength(1);
+      expect(h.queued).toHaveLength(mode === 'auto' ? 1 : 0);
+      if (mode === 'notify') expect(t.task().allowanceReplenishedAt).toBeInstanceOf(Date);
+    },
+  );
+
+  it('still requires a post-failure snapshot for subscription Claude', async () => {
+    config('auto', 'normal');
+    const t = setup();
+    Object.assign(t.armed, { reason: 'server_error', since: new Date(Date.now() - 5 * 60_000) });
+    await checkProviderRecovery(t.db);
+    expect(t.writes).toEqual([]);
+    expect(h.queued).toEqual([]);
+  });
+
+  it('preserves a captured rate-limit reset even if auth has since changed', async () => {
+    config('auto', 'normal');
+    const t = setup();
+    t.armed.providerAuthMode = 'api_key';
+    await checkProviderRecovery(t.db);
+    expect(t.task().status).toBe('running');
+    expect(h.queued).toHaveLength(1);
+  });
+});
+
 describe('the allowance auto-resume of a task whose provider is back', () => {
+  it('keeps the committed reopen epoch when a Retry commits before enqueue', async () => {
+    config('auto', 'normal');
+    const t = setup();
+    t.fake.patch(schema.tasks, TASK, { orchestrationEpoch: 7 });
+    const transaction = t.fake.db.transaction.bind(t.fake.db);
+    t.db.transaction = (async (fn: never) => {
+      const result = await transaction(fn);
+      t.fake.patch(schema.tasks, TASK, { orchestrationEpoch: 9 });
+      return result;
+    }) as typeof t.db.transaction;
+    await checkProviderRecovery(t.db);
+    expect(t.task().orchestrationEpoch).toBe(9);
+    expect(h.queued).toMatchObject([{ data: { taskId: TASK, epoch: 8 } }]);
+  });
+
   it('retries a refused auto-resume add after the re-open and queues exactly one advance', async () => {
     vi.useFakeTimers();
     config('auto', 'normal');
@@ -162,7 +217,7 @@ describe('the allowance auto-resume of a task whose provider is back', () => {
       expect(h.queued).toEqual([
         {
           name: TASK_JOB_NAMES.ADVANCE_STEP,
-          data: { taskId: TASK, userId: USER, stepId: 'fan-out', round: 0, epoch: 7 },
+          data: { taskId: TASK, userId: USER, stepId: 'fan-out', round: 0, epoch: 8 },
         },
       ]);
       expect(t.task()).toMatchObject({
@@ -194,11 +249,11 @@ describe('the allowance auto-resume of a task whose provider is back', () => {
 
     await checkProviderRecovery(t.db);
 
-    expect(t.task()).toMatchObject({ status: 'running', orchestrationEpoch: 7 });
+    expect(t.task()).toMatchObject({ status: 'running', orchestrationEpoch: 8 });
     expect(h.queued).toMatchObject([
       {
         name: TASK_JOB_NAMES.ADVANCE_STEP,
-        data: { taskId: TASK, userId: USER, stepId: 'fan-out', round: 0, epoch: 7 },
+        data: { taskId: TASK, userId: USER, stepId: 'fan-out', round: 0, epoch: 8 },
       },
     ]);
   });
@@ -220,8 +275,8 @@ describe('the allowance auto-resume of a task whose provider is back', () => {
     await checkProviderRecovery(t.db);
 
     expect(h.queued).toMatchObject([
-      { data: { taskId: TASK, epoch: 7 } },
-      { data: { taskId: NEXT_TASK, epoch: 11 } },
+      { data: { taskId: TASK, epoch: 8 } },
+      { data: { taskId: NEXT_TASK, epoch: 12 } },
     ]);
   });
 
@@ -516,7 +571,7 @@ describe('the allowance auto-resume when the epoch of the re-opened task cannot 
     } as unknown as Database;
   }
 
-  it('queues the advance unstamped and warns, rather than lose it to the read', async () => {
+  it('uses the returned epoch even when a later read would fail', async () => {
     config('auto', 'normal');
     const warn = vi.spyOn(logger, 'warn').mockImplementation(() => undefined);
     const error = vi.spyOn(logger, 'error').mockImplementation(() => undefined);
@@ -534,11 +589,8 @@ describe('the allowance auto-resume when the epoch of the re-opened task cannot 
         data: { taskId: TASK, userId: USER, stepId: 'fan-out', round: 0 },
       },
     ]);
-    expect(epochOf(h.queued[0]), 'with no epoch to carry').toBeUndefined();
-    expect(warn).toHaveBeenCalledWith(
-      expect.objectContaining({ taskId: TASK, err: unreadable }),
-      expect.any(String),
-    );
+    expect(epochOf(h.queued[0]), 'the committed epoch is always carried').toBe(1);
+    expect(warn).not.toHaveBeenCalled();
     expect(error, 'the failed read is no failed recovery').not.toHaveBeenCalled();
   });
 
@@ -560,8 +612,8 @@ describe('the allowance auto-resume when the epoch of the re-opened task cannot 
 
     expect(h.queued).toHaveLength(2);
     expect(h.queued[0]).toMatchObject({ data: { taskId: TASK } });
-    expect(epochOf(h.queued[0])).toBeUndefined();
-    expect(h.queued[1]).toMatchObject({ data: { taskId: NEXT_TASK, epoch: 11 } });
+    expect(epochOf(h.queued[0])).toBe(1);
+    expect(h.queued[1]).toMatchObject({ data: { taskId: NEXT_TASK, epoch: 12 } });
   });
 });
 
@@ -822,3 +874,51 @@ describe('T594 M1: a recovered allowance survives revival refusals', () => {
     expect(h.queued).toHaveLength(1);
   });
 });
+
+describe('allowance reset backfill from stored windows', () => {
+  afterEach(() => vi.restoreAllMocks());
+  it.each(['error', 'needs_reconnect', 'ok'])('uses only ok snapshots (%s)', async (status) => {
+    config('notify', 'normal');
+    const t = setup();
+    t.armed.resetAt = null;
+    t.fake.patch(schema.tasks, TASK, { allowanceResetAt: null });
+    t.fake.insert(schema.usageWindowSnapshots, {
+      providerId: PROVIDER,
+      userId: USER,
+      providerName: 'claude-code',
+      status,
+      fetchedAt: new Date(),
+      fiveHourPct: 100,
+      fiveHourResetAt: new Date(0),
+    });
+    await checkProviderRecovery(t.db);
+    expect(t.task().allowanceReplenishedAt != null).toBe(status === 'ok');
+    if (status !== 'ok') {
+      expect(t.task().allowanceResetAt).toBeNull();
+      expect(t.fake.rows(schema.taskEvents)).toEqual([]);
+    }
+  });
+});
+
+it.each([10, 100])(
+  'stale ok snapshots cannot backfill resets or recover via percentage (%s)',
+  async (pct) => {
+    config('notify', 'normal');
+    const t = setup();
+    t.armed.resetAt = null;
+    t.fake.patch(schema.tasks, TASK, { allowanceResetAt: null });
+    t.fake.insert(schema.usageWindowSnapshots, {
+      providerId: PROVIDER,
+      userId: USER,
+      providerName: 'claude-code',
+      status: 'ok',
+      fetchedAt: new Date(Date.now() - 13 * 60_000 - 1),
+      fiveHourPct: pct,
+      fiveHourResetAt: new Date(0),
+    });
+    await checkProviderRecovery(t.db);
+    expect(t.task().allowanceReplenishedAt).toBeNull();
+    expect(t.task().allowanceResetAt).toBeNull();
+    expect(t.fake.rows(schema.taskEvents)).toEqual([]);
+  },
+);

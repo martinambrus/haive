@@ -22,6 +22,12 @@ used `String(error)` must preserve that ordinary conversion, including its class
 sanitizing bound members; replacing every such conversion with `.message` changes diagnoses.
 This matters for fix-loop input, retry guidance and plan-mirror refusal reasons.
 
+The cli-exec failure handler treats its login hint as optional display copy: a failed
+hint transaction warns with the original structured hint error under `err`, never a string
+conversion. It then accounts the CLI park and resumes the step using the CLI failure,
+which remains the thrown error. This applies to every hint-write failure, including a
+40P01 deadlock; it does not retry the hint or change locking.
+
 Every BullMQ processor uses `safeProcessor`, which passes its job to `safeErrorForTransport`.
 The latter logs sanitized structured diagnostics with job identity before replacing a bound
 error with safe text and its database code for BullMQ's persisted reason and stack. An ordinary
@@ -54,6 +60,12 @@ The workflow merge's projection-restoration hook can fail on the same identity l
 catch logs the original structured error and sanitizes before persisting the prefixed
 `Nothing was merged` failure through the existing merge halt.
 
+API sandbox cleanup returns only the fixed reasons `sandbox_listing_failed` and
+`sandbox_removal_failed` in `killError`, including the strict urgent-stop helper. Owner
+responses, task events and audit metadata never receive Docker stderr or spawn messages.
+The Docker runner logs those diagnostics through `safeErrorMessage` before conversion;
+confirmation uses exit success and structured container states, never diagnostic wording.
+
 These rules govern new writes and replies. A git or filesystem failure shown to a person also goes through `scrubErrorPaths` (`@haive/shared/logger`): an absolute POSIX, drive or UNC path becomes `[path]`, while the rest of the message and any URL are kept (the URL scheme match is bounded, since an unbounded one is quadratic on a long token). The plan snapshot error (`plan_mirror_state.last_error`), the plan Save and Pull 409 bodies, `repositories.status_message` of a failed repository job 12's plan-mirror warning the worker module report's `runtime.reason` (`failureReason`, worker `modules/loader.ts`) and the Terminal's open refusal (`terminal-session-manager.ts`) use it. Historical error columns retain their existing values unless a data repair says otherwise; two convergent boot repairs (`scrubPlanMirrorErrors`, `scrubRepositoryErrors` in `worker/src/data-migrations.ts`) rewrite stored `plan_mirror_state.last_error` and the `status_message` of repositories in `status = 'error'` through the same helper, touching only rows they change (compare-and-swap on the text and status they read) and logging the count and ids. The rewrite cannot be undone; both columns are display copy that the next failure or success overwrites. Display messages remain copy,
 not state: the structural banner rules in `web/src/lib/step-banners.ts` still apply.
 
@@ -73,6 +85,13 @@ The PR poller catches per-task failures, including merged-task step lookup failu
 records their sanitized message with the task id. The tick also inspects every settled
 rejection and logs it when the error-recording path itself fails; remaining tasks and later
 batches continue.
+
+The API answers a transaction deadlock by SQLSTATE `40P01`, including a wrapped driver
+error, with 503 `transaction_retry_required`, `retryable: true` and `Retry-After: 1`.
+The response contains fixed retry guidance and no query or bound values. Provider-choice
+and summary writers first retry their top-level transaction once; a supplied transaction handle never retries a savepoint while its outer locks stand. The retry log and exhausted busy error retain the original deadlock as `cause`. A second deadlock or a provider
+lost before the write raises `ComposedLspWriteBusyError` (`composed_lsp_write_busy`), also
+answered 503 with retry guidance. A persistently disabled provider has the distinct stable code `cli_provider_disabled` (API 400); skill verification re-parks on that code. No message text triggers these outcomes.
 
 ## Configuration store outage
 
@@ -134,6 +153,70 @@ one administrator with the host command below. Remove the setting once boot
 succeeds. Concurrent boots and a crash between commit and publish reuse one Redis-reserved pending key
 and audit id; the reserve and publish Lua scripts run against a real Redis in CI
 (`encryption-key-boot-redis.test.ts`). A boot with a usable env key, and the fallback recovery, seed that key only while no pending exists: a pending younger than 10 minutes (`PENDING_ENCRYPTION_KEY_WAIT_MS`, timed by its `reservedAt`) is a discard in progress, so boot waits and retries; an older one, or one without a readable `reservedAt`, is a discard a crash interrupted, and boot exits naming Redis key `bootstrap:pendingEncryptionKey` with the two ways out: restart without `CONFIG_ENCRYPTION_KEY` and with the override to finish it, or, when `audit_events` holds no `config.discard_unreadable_secrets` row whose id is the pending JSON's `id` (the discard did not commit), delete that key and restart to keep the secrets. The updater gives boot its own short-lived one-connection client, since Drizzle rewrites the codecs of the postgres.js client it wraps and the updater's journal needs its own.
+
+**A key that cannot read the stored secrets is refused too, in every environment.** Outside
+production `SecretsService.get` used to answer `null` for a `system_secrets` row its key could not
+decrypt, and `getMasterKek`, `getJwtSecret` and `getEmailBlindIndexPepper` read `null` as absent:
+they generated a new value and upserted it over the stored row. A wrong key (a Redis wiped and
+reseeded from a different `CONFIG_ENCRYPTION_KEY`, or a stale key kept in Redis) therefore orphaned
+every envelope, user field and pepper-derived login index without a word. `get` now throws
+`SecretUnreadableError` (`config/secret-unreadable.ts`; `secretKeys` names the rows, never a value)
+for any stored row that `tryDecrypt` cannot read, in every `NODE_ENV`; only an absent row generates,
+and a caller decides on the class, never the message. `SecretsService.initialize` also refuses before
+any write: `assertKeyReadsSystemSecrets` (`encryption-key-boot.ts`) reads the table and passes when it
+is empty (a first install), absent (the updater can boot before the schema exists) or readable by at
+least one row; a table in which every row is unreadable is the wrong key. The refusal exits boot 1
+(not a `ConfigUnavailableError`, so it never retries) and names where the key came from, the rows and
+both ways out: restore the original key (`CONFIG_ENCRYPTION_KEY` only seeds an empty Redis, so delete
+a different key stored under `bootstrap:encryptionKey` first), or `HAIVE_DISCARD_UNREADABLE_SECRETS=1`,
+the same audited override, now for a present key too. That discard takes
+`LOCK TABLE system_secrets IN SHARE ROW EXCLUSIVE MODE`, reads the table again under the lock (a peer
+that already discarded and regenerated is left alone, and api and worker booting together record one
+audit row), then writes the same `config.discard_unreadable_secrets` audit row (random id,
+`keyPresent: true`, the same counts) and deletes the system secrets in that one transaction, so the
+recovery claim gates read it as they read the no-key discard. A table with only some unreadable rows,
+which the old behaviour could already have left behind, does not refuse boot, and the override does
+not apply to it: it fires only when the key reads none of the rows, so it can never delete a readable
+`master_kek`. Each unreadable row throws `SecretUnreadableError` at its reader instead of being
+replaced. The optional rows (`mail_smtp_password` behind `GET /admin/mail`,
+`global_kb_connection_string` behind every global KB reader and its config route, a
+`module_source:<id>:token`) then fail at their readers, as they already did in production, and now
+outside it too. When the unreadable row is one boot reads (`master_kek`, `jwt_secret`,
+`email_blind_index_pepper`), the service that reads it exits at boot with the row's name, and the log
+line before it points here. Restore the key that wrote that row. If that key is lost, delete that one
+row (`DELETE FROM system_secrets WHERE key = '<name>'`). A boot row is then generated again by a
+restart, accepting what depended on it: a new `master_kek` orphans every envelope the old one
+wrapped, a new `email_blind_index_pepper` breaks every email login lookup, a new `jwt_secret` signs
+everyone out. An optional row is entered again in its admin page.
+`recover-admin` reports a refusal as "does not decrypt the stored system secrets" and never offers the
+override. The `./haive` helper and its PowerShell fallback forward only `DATABASE_URL`, `REDIS_URL`
+and `CONFIG_ENCRYPTION_KEY`, so they cannot discard; the `docker exec` form below runs inside the api
+container and inherits its `HAIVE_DISCARD_UNREADABLE_SECRETS`, so keep that at 0 when running it.
+
+**An environment key is checked before it seeds Redis.** `ConfigService.ensureEncryptionKey` seeded
+`CONFIG_ENCRYPTION_KEY` into an empty Redis without asking whether it reads what the database holds,
+so a wiped Redis plus a different key reached the generators above as a first install. It now runs
+the same `assertKeyReadsSystemSecrets` before the seed whenever the caller passed a database (api,
+worker and its scripts, the updater and `recover-admin` all do; a caller without one has nothing to
+check against and is unchanged). A key that reads none of the rows is refused with Redis untouched,
+so a refusal never leaves a wrong key behind. The override is ordered the other way round from the
+no-key discard: Redis decides which key is the install's, and another process may have seeded it
+since this one read Redis empty, so a discard first seeds set-if-absent, reads Redis again and
+deletes only if Redis holds this key. A process whose key lost that race deletes nothing and meets the
+existing mismatch check (production refuses boot, other environments warn and use the stored key). A
+crash between that seed and the commit leaves this key in Redis and every row in place: the next boot
+reaches the same discard through `SecretsService.initialize` while the override is set, and refuses
+once it is removed. No row is deleted without its audit row in the same transaction. The no-key
+discard needs no such step, since its pending reservation is atomic with the key's absence and
+precedes the delete. MEASURED on throwaway PostgreSQL 18 and Redis 8 through the real api
+`bootstrap()` (one fresh process per phase, evidence by SHA-256 of each stored row): with Redis wiped
+and a different `CONFIG_ENCRYPTION_KEY`, the base commit booted and changed the stored system secrets
+(the row hashes differ); now boot refuses with every row unchanged and no key seeded, the original
+key then boots unchanged, and the override writes one audit row. MEASURED with two forked boots on the
+same stores (`encryption-key-boot-db.test.ts`, R1 to R4): a process holding a different key and the
+override, held right after its empty Redis read while the original key seeded Redis, deleted all
+three system secrets under the previous order; now it deletes nothing, and a process that wins the
+race has its key in Redis before the delete opens.
 
 **Recover an administrator after key loss.** First let boot finish with the discard override, then
 remove the override. New installations created with this release have the recovery subcommand.
@@ -315,8 +398,9 @@ work must be idempotent or guarded by the worker. `QueueAddTimeoutError` identif
 unknown enqueue outcome by class. Sign-out and module teardown keep their committed launch audit
 on that timeout, since the job may still land; a known rejection still removes only that launch's
 audit. Both timeout responses use 503 `queue_outcome_unknown`: the action may still complete
-and is safe to retry; rejections keep their existing response. The web maps that code to the same
-unknown-outcome guidance. Bundle queue lookups (including replacement job state) share a five-second
+and is safe to retry; rejections keep their existing response. `QueueOutcomeUnknownError` takes an
+optional message for a site where a repeat is not safe. The web shows the response's own text for that
+code, and the same unknown-outcome sentence when it has none. Bundle queue lookups (including replacement job state) share a five-second
 read deadline and answer 503 rather than interpreting a failed lookup as an absent job. ZIP replacement
 imports answer a timeout with 503 `queue_outcome_unknown` and keep the promoted source for a late ingest.
 A known rejection keeps the existing failure response and compensates the owned syncing row,
@@ -333,11 +417,20 @@ compensation when only a model save overlaps it. Saving model or Modelfile field
 provider retries failed model provisioning even with unchanged inputs, through the same pull policy
 and maintenance admission checks. Disabling or editing metadata alone does not retry provisioning,
 including a form save that echoes unchanged model fields alongside a metadata change.
+Repository create, upload complete and refresh or recover enqueue through `addRepoJobOrMarkError`
+(`routes/repos.ts`): a rejection marks the admitted row `error` (fenced by its job id) and rethrows,
+as before; a deadline is an unknown outcome, so the row stays `cloning` or pending with its job id for
+a late job or for the stranded-preparation sweep (`reconcileStrandedCloningRepos`, at boot and every 60
+s, only for rows older than 5 minutes whose job is not queued and that hold no live root claim), and the
+request answers 503 `queue_outcome_unknown` with the repository message (reload the list; adding it
+again creates a second repository), not the default "safe to retry". No API claim is held across these
+adds, so none is left behind. A repeat of a refresh then meets its pending marker (409), a repeat of an
+upload complete meets the completed session (409), and a repeat of a create makes a second repository.
 Runtime access keeps its 202 pending response, VNC its starting refusal, and plan/data Save and Pull their existing refusal
 contracts. Optional wake-ups (plan/project-state sweeps, module-source outbox, global-KB pending
 embeds and usage polls) are best effort. The API queue-add ratchet resolves the called BullMQ method declaration
-across routes, libraries and modules; `routes/repos.ts` remains explicitly excluded for its
-separate enqueue work (exactly three sites, pinned until T780 changes them). Optional chaining,
+across routes, libraries and modules, `routes/repos.ts` included: `addRepoJobOrMarkError` is trusted at
+argument index 2 like `addBundleJobOrMarkFailed`, and a source assertion pins its `await boundedAdd(add`. Optional chaining,
 subclasses, mapped types and queue-returning wrappers are covered; any-typed add receivers fail, and
 bounding helpers are recognized by declaration rather than identifier spelling. `addBestEffort` never throws and returns a boolean:
 use it when committed state already records the work (step actions, cancel, task start, stop-settle).
@@ -350,8 +443,75 @@ through. A timed-out write may still have landed, and a command issued while the
 reconnects rejects at once. Request paths use `getRedis()`. Socket-lifetime and boot work (editor and
 shell refcounts, their boot resets, subscribers, the CLI stream's `XREAD BLOCK` reader, a shell
 socket's publisher) uses `getPatientRedis()`, which keeps the old unbounded options, and duplicates from
-it: `getRedis().duplicate()` throws. `getBullRedis()`, the worker and the `createRedisConnection`
-defaults are unchanged.
+it: `getRedis().duplicate()` throws. `getBullRedis()` and the `createRedisConnection` defaults are unchanged.
+
+The worker's shared finite-command client (`worker/src/redis.ts`, `getRedis()`) now uses
+`REDIS_COMMAND_TIMEOUT_MS` (2000 ms, injectable through `initRedis`'s `commandTimeoutMs`),
+`enableOfflineQueue: false`, `autoResendUnfulfilledCommands: false` and the same capped retry
+strategy. A transport failure or command deadline rejects with the worker's
+`RedisUnavailableError` (`code: REDIS_UNAVAILABLE_CODE`, original `cause`); a server `ReplyError`
+passes through by identity. Pipelines retain typed errors in their result tuples. A command
+issued during connect, reconnect or a LOADING ready check rejects without queueing. A write
+whose answer timed out may still have landed; it is never automatically replayed on reconnect.
+Connection warnings are throttled to one per ten seconds. `REDIS_UNAVAILABLE_CODE` in
+`@haive/shared/constants` is the one contract used by every writer and matcher, including the web client.
+
+This changes how long a gate waits while retaining its documented outage policy. INVOKE lane
+reservation fails open without a slot. Step-command leases treat `code: redis_unavailable` as
+not acquired and keep polling under their existing ten-minute wait and abort signal; one-shot
+lease and slot attempts still propagate the failure. A polling acquire reuses one lease UUID,
+since a timed-out EVAL may have inserted its field. RAG and agent polls distinguish an unreadable
+Redis attempt from a held lock or full pool when publishing progress copy. Agent-slot release stops its heartbeat and
+finishes after a failed HDEL, relying on the existing two-minute field expiry. Runtime
+reservation/surcharge accounting keeps its live-runners-only fallback. A cold boot's own
+reservation check distinguishes unknown from absent: an unreadable HEXISTS polls every two
+seconds under the same eight-minute admission read bound as unreadable limits, then throws
+the retryable typed outage. This gate also wraps a server refusal as unreadable without
+matching its wording; the finite client itself still preserves ReplyError identity. Both bounds are injectable and honor abort. A recovered read of a
+held reservation bypasses the local queue. Guessing absent can queue behind the task's own
+reservation; guessing held can admit capacity that was never reserved. These decisions use error structure, never message wording. The RAG lock's
+polling acquire treats both its own five-second command timeout and `code: redis_unavailable`
+as not acquired, retaining the two-hour worker wait and abort signal; one-shot acquire still
+throws. A timed-out SET's compensating release can also fail on the finite client, leaving the
+key to its existing 120-second TTL.
+
+`getPatientRedis()` keeps the old options for boot and socket-lifetime work: the bootstrap
+version SET, initial module report, boot reservation/lease/surcharge clears, boot-requeue
+counter, terminal output and registry bookkeeping, and the dedicated mid-run steer subscriber
+duplicated from it. Each boot command waits for its own client's ready check, independently of
+ConfigService's connection, so a LOADING store cannot silently skip the clears or counter or
+abort the module report. Shared clear helpers accept a client and retain the finite default
+for other callers. Later module report changes use the finite client; failure clears the
+published digest, so the next 15-second reconcile pass retries even without a new change.
+The CLI exit frame waits for pending chunk writes before using the patient client and setting
+its TTL: an open API stream reader closes on that frame. The drain and exit write share the
+injectable `CLI_EXIT_WAIT_MS` (five seconds); expiry logs and lets database finalization proceed.
+A patient write already issued may still land later. Other best-effort stream frames,
+cache/hint writes and the soft-timeout wind-down publish stay finite and can be dropped during
+an outage. Terminal teardown retries a coded Redis outage up to `TASK_TERMINAL_REAP_ATTEMPTS`
+(three), separated by `TASK_TERMINAL_REAP_RETRY_MS` (250 ms); both are injectable. Every attempt
+uses the finite client because reap holds a Postgres task-row settlement lock. Exhaustion keeps
+the worktree. On Cancel, exhaustion defers the whole resource section: merge reports and
+claim release, plan-merge discard, task-end re-sync, scratch and no-change directory cleanup,
+and worktree removal. Model unloads and KB cleanup still run before the error is rethrown;
+`task.cancel_finished` is withheld so the existing capped cancel re-drive repeats the teardown.
+A checkout rebuild is refused for that task while its cancellation remains unfinished.
+Completion has no automatic retry: only when its ordinary cleanup policy would remove the
+worktree does `worktree.cleanup_deferred` in Activity record the retained path and structural
+reason `terminal_reap_failed`. A workflow or custom type with its own cleanup step records no
+such event. The task stays completed. The cancel-only
+task-label sweep may already have removed task shells, but is best effort, and completion
+does not run it.
+
+A finite client's `duplicate()` throws so a subscriber or future blocking reader cannot inherit
+its deadline. There are no worker BLPOP/XREAD BLOCK consumers today. The terminal manager's
+independently constructed subscriber already uses patient factory defaults. All three singleton
+clients share the existing one-second shutdown backstop. BullMQ factories, queue connections,
+blocking reads and defer retry behavior are unchanged. In particular this does not bound a
+BullMQ-owned `moveToDelayed` during a transport outage, nor change the documented fail-open
+policies to strict admission. The 2000 ms worker deadline is inherited from the API, not a
+measured worker latency budget. Rollback restores the worker client and its consumer injections
+together; no schema or persisted-data rollback is needed.
 
 `/admin/health` reports `redis: 'up' | 'down'` from a bounded `ping()` and is in the maintenance
 gate's ALWAYS_OPEN by exact path (`/^\/admin\/health$/`), still behind `requireAuth` and
@@ -410,3 +570,35 @@ connection timeout and authentication codes, with a fixed generic fallback for o
 parser, TLS, filesystem and server errors. Never return a raw driver message here, even
 when no query parameters were bound: an ENOENT message previously exposed a file-existence
 oracle. `safeErrorMessage` keeps its existing contract for other callers.
+
+## User-supplied endpoint bodies
+
+The tooling API's Ollama `/api/tags` and `/api/show` reads and shared RAG residency JSON reads
+use `readForgeJson` (`@haive/shared/forge`), with its 8 MiB default bound. `ollamaEmbed` passes
+`OLLAMA_EMBED_MAX_BYTES` (32 MiB), leaving headroom for 64 inputs × 8192 dimensions even when a
+user-configured proxy emits float64 decimals.
+The reader cancels the stream beyond that bound and throws fixed text without the response body;
+invalid JSON also produces fixed text rather than a parser excerpt. `ollamaEmbed` error reads use
+`readBounded` with `OLLAMA_ERROR_MAX_BYTES` (64 KiB): both short and oversized errors keep at most
+the first 200 characters read; an oversized one also appends the size refusal. Timeouts still
+cover the request and body read.
+
+When these helpers, tooling routes, or user-set Ollama/OpenRouter compatibility probes need only
+the status, they cancel the unread body before returning. Cancellation failure is best effort and
+does not change the status verdict. Tests lower the existing bounded-reader seam to 128 bytes
+(256 for the embed error prefix) and stream a few hundred bytes from a throwaway loopback server;
+held-open replies must also release the upstream socket without waiting for the request's abort
+timer. Fixed-vendor bodies and helper deduplication are separate work.
+
+The worker model provisioner is outside this user-set endpoint scope: `provisionOllamaProvider`
+settles an external daemon to `idle` before fetching, and its tags, pull and create calls always
+target `IN_STACK_OLLAMA_URL`. Loopback oversized-response fixtures confirm that external provider
+URLs trigger no request; bounding the fixed in-stack reads remains separate work.
+
+Global KB Ollama Test failures use fixed guidance instead of embedding transport/error-body
+text, since either can echo a credential-bearing URL or its password alone. Config response
+and audit URL copy show only scheme, host and port for every role, marking userinfo, path, query
+and fragment as hidden; the worker's unreachable-embedder warning uses the same shared helper.
+The private stored value is used only
+for the dial. The interactive embedding deadline returns `ollama_probe_timeout` with
+`retryable: true`; it does not log the raw transport failure. See [Global knowledge base](global-kb.md).

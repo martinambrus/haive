@@ -3,7 +3,7 @@ import { retryPlanPatch } from '../../../plan/patch-retry.js';
 import { asc, eq, and } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import { CONFIG_KEYS, configService, type FormSchema } from '@haive/shared';
-import { loadPlanNodes, loadPlanEdges } from '@haive/shared/plan';
+import { PlanPatchError, loadPlanNodes, loadPlanEdges } from '@haive/shared/plan';
 import { PLAN_CHAT_MESSAGE_MAX_CHARS, PLAN_CHAT_MESSAGE_LIMIT_TEXT } from '@haive/shared/schemas';
 import type { StepDefinition } from '../../step-definition.js';
 import { writePlanMirror } from '../../../plan/mirror.js';
@@ -437,6 +437,7 @@ export const planChatStep: StepDefinition<PlanChatDetect, PlanChatApply> = {
             }
           }
         } catch (err) {
+          if (err instanceof PlanPatchError && err.kind === 'repository_gone') throw err;
           // A conflict is reported to the USER rather than retried: the plan moved
           // under the agent, and the next turn re-reads it anyway.
           result.error = err instanceof Error ? err.message : String(err);

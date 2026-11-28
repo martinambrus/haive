@@ -1089,6 +1089,7 @@ function makeDagMergeWaitDb(opts: {
   const issueUpdateLog: { id: unknown; patch: Record<string, unknown> }[] = [];
   const events: { eventType?: string }[] = [];
   const invocationInserts: Record<string, unknown>[] = [];
+  const invocationRows: Record<string, unknown>[] = [];
   const agentRunInserts: Record<string, unknown>[] = [];
   const agentRunUpdates: Record<string, unknown>[] = [];
   let levelReads = 0;
@@ -1176,7 +1177,10 @@ function makeDagMergeWaitDb(opts: {
     insert: (table: unknown) => ({
       values: (v: { eventType?: string }) => {
         if (table === schema.taskEvents) events.push(v);
-        if (table === schema.cliInvocations) invocationInserts.push(v);
+        if (table === schema.cliInvocations) {
+          invocationInserts.push(v);
+          invocationRows.push({ ...v, id: 'fix-inv-1', endedAt: null, supersededAt: null });
+        }
         if (table === schema.dagAgentRuns) agentRunInserts.push(v);
         return {
           returning: async () => (table === schema.cliInvocations ? [{ id: 'fix-inv-1' }] : []),
@@ -1187,6 +1191,10 @@ function makeDagMergeWaitDb(opts: {
     update: (table: unknown) => ({
       set: (patch: Record<string, unknown>) => {
         const apply = (cond?: unknown) => {
+          if (table === schema.cliInvocations) {
+            const id = conditionValues(cond)[0];
+            for (const row of invocationRows) if (row.id === id) Object.assign(row, patch);
+          }
           if (table === schema.taskDagLevels && patch && 'mergeState' in patch) {
             levelMergeState = patch.mergeState;
           }
@@ -1252,6 +1260,7 @@ function makeDagMergeWaitDb(opts: {
     issueUpdates,
     issueUpdateLog,
     invocationInserts,
+    invocationRows,
     agentRunInserts,
     agentRunUpdates,
     events,
@@ -1739,6 +1748,33 @@ describe('runLevelMerge (via resolveDagPhase): a fix run superseded before it st
       };
       expect(state.fixInvocationId).toBe('fix-inv-1');
       expect(state.activeConflict).toBe('ISSUE-1');
+      expect(h.invocationRows).toHaveLength(1);
+      expect(h.invocationRows[0]!.supersededAt).toBeInstanceOf(Date);
+      // Recovery retains the saved id and ingests the actual released reservation.
+      const released = h.invocationRows[0]!;
+      vi.spyOn(h.db.query.cliInvocations, 'findFirst').mockResolvedValue(released as never);
+      vi.mocked(resolveTaskDispatch).mockResolvedValueOnce({
+        mode: 'cli',
+        providerId: 'p1',
+        invocation: { kind: 'cli', spec: {} },
+      } as never);
+      const recovered = await resolveDagPhase(
+        h.db as never,
+        dagExecuteStep as never,
+        { id: 'step1', status: 'running', round: 0 } as never,
+        ctx,
+        { ...params, deps: { enqueueCliInvocation: async () => {} } } as never,
+      );
+      expect(recovered.resolved).toBe(false);
+      if (!recovered.resolved) expect(recovered.result.status).toBe('waiting_cli');
+      expect(released.consumedAt).toBeInstanceOf(Date);
+      expect(h.invocationRows).toHaveLength(2);
+      expect(h.invocationRows[1]!.supersededAt).toBeNull();
+      expect(
+        (h.getLevelMergeState() as { conflictRetries: Record<string, number> }).conflictRetries[
+          'ISSUE-1'
+        ],
+      ).toBe(1);
     } finally {
       await rm(integrationDir, { recursive: true, force: true });
     }

@@ -1,6 +1,6 @@
 import { randomBytes } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
-import { isUsageGrantValue } from '../src/lib/usage-grant-set.js';
+import { isUsageGrantValue, isUsageGrantSecret } from '../src/lib/usage-grant-set.js';
 
 const rnd = () => randomBytes(16).toString('hex');
 const grant = (over: Record<string, unknown> = {}) =>
@@ -34,3 +34,11 @@ describe('a pasted usage grant', () => {
     expect(isUsageGrantValue(make())).toBe(false);
   });
 });
+
+it.each(['claude-code', 'codex', 'grok', 'zai'])(
+  'recognizes usage grants only for Claude in the library (%s)',
+  (name) => {
+    expect(isUsageGrantSecret(name, 'CLAUDE_USAGE_OAUTH')).toBe(name === 'claude-code');
+    expect(isUsageGrantSecret(name, 'CLAUDE_CODE_OAUTH_TOKEN')).toBe(false);
+  },
+);

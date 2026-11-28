@@ -7,7 +7,7 @@ const h = vi.hoisted(() => ({
   db: undefined as unknown,
   paused: false,
   add: vi.fn(async (..._args: unknown[]) => undefined),
-  kill: vi.fn(async (_taskId: string) => 0),
+  kill: vi.fn(async (_taskId: string) => ({ killed: 0, killConfirmed: true })),
 }));
 vi.mock('../src/db.js', () => ({ getDb: () => h.db }));
 vi.mock('../src/queues.js', () => ({ getTaskQueue: () => ({ add: h.add }) }));

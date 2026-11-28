@@ -6,7 +6,7 @@ import { eq } from 'drizzle-orm';
 import { Hono } from 'hono';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createDatabase, schema, type Database } from '@haive/database';
-import { secretsService } from '@haive/shared';
+import { configService, secretsService } from '@haive/shared';
 import { deriveRenderTargets, type RenderContextColumn } from '@haive/shared/project-state';
 
 const url = process.env.T118_DATABASE_URL;
@@ -98,6 +98,7 @@ describe.skipIf(!url)('recorded CLI units through actual reset route', () => {
     h.failRemoveRel = null;
     h.failed = false;
     vi.spyOn(secretsService, 'getJwtSecret').mockResolvedValue('ab'.repeat(32));
+    vi.spyOn(configService, 'getFresh').mockResolvedValue('normal');
     userId = randomUUID();
     repositoryId = randomUUID();
     root = await mkdtemp(path.join(tmpdir(), 't118-reset-cli-'));

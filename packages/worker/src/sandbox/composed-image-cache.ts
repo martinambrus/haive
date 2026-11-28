@@ -177,6 +177,7 @@ export async function resolveSandboxImageComposition(
   // Until some provider holds an effective composed image there is nothing to pin or refuse.
   // The environment steps that build the first one (and their AI repair) launch on the provider
   // image, as a legacy task does before its environment is built; LSP readiness stays false.
+  // An explicit Skip of 04 keeps that fallback: readiness stays false (only 01b1 sets it).
   // Once any effective reference exists every refusal below applies.
   if (contract === 2 && options.verifiedProviderId && !launchEntries.some((e) => e.effective))
     return null;

@@ -1,3 +1,4 @@
+import { applyWarningPatch } from './support/step-warning-patch.js';
 import { describe, expect, it, vi } from 'vitest';
 import { schema, type Database } from '@haive/database';
 import { createFakeDb } from '@haive/database/testing';
@@ -97,6 +98,7 @@ function buildFake(s: Scenario, storedDeps: Record<string, unknown> | null) {
           userStepCliPreferences: schema.userStepCliPreferences,
           userStepCliRolePreferences: schema.userStepCliRolePreferences,
           taskTypeDefinitions: schema.taskTypeDefinitions,
+          taskSteps: schema.taskSteps,
         },
   );
   const task = {
@@ -113,6 +115,13 @@ function buildFake(s: Scenario, storedDeps: Record<string, unknown> | null) {
     envTemplateId: storedDeps ? TEMPLATE : null,
   };
   fake.insert(schema.tasks, task);
+  if (!s.legacyTables)
+    fake.insert(schema.taskSteps, {
+      id: uuid(99),
+      taskId: TASK,
+      stepId: '01-declare-deps',
+      status: 'running',
+    });
   fake.insert(schema.repositories, {
     id: REPO,
     lspServers: s.repoLsp === undefined ? ['intelephense-extended'] : s.repoLsp,
@@ -161,6 +170,7 @@ function makeRun(s: Scenario, storedDeps: Record<string, unknown> | null) {
   const emitProgress = vi.fn(async () => {});
   const ctx = {
     taskId: TASK,
+    taskStepId: uuid(99),
     userId: USER,
     cliProviderId: s.defaultProvider ?? CLAUDE,
     db: fake.db as unknown as Database,
@@ -447,6 +457,9 @@ describe('contract-2 writer: provider read under the lock', () => {
     };
     await r.apply();
     expect(depsOf(r.fake)).not.toHaveProperty(KEY);
+    expect(applyWarningPatch(null, r.fake.rows(schema.taskSteps)[0]?.warningMessage)).toContain(
+      'legacy variant',
+    );
   });
 
   it('decides on the provider read under the lock when the task has no default: accepts after a disable makes another claude-code provider the oldest', async () => {

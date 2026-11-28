@@ -191,6 +191,7 @@ jobs:
                 for arch in amd64 arm64; do
                   echo "go vet: $os/$arch"
                   GOOS=$os GOARCH=$arch go vet -p 1 ./... || exit 1
+                  GOOS=$os GOARCH=$arch go test -p 1 -c -o "/tmp/bridge-$os-$arch.test" . || exit 1
                 done
               done
             '
@@ -597,11 +598,16 @@ jobs:
           GATED_SHARDS: ${{ strategy.job-total }}
           PG_CONTAINER: ${{ job.services.postgres.id }}
           PGVECTOR_CONTAINER: ${{ job.services.pgvector.id }}
-          # This job owns its Redis service: gated databases 11-14, job default 0.
+          # This job owns its Redis service: gated databases 11-14, job default 0. Rows run one at a
+          # time, so advance-epochs shares database 11 under its own random queue name, and the
+          # encryption-key race test shares database 14: it writes and deletes only the two keys that
+          # name the install's key, which no other row touches.
+          ENCRYPTION_KEY_BOOT_RACE_REDIS_URL: redis://localhost:6379/14
           INTEGRATIONS_BROKER_TEST_REDIS_URL: redis://localhost:6379/13
           MODULE_PURGE_API_TEST_REDIS_URL: redis://localhost:6379/12
           INTEGRATIONS_AUDIT_TEST_REDIS_URL: redis://localhost:6379/11
           T117_REDIS_URL: redis://127.0.0.1:6379/14
+          ADVANCE_EPOCHS_TEST_REDIS_URL: redis://localhost:6379/11
         run: |
           set -uo pipefail
           failed=0
@@ -709,6 +715,7 @@ jobs:
           api test/task-list-dead.test.ts TASK_LIST_DEAD_TEST_URL task_list_dead_test pg
           api test/integrations-broker.test.ts INTEGRATIONS_BROKER_TEST_URL integrations_broker_test pg
           api test/custom-mcp-db.test.ts CUSTOM_MCP_TEST_URL custom_mcp_test pg
+          api test/files-read-route-db.test.ts FILES_READ_TEST_URL files_read_test pg
           shared test/create-database-race.test.ts RACE_PG_URL create_database_race_test pg
           shared test/module-db-abandoned-waiter.test.ts MODULE_DB_WAITER_TEST_URL module_db_waiter_test pg
           shared test/integrations-refresh-db.test.ts INTEGRATIONS_REFRESH_TEST_URL integrations_refresh_test pg
@@ -750,6 +757,7 @@ jobs:
           api test/plan-merge-cancel-db.test.ts PLAN_MERGE_CANCEL_TEST_URL plan_merge_cancel_test pg
           api test/step-row-lock-order-db.test.ts STEP_ROW_LOCK_ORDER_TEST_URL step_row_lock_order_test pg
           api test/step-fold-preread-db.test.ts STEP_FOLD_PREREAD_TEST_URL step_fold_preread_test pg
+          api test/advance-epochs-db.test.ts ADVANCE_EPOCHS_TEST_URL advance_epochs_test pg
           api test/lock-tier-order-db.test.ts LOCK_TIER_ORDER_TEST_URL lock_tier_order_test pg
           api test/plan-advisory-delete-db.test.ts PLAN_ADVISORY_DELETE_TEST_URL plan_advisory_delete_test pg
           api test/admin-config-pool-db.test.ts ADMIN_CONFIG_POOL_TEST_URL admin_config_pool_test pg
@@ -773,6 +781,7 @@ jobs:
           api test/task-integration-lock-routes-db.test.ts TASK_INTEGRATION_LOCK_TEST_URL task_integration_lock_test pg
           shared test/integrations-task-lock-db.test.ts INTEGRATIONS_TASK_LOCK_TEST_URL integrations_task_lock_test pg
           shared test/module-integrations-state-db.test.ts MODULE_INTEGRATIONS_STATE_TEST_URL module_integrations_state_test pg
+          worker test/plan-delete-cycle-db.test.ts PLAN_DELETE_CYCLE_TEST_URL plan_delete_cycle_test pg
           shared test/plan-patch-repo-delete-db.test.ts PLAN_PATCH_REPO_DELETE_TEST_URL plan_patch_repo_delete_test pg
           api test/module-integrations-routes-db.test.ts MODULE_INTEGRATIONS_ROUTES_TEST_URL module_integrations_routes_test pg
           api test/integrations-audit-db.test.ts INTEGRATIONS_AUDIT_TEST_URL integrations_audit_test pg
@@ -810,6 +819,7 @@ jobs:
           api test/stop-settle-db.test.ts STOP_SETTLE_TEST_URL stop_settle_test pg
           worker test/settle-stopped-task-db.test.ts WORKER_SETTLE_STOPPED_TEST_URL worker_settle_stopped_test pg
           worker test/global-kb-task-end-db.test.ts WORKER_KB_SETTLEMENT_TEST_URL worker_kb_settlement_test pg
+          worker test/global-kb-consumed-promotions-db.test.ts GKB_CONSUMED_PROMOTIONS_TEST_URL gkb_consumed_promotions_test pg
           database test/repository-task-lock.test.ts REPOSITORY_TASK_LOCK_TEST_URL repository_task_lock_test pg
           api test/upgrade-cli-addition-db.test.ts T118_DATABASE_URL test_t118_upgrade_cli_ci pg
           api test/onboarding-agentless-db.test.ts T118_DATABASE_URL test_t118_agentless_ci pg

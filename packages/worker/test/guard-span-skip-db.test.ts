@@ -500,7 +500,7 @@ describe.skipIf(!url)('owned guard spans on Postgres', () => {
         via: 'guard-test',
         watchSince: null,
       }),
-    ).toBe(true);
+    ).toEqual({ epoch: 1 });
     expect((await read()).slice(1, 3)).toEqual(before.slice(1, 3));
   });
   it('boot recovery preserves decisions/generations and never reopens a skipped span', async () => {

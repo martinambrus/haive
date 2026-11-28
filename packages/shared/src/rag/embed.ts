@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { readBounded, readForgeJson } from '../forge/index.js';
 import { configService, CONFIG_KEYS } from '../config/config.service.js';
 import { logger } from '../logger/index.js';
 import { guardedProbeFetch as ollamaFetch } from '../egress/index.js';
@@ -22,6 +23,10 @@ export const EMBED_BATCH_SIZE = 8;
 /** Sent on every embed so Ollama keeps the model resident between batches (and
  *  after warmup) instead of unloading it (default 5m) and reloading cold. */
 export const OLLAMA_KEEP_ALIVE = '30m';
+/** Headroom for 64 inputs × 8192 dimensions, including float64-emitting proxies. */
+export const OLLAMA_EMBED_MAX_BYTES = 32 * 1024 * 1024;
+/** Error replies need only short diagnostics, even from a user-configured proxy. */
+export const OLLAMA_ERROR_MAX_BYTES = 64 * 1024;
 /** Generous timeout for the one-off warmup call: a cold multi-billion-parameter
  *  embedding model on CPU can take far longer to LOAD than a normal embed's
  *  timeout, so the load must be given room to finish once. */
@@ -86,6 +91,7 @@ export async function probeOllama(
     const resp = await fetchFn(`${url}/api/tags`, {
       signal: AbortSignal.timeout(5000),
     });
+    await resp.body?.cancel().catch(() => {});
     return resp.ok;
   } catch {
     return false;
@@ -109,10 +115,16 @@ export async function ollamaEmbed(
     signal: AbortSignal.timeout(timeoutMs),
   });
   if (!resp.ok) {
-    const body = await resp.text().catch(() => '');
-    throw new Error(`Ollama embed failed (${resp.status}): ${body.slice(0, 200)}`);
+    const answer = await readBounded(resp, OLLAMA_ERROR_MAX_BYTES).catch(() => ({
+      text: '',
+      truncated: false,
+    }));
+    const detail =
+      answer.text.slice(0, 200) +
+      (answer.truncated ? ` (response is larger than ${OLLAMA_ERROR_MAX_BYTES} bytes)` : '');
+    throw new Error(`Ollama embed failed (${resp.status}): ${detail}`);
   }
-  const data = (await resp.json()) as { embeddings?: number[][] };
+  const data = (await readForgeJson(resp, OLLAMA_EMBED_MAX_BYTES)) as { embeddings?: number[][] };
   if (!data.embeddings || data.embeddings.length === 0) {
     throw new Error('Ollama returned no embeddings');
   }
@@ -138,6 +150,7 @@ export async function warmOllamaModel(
       body: JSON.stringify({ model, input: 'warmup', keep_alive: OLLAMA_KEEP_ALIVE }),
       signal: AbortSignal.timeout(budget),
     });
+    await resp.body?.cancel().catch(() => {});
     return resp.ok;
   } catch {
     return false;
@@ -166,6 +179,7 @@ export async function unloadOllamaModel(
         ? AbortSignal.any([sectionSignal, AbortSignal.timeout(timeoutMs)])
         : AbortSignal.timeout(timeoutMs),
     });
+    await resp.body?.cancel().catch(() => {});
     return resp.ok;
   } catch {
     return false;
@@ -185,8 +199,13 @@ export async function listResidentOllamaModels(
 ): Promise<string[] | null> {
   try {
     const resp = await fetchFn(`${url}/api/ps`, { signal: AbortSignal.timeout(timeoutMs) });
-    if (!resp.ok) return null;
-    const data = (await resp.json()) as { models?: Array<{ name?: string; model?: string }> };
+    if (!resp.ok) {
+      await resp.body?.cancel().catch(() => {});
+      return null;
+    }
+    const data = (await readForgeJson(resp)) as {
+      models?: Array<{ name?: string; model?: string }>;
+    };
     const names = new Set<string>();
     for (const m of data.models ?? []) {
       if (m.name) names.add(m.name);
@@ -217,8 +236,11 @@ export async function getOllamaModelPlacement(
 ): Promise<EmbedDevicePlacement> {
   try {
     const resp = await fetchFn(`${url}/api/ps`, { signal: AbortSignal.timeout(timeoutMs) });
-    if (!resp.ok) return 'unreachable';
-    const data = (await resp.json()) as {
+    if (!resp.ok) {
+      await resp.body?.cancel().catch(() => {});
+      return 'unreachable';
+    }
+    const data = (await readForgeJson(resp)) as {
       models?: Array<{ name?: string; model?: string; size_vram?: number }>;
     };
     const m = (data.models ?? []).find((x) => x.name === model || x.model === model);

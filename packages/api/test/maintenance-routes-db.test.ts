@@ -1,6 +1,12 @@
 import { and, eq, sql } from 'drizzle-orm';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
-import { createDatabase, schema, UPGRADE_JOURNAL_DDL, type Database } from '@haive/database';
+import {
+  createDatabase,
+  ROOT_CLAIM_STALE_MS,
+  schema,
+  UPGRADE_JOURNAL_DDL,
+  type Database,
+} from '@haive/database';
 
 const url = process.env.MAINTENANCE_API_TEST_URL;
 if (url && !new URL(url).pathname.startsWith('/maintenance_api_test'))
@@ -26,7 +32,9 @@ vi.mock('node:child_process', async (importOriginal) => {
 });
 vi.mock('../src/db.js', () => ({ getDb: () => (h.stall ? h.stall(h.db) : h.db) }));
 vi.mock('../src/queues.js', () => ({ getTaskQueue: () => ({ add: async () => undefined }) }));
-vi.mock('../src/lib/sandbox-kill.js', () => ({ killTaskSandboxes: async () => 0 }));
+vi.mock('../src/lib/sandbox-kill.js', () => ({
+  killTaskSandboxes: async () => ({ killed: 0, killConfirmed: true }),
+}));
 vi.mock('../src/middleware/auth.js', () => ({
   requireAuth: async (c: { set: (key: string, value: string) => void }, next: () => unknown) => {
     c.set('userId', h.actor.id);
@@ -472,6 +480,79 @@ describe.skipIf(!url)('maintenance routes on Postgres', () => {
       },
     );
 
+    describe('a live root claim', () => {
+      const claim = async (id: string, ageMs: number, kind: string | null = 'mutation') => {
+        await db
+          .update(schema.repositories)
+          .set({
+            rootClaimedAt: new Date(Date.now() - ageMs),
+            rootClaimKind: kind,
+            rootClaimOwner: 'test-owner',
+          })
+          .where(eq(schema.repositories.id, id));
+      };
+
+      it('lists a ready repository with a live claim, owner named, and counts it', async () => {
+        const repo = await repository('ready', 'claimed repo');
+        await claim(repo.id, 1000);
+
+        const body = await blocking();
+
+        expect(body.jobs).toMatchObject([
+          {
+            kind: 'repository',
+            id: repo.id,
+            status: 'checkout in use (file change)',
+            ownerId: OWNER,
+            ownerName: 'Owner Name',
+            ownerEmail: 'owner@maintenance.test',
+          },
+        ]);
+        expect(body.jobs[0]).not.toHaveProperty('rootClaimKind');
+        expect(body.total).toBe(1);
+      });
+
+      it('words a claim without a kind as a reset', async () => {
+        const repo = await repository('ready', 'legacy claim');
+        await claim(repo.id, 1000, null);
+        expect((await blocking()).jobs).toMatchObject([{ status: 'checkout in use (reset)' }]);
+      });
+
+      it('leaves out a stale claim and a released one', async () => {
+        const stale = await repository('ready', 'stale claim');
+        await claim(stale.id, ROOT_CLAIM_STALE_MS + 60_000);
+        const released = await repository('ready', 'released claim');
+        await claim(released.id, 1000);
+        await db
+          .update(schema.repositories)
+          .set({ rootClaimedAt: null, rootClaimKind: null, rootClaimOwner: null })
+          .where(eq(schema.repositories.id, released.id));
+
+        const body = await blocking();
+
+        expect(body.jobs).toEqual([]);
+        expect(body.total).toBe(0);
+      });
+
+      it('keeps cloning for a cloning repository that also holds a claim', async () => {
+        const repo = await repository('cloning', 'cloning claimed');
+        await claim(repo.id, 1000);
+        expect((await blocking()).jobs).toMatchObject([{ id: repo.id, status: 'cloning' }]);
+      });
+
+      it('keeps pending preparation for a repository that also holds a claim', async () => {
+        const repo = await repository('ready', 'preparing claimed');
+        await db
+          .update(schema.repositories)
+          .set({ refreshPending: true })
+          .where(eq(schema.repositories.id, repo.id));
+        await claim(repo.id, 1000);
+        expect((await blocking()).jobs).toMatchObject([
+          { id: repo.id, status: 'pending preparation' },
+        ]);
+      });
+    });
+
     it('names the owner of each, as it does for a task', async () => {
       const host = await repository('cloning', 'cloning repo');
       await bundle(host.id, 'syncing', 'syncing bundle');
@@ -599,6 +680,7 @@ describe.skipIf(!url)('maintenance routes on Postgres', () => {
       expect(await res.json()).toEqual({
         ok: true,
         killed: 0,
+        killConfirmed: true,
         cancelled: 0,
         stopped: 0,
         failedAt: null,

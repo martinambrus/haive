@@ -716,6 +716,9 @@ describe('behavior fixture', () => {
     });
     const form = phase8LearningStep.form!(s.ctx, s.args.detected, s.args.llmOutput);
     const output = await phase8LearningStep.apply(s.ctx, s.args);
+    for (const call of io.promote.mock.calls as unknown[][]) {
+      expect(call[3]).toEqual({ signal: s.ctx.signal });
+    }
     const fixture = {
       prompt,
       form,
@@ -726,7 +729,8 @@ describe('behavior fixture', () => {
         .filter(([file]) => !file.startsWith('.haive/learning-deletions/'))
         .map(([file, body]) => [file, file.startsWith(`${dir}/`) ? learningContent(body) : body])
         .sort(),
-      promotions: io.promote.mock.calls,
+      // Owner cancellation is separately asserted; promotion content keeps its captured baseline.
+      promotions: io.promote.mock.calls.map((call) => Array.from(call).slice(0, 3)),
     };
     // The real investigation renderer receives the clock; normalize only its timestamp.
     const serialized = JSON.stringify(fixture).replace(/\d{4}-\d{2}-\d{2}T[\d:.]+Z/g, '<now>');

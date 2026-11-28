@@ -66,7 +66,8 @@ export async function markQueuedForStart(
         TASK_START_LOCK_TIMEOUT_MS,
       );
       if (task?.status === 'created' && task.deadAt == null) {
-        // The move's short key has ended, but its lease spans the whole clone/restore.
+        // Holding the tasks key excludes a recovery's publication transaction; its root-claim
+        // lease spans the whole clone/restore, so a live claim refuses Start.
         const claim = await readLiveRootClaim(tx, repositoryId);
         if (claim) throw new HttpError(409, rootClaimRefusal(claim.kind));
         await assertRootMergeIdle(tx, taskId, { ...task, repositoryId });
