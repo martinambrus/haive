@@ -277,8 +277,8 @@ reads, attachment removal and remote configuration repair. Neither admits clonin
 `preparation` requires the actual renewing `RootClaimHandle`, verified against its private runtime
 registration, repository ID, preparation kind (`rebuild` or `refresh`) and the live row's owner.
 A boolean, copied object, another repository's handle, expired/replaced claim or released handle grants no permission. Plan mirror and project-state callers carry this verified handle through `withRootClaim`, including the private
-restore's nested import or writer. Legacy preparation imports retain their existing implementation
-and remain follow-up work.
+restore's nested import or writer. Preparation imports always run under a claim the job owns (see
+"Preparation imports" below); only a read-only external-folder scan holds none.
 
 `withCheckoutMutation` acquires a distinct `mutation` root claim **before** attachment/domain/row locks,
 checks availability again after acquisition and releases in `finally`. The API reaches it through
@@ -346,7 +346,8 @@ record writers of steps 02, 04 and 12 fail their step with a retry-this-step tex
 admission (`admitWatchedCheckout`) already refuses the same set plus holder tasks, so it has no
 separate gate. `completePreparationImports` skips its legacy-mirror fallback after a held sync, which
 would otherwise import legacy files over units the record carries; nothing re-runs the fallback if that
-record later imports as refused.
+record later imports as refused. Only a read-only folder scan or a lost lease can reach that skip: a
+preparation holds its own claim through the sync.
 
 Explicit plan Save/Pull hold a renewing mutation lease across preparation and the complete
 Git/reconcile/recovery lifetime, acquired before their existing merge/domain/row locks. Nested
@@ -361,12 +362,38 @@ refresh or rebuild waits behind it (`RootClaimBusyError`). A lost or unproven le
 Git, recovery's included, so a half-done merge stays as an open Git operation until a person acts.
 See the [plan mirror contract](plan-canvas.md) for the private restore, lock order and retry details.
 
+**Preparation imports.** The handlers (`handleClone`, `handleCopyLocal`, `handleExtract`, `handleInit`,
+`handleRefresh`) take `withRootClaim` and carry it through `persistDetection` into
+`completePreparationImports`, whose legacy mirror, project-state, plan and RTK steps run inside that
+claim; the sync and plan gates admit it as `preparation` access. The one claimless
+entry was the redelivery of an initial job that had already published `ready` (`repo-queue.ts`, after a
+stalled worker or a retry past the ready flip). It now takes `withRootClaim` around
+`completePreparationImports` and, while the claim is held (a crashed predecessor's claim stays live for
+`ROOT_CLAIM_STALE_MS`, or a reset, edit, verify or mutation), delays five seconds through the existing
+`RootClaimBusyError` path with no attempt spent and status, owner and marker untouched. Nothing runs
+partially while it waits, so the held sync and the lost legacy fallback cannot be reached from it. The
+claim is acquired before any task, domain or row lock, as everywhere. Never put `withRootClaim` inside
+`completePreparationImports` or `persistDetection`: the handlers already hold the claim, so a second
+acquire is refused by their own live claim and the job delays forever. A foreign replacement cannot
+overlap any of this short of a lost lease: the owed-preparation marker stays set until the queue clears
+it after the imports, and refresh admission is a compare-and-swap on it. `handleScan` (a read-only external folder) holds no
+claim by design: Haive never replaces that folder, so a database claim fences none of its bytes, and its
+imports stay admitted by the ambient `projection` access.
+
+**Runtime opens.** Independent runtime opens use the interactive barrier (see "Interactive mounts at replacement"): runtime
+ensure (`ENSURE`, `NAVIGATE_MAILPIT`, `REBUILD_DDEV`), the Editor ensure and a Terminal open each run under
+`withInteractiveCheckout`, which reads `ready` from the row before it opens and again after its long
+awaits. The row, not the process fence, covers a worker restart or a deferred suspend retry, when the row
+is `cloning` with no claim and an empty fence. DDEV control `restart` takes the same wrapper and checks
+again before its cold-boot fallback, because the failing exec may be the rebuild having removed the runner.
+Its refusal is returned, never thrown, as `ok: false` with the message in both `output` and `error` (the
+MCP shim shows the agent only `output`). `status` and `logs` only exec into a runner that already exists
+and stay ungated. Teardown (stopping runners and sessions) must stay ungated.
+
 The remaining independent entries in the T780 analysis are **not yet covered**: independent
 Haive-data Save, project-state set-aside, kept-metadata and private-replacement recovery, conflict
-answers (`project-state/resolve.ts`), initial detection/legacy imports (a redelivered
-`completePreparationImports` holds no claim, so a held import waits for the watcher's hash comparison),
-task file/archive/root resolvers, scope/code previews, onboarding/upgrade/data/snapshot
-status, runtime ensure and DDEV control. They still need the same policy at their admission/locked
+answers (`project-state/resolve.ts`), task file/archive/root resolvers, scope/code previews and
+onboarding/upgrade/data/snapshot status. They still need the same policy at their admission/locked
 boundaries, with task-key → domain → repository-row order and dirty/outbox obligations retained
 on holds. Interactive mount suspension is described below. Do not infer complete checkout exclusion from the
 attachment/remote/deletion and plan-mirror coverage.
@@ -374,7 +401,9 @@ attachment/remote/deletion and plan-mirror coverage.
 Rollback: settle active attachment, remote, plan-delete, plan Save/Pull and mirror operations and all preparations, then
 revert the API/shared/database code together and rebuild shared/database from that revision. There
 is no schema migration. Preserve relink intents, dirty/outbox rows and every aside/staging sibling.
-Rollback reopens the covered races; it never moves an aside back automatically.
+Rollback reopens the covered races; it never moves an aside back automatically. The redelivery claim
+and the DDEV restart gate are worker-only: revert `repo-queue.ts` and `ddev-control-queue.ts`, which reopens
+a redelivered import under a foreign claim and a DDEV restart during a rebuild, and nothing else.
 
 T780 PR2b-2 rollback: revert its code commits; there is no migration. Dirty outbox rows, write journals
 and their fixed reasons stay and the sweep retries them; nothing is rewritten or moved. Reverting reopens
