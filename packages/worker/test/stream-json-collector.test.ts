@@ -248,15 +248,15 @@ describe('createStreamJsonCollector.getTokenUsage', () => {
     feed(c, killedRunEvents());
     expect(c.getTokenUsage()).toEqual({
       inputTokens: 14,
-      outputTokens: 350,
-      totalTokens: 5264,
+      outputTokens: null,
+      totalTokens: 4914,
       cacheReadTokens: 4100,
       cacheCreationTokens: 800,
       peakPromptTokens: 1802,
     });
   });
 
-  it('live reading equals what the result then reports', () => {
+  it('live reading has unknown output; the result then reports it', () => {
     const c = createStreamJsonCollector();
     feed(c, killedRunEvents());
     const live = c.getTokenUsage();
@@ -268,7 +268,19 @@ describe('createStreamJsonCollector.getTokenUsage', () => {
         usage: usageOf(14, 350, 4100, 800),
       },
     ]);
-    expect(c.getTokenUsage()).toEqual(live);
+    expect(live).toEqual({
+      inputTokens: 14,
+      outputTokens: null,
+      totalTokens: 4914,
+      cacheReadTokens: 4100,
+      cacheCreationTokens: 800,
+      peakPromptTokens: 1802,
+    });
+    expect(c.getTokenUsage()).toEqual({
+      ...live,
+      outputTokens: 350,
+      totalTokens: 5264,
+    });
   });
 
   it('interleaved message ids (parallel sub-agents) are each counted once', () => {
@@ -283,8 +295,8 @@ describe('createStreamJsonCollector.getTokenUsage', () => {
     ]);
     expect(c.getTokenUsage()).toEqual({
       inputTokens: 7,
-      outputTokens: 70,
-      totalTokens: 847,
+      outputTokens: null,
+      totalTokens: 777,
       cacheReadTokens: 700,
       cacheCreationTokens: 70,
       peakPromptTokens: 444,
@@ -344,8 +356,8 @@ describe('createStreamJsonCollector.getTokenUsage', () => {
     ]);
     expect(c.getTokenUsage()).toEqual({
       inputTokens: 10,
-      outputTokens: 5,
-      totalTokens: 15,
+      outputTokens: null,
+      totalTokens: 10,
       peakPromptTokens: 10,
     });
   });
@@ -361,8 +373,8 @@ describe('createStreamJsonCollector.getTokenUsage', () => {
     ]);
     expect(c.getTokenUsage()).toEqual({
       inputTokens: 1,
-      outputTokens: 2,
-      totalTokens: 3,
+      outputTokens: null,
+      totalTokens: 1,
       peakPromptTokens: 1,
     });
   });
@@ -424,8 +436,8 @@ describe('createStreamJsonCollector.getTokenUsage', () => {
     feed(c, peakRunEvents());
     expect(c.getTokenUsage()).toEqual({
       inputTokens: 24,
-      outputTokens: 600,
-      totalTokens: 300624,
+      outputTokens: null,
+      totalTokens: 300024,
       cacheReadTokens: 245000,
       cacheCreationTokens: 55000,
       peakPromptTokens: 120006,

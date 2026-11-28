@@ -54,3 +54,19 @@ describe('sumTokenUsage contextWindow', () => {
     expect(sumTokenUsage(withWindow(), withWindow())).not.toHaveProperty('contextWindow');
   });
 });
+
+describe('sumTokenUsage unknown output', () => {
+  it('is unknown when either side is unknown, and still sums the totals', () => {
+    const unknown = { inputTokens: 10, outputTokens: null, totalTokens: 10 };
+    expect(sumTokenUsage(unknown, usage())).toEqual({
+      inputTokens: 20,
+      outputTokens: null,
+      totalTokens: 25,
+    });
+    expect(sumTokenUsage(usage(), unknown)).toEqual({
+      inputTokens: 20,
+      outputTokens: null,
+      totalTokens: 25,
+    });
+  });
+});

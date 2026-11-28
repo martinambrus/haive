@@ -93,7 +93,10 @@ export type StepErrorHint =
  *    totalTokens = the stats total (includes tool tokens). */
 export interface CliTokenUsage {
   inputTokens: number;
-  outputTokens: number;
+  /** null means the CLI never reported it (a run killed before its result event; assistant
+   *  events carry placeholders). totalTokens then counts the other buckets only. Never
+   *  write 0 for unknown. */
+  outputTokens: number | null;
   totalTokens: number;
   cacheReadTokens?: number;
   cacheCreationTokens?: number;

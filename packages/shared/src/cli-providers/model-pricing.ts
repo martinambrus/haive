@@ -480,7 +480,7 @@ export interface CostComputation {
  *  fields pricing does not read, so a caller can pass the stored usage directly. */
 export interface PricedTokens {
   inputTokens: number;
-  outputTokens: number;
+  outputTokens: number | null;
   cacheReadTokens?: number;
   cacheCreationTokens?: number;
 }
@@ -551,6 +551,13 @@ export function computeInvocationCost(
   rates: ModelPriceRates,
   opts: CostComputationOptions = {},
 ): CostComputation {
+  // A null output is unpriced, and must not read as an unknown prompt tier.
+  if (usage.outputTokens === null)
+    return {
+      costUsd: 0,
+      perBucket: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+      unpricedBuckets: ['output'],
+    };
   if (rates.tiers?.length) return computeTieredCost(usage, rates, opts);
   const cacheRead = Math.max(0, usage.cacheReadTokens ?? 0);
   const cacheWrite = Math.max(0, usage.cacheCreationTokens ?? 0);

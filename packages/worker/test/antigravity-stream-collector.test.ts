@@ -85,7 +85,7 @@ describe('antigravity stream-json collector', () => {
     const c = createAntigravityStreamCollector();
     c.onChunk(REAL_RUN + '\n');
     const u = c.getTokenUsage()!;
-    expect(u.inputTokens + u.outputTokens).toBe(u.totalTokens);
+    expect(u.inputTokens + u.outputTokens!).toBe(u.totalTokens);
   });
 
   it('counts malformed lines instead of throwing', () => {
