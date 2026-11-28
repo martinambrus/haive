@@ -1597,18 +1597,11 @@ export default function createStatsRoutes(ctx: ModuleRouteContext): Hono<AppEnv>
       return c.json({ range, scope, available: false, reason: 'repository-required' });
     }
 
-    const providerTerm = q.cliProviderId
-      ? [eq(schema.cliInvocations.cliProviderId, q.cliProviderId)]
-      : [];
-    const where = and(
-      ...taskScopeFilter(q, userId),
-      ...providerTerm,
-      invocationAttributionFilter(),
-      gte(schema.cliInvocations.startedAt, from),
-      lt(schema.cliInvocations.startedAt, to),
-    )!;
     const report = buildFilesRead(
-      await rollupFilesRead(ctx.db, { where, rowLimit: FILES_READ_ROW_LIMIT }),
+      await rollupFilesRead(ctx.db, {
+        where: invocationWindowFilter(q, userId, from, to),
+        rowLimit: FILES_READ_ROW_LIMIT,
+      }),
     );
     return c.json({ range, scope, available: true, ...report });
   });
