@@ -539,7 +539,7 @@ ready intent even without a recorded deferral. Any successful sync caller can dr
 checkout guards (`project-state/task-end-rules.ts`), re-rendering the AGENTS.md rules region from the
 new column and recording a `backfill` row, so the next upgrade reads the region as current and a
 rollback does not claim it. The sweep retries a pending intent after a transient refusal (another
-holder, a write journal, a git operation, an unreadable file, a racing save). A changed override or
+holder, a root claim or a checkout that is not ready, a write journal, a git operation, an unreadable file, a racing save). A changed override or
 reset epoch, or a region edited or removed since the earlier render, clears the intent in the locked
 transaction and warns once that it is left for the next upgrade. Success clears it too; a withdrawn
 deferral clears without rendering, and reset or repository deletion removes the outbox row. An
@@ -795,9 +795,10 @@ marker). The import runs before the pending rows are settled, so a row is never 
 when the right outcome was to import their claim. A checkout with no claim file while the base holds
 some is a record from before it carried claims, and retires nothing. The sync's base keeps the
 checkout's claims, each conflicted one at its old base, so a second sync of the same files writes
-nothing and the writer keeps owning its claim files. It defers while a reset holds the root claim
-and stands down when `onboarding_reset_at` moved after it read the checkout; a clone's or a
-refresh's own claim does not stop it, since they call it. The applicable set is written after the
+nothing and the writer keeps owning its claim files. It holds (`held`, code `checkout_unavailable`)
+while the shared checkout-access policy refuses it, before its final read of the checkout (a reset's
+claim included), and stands down when `onboarding_reset_at` moved after it read the checkout; a clone's
+or a refresh's own claim does not stop it, since they call it. The applicable set is written after the
 ledger and the settings have moved, whenever the column or the ledger did (a flip of the RTK flag
 is a column move), so it renders the live RTK switch as the sync leaves it.
 
@@ -850,7 +851,9 @@ the hint is asynchronous and does not promise that the first GET already contain
 The observer reads the actual named checkout and hashes the complete bounded raw record on every
 pass. It never uses timestamps or the configured repository branch as proof: a different named
 branch may import, while a detached or unborn HEAD, unreadable Git state, no usable Git root of
-its own, an open Git operation, a live root claim or a checkout holder defers observation. It does
+its own, an open Git operation, a live root claim or a checkout holder defers observation. A status other than
+`ready` or a live root claim is the shared checkout-access policy's `projection` refusal, so the
+observer needs no gate of its own. It does
 not fetch, switch branches or copy from a folder import's source; those still require Refresh. Each
 pass also records the checkout's current branch in `repositories.checkout_branch` before its own
 config gate; with `PROJECT_STATE_SYNC_ENABLED` off the sweep does not run and only an onboarding
@@ -994,7 +997,17 @@ merge can open while it waits there: the sync then answers `held`, imports nothi
 earlier recovery fence also reports the live onboarding/upgrade/reset hold on a dirty row, without
 changing its revisions, journal, files or semantic state; a clean row stays untouched. The error
 distinguishes that admission hold from an open git operation, whose prior diagnostic stays alone. The under-lock git guard runs after the repository row is held and takes priority even when a live
-holder or reset also appeared; both writer phases classify a live reset as an admission hold. A
+holder or reset also appeared; both writer phases classify a live reset as an admission hold. Both phases, the recovery restore and the
+task-end rules reconcile then apply the shared checkout-access `projection` policy under that row lock
+([Repository refresh](repository-refresh.md)): a status other than `ready`, or a live root claim the
+caller does not hold itself, throws `ProjectStateCheckoutUnavailableError`, a
+`ProjectStateCheckoutHeldError`. It writes nothing and changes no revision, journal or base. The refresh
+keeps the row dirty with one fixed `last_error` (set only on a dirty row) and answers `held` with
+reason `checkout`; the sweep writes once the checkout is ready. A caller's own claim is carried by the
+ambient scope, so a clone, a refresh and the Undo's edit claim are not refused by themselves. A sync refused
+the same way answers `held` with code `checkout_unavailable` before its final read, and
+`completePreparationImports` then skips the legacy-mirror fallback. A rules reconcile refused the same way
+writes neither `AGENTS.md` nor the rules region and keeps its obligation for the sweep. A
 missing row or a completed reset's changed epoch still refuses as a moved context, without a hold
 diagnostic. Every sync producer also reads the checkout
 again under the lock and answers `superseded` when the two reads differ, including a clone scan
