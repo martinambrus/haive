@@ -1,9 +1,11 @@
 import { randomBytes } from 'node:crypto';
 import { eq, asc } from 'drizzle-orm';
 import { schema, type Database, type DbTx } from '@haive/database';
-import { decrypt, encrypt } from '../crypto/index.js';
+import { encrypt, tryDecrypt } from '../crypto/index.js';
 import { logger } from '../logger/index.js';
 import { configService } from './config.service.js';
+import { assertKeyReadsSystemSecrets } from './encryption-key-boot.js';
+import { SecretUnreadableError } from './secret-unreadable.js';
 
 type DbClient = Database;
 
@@ -28,6 +30,8 @@ export class SecretsService {
     if (this.initialized) return;
     this.db = db;
     this.encryptionKey = await configService.getEncryptionKey();
+    // Before any write: a key that reads none of the stored secrets refuses boot untouched.
+    await assertKeyReadsSystemSecrets(db, this.encryptionKey, 'The encryption key in Redis');
     await this.removeRetiredKeys();
     this.initialized = true;
     logger.info('SecretsService initialized');
@@ -54,17 +58,17 @@ export class SecretsService {
       columns: { encryptedValue: true },
     });
     if (!row) return null;
-    try {
-      const plaintext = decrypt(row.encryptedValue, this.encryptionKey!);
-      this.cache.set(key, { value: plaintext, expiresAt: Date.now() + CACHE_TTL_MS });
-      return plaintext;
-    } catch (err) {
-      logger.error({ key, err }, 'Failed to decrypt secret');
-      if (process.env.NODE_ENV === 'production') {
-        throw new Error(`Failed to decrypt secret '${key}': encryption key may have changed`);
-      }
-      return null;
+    const plaintext = tryDecrypt(row.encryptedValue, this.encryptionKey!);
+    if (plaintext === null) {
+      // Never null: the generators below read null as "absent" and would overwrite this row.
+      logger.error({ key }, 'Failed to decrypt secret');
+      throw new SecretUnreadableError(
+        `Failed to decrypt secret '${key}': encryption key may have changed`,
+        [key],
+      );
     }
+    this.cache.set(key, { value: plaintext, expiresAt: Date.now() + CACHE_TTL_MS });
+    return plaintext;
   }
 
   /** Reads the database past the process cache, for a secret another process may have just set. */

@@ -54,7 +54,9 @@ async function add() {
 describe('module source routes build keys and audit targets from the row id', () => {
   beforeAll(async () => {
     vi.spyOn(configService, 'getEncryptionKey').mockResolvedValue(randomBytes(32).toString('hex'));
-    await secretsService.initialize(fake.db as never);
+    // The boot key check reads the stored secrets through `execute`, which the fake has no shape
+    // for; no secret is stored when the service boots.
+    await secretsService.initialize({ ...fake.db, execute: async () => [] } as never);
   });
   beforeEach(() => {
     h.db = fake.db;

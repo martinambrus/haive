@@ -1,6 +1,7 @@
 import { Redis, ReplyError } from 'ioredis';
 import { mailSeedDefaults } from './mail.js';
 import {
+  ENCRYPTION_KEY_REDIS_KEY,
   generateBootEncryptionKey,
   PENDING_ENCRYPTION_KEY,
   PENDING_ENCRYPTION_KEY_WAIT_MS,
@@ -359,7 +360,7 @@ export const CONFIG_KEYS = {
 
   APP_URL: 'config:app:url',
 
-  ENCRYPTION_KEY: 'bootstrap:encryptionKey',
+  ENCRYPTION_KEY: ENCRYPTION_KEY_REDIS_KEY,
 
   MAINTENANCE_MODE: 'config:deployment:maintenanceMode',
   MAINTENANCE_MESSAGE: 'config:deployment:maintenanceMessage',
