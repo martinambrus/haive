@@ -16,6 +16,7 @@ import { getBullRedis } from '../redis.js';
 import { withInteractiveCheckout } from '../repo/interactive-checkout.js';
 import { resolveDdevWorkspace } from '../step-engine/steps/workflow/_task-meta.js';
 import { ddevExec, runnerHandleForTask, ensureDdevStarted } from '../sandbox/ddev-runner.js';
+import { requireRunnerPresence } from '../sandbox/runner-probe.js';
 
 // Worker side of the ddev-control MCP. The api enqueues a job here when a task's AI
 // CLI calls ddev_status / ddev_logs / ddev_restart; the worker resolves the per-task
@@ -43,9 +44,10 @@ async function resolveTaskRepo(
 }
 
 /** Run one ddev-control action against the task's runner. Read actions (status/logs)
- *  use a handle to the already-running runner (no boot); restart recovers a gone/down
- *  runner first (ensureDdevStarted) then forces `ddev restart`. Never throws — a
- *  failure is returned as { ok:false, error } so the api relays it to the agent. */
+ *  use a handle to the already-running runner (no boot); restart runs `ddev restart` in
+ *  place and cold-boots (ensureDdevStarted) only a runner that is gone or stopped, any
+ *  other failed restart is reported as it is. Never throws — a failure is returned as
+ *  { ok:false, error } so the api relays it to the agent. */
 export async function runDdevControl(payload: DdevControlPayload): Promise<DdevControlResult> {
   const db = getDb();
   const repo = await resolveTaskRepo(db, payload.taskId);
@@ -86,17 +88,32 @@ export async function runDdevControl(payload: DdevControlPayload): Promise<DdevC
       // status/logs only exec into a runner that already exists and stay ungated.
       return await withInteractiveCheckout(db, repo.repositoryId, async (check) => {
         // Fast path: restart in place (works whether the project is serving, wedged, or
-        // stopped). If the runner CONTAINER is gone, `ddev restart` fails fast (docker exec
-        // on a missing container errors immediately) — recover it with a full cold boot.
+        // stopped). If the runner CONTAINER is gone or stopped, `ddev restart` fails fast
+        // (docker exec on it errors immediately) — recover that one with a full cold boot.
         // Avoids the redundant cold-boot-then-restart of doing ensureDdevStarted first.
         const r = await ddevExec(handle, 'restart', {
           timeoutMs: 900_000,
           onLine: (line) => log.debug({ taskId: payload.taskId }, line),
         });
         if (r.exitCode === 0) return { ok: true, output: r.output };
-        log.info({ taskId: payload.taskId }, 'ddev restart failed; recovering via cold boot');
         // The failure may be the rebuild having removed the runner: do not boot a new one onto it.
         await check();
+        // Only the container's presence says a cold boot is the recovery, never ddev's wording;
+        // an unknown answer throws, since a rebuild is not guessed at. Any other failure is the
+        // restart's own: report it with its output rather than a recovery that did not happen.
+        const presence = await requireRunnerPresence(handle.container);
+        if (presence.state === 'present' && presence.running) {
+          log.info(
+            { taskId: payload.taskId, exitCode: r.exitCode },
+            'ddev restart failed in a running runner; not cold booting',
+          );
+          return {
+            ok: false,
+            output: r.output.slice(-8000),
+            error: `ddev restart failed (exit ${r.exitCode}); the runner is up, so it was not rebuilt.`,
+          };
+        }
+        log.info({ taskId: payload.taskId }, 'ddev restart failed; recovering via cold boot');
         await ensureDdevStarted(payload.taskId, ws.repoSubpath, {
           onProgress: (line) => log.debug({ taskId: payload.taskId }, line),
         });
@@ -109,7 +126,8 @@ export async function runDdevControl(payload: DdevControlPayload): Promise<DdevC
     return { ok: false, output: '', error: `unknown action: ${String(payload.action)}` };
   } catch (err) {
     if (err instanceof CheckoutUnavailableError) {
-      // The MCP shim shows the agent only `output`, so the refusal text goes there too.
+      // A shim already mounted in a running sandbox shows the agent only `output`, so the
+      // refusal text goes there too (the current shim dedupes it against `error`).
       return { ok: false, output: err.message, error: err.message };
     }
     const message = safeErrorMessage(err);
