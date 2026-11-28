@@ -8,6 +8,8 @@ const h = vi.hoisted(() => ({
   error: vi.fn(),
   info: vi.fn(),
   task: vi.fn(),
+  ensure: vi.fn(),
+  repoStatus: { value: 'ready' },
 }));
 vi.mock('@haive/shared', async (original) => ({
   ...(await original<typeof import('@haive/shared')>()),
@@ -31,12 +33,15 @@ vi.mock('../db.js', () => ({
     query: {
       tasks: { findFirst: h.task },
       repositories: {
-        findFirst: async () => ({ storagePath: '/repos/user/repo', status: 'ready' }),
+        findFirst: async () => ({ storagePath: '/repos/user/repo', status: h.repoStatus.value }),
       },
     },
   }),
 }));
-vi.mock('../step-engine/steps/workflow/_app-runtime.js', () => ({ classifyRuntime: h.classify }));
+vi.mock('../step-engine/steps/workflow/_app-runtime.js', () => ({
+  classifyRuntime: h.classify,
+  ensureAppServing: h.ensure,
+}));
 vi.mock('../sandbox/ddev-runner.js', async (original) => ({
   ...(await original<typeof import('../sandbox/ddev-runner.js')>()),
   rebuildDdevRunner: h.rebuild,
@@ -46,6 +51,8 @@ import { rebuildDdevForTask, startRuntimeEnsureWorker } from './runtime-ensure-q
 const payload = { taskId: 'task', userId: 'owner' };
 beforeEach(() => {
   vi.clearAllMocks();
+  h.repoStatus.value = 'ready';
+  h.ensure.mockResolvedValue(null);
   h.task.mockResolvedValue({ repositoryId: 'repo' });
   h.classify.mockResolvedValue({ mode: 'ddev', repoSubpath: 'user/repo' });
   h.rebuild.mockImplementation(async (_task, _workspace, _user, enqueue) => {
@@ -161,4 +168,27 @@ it('returns an unknown probe as a retryable refusal', async () => {
     'DDEV rebuild refused',
   );
   expect(h.error).not.toHaveBeenCalled();
+});
+
+const pinnedJobs = ['ensure-runtime', 'navigate-mailpit', 'rebuild-ddev'];
+it.each(pinnedJobs)(
+  '%s rejects with checkout_unavailable while the repository is cloning',
+  async (name) => {
+    h.repoStatus.value = 'cloning';
+    startRuntimeEnsureWorker();
+    const run = h.worker.mock.calls[0]![0] as (job: unknown) => Promise<unknown>;
+    await expect(run({ name, data: payload })).rejects.toMatchObject({
+      code: 'checkout_unavailable',
+    });
+    expect(h.ensure).not.toHaveBeenCalled();
+    expect(h.classify).not.toHaveBeenCalled();
+    expect(h.rebuild).not.toHaveBeenCalled();
+  },
+);
+
+it.each(pinnedJobs)('%s dispatches when the repository is ready', async (name) => {
+  startRuntimeEnsureWorker();
+  const run = h.worker.mock.calls[0]![0] as (job: unknown) => Promise<unknown>;
+  await run({ name, data: payload });
+  expect(name === 'rebuild-ddev' ? h.rebuild : h.ensure).toHaveBeenCalled();
 });

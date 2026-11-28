@@ -30,6 +30,7 @@ import { ensureShellContainer, seedShellTrust } from '../src/terminal/terminal-c
 import { TerminalProviderDisabledError } from '../src/terminal/provider-disabled-error.js';
 import { resolveTaskSandboxWorkdir } from '../src/queues/cli-exec-queue.js';
 
+const repoRow = { status: 'ready' };
 const WORKTREE = '/haive/workdir/.haive-worktrees/task-1';
 const ROOT = '/haive/workdir';
 
@@ -108,7 +109,7 @@ function harness(probe: string | null, killExit: number | number[] = 0): Harness
           repositoryId: 'repo-1',
         }),
       },
-      repositories: { findFirst: async () => ({ id: 'repo-1', status: 'ready' }) },
+      repositories: { findFirst: async () => ({ id: 'repo-1', status: repoRow.status }) },
       taskSteps: { findFirst: async () => ({ status: 'done' }) },
       cliProviders: { findFirst: async () => ({ enabled: provider.enabled }) },
     },
@@ -730,4 +731,24 @@ it('drains a Terminal open started before cloning before stopping detached conta
   (await suspension)();
   expect(stop).toHaveBeenCalledOnce();
   expect(h.attaches).toHaveLength(0);
+});
+
+describe('a repository that is not ready', () => {
+  beforeEach(() => {
+    repoRow.status = 'cloning';
+    vi.mocked(ensureShellContainer).mockClear();
+    return () => {
+      repoRow.status = 'ready';
+    };
+  });
+
+  it.each(['openRepo', 'openTask'] as const)(
+    'refuses %s before any shell container starts',
+    async (open) => {
+      const h = harness(ROOT);
+      await expect(h[open]()).rejects.toMatchObject({ code: 'checkout_unavailable' });
+      expect(ensureShellContainer).not.toHaveBeenCalled();
+      expect(h.attaches).toHaveLength(0);
+    },
+  );
 });

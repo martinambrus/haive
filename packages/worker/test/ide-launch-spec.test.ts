@@ -5,6 +5,7 @@ vi.mock('../src/sandbox/checkout-identity.js', async (original) => ({
   checkoutIdentity: async () => '1:2',
 }));
 import { beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import { eq } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
 import { createFakeDb } from '@haive/database/testing';
 import {
@@ -801,4 +802,22 @@ it('keeps a held Editor when its checkout identity label is unreadable', async (
   await repositoryEditor.ensure();
   expect(h.state.runs).toHaveLength(0);
   expect(mutations()).toEqual([]);
+});
+
+describe('an editor on a repository that is not ready', () => {
+  const setStatus = async (status: 'ready' | 'cloning') => {
+    await db.update(schema.repositories).set({ status }).where(eq(schema.repositories.id, REPO));
+  };
+  beforeEach(async () => {
+    await setStatus('cloning');
+    return () => setStatus('ready');
+  });
+
+  it.each([
+    ['repository', repositoryEditor],
+    ['task', taskEditor],
+  ] as const)('refuses to launch a %s editor and starts no container', async (_name, editor) => {
+    await expect(editor.ensure()).rejects.toMatchObject({ code: 'checkout_unavailable' });
+    expect(h.state.runs).toHaveLength(0);
+  });
 });
