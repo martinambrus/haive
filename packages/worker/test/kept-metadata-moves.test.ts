@@ -76,6 +76,8 @@ describe('move callers retain metadata when re-sync does not finish', () => {
       if (site === 'pull')
         expect(h.resettle).toHaveBeenCalledWith(expectedDb, REPO, '/repo', kept, 'plan_pull');
       else expect(h.resettle).toHaveBeenCalledWith(expectedDb, REPO, '/repo', kept);
+      // objectContaining(query) also matches the raw database; a plan operation must pass the facade.
+      if (site !== 'confirm') expect(h.resettle.mock.calls[0]![0]).not.toBe(h.db);
       expect(h.metadata).not.toHaveBeenCalled();
       expect(kept.get('.haive-data/plan.json')?.mode).toBe(0o600);
     },
