@@ -68,7 +68,7 @@ All PRE-EXISTING.
 
 ### T595 · FNF[root-merge-runapp-followups] · run-app commit and root merge fence follow-ups (+15)
 
-status: open · kind: fix · found: E1 (#286, #271) reviews 2026-11-10/11 · priority: P4
+status: [parked: diminishing returns] 2026-11-28 (open members are lows, minor or theoretical; owner rule 2026-11-14; resume on a user report, a measured failure or a related change); was: open · kind: fix · found: E1 (#286, #271) reviews 2026-11-10/11 · priority: P4
 All low.
 
 1. An index-refresh failure after a landed run-app commit (`worker/src/repo/git-preview.ts` ~:148-160) fails the step; the Retry that recognises the landed commit skips the refresh, so it is never repaired. Fix: re-run the refresh on that Retry.
@@ -89,7 +89,7 @@ All low.
 
 ### T599 · FNF[rules-reconcile-followups] · task-end rules re-render follow-ups (+8)
 
-status: open · kind: fix · found: B (#443, #386, #317) reviews 2026-11-10/11 · priority: P4
+status: [parked: diminishing returns] 2026-11-28 (open members are lows, minor or theoretical; owner rule 2026-11-14; resume on a user report, a measured failure or a related change); was: open · kind: fix · found: B (#443, #386, #317) reviews 2026-11-10/11 · priority: P4
 All low unless marked. Code in `worker/src/project-state/task-end-rules.ts` and `sync.ts`.
 
 1. The repository path-mismatch refusal (`task-end-rules.ts` ~:62-63) is transient by design but has no test.
@@ -103,7 +103,7 @@ All low unless marked. Code in `worker/src/project-state/task-end-rules.ts` and 
 
 ### T600 · FNF[rag-accent-followups] · accent-insensitive lexical search follow-ups (+8)
 
-status: open · kind: fix · found: K (#145) reviews 2026-11-10/11 · priority: P4
+status: [parked: diminishing returns] 2026-11-28 (open members are lows, minor or theoretical; owner rule 2026-11-14; resume on a user report, a measured failure or a related change); was: open · kind: fix · found: K (#145) reviews 2026-11-10/11 · priority: P4
 All low unless marked. Code in `shared/src/rag/lexical-config.ts` and the RAG schema ensure.
 
 1. Accented queries miss rows until the backfill has restamped them; no progress or completion signal.
@@ -117,7 +117,7 @@ All low unless marked. Code in `shared/src/rag/lexical-config.ts` and the RAG sc
 
 ### T601 · FNF[revalidation-followups] · validation order, revalidation and 06 in custom types follow-ups (+12)
 
-status: open · kind: fix · found: F4 (#334) reviews 2026-11-10/11 · priority: P4
+status: [parked: diminishing returns] 2026-11-28 (open members are lows, minor or theoretical; owner rule 2026-11-14; resume on a user report, a measured failure or a related change); was: open · kind: fix · found: F4 (#334) reviews 2026-11-10/11 · priority: P4
 All low unless marked. Code in `worker/src/queues/validation-recheck.ts`, `07b-phase-4-validate.ts`, `task-queue.ts` and `06-run-config`.
 
 1. 06 reads stored defaults back as presets: answers 06 wrote itself cannot be told apart from a type's presets, so a Retry shows the previous run's stored answers as defaults.
@@ -135,7 +135,7 @@ All low unless marked. Code in `worker/src/queues/validation-recheck.ts`, `07b-p
 
 ### T602 · FNF[repair-recovery-followups] · repair-needed checkout recovery follow-ups (+18)
 
-status: open for items 3, 4, 7-23 (fenced run 2026-11-27: items 1 and 6 DONE, merged #1393 (280c44f4b) and live: a recovery's restore and publication commit in one transaction, and a failed recovery or enqueue keeps the admitted repair code while a source folder that fails its proof records `source_repair_needed`; item 5 RESOLVED earlier by 13fd8307d (#1366, `RootClaimBusyError` defers a check-only job without touching the row), four controls pass) · kind: fix · found: F2 (#460, #512) reviews 2026-11-10/11 · priority: P3
+status: [parked: diminishing returns] 2026-11-28 (open members are lows, minor or theoretical; owner rule 2026-11-14; resume on a user report, a measured failure or a related change); was: open for items 3, 4, 7-23 (fenced run 2026-11-27: items 1 and 6 DONE, merged #1393 (280c44f4b) and live: a recovery's restore and publication commit in one transaction, and a failed recovery or enqueue keeps the admitted repair code while a source folder that fails its proof records `source_repair_needed`; item 5 RESOLVED earlier by 13fd8307d (#1366, `RootClaimBusyError` defers a check-only job without touching the row), four controls pass) · kind: fix · found: F2 (#460, #512) reviews 2026-11-10/11 · priority: P3
 Low unless marked. Code in `worker/src/project-state/refresh.ts`, `worker/src/queues/repo-queue.ts`, `api/src/routes/repos.ts`, `shared/src/repo-rebuild.ts` and `worker/src/project-state/write.ts`.
 
 1. CONSEQUENTIAL, PRE-EXISTING: bases advance before publication of the rebuilt checkout.
@@ -201,7 +201,7 @@ When an api process that still holds a CLI login's auth lock times out the login
 
 ### T622 · FNF[terminal-close-codes-followups] · terminal close-code follow-ups (+3)
 
-status: open · kind: fix · found: S1 (#1091) review 2026-11-12 · priority: P4
+status: [parked: diminishing returns] 2026-11-28 (open members are lows, minor or theoretical; owner rule 2026-11-14; resume on a user report, a measured failure or a related change); was: open · kind: fix · found: S1 (#1091) review 2026-11-12 · priority: P4
 
 1. `InlineMarkdown inline` mode's phrasing-element allowlist has no test of its own (web components/markdown). Coverage.
 2. Inline mode always applies soft line breaks. Minor.
@@ -209,7 +209,7 @@ status: open · kind: fix · found: S1 (#1091) review 2026-11-12 · priority: P4
 
 ### T623 · FNF[gated-ratchet-and-bundle-recovery-lows] · gated-file ratchet, bundle recovery and follow-up lows (+12)
 
-status: open · kind: fix · found: #1093, #1094 reviews 2026-11-12 · priority: P4
+status: [parked: diminishing returns] 2026-11-28 (open members are lows, minor or theoretical; owner rule 2026-11-14; resume on a user report, a measured failure or a related change); was: open · kind: fix · found: #1093, #1094 reviews 2026-11-12 · priority: P4
 
 1. The gated-file ratchet (`scripts/test/ci-gated-list.test.mjs`) does not follow a guard through a helper function, and does not scan `modules/` or `tests/` (no gated files there today). Minor.
 2. The T117/T118 test guards no longer refuse the default port; they still need the opt-in env and a dedicated database name. `checkout-watch-queue.test.ts` obliterates its queue on the Redis db the env names. Minor; a comment would do.
@@ -226,7 +226,7 @@ status: open · kind: fix · found: #1093, #1094 reviews 2026-11-12 · priority:
 
 ### T612 · FNF[web-origin-proxy-followups] · cross-host web-origin proxy follow-ups (+1)
 
-status: open · kind: fix · found: H2 (#435) review 2026-11-11 · priority: P4
+status: [parked: diminishing returns] 2026-11-28 (open members are lows, minor or theoretical; owner rule 2026-11-14; resume on a user report, a measured failure or a related change); was: open · kind: fix · found: H2 (#435) review 2026-11-11 · priority: P4
 Code in web `lib/api-proxy.server.ts`, `lib/api-base.server.ts`, `app/api/haive/[...path]/route.ts`, api routes serving inline files.
 
 1. DONE #1087. The raw-file browser control (top-level SVG cannot run script) was never shown red against the old headers.
@@ -244,7 +244,7 @@ PLAN 2026-11-12 (approved): same-host installs are NOT unaffected: the host-only
 
 ### T614 · FNF[cancel-left-merge-followups] · cancel-left committed-merge report and Undo follow-ups (+21)
 
-status: open · kind: fix · found: E2 (#329) reviews 2026-11-11 · priority: P4
+status: [parked: diminishing returns] 2026-11-28 (open members are lows, minor or theoretical; owner rule 2026-11-14; resume on a user report, a measured failure or a related change); was: open · kind: fix · found: E2 (#329) reviews 2026-11-11 · priority: P4
 Code in `worker/src/step-engine/left-committed-merge.ts`.
 
 1. Every git no-exit result is treated as "cannot confirm" and reported as nothing, including a signal kill or an `EMFILE`/`EAGAIN` spawn failure that a re-drive could fix (~:65). Kept on purpose: a persistent spawn error that rethrows would hold the abandon pass forever. Narrow to `ENOENT` only if a retry bound for the abandon pass exists.
@@ -277,7 +277,7 @@ Owner direction 2026-11-12: make tests fast and minimal rather than only raising
 
 ### T626 · FNF[editor-proxy-paths] · editor proxy path hygiene (+2)
 
-status: open · kind: fnf · found: #1108 review 2026-11-12 · priority: P4
+status: [parked: diminishing returns] 2026-11-28 (open members are lows, minor or theoretical; owner rule 2026-11-14; resume on a user report, a measured failure or a related change); was: open · kind: fnf · found: #1108 review 2026-11-12 · priority: P4
 
 1. `api/src/routes/ide.ts` `isPortProxyPath` does not see `//proxy/80`, `/%70roxy/80` or `/proxy%2f80` (encoded letters or slash in the first segment); the HTTP side is identical. PRE-EXISTING, minor: `--disable-proxy` is the second guard, and code-server's own decoding is unverified. Fix: decode the first segment as Hono does before comparing, as `apiProxyTarget` does on the web.
 2. Five copies of `rawUrl.split(/[?#]/)[0]` (`ide.ts`, `terminal.ts`, `terminal-shell.ts`, `cli-stream.ts`, `browser-vnc.ts`); PRE-EXISTING, minor. Fix: one helper in `lib/upgrade-auth.ts`.
@@ -399,7 +399,7 @@ Execution fence 2026-11-01: first establish an affected legacy/current supported
 
 ### T309 · FNF[cancel-cap-2] · a capped cancel with no claim row never finishes (+8)
 
-status: fenced scope done 2026-11-27 (the fence prioritized 1/4/8/9: all settled); members 2, 3, 5, 6, 7 deferred by the fence (cosmetic, isolated coverage and cleanup; 7 is resolver-area); members 1, 4, 9 DONE in #1365 (b32cea910, live 2026-11-27, migration 0253 applied: abandon pass selects recorded merge states, cooldown via updated_at, pause cleared inside the cancel transaction on every path); member 8 does not reproduce (terminal guard, pinned by a control) · gate: bounded verification · user decision: recheck risk-bearing members, 2026-11-01 · priority: P2
+status: [parked: diminishing returns] 2026-11-28 (open members are lows, minor or theoretical; owner rule 2026-11-14; resume on a user report, a measured failure or a related change); was: fenced scope done 2026-11-27 (the fence prioritized 1/4/8/9: all settled); members 2, 3, 5, 6, 7 deferred by the fence (cosmetic, isolated coverage and cleanup; 7 is resolver-area); members 1, 4, 9 DONE in #1365 (b32cea910, live 2026-11-27, migration 0253 applied: abandon pass selects recorded merge states, cooldown via updated_at, pause cleared inside the cancel transaction on every path); member 8 does not reproduce (terminal guard, pinned by a control) · gate: bounded verification · user decision: recheck risk-bearing members, 2026-11-01 · priority: P2
 All PRE-EXISTING, low.
 
 1. abandonCancelledTeardowns selects only tasks with merge_dir_claims rows; a DAG-mode capped cancel never gets cancel_finished, and worktreeSharer keeps counting it. Select also recorded mid-merge / DAG activeConflict within the re-drive window.
@@ -517,13 +517,13 @@ status: parked · reason: diminishing returns (owner triage 2026-11-10); resume 
 
 ### T533 · FNF[build-channel] · build-channel.mjs, channel-gate, channel-boot-check and publish-channel follow-ups from T351/T353/T352 (+1)
 
-status: open · last: 2026-11-06 · kind: fix · found: T351 reviews 2026-11-05 · priority: P3
+status: [parked: diminishing returns] 2026-11-28 (open members are lows, minor or theoretical; owner rule 2026-11-14; resume on a user report, a measured failure or a related change); was: open · last: 2026-11-06 · kind: fix · found: T351 reviews 2026-11-05 · priority: P3
 
 24. build-channel stops only the direct `docker` child (scripts/build-channel.mjs ~:69, `capture`); no process-group kill, and whether BuildKit stops the solve server-side when the CLI dies is unverified. PRE-EXISTING; found T533d review. Fix direction: spawn detached and signal the group, then measure a killed build on a live daemon.
 
 ### T538 · FNF[updater-manifest] · release manifest read and refusal-row leftovers from T534/T537 (+1)
 
-status: open · kind: fix · found: T534 review 1 2026-11-06 · priority: P4
+status: [parked: diminishing returns] 2026-11-28 (open members are lows, minor or theoretical; owner rule 2026-11-14; resume on a user report, a measured failure or a related change); was: open · kind: fix · found: T534 review 1 2026-11-06 · priority: P4
 
 4. Some refusals still write no attempt row: argv errors, missing `DATABASE_URL`/`REDIS_URL`, failures before the journal or the lock, and a failed insert. The admin page then shows only the launch box. PRE-EXISTING. Fix direction: an api-side follow of the container's exit code for the cases the updater cannot record.
 
@@ -590,7 +590,7 @@ From the T355 build, cosmetic. The web client renders the 503 as a generic failu
 
 ### T665 · FNF[price-tier-lows] · prompt-size price tier lows, after #1164 (+21)
 
-status: open; context-tiered PR 3 SHIPPED #1245 (6ddda4960, 2026-11-17) and PR 4's Claude Code half #1262 (8422abc06), so the "PR 3 waits" line below is historical (corrected 2026-11-26) (2026-11-15 #1198: items 11 and 14 resolved; items 1 and 10 verified already correct on base (advisory lock and guarded close exist; the collector keeps last usage per message, the 141 output tokens appear only on the result event); OWNER DECISION 2026-11-14: overnight fix prerequisites 10, 11, 14 and 1 only; context-tiered PR 3 still waits for the complete-coverage rate measured on dev runs; the rest parked: diminishing returns (2026-11-14, owner rule: trivial lows park; resume on a user report, a measured failure or a related change; earlier: OWNER DECISION 2026-11-14: fix these prerequisites and measure the complete-coverage rate on dev runs BEFORE context-tiered PR 3 is built; items 1, 3, 4, 6, 7 and 8 done 2026-11-14 #1173 (1735eb64b): measured claude-code 2,941/3,153 and Haiku main 178/191 complete, replay tool `worker/scripts/replay-request-usage.ts`; open: 2, 5, 9, 10 and 11-17) · kind: fix · found: context-tiered pricing PR 1 · priority: P3
+status: next 2026-11-28: items 10 and 18 (a killed run's output is recorded as 0, not unknown) and a check of item 11 against #1245, after the Files read view merges; the other open items are lows; was: open; context-tiered PR 3 SHIPPED #1245 (6ddda4960, 2026-11-17) and PR 4's Claude Code half #1262 (8422abc06), so the "PR 3 waits" line below is historical (corrected 2026-11-26) (2026-11-15 #1198: items 11 and 14 resolved; items 1 and 10 verified already correct on base (advisory lock and guarded close exist; the collector keeps last usage per message, the 141 output tokens appear only on the result event); OWNER DECISION 2026-11-14: overnight fix prerequisites 10, 11, 14 and 1 only; context-tiered PR 3 still waits for the complete-coverage rate measured on dev runs; the rest parked: diminishing returns (2026-11-14, owner rule: trivial lows park; resume on a user report, a measured failure or a related change; earlier: OWNER DECISION 2026-11-14: fix these prerequisites and measure the complete-coverage rate on dev runs BEFORE context-tiered PR 3 is built; items 1, 3, 4, 6, 7 and 8 done 2026-11-14 #1173 (1735eb64b): measured claude-code 2,941/3,153 and Haiku main 178/191 complete, replay tool `worker/scripts/replay-request-usage.ts`; open: 2, 5, 9, 10 and 11-17) · kind: fix · found: context-tiered pricing PR 1 · priority: P3
 
 1. Two overlapping refreshes can race in `applyDesiredRows` (worker cli-versions/model-prices.ts ~:291): live rows are read outside the transaction and closed by id with no `effective_to IS NULL` guard, so the loser fails on `cli_model_prices_live_idx` and a stale marker can stay live until the next tick (up to 12 h of refused pricing). No corruption (the loser rolls back). PRE-EXISTING mechanism.
 2. LiteLLM tiers inherit from the base, not from a lower tier, when buckets use different thresholds (shared cli-providers/model-pricing.ts ~:324). Spec-literal (plan Decision 2) and no mapped entry has differing thresholds today. Latent.
@@ -678,7 +678,7 @@ Today agents may append `## INSIGHTS` (out-of-scope improvements, `INSIGHTS_INST
 
 ### T708 · Plan labels in product docs
 
-status: open · kind: docs · found: guarded span prerequisites docs (#1268) · priority: P4
+status: [parked: diminishing returns] 2026-11-28 (open members are lows, minor or theoretical; owner rule 2026-11-14; resume on a user report, a measured failure or a related change); was: open · kind: docs · found: guarded span prerequisites docs (#1268) · priority: P4
 
 `docs/architecture/task-types.md` (~:780 heading "Pinned execution declarations (P6; admission only)", ~:786, ~:851) and `docs/architecture/worker-restarts.md` (~:766) name an internal plan phase ("P6") in product text. Replace with the behaviour and the PR number (#1222). Docs-only; ride with the next change touching either file.
 
@@ -745,7 +745,7 @@ PRE-EXISTING, by design today. The step-11 learning review offers `writeFiles` (
 
 ### T725 · FNF[translator-render] · Translator render step and artifact lows (+10)
 
-status: open · kind: bug · found: translator assembly milestone (module PR #7) · priority: P4
+status: [parked: diminishing returns] 2026-11-28 (open members are lows, minor or theoretical; owner rule 2026-11-14; resume on a user report, a measured failure or a related change); was: open · kind: bug · found: translator assembly milestone (module PR #7) · priority: P4
 
 In `martinambrus/haive-module-translator`; all NEW with the render step, none blocking.
 
@@ -762,7 +762,7 @@ In `martinambrus/haive-module-translator`; all NEW with the render step, none bl
 
 ### T726 · FNF[translator-retention] · Translator delete, orphan reconcile and operator leftovers (+11)
 
-status: open · kind: fix · found: translator retention milestone (module PR #8) · priority: P3
+status: [parked: diminishing returns] 2026-11-28 (open members are lows, minor or theoretical; owner rule 2026-11-14; resume on a user report, a measured failure or a related change); was: open · kind: fix · found: translator retention milestone (module PR #8) · priority: P3
 
 In `martinambrus/haive-module-translator`; all NEW with the delete and reconcile slice. Item 1 first: it departs from a host rule.
 
@@ -851,7 +851,7 @@ In `martinambrus/haive-module-translator`. 1. DONE module PR #12 (3493a9e). `src
 
 ### T734 · FNF[module-db-open] · The module database opener creates databases on request paths (+1)
 
-status: open · kind: fix · found: translator scale and acceptance milestone 2026-11-20 · priority: P4
+status: [parked: diminishing returns] 2026-11-28 (open members are lows, minor or theoretical; owner rule 2026-11-14; resume on a user report, a measured failure or a related change); was: open · kind: fix · found: translator scale and acceptance milestone 2026-11-20 · priority: P4
 
 1. `openModuleDatabase` (`shared/src/module-db/index.ts` ~:32-48) creates the module's database when it is absent, and a module's request handlers call it per request (translator `src/db/passes.ts:87,379`, `src/db/retention.ts:67,79`, `src/db/setup.ts:18`). A GET can therefore run `CREATE DATABASE` when an active module's database is missing; the worker creates it at module load (`worker/src/modules/loader.ts:288`), so only after an out-of-band drop. Each call also builds a new two-connection pool that the caller must close. PRE-EXISTING. Fix direction: a create-free open for request paths, creating only at module load, and one cached pool per module.
 
@@ -871,7 +871,7 @@ In `martinambrus/haive-module-translator`.
 
 ### T736 · FNF[translator-grouping] · Translator unit grouping and calibration envelope leftovers (+8)
 
-status: open for items 3, 4, 5, 8, 9, 10; items 1, 2, 6, 7 DONE in translator #19 (c3c988d, deployed 2026-11-26: serialized single-block overflow marked exceptional and labelled at source review, one envelope constant bound into SQL, `test:ingest` builds first, acceptance coverage from the unit count) · kind: fix · found: tiny-unit grouping build and review (module PR #12) 2026-11-20 · priority: P4
+status: [parked: diminishing returns] 2026-11-28 (open members are lows, minor or theoretical; owner rule 2026-11-14; resume on a user report, a measured failure or a related change); was: open for items 3, 4, 5, 8, 9, 10; items 1, 2, 6, 7 DONE in translator #19 (c3c988d, deployed 2026-11-26: serialized single-block overflow marked exceptional and labelled at source review, one envelope constant bound into SQL, `test:ingest` builds first, acceptance coverage from the unit count) · kind: fix · found: tiny-unit grouping build and review (module PR #12) 2026-11-20 · priority: P4
 
 In `martinambrus/haive-module-translator`.
 
@@ -894,7 +894,7 @@ status: done 2026-11-21 (#1298, 655845a07, docs: `docs/architecture/testing.md` 
 
 ### T738 · FNF[step-warning-atomic-append] · a step warning written from the caller's row snapshot can drop one added since
 
-status: open for follow-ups 3-6; items 1-2 DONE in #1307 (7fc70f310, deployed 2026-11-21 16:31Z: nine snapshot sites and the codex fallback append through `appendStepWarning`; `addStepWarning` removed) · kind: fix · found: #1297 driver 2026-11-21 · priority: P4
+status: [parked: diminishing returns] 2026-11-28 (open members are lows, minor or theoretical; owner rule 2026-11-14; resume on a user report, a measured failure or a related change); was: open for follow-ups 3-6; items 1-2 DONE in #1307 (7fc70f310, deployed 2026-11-21 16:31Z: nine snapshot sites and the codex fallback append through `appendStepWarning`; `addStepWarning` removed) · kind: fix · found: #1297 driver 2026-11-21 · priority: P4
 
 1. `addStepWarning` (`worker/src/step-engine/step-ownership.ts` ~:92-100) joins the caller's row snapshot and writes the whole column, so a warning another writer added after the caller read its row is lost. Sites: `merge-resolver.ts` ~:532, 557, 679, 897, 1123, 1598; `left-open-merge.ts` ~:521; `dag-executor.ts` ~:977; `project-state/branch-revert.ts` ~:611. Fix direction: route them through `appendStepWarning` (one UPDATE that adds the text once, added by #1297). PRE-EXISTING; #1297's notice was traced through these flows and is not overwritten.
 2. `queues/cli-exec/handlers.ts` ~:387 replaces `warning_message` for a codex app-server fallback. Unreachable on a composed-LSP task today (only claude-code can be in its set). Same fix. PRE-EXISTING.
@@ -908,7 +908,7 @@ Follow-ups found by the #1307 driver:
 
 ### T739 · FNF[cli-touched-vestigial] · the touched-CLI marker table has readers and no writer
 
-status: open for item 4; phase 2 (item 3) DONE in #1311 (edd7a7586, migration 0248 applied on dev 2026-11-21 19:32Z, 12 rows dumped first to `.claude/tmp/codex-run/T739-S/dev-task_step_cli_touched-dump.sql`; runner skips dropped baseline tables, roll-forward-only undo once applied); phase 1 (readers removed) DONE in #1309 (21f6fceba, deployed 2026-11-21 17:58Z) · kind: fix · found: #1297 driver 2026-11-21, checked against the code · priority: P4
+status: [parked: diminishing returns] 2026-11-28 (open members are lows, minor or theoretical; owner rule 2026-11-14; resume on a user report, a measured failure or a related change); was: open for item 4; phase 2 (item 3) DONE in #1311 (edd7a7586, migration 0248 applied on dev 2026-11-21 19:32Z, 12 rows dumped first to `.claude/tmp/codex-run/T739-S/dev-task_step_cli_touched-dump.sql`; runner skips dropped baseline tables, roll-forward-only undo once applied); phase 1 (readers removed) DONE in #1309 (21f6fceba, deployed 2026-11-21 17:58Z) · kind: fix · found: #1297 driver 2026-11-21, checked against the code · priority: P4
 
 1. `task_step_cli_touched` is read (`worker/src/step-engine/step-runner.ts` ~:333-343 `isTouched`, `api/src/routes/tasks/_helpers.ts` ~:186-199) but never written. The CLI switch writes the per-task choice first (`api/src/lib/step-cli-choice.ts` ~:87), which the resolver reads before any saved row, so an in-task pick never depends on the marker; under `ignore_saved_step_clis` a saved row is simply never honoured. Dead code, no user-visible effect. Fix direction: drop the readers, then the table in a later two-phase migration, or document why it stays. PRE-EXISTING.
 
@@ -1008,7 +1008,7 @@ Follow-ups found by the #1308 driver:
 
 ### T748 · FNF[empty-typed-secret] · the api stores a secret-named env var with an empty value
 
-status: open for follow-up 2 and the FNF below; main item DONE in #1313 (7a7b0c0fd, deployed 2026-11-21: shared schema 400 naming the key, worker skips stored empties; dev has 0 stored empties); follow-ups 1, 3, 4, 5 DONE in #1333 (ec4fc8726, deployed 2026-11-23: clone skips blanks, `keepGeneration` removed, the secrets list excludes exact-empty envelopes by shape (`isEmptyEnvelope`, no decrypt on a GET; a whitespace-only legacy row stays counted and copied, inert), blank = trimmed-empty at every writer, seed stops at the first configured candidate) · kind: fix · found: #1306 driver 2026-11-21 · priority: P4
+status: [parked: diminishing returns] 2026-11-28 (open members are lows, minor or theoretical; owner rule 2026-11-14; resume on a user report, a measured failure or a related change); was: open for follow-up 2 and the FNF below; main item DONE in #1313 (7a7b0c0fd, deployed 2026-11-21: shared schema 400 naming the key, worker skips stored empties; dev has 0 stored empties); follow-ups 1, 3, 4, 5 DONE in #1333 (ec4fc8726, deployed 2026-11-23: clone skips blanks, `keepGeneration` removed, the secrets list excludes exact-empty envelopes by shape (`isEmptyEnvelope`, no decrypt on a GET; a whitespace-only legacy row stays counted and copied, inert), blank = trimmed-empty at every writer, seed stops at the first configured candidate) · kind: fix · found: #1306 driver 2026-11-21 · priority: P4
 
 `api/src/routes/cli-providers.ts` ~:557 (create) and ~:865 (PATCH), via `shared/src/schemas/cli-providers.ts` ~:98 and `shared/src/cli-providers/provider-secret.ts` ~:25, accept a secret-named env var with an empty value and store an encrypted empty string; `worker/src/secrets/provider-secrets.ts` ~:33 then injects it as an empty env var. The web form drops empties, so this is API-only. PRE-EXISTING.
 
@@ -1083,7 +1083,7 @@ In `martinambrus/haive` (host), with a one-line follow-up in `martinambrus/haive
 
 ### T756 · FNF[updater-attempt-fields-followups] · minor follow-ups of the early-refusal fields (+8)
 
-status: open for items 2 and 3; items 1, 4, 5, 6, 7, 8 DONE in #1339 (a1849f0ad, 2026-11-26: attempt note kept within the error cap, one strict env parser, held-directory version read, ordering and edge controls) · kind: fix · found: #1321 reviews 2026-11-22 · priority: P4
+status: [parked: diminishing returns] 2026-11-28 (open members are lows, minor or theoretical; owner rule 2026-11-14; resume on a user report, a measured failure or a related change); was: open for items 2 and 3; items 1, 4, 5, 6, 7, 8 DONE in #1339 (a1849f0ad, 2026-11-26: attempt note kept within the error cap, one strict env parser, held-directory version read, ordering and edge controls) · kind: fix · found: #1321 reviews 2026-11-22 · priority: P4
 
 1. DONE (#1339). `packages/updater/src/journal.ts` ~:94: truncating the refusal message drops the appended note. REGRESSION, minor.
 2. `packages/updater/src/envkeys.ts` ~:48: `literalEnvValues` is exported generically though only the display read uses it. PRE-EXISTING, minor.
@@ -1122,7 +1122,7 @@ status: done (#1330 9974653a3, 2026-11-23; updater code, ships with the next rel
 
 ### T760 · FNF[updater-takeover-order] · a takeover may fail before it reaches the child check (+2)
 
-status: open for item 2; items 1 and 3 DONE in #1339 (a1849f0ad, 2026-11-26: connection-class journal bootstrap failures refuse with `updater-bootstrap-failed`, exit 3, naming the code and the one-shot survivor check; boot and other errors pass through; a second cleanup listing) · kind: fix · found: T744 review 2026-11-23 · priority: P4
+status: [parked: diminishing returns] 2026-11-28 (open members are lows, minor or theoretical; owner rule 2026-11-14; resume on a user report, a measured failure or a related change); was: open for item 2; items 1 and 3 DONE in #1339 (a1849f0ad, 2026-11-26: connection-class journal bootstrap failures refuse with `updater-bootstrap-failed`, exit 3, naming the code and the one-shot survivor check; boot and other errors pass through; a second cleanup listing) · kind: fix · found: T744 review 2026-11-23 · priority: P4
 
 1. DONE (#1339). `packages/updater/src/cli.ts` ~:336: `ensureJournal` and the database bootstrap run before the lock and the child check, so after an updater killed mid-snapshot (Postgres stopped by `composeStop`) a takeover probably fails at the journal connection with no named refusal. PRE-EXISTING, unverified: probe first.
 2. `packages/updater/src/docker.ts` ~:262 `restoreVolume` has no caller. PRE-EXISTING, minor.
@@ -1130,7 +1130,7 @@ status: open for item 2; items 1 and 3 DONE in #1339 (a1849f0ad, 2026-11-26: con
 
 ### T761 · FNF[T755]: own-provider type follow-ups (+6)
 
-status: open · kind: fix · found: T755 reviews 2026-11-22 · priority: P3
+status: [parked: diminishing returns] 2026-11-28 (open members are lows, minor or theoretical; owner rule 2026-11-14; resume on a user report, a measured failure or a related change); was: open · kind: fix · found: T755 reviews 2026-11-22 · priority: P3
 
 All PRE-EXISTING, minor, unless noted.
 
@@ -1166,7 +1166,7 @@ status: done 2026-11-26 (#1340, 7c1fa45d0: the e2e clears through the editor key
 
 ### T764 · FNF[T689-PR7b] · custom fix target follow-ups (+10)
 
-status: open for items 3, 9 and 11-13 (lows); items 1, 2, 4, 5, 6, 7, 8, 10 DONE in #1341 (764e60442, worker reloaded 2026-11-26: fix-round requests carry the START marker id, claim and marker in one transaction, legacy unstamped requests count as before, one predicate for every fix-round reader; module fix target house rules need `file_write`; fan-out refusals named, withheld steps warned at boot) · kind: fix · found: PR7b reviews 1-4 and bots 2026-11-23 · priority: P4
+status: [parked: diminishing returns] 2026-11-28 (open members are lows, minor or theoretical; owner rule 2026-11-14; resume on a user report, a measured failure or a related change); was: open for items 3, 9 and 11-13 (lows); items 1, 2, 4, 5, 6, 7, 8, 10 DONE in #1341 (764e60442, worker reloaded 2026-11-26: fix-round requests carry the START marker id, claim and marker in one transaction, legacy unstamped requests count as before, one predicate for every fix-round reader; module fix target house rules need `file_write`; fan-out refusals named, withheld steps warned at boot) · kind: fix · found: PR7b reviews 1-4 and bots 2026-11-23 · priority: P4
 
 All low unless noted; PRE-EXISTING means older than #1328.
 
@@ -1186,7 +1186,7 @@ All low unless noted; PRE-EXISTING means older than #1328.
 
 ### T765 · Updater: recovery under an unproven lease proof is not time-bounded
 
-status: open for item 5 below; the time bound DONE in #1342 (f3092472f, 2026-11-26: unproven tolerance ends one stale window after the last successful record write, stamped before its I/O; proofs and failed writes never renew; torn-write excuse only after a truncating own overwrite; every write attempt takes a new `seq`; same rules in the Go bridge; reverse-resume, commit and full-disk CLI controls) · kind: design · found: T759 review 2 2026-11-23 · priority: P4
+status: [parked: diminishing returns] 2026-11-28 (open members are lows, minor or theoretical; owner rule 2026-11-14; resume on a user report, a measured failure or a related change); was: open for item 5 below; the time bound DONE in #1342 (f3092472f, 2026-11-26: unproven tolerance ends one stale window after the last successful record write, stamped before its I/O; proofs and failed writes never renew; torn-write excuse only after a truncating own overwrite; every write attempt takes a new `seq`; same rules in the Go bridge; reverse-resume, commit and full-disk CLI controls) · kind: design · found: T759 review 2 2026-11-23 · priority: P4
 
 `packages/updater/src/lease-fence.ts` ~:30-36, `stack-lock.ts` ~:141-153 (after #1330): failure recovery tolerates `stack-lock-unproven`, so a takeover whose record this holder cannot read (lock unreadable or absent to it for 60 s or more while another holder took over) is not fenced during rollback, restore or the postgres restart. Narrower than before #1330. Fix direction: bound the tolerance by time since the last good proof or beat (refuse as lost past the stale window). The same holds for the own-write torn-record tolerance after #1330 fix 2 (`stack-lock.ts` ~:153, :220, :236-241: no time bound, and set when `overwrite` fails at `open` before truncating anything). Cross-code (PRE-EXISTING): the Go bridge's beat (`docker/desktop-extension/bridge/stack_lock.go` ~:176-206) sets `failing` on a read error or failed create too and then accepts a non-JSON record as its own and overwrites it, the pattern #1330 fixed in the updater. Also from the same review (D4, low): no control for an unproven proof in the reverse-resume path or the commit phase (`cli.ts` ~:453-463, ~:670), and no CLI-level control for the full-disk trace (torn own record, failing snapshot, postgres restarted); the heartbeat's read-then-overwrite can truncate a lock a contender created between the two (`stack-lock.ts` ~:180-196, PRE-EXISTING); the fence defaults open when no lease scope is bound and docker fencing is an allow-list (`lease-fence.ts` ~:17-19, `docker.ts` ~:194).
 
@@ -1194,7 +1194,7 @@ status: open for item 5 below; the time bound DONE in #1342 (f3092472f, 2026-11-
 
 ### T766 · FNF[T757]: fix-loop handoff follow-ups (+5)
 
-status: open for items C1-C3 below; items 1-5 DONE #1332 (eebe8e039, deployed 2026-11-26: pinned-target leg of the recovery controls, structured revise refusal codes, guarded-revise controls, `StepNotInRunListError` with its own dead reason, Accept with a next step accepts findings in the gate transaction) · kind: fix · found: T757 reviews 2026-11-23 · priority: P4
+status: [parked: diminishing returns] 2026-11-28 (open members are lows, minor or theoretical; owner rule 2026-11-14; resume on a user report, a measured failure or a related change); was: open for items C1-C3 below; items 1-5 DONE #1332 (eebe8e039, deployed 2026-11-26: pinned-target leg of the recovery controls, structured revise refusal codes, guarded-revise controls, `StepNotInRunListError` with its own dead reason, Accept with a next step accepts findings in the gate transaction) · kind: fix · found: T757 reviews 2026-11-23 · priority: P4
 
 1. T757 item 2 and the pinned half of item 9 (deferred until PR7b): apply the T757 controls to a pinned custom fix target (the `atomic revise` block in `custom-fix-recovery-db.test.ts` runs only `if (!leg.pin)`).
 2. A lost revise logs one bare `revise not entered` line with no reason (`worker/src/queues/task-queue.ts` ~:3047-3052); add the refusal reason as loop_back's `logRefusal` does.
@@ -1490,7 +1490,7 @@ OWNER DECISION 2026-11-19: the usage connection (`CLAUDE_USAGE_OAUTH`, refreshed
 
 ### T719 · FNF[env-template-lifecycle] · environment template lifecycle leftovers (+15)
 
-status: open · kind: fix · found: legacy template replacement design (T709) 2026-11-19 · priority: P4
+status: [parked: diminishing returns] 2026-11-28 (open members are lows, minor or theoretical; owner rule 2026-11-14; resume on a user report, a measured failure or a related change); was: open · kind: fix · found: legacy template replacement design (T709) 2026-11-19 · priority: P4
 
 All PRE-EXISTING, none blocking the replacement series. Paths are under `packages/`.
 
@@ -1512,7 +1512,7 @@ All PRE-EXISTING, none blocking the replacement series. Paths are under `package
 
 ### T718 · Translator module lows (review and correction approval) (+12)
 
-status: open · kind: bug · found: translator review milestone (module PRs #5, #6) · priority: P4
+status: [parked: diminishing returns] 2026-11-28 (open members are lows, minor or theoretical; owner rule 2026-11-14; resume on a user report, a measured failure or a related change); was: open · kind: bug · found: translator review milestone (module PRs #5, #6) · priority: P4
 
 In `martinambrus/haive-module-translator`. NEW = a limit of the review feature, none a regression. (a) `src/db/review-patches.ts:95,146`: `page` and `applyRound` load every block version and write about 2.4 statements per proposal. NEW. (b) `src/steps/tr-review.ts:167,178`: a stale or repeated submit after a reopen fails the step (Retry recovers), inherited from the `explicit` pattern in `src/db/setup.ts`. PRE-EXISTING. (c) `src/db/review.ts:32`: `acceptBytes` reserves nothing for decisions or the batch, so near the allowance they can fail after every unit was reviewed. NEW, documented in the README. (d) `src/db/review-patches.ts:174`: seam windows use the target language (equivalent for en and sk). NEW. (e) `src/protocol/patch.ts:87,105,127`: groups built by spread, O(k^2) per block. NEW. (f) `test/review-step.test.ts`: `FakeReviewStore` duplicates `test/support/patch-fakes.ts`. NEW. (g) Documented limits: corrections valid only as a pair are not applied, re-review after a batch needs a Retry, a rejected correction can be proposed again, decisions are final, the reason text is not shown on the page. PRE-EXISTING at `4a2efb8`: (h) `src/manifest.ts:7` `schemaVersion: 4` with 7 migrations; (i) milestone labels in test titles (`test/setup-gates.test.ts:6`, `pass-step.test.ts:12`, `manifest.test.ts:6`, `pass-store.test.ts:20`, `passes.test.ts:8,83`, `setup.test.ts:9`) and the `README.md:14` heading; (j) `src/db/passes.ts:100,105` bookkeeping inserts in read-only sessions; (k) `exactKeys` and duplicate-key pattern (`src/protocol/passes.ts:76,111-128`, `review.ts:88`), and `validateReply` does not check text well-formedness; (l) `test/pass-db.test.mjs:221-233` pins only the allow side of headroom. Added from the assembly and retention milestones (module PRs #7, #8), all PRE-EXISTING: (m) `src/protocol/passes.ts:135-141` `validateReply` does not constrain code or definition blocks or `open:a`/url adjacency, so a word inside a code block still fails `code-block` at the render step, after payment (same function as (k)); (n) `src/db/passes.ts` (session to lineage): the render step checks the live provider policy although it calls no model, while downloads do not; (o) `src/db/passes.ts:131-136` `session()` commits the seen and outcome rows of the task's runs even when the operator action or another `run` is refused (it rethrows after the commit; accounting facts only); (p) `src/db/passes.ts:149` `cap()` throws a plain `Error('Invalid operator extension')` on an unsafe stored total, which surfaces as a 500 instead of a refusal.
 
@@ -1520,13 +1520,13 @@ From the scale and acceptance milestone (module PRs #9, #10), 2026-11-20: (q) `s
 
 ### T717 · The sandbox image's own uv is unpinned and unused by Haive
 
-status: open · kind: design · found: git MCP warm start (#1279) · priority: P4
+status: [parked: diminishing returns] 2026-11-28 (open members are lows, minor or theoretical; owner rule 2026-11-14; resume on a user report, a measured failure or a related change); was: open · kind: design · found: git MCP warm start (#1279) · priority: P4
 
 The core image and the composer's runtime-tools layer still install uv from `https://astral.sh/uv/install.sh` with no version or hash (`worker/sandbox-image/Dockerfile:45`, `worker/src/sandbox/image-composer.ts:194`). Since #1279 nothing in Haive runs it: the git MCP server uses its own pinned uv at build time only. It costs about 40 MB per image, and agents may still call `uv`/`uvx` in a repository. PRE-EXISTING. Decision needed: drop it, or pin it the way `install-git-mcp.sh` pins its tarball (version plus per-target sha256).
 
 ### T716 · Sandbox image supply chain lows
 
-status: open · kind: bug · found: git MCP warm start (#1279) · priority: P4
+status: [parked: diminishing returns] 2026-11-28 (open members are lows, minor or theoretical; owner rule 2026-11-14; resume on a user report, a measured failure or a related change); was: open · kind: bug · found: git MCP warm start (#1279) · priority: P4
 
 (a) The filesystem and postgres default MCP servers run unpinned `npx --prefer-offline -y @modelcontextprotocol/server-*` (`worker/src/sandbox/mcp-config.ts:246,257,277`), so an upstream release changes their tool surface mid-experiment; pin them as #1279 pinned git. PRE-EXISTING. (b) Alpine environment templates cannot be composed: the runtime-tools layer runs `apk add uv` (`image-composer.ts:189`), which fails before Alpine 3.21, and the provider install falls back to `apt-get` (`worker/src/cli-versions/codegen.ts:10-12`). PRE-EXISTING. (c) A reused terminal shell container keeps the MCP config it was created with; the git label gate covers creation only (`worker/src/terminal/terminal-container.ts:433-447`). Transitional, REGRESSION-adjacent, clears on the next container. (d) `worker/src/sandbox/npm-cache.ts:76` still says "git pending (uvx)". (e) The first image build after a change needs GitHub and PyPI reachable; no mirror fallback.
 
@@ -1538,13 +1538,13 @@ Claude-family runs declare the `git` MCP server as `uvx mcp-server-git` (`worker
 
 ### T714 · Testing doc: `vitest run -u <file>` runs the whole suite
 
-status: open · kind: docs · found: LSP cold-start guidance driver (#1278) · priority: P4
+status: [parked: diminishing returns] 2026-11-28 (open members are lows, minor or theoretical; owner rule 2026-11-14; resume on a user report, a measured failure or a related change); was: open · kind: docs · found: LSP cold-start guidance driver (#1278) · priority: P4
 
 In vitest 5.0.3 `-u, --update [type]` takes an optional value, so `vitest run -u <file>` reads the file as the update type and runs the whole suite with snapshot update on (hit once, killed after ~3 min, no tracked change). Add one line to `docs/architecture/testing.md`: put `-u` after the file, or use `--update=all`. Third-party behaviour; only the doc note is ours.
 
 ### T713 · Custom-bundle agent hashes ignore the rendered body
 
-status: open for follow-ups 1-5; the hash itself DONE #1302 (976d9dd80, deployed 2026-11-21 09:00Z: version bumped 2 to 3 for six unbumped body changes, pin test ties the version to a rendered corpus; follow-ups 1-5 below) · kind: design · found: LSP cold-start guidance driver (#1278) · priority: P3
+status: [parked: diminishing returns] 2026-11-28 (open members are lows, minor or theoretical; owner rule 2026-11-14; resume on a user report, a measured failure or a related change); was: open for follow-ups 1-5; the hash itself DONE #1302 (976d9dd80, deployed 2026-11-21 09:00Z: version bumped 2 to 3 for six unbumped body changes, pin test ties the version to a rendered corpus; follow-ups 1-5 below) · kind: design · found: LSP cold-start guidance driver (#1278) · priority: P3
 
 A custom-bundle agent's manifest hash covers its parsed spec and `AGENT_RENDERER_VERSION`, not the rendered body (`shared/src/templates/manifest.ts:104`, `worker/src/step-engine/template-manifest.ts:468`, `api/src/routes/upgrades.ts:399`, `steps/onboarding/01-upgrade-plan.ts:247`), so a body-only generator change (a retrieval block edit) never reaches an installed custom-bundle agent file until the spec or renderer version moves. Built-in agents follow the render. PRE-EXISTING. Decision needed: hash the rendered body for custom bundles too (offers an upgrade on every generator change) or bump `AGENT_RENDERER_VERSION` whenever a shared block changes.
 
@@ -1558,7 +1558,7 @@ Follow-ups found by the #1302 driver, all PRE-EXISTING:
 
 ### T711 · Custom fix target lows
 
-status: open · kind: bug · found: custom fix target diagnosis (#1271) · priority: P4
+status: [parked: diminishing returns] 2026-11-28 (open members are lows, minor or theoretical; owner rule 2026-11-14; resume on a user report, a measured failure or a related change); was: open · kind: bug · found: custom fix target diagnosis (#1271) · priority: P4
 
 Leftovers, none blocking while custom targets stay refused: (a) `excerptDiagnosis` (`worker/src/step-engine/steps/workflow/_fix-loop.ts:393`) is not idempotent on every oversize shape, pre-existing; (b) the real `loadFixLoopRead` path has no builder-independent control (a stand-in passed all but one case); (c) a module step declaring `agentMining` is refused as a fix target because repair evidence is captured only on the LLM phase (`fix-consumer.ts` `isCapableModuleStep`); lift only together with evidence on the mining path; (d) fix-resolver refusal reasons are sentences with no stable code (`run-list.ts` `resolveFixLoopTarget`); add a code if a consumer ever branches on them; (e) the step-card CLI PATCH accepts `fix:N:default` on any step, not only a fix target (`shared/src/schemas/tasks.ts:332`, `api/src/routes/tasks/steps.ts:2346`); (f) round-CLI copy still says "implementation" for a custom target (`_fix-round-cli-field.ts:25,27`, `_fix-round-cli.ts:107,114,118`).
 
@@ -1568,7 +1568,7 @@ Added 2026-11-21 (#1305 driver), all PRE-EXISTING: the malformed-pin fallback ab
 
 ### T710 · Guarded span lows after activation
 
-status: open · kind: bug · found: guarded span activation (#1270) · priority: P4
+status: [parked: diminishing returns] 2026-11-28 (open members are lows, minor or theoretical; owner rule 2026-11-14; resume on a user report, a measured failure or a related change); was: open · kind: bug · found: guarded span activation (#1270) · priority: P4
 
 Leftovers, none blocking: (a) a dependent span re-entered in a later fix round fails closed with `shared-decision-unavailable` (`worker/src/step-engine/guard-decisions.ts:67,202`), design limit, belongs with the custom fix target work; (b) hook refusals in `worker/src/queues/task-queue.ts:3690,3701,3718` go through `failStepTransition` (:2224), which does not call `foldAbandonedPark` (:3429), so a failed parked row keeps `waiting_started_at`; timer effect unverified, helper behaviour pre-existing; (c) `isRetryableGuardError` (`guard-span-skip.ts:198-201`) treats a SQLSTATE anywhere in `.cause` as transient; (d) `dead-task-boot.ts:256` approximates the strategy as derived or static for the revive gate; (e) unverified by review: `validationSuccessor` with a null-output guard-skipped row after 07b, `loop_back` into a suppressed member, and the lock order of `holdReopenedForm` and `reconcileOrphanedSteps` against the entry hook; (f) `guard-gate-agreement-db` logs many expected error-level `task job failed` lines that bury real failures.
 
@@ -1592,19 +1592,19 @@ UPDATE 2026-11-27: fenced five shipped #1389 (b08fc27b0), deployed. (a) FIXED: u
 
 ### T707 · PHP database driver lows after the generator fix
 
-status: open · kind: bug · found: PHP database driver review (#1267) · priority: P4
+status: [parked: diminishing returns] 2026-11-28 (open members are lows, minor or theoretical; owner rule 2026-11-14; resume on a user report, a measured failure or a related change); was: open · kind: bug · found: PHP database driver review (#1267) · priority: P4
 
 Small leftovers, none blocking: (a) an existing PHP template with a SQLite, Postgres or MySQL database and no `ext-*` requirement keeps its saved Dockerfile without the driver until its declared dependencies change or someone edits it; a self-heal like `dockerfileTargetsUnbuildablePhp` would force a rebuild, so only do it if wanted; (b) `04-verify-environment` checks only `php --version`, so an image missing the PDO driver verifies green; add a `php -m` module check for the declared database.
 
 ### T706 · Desktop extension lows after the live check
 
-status: open · kind: bug · found: Desktop extension reviews (#1259) · priority: P4
+status: [parked: diminishing returns] 2026-11-28 (open members are lows, minor or theoretical; owner rule 2026-11-14; resume on a user report, a measured failure or a related change); was: open · kind: bug · found: Desktop extension reviews (#1259) · priority: P4
 
 Small leftovers, none blocking: (a) `TestStatusAndStopDoNotRequireMailpitPort` asserts no `.env` bytes before/after; add a busy-8025-without-key refusal case and an invalid `HAIVE_MAILPIT_PORT` Start case; (b) the crash-loop flicker reopens the 5 s window per starting episode (bounded, polling never stalls); (c) Windows `.env` rename retry budget (~150 ms) is unmeasured against antivirus, and a read error during retry refuses rather than retries; (d) drift test takes the first `ENTRYPOINT` line and gives a bare SyntaxError on a non-JSON array; (e) the hung-updater refusal could name the updater's recovery command. Native Windows/macOS acceptance beyond the 2026-11-17 owner check stays manual.
 
 ### T705 · Updater and Desktop extension share one lock
 
-status: open for follow-ups 1-4; the lock itself DONE #1304 (718dfd7d4, 2026-11-21: lease file `<install>/.haive-stack-lock`, beat 5 s, stale after 60 s of unchanged bytes, break by rename; follow-ups below) · kind: feature · found: Greptile P1 on #1259 · priority: P3
+status: [parked: diminishing returns] 2026-11-28 (open members are lows, minor or theoretical; owner rule 2026-11-14; resume on a user report, a measured failure or a related change); was: open for follow-ups 1-4; the lock itself DONE #1304 (718dfd7d4, 2026-11-21: lease file `<install>/.haive-stack-lock`, beat 5 s, stale after 60 s of unchanged bytes, break by rename; follow-ups below) · kind: feature · found: Greptile P1 on #1259 · priority: P3
 
 The extension refuses Install/Start/Stop while this install's updater container runs and re-checks right before `compose up`, but a window remains between that final check and the Compose call: an upgrade launched in that instant can still have PostgreSQL restarted during `phaseSnapshot` (`packages/updater/src/run.ts`). Closing it needs a lock both sides take (the updater and its launchers, plus the extension's `<install>.extension-lock`), honored by the updater from some release onward; older updaters keep today's container-identity guard. Design the lock location (the updater container must see it) and its recovery after a crash.
 
@@ -1617,7 +1617,7 @@ Follow-ups found by the #1304 driver:
 
 ### T704 · Installer port probe matches only the first port of a published range
 
-status: open · kind: bug · found: review of #1260 · priority: P4
+status: [parked: diminishing returns] 2026-11-28 (open members are lows, minor or theoretical; owner rule 2026-11-14; resume on a user report, a measured failure or a related change); was: open · kind: bug · found: review of #1260 · priority: P4
 
 `port_in_use` (install.sh) and `Test-PortInUse` (install.ps1) match docker's published ports with `(^|[^0-9])N->`, so a range such as `0.0.0.0:8025-8026->8025-8026/tcp` reports only its first port as taken; 8026 reads free. Pre-existing, unchanged by #1260. Fix: parse `A-B->` ranges and test membership, with a test next to `scripts/test/install-ports.test.mjs`.
 
@@ -1717,7 +1717,7 @@ Resolution: the diagnosis above did not hold for the live error. Codex read its 
 
 ### T694 · FNF[insight-gate3] · insight-cycle approval exposures beside the gate-3 park (+12)
 
-status: open for items 6, 7, 8, 13, 14, 17-20 (fenced run 2026-11-27: items 16 and 5 DONE and item 9's coverage added, merged #1395 (810d78e88) and live: a task Retry's re-offer keeps an accepted, not yet picked-up answer and its generation, the gate row's own step Retry still re-asks; the queue-level validation recheck polls task status and epoch and aborts its read on cancel; review 1 PASS, its leftovers added as items 17-20); items 1, 3 and 4 done by #1294 (2c29b923a, deployed 2026-11-20 17:29Z); items 2 and 10 done by #1296 (0dd72fa79, deployed 2026-11-21 01:48Z; owner decisions 2026-11-20, item 10 option B; the input-variant matrices moved to the fake-database layer in the same PR); item 11 done by #1299 (815216209, deployed 2026-11-21 03:45Z); item 15 done by #1301 (5bddd0d36, deployed 2026-11-21 07:47Z) · kind: fix · found: review of the gate-3 park change 2026-11-16 · priority: P2
+status: [parked: diminishing returns] 2026-11-28 (open members are lows, minor or theoretical; owner rule 2026-11-14; resume on a user report, a measured failure or a related change); was: open for items 6, 7, 8, 13, 14, 17-20 (fenced run 2026-11-27: items 16 and 5 DONE and item 9's coverage added, merged #1395 (810d78e88) and live: a task Retry's re-offer keeps an accepted, not yet picked-up answer and its generation, the gate row's own step Retry still re-asks; the queue-level validation recheck polls task status and epoch and aborts its read on cancel; review 1 PASS, its leftovers added as items 17-20); items 1, 3 and 4 done by #1294 (2c29b923a, deployed 2026-11-20 17:29Z); items 2 and 10 done by #1296 (0dd72fa79, deployed 2026-11-21 01:48Z; owner decisions 2026-11-20, item 10 option B; the input-variant matrices moved to the fake-database layer in the same PR); item 11 done by #1299 (815216209, deployed 2026-11-21 03:45Z); item 15 done by #1301 (5bddd0d36, deployed 2026-11-21 07:47Z) · kind: fix · found: review of the gate-3 park change 2026-11-16 · priority: P2
 
 1. DONE #1294. Stale-tab attestation: the step submit body carries only `values` and targets the newest `waiting_form` row (`api/src/routes/tasks/steps.ts` ~:902-1017), so any stale tab of the same owner can attest a gate-2 or gate-3 answer for a form it never showed. Bind latched-gate submits to `stepRowId` + `waitingStartedAt`.
 2. DONE #1296. A successful second insight cycle (no verify failure, gate 2 skipped) still lets a gate-3 preset commit the refreshed diff (`insight-gate3-return.ts` ~:54-66 settles on the prior done gate 3). Same exposure as the owner's park decision; owner call whether it should park too. OWNER DECIDED 2026-11-20: always park gate 3 after a gate-3 insight cycle, whether or not its verification failed; presets and pre-answers are ignored there. Scope: only cycles a person started by picking insights at a parked gate 3 (`10-gate-3-commit.ts` ~:639); automatic rounds (`autoActOnInsights`, `08e-insights-triage.ts` ~:247) stay as they are. Once the person answers that gate 3, Retry, Resume and worker takeover must not park it again, and the fresh-submission anchor (`freshInsightGateSubmission`, today the latest `gate2_approved` event) moves to the cycle.
@@ -1754,7 +1754,7 @@ From #1224 review-3: `definitionForCreate` pins data edges from the full static 
 
 ### T688 · FNF[dag-partial-2] · opt-in DAG hardening lows, after T686 (+6)
 
-status: open (items 1-6 DONE #1221 e741a2fbb; the lows below remain, all opt-in only) · kind: fix · found: #1221 review-1/2 2026-11-15 · priority: P3
+status: [parked: diminishing returns] 2026-11-28 (open members are lows, minor or theoretical; owner rule 2026-11-14; resume on a user report, a measured failure or a related change); was: open (items 1-6 DONE #1221 e741a2fbb; the lows below remain, all opt-in only) · kind: fix · found: #1221 review-1/2 2026-11-15 · priority: P3
 
 Reviews in `.claude/tmp/codex-run/DGL-S/review-1.md` and `review-2.md`. The default `fail-step` policy is unaffected.
 
@@ -1767,7 +1767,7 @@ Reviews in `.claude/tmp/codex-run/DGL-S/review-1.md` and `review-2.md`. The defa
 
 ### T687 · FNF[insight-loop] · insight loop lows, after #1215 (+30)
 
-status: open (lows; bundle with the next insight-loop change or park; owner decided 2026-11-16: item 19 gate 3 PARKS after a human gate-2 re-approval of a picked-insight cycle (presets ignored), item 24 all-`not_applied` gate-3 batches SHORT-CIRCUIT the checks with a recorded reason; both DONE 2026-11-16 in #1233 b457672e7; remaining items stay lows) · kind: fix · found: #1215 reviews 2026-11-15 · priority: P3
+status: [parked: diminishing returns] 2026-11-28 (open members are lows, minor or theoretical; owner rule 2026-11-14; resume on a user report, a measured failure or a related change); was: open (lows; bundle with the next insight-loop change or park; owner decided 2026-11-16: item 19 gate 3 PARKS after a human gate-2 re-approval of a picked-insight cycle (presets ignored), item 24 all-`not_applied` gate-3 batches SHORT-CIRCUIT the checks with a recorded reason; both DONE 2026-11-16 in #1233 b457672e7; remaining items stay lows) · kind: fix · found: #1215 reviews 2026-11-15 · priority: P3
 
 Reviews in `.claude/tmp/codex-run/INS3B-S/` (review-4.md, review-5.md).
 
@@ -2160,7 +2160,7 @@ status: parked: diminishing returns (2026-11-14, owner rule: trivial lows park; 
 
 ### T553 · FNF[disabled-task-cli-2] · leftovers after the disabled-provider hold (+9)
 
-status: open · kind: fix · priority: P3
+status: [parked: diminishing returns] 2026-11-28 (open members are lows, minor or theoretical; owner rule 2026-11-14; resume on a user report, a measured failure or a related change); was: open · kind: fix · priority: P3
 From the T406/T408 build (2026-11-07).
 
 1. DONE 2026-11-14 #1162: warns before a disable that would hold tasks (impact preview + confirm).
@@ -2203,7 +2203,7 @@ status: parked · reason: diminishing returns (owner triage 2026-11-10); resume 
 
 ### T557 · FNF[unguarded-dial-audit] · dials that still bypass the egress guard (design) (+13)
 
-status: open (fenced run 2026-11-27: item 13's stored-URL exposure and probe timeout and item 15h DONE, merged #1394 (6a700a654) and live (libs): only scheme, host and port of the Global KB Ollama URL leave the api, with `***` markers, on every role's config reply, the Test text, audit rows and the sync warning; a redacted echo keeps the stored URL, a changed origin or non-http(s) URL answers 400; both Test routes share the 60 s `OLLAMA_EMBED_PROBE_TIMEOUT_MS`; 15h controls added, no defect; items 17 and 18 added from its reviews) · kind: design · found: T347 run · priority: P2
+status: [parked: diminishing returns] 2026-11-28 (open members are lows, minor or theoretical; owner rule 2026-11-14; resume on a user report, a measured failure or a related change); was: open (fenced run 2026-11-27: item 13's stored-URL exposure and probe timeout and item 15h DONE, merged #1394 (6a700a654) and live (libs): only scheme, host and port of the Global KB Ollama URL leave the api, with `***` markers, on every role's config reply, the Test text, audit rows and the sync warning; a redacted echo keeps the stored URL, a changed origin or non-http(s) URL answers 400; both Test routes share the 60 s `OLLAMA_EMBED_PROBE_TIMEOUT_MS`; 15h controls added, no defect; items 17 and 18 added from its reviews) · kind: design · found: T347 run · priority: P2
 Owner decision 2026-11-12: item 2 admin-trusted, document it; item 3 remove the dead SMTP keys; item 12 non-admins may pull only models already named in a provider or Global KB config, plus an admin-managed allowlist (admin UI with GET/PUT), admins pull anything.
 Each needs a per-dial decision (guard, admin-trust, or remove).
 
@@ -2245,7 +2245,7 @@ status: parked · reason: diminishing returns (owner triage 2026-11-10); resume 
 
 ### T582 · FNF[global-kb-delete-ui-followups] · small Global KB delete page gaps (+6)
 
-status: open · kind: fix · found: T579 review 2026-11-09 · priority: P4
+status: [parked: diminishing returns] 2026-11-28 (open members are lows, minor or theoretical; owner rule 2026-11-14; resume on a user report, a measured failure or a related change); was: open · kind: fix · found: T579 review 2026-11-09 · priority: P4
 
 1. PRE-EXISTING. An admin's Cancel on another user's enrichment is dead, and so is the cancel after an admin deletes that entry: the task route scopes to the task's owner (`routes/tasks/index.ts:1304-1306`) and answers 404 while `page.tsx` ~:2119 shows Cancel and ~:1120 promises it.
 2. Own change, cosmetic. After a refused delete the page shows the 403 but keeps the Delete button until a reload (`page.tsx` ~:1144); a non-admin owner also gets no explanation for a missing Delete on a lapsed or paused row.
@@ -2262,7 +2262,7 @@ PRE-EXISTING link, new consequence of #1044. Auto-link picks the entry a draft r
 
 ### T577 · FNF[global-kb-config-untrimmed-write] · an admin's Ollama URL and embed model are stored untrimmed
 
-status: open · kind: fix · found: T558 run 2026-11-09 · priority: P4
+status: [parked: diminishing returns] 2026-11-28 (open members are lows, minor or theoretical; owner rule 2026-11-14; resume on a user report, a measured failure or a related change); was: open · kind: fix · found: T558 run 2026-11-09 · priority: P4
 PRE-EXISTING, minor. `configSchema` (api routes/global-kb.ts ~:292-293) accepts `ollamaUrl`/`embedModel` with surrounding whitespace and `putConfig` writes them as sent; the non-admin compare trims, so only the stored value and its dials see the whitespace. Fix: trim in the schema.
 
 ### T559 · FNF[gated-test-hygiene] · gated test addresses and the gated-list check in driver gates (+1)
@@ -2284,7 +2284,7 @@ status: parked · reason: owner left as is (owner triage 2026-11-10): third-part
 
 ### T561 · FNF[npm-cache-hardening] · shared npm cache base: pruning, retries, races, warm input
 
-status: open · kind: fix · found: T354 run · priority: P3
+status: [parked: diminishing returns] 2026-11-28 (open members are lows, minor or theoretical; owner rule 2026-11-14; resume on a user report, a measured failure or a related change); was: open · kind: fix · found: T354 run · priority: P3
 
 1. Seed warning says "empty private cache" but a partial copy is not empty (worker sandbox/npm-cache.ts:51). NEW-LIMIT (wording).
 2. The read-only base is never pruned; seed time grows with it (0.36 s at 47 MB). PRE-EXISTING.
@@ -2304,7 +2304,7 @@ status: done 2026-11-27, merged #1386 (0f5aafb1b): did not reproduce; #1246 (716
 
 ### T563 · FNF[custom-tool-start-gate] · start gate leftovers from the T346 build (+1)
 
-status: open · kind: fix · found: T346 run · priority: P3
+status: [parked: diminishing returns] 2026-11-28 (open members are lows, minor or theoretical; owner rule 2026-11-14; resume on a user report, a measured failure or a related change); was: open · kind: fix · found: T346 run · priority: P3
 
 1. The Start gate does not check `CONFIG_ENCRYPTION_KEY`, which the runner does (worker step-runner.ts:621; api lib/custom-tools-start-check.ts:43-50). PRE-EXISTING scope gap.
 2. The refusal names only the first failing step, in string-id order rather than run order (custom-tools-start-check.ts:19-21, 30-42). Cosmetic.
@@ -2336,7 +2336,7 @@ PRE-EXISTING limits of the per-module `runtime` in the worker report (`haive:mod
 
 ### T566 · FNF[worker-redis-bound] · the worker's shared Redis client is unbounded (+4)
 
-status: open for the review leftovers 1-4 below (the bound itself DONE 2026-11-27, merged #1396 (e2d2cb93d) and live (libs): 43 call sites classified as 16 gates, 26 best-effort, 1 subscriber; the shared client has a command deadline and no offline queue and throws the coded `RedisUnavailableError`; the subscriber, boot, clears, requeue counter and exit frame use the patient client; each gate keeps its outage policy; failed terminal reaps keep the worktree (completion records `worktree.cleanup_deferred` only when removal was owed, cancel rethrows into the capped re-drive); three reviews) · kind: fix · found: T549 run 2026-11-08 · priority: P3
+status: [parked: diminishing returns] 2026-11-28 (open members are lows, minor or theoretical; owner rule 2026-11-14; resume on a user report, a measured failure or a related change); was: open for the review leftovers 1-4 below (the bound itself DONE 2026-11-27, merged #1396 (e2d2cb93d) and live (libs): 43 call sites classified as 16 gates, 26 best-effort, 1 subscriber; the shared client has a command deadline and no offline queue and throws the coded `RedisUnavailableError`; the subscriber, boot, clears, requeue counter and exit frame use the patient client; each gate keeps its outage policy; failed terminal reaps keep the worktree (completion records `worktree.cleanup_deferred` only when removal was owed, cancel rethrows into the capped re-drive); three reviews) · kind: fix · found: T549 run 2026-11-08 · priority: P3
 PRE-EXISTING. T549 bounded the api's `getRedis()`; the worker's (worker src/redis.ts) still has no command deadline and keeps an offline queue: 44 call sites in 16 files under packages/worker/src, not classified. Consequential if any of them decides a gate during an outage. Classify each (gate, best-effort, blocking reader, subscriber) the way T549 split the api into `getRedis()` and `getPatientRedis()`; raw Redis commands, not config reads, so not T546. (T546 run) LOADING makes raw `getRedis()` commands wait in the offline queue: gate-1 `reserveAgentSlot` (queues/cli-exec/agent-lease.ts ~:129, caught at handlers.ts ~:1391 "agent-lane reserve failed; allowing job") and the slot heartbeat, which bounds what the T546 defer retry can protect.
 
 1. (#1396 review 2 L-6) The `index.ts` boot wiring control (`worker/test/boot-redis-ready.test.ts` ~:112-117) is a source-text match never shown red; the three `clear*` helpers still default to the finite `getRedis()` (`runtime-admission.ts`), so a new caller without an argument gets the bounded client at boot. Low.
@@ -2358,7 +2358,7 @@ PRE-EXISTING. terminal-shell.ts `openSession` (api routes ~:439-476) publishes t
 
 ### T569 · FNF[configservice-wedged-connection] · ConfigService never recycles a wedged connection
 
-status: open · kind: fix · found: T544 run 2026-11-08 · priority: P4
+status: [parked: diminishing returns] 2026-11-28 (open members are lows, minor or theoretical; owner rule 2026-11-14; resume on a user report, a measured failure or a related change); was: open · kind: fix · found: T544 run 2026-11-08 · priority: P4
 PRE-EXISTING. shared config.service.ts `CONFIG_REDIS_OPTIONS` (~:785) and `redisCall` (~:1068): after repeated 2 s command timeouts on a socket that stays open but loses bytes, ioredis keeps the timed-out commands queued and reply pairing can desync until the socket is destroyed. A drop, a restart-like drop and `docker pause` recover on the same client; only the lossy black-hole does not, and T544's boot retry then waits as long as it lasts. Related T548.
 
 ### T571 · FNF[global-kb-boot-store-stall] · worker boot waits forever on a stalled global KB store
@@ -2374,19 +2374,19 @@ PRE-EXISTING, more reachable since #1116 made the bounded path the norm at boot.
 
 ### T631 · fix · git-template test helper cleanup times out on a loaded runner
 
-status: open · kind: fix · found: #1117 CI 2026-11-12 · priority: P4
+status: [parked: diminishing returns] 2026-11-28 (open members are lows, minor or theoretical; owner rule 2026-11-14; resume on a user report, a measured failure or a related change); was: open · kind: fix · found: #1117 CI 2026-11-12 · priority: P4
 worker `test/support/git-template.ts` ~:10 registers a module-scope `afterAll` that `rm`s every template and copy root with `maxRetries: 5`; on run 43322735643 (worker 1/2) it hit the 10 s hook timeout in `git-template.test.ts` while all 8537 tests passed, failing the shard (re-run passed). Fix direction: give the hook its own timeout or remove the roots per file without retries, and measure how long the removal takes on CI.
 
 ### T632 · FNF[stop-settle-redrive-lows] · Stop and Cancel re-drive lows (+2)
 
-status: open · kind: fix · found: #1117 reviews 2026-11-12 · priority: P4
+status: [parked: diminishing returns] 2026-11-28 (open members are lows, minor or theoretical; owner rule 2026-11-14; resume on a user report, a measured failure or a related change); was: open · kind: fix · found: #1117 reviews 2026-11-12 · priority: P4
 
 1. The throttle compares `task_events.created_at` (timestamp without zone, DB `now()` in the session zone) with a JS UTC cutoff (`stalled-redrive.ts` `redriveStoppedTasks` ~:606 and `redriveCancelledTasks` ~:697, ~:817): in a session zone behind UTC an unfinished Stop or Cancel is re-queued every 60 s sweep instead of every 5 min; ahead of UTC the throttle lengthens by the offset. PRE-EXISTING pattern (Cancel), repeated by #1117. Fix: compare through UTC on both sides or stamp from JS.
 2. The Stop re-drive has no count cap (Cancel has `CANCEL_REDRIVE_MAX`): a task whose finish insert keeps failing is re-settled every 5 min with one `task.stop_settle_redriven` row per cycle until a Retry or Cancel. Low.
 
 ### T633 · FNF[bundle-orphan-sweep-lows] · bundle orphan sweep lows (+7)
 
-status: open · kind: fix · found: #1118 reviews 2026-11-13 · priority: P4
+status: [parked: diminishing returns] 2026-11-28 (open members are lows, minor or theoretical; owner rule 2026-11-14; resume on a user report, a measured failure or a related change); was: open · kind: fix · found: #1118 reviews 2026-11-13 · priority: P4
 All in worker `repo/bundle-orphan-sweep.ts` unless named. Low.
 
 1. `.move.json` intent files are never collected by the sweep.
@@ -2404,7 +2404,7 @@ status: done 2026-11-13 #1130 (b78611d5a): one shared policy in `@haive/shared` 
 
 ### T635 · FNF[ollama-pull-policy-lows] · Ollama pull policy lows (+4)
 
-status: open · kind: fix · found: #1119 reviews 2026-11-13 · priority: P4
+status: [parked: diminishing returns] 2026-11-28 (open members are lows, minor or theoretical; owner rule 2026-11-14; resume on a user report, a measured failure or a related change); was: open · kind: fix · found: #1119 reviews 2026-11-13 · priority: P4
 
 1. An allowlist entry that fails validation when read back (a stored value edited outside the PUT) makes the whole list fail closed with no log or admin-visible reason (api `lib/ollama-pull-policy.ts`). Low.
 2. `api/test/probe-targets.test.ts` ~:192 waits on real timers; convert to fake timers (testing.md rule). Low.
@@ -2413,7 +2413,7 @@ status: open · kind: fix · found: #1119 reviews 2026-11-13 · priority: P4
 
 ### T636 · FNF[login-lease-reaper-lows] · CLI login lease and reaper lows (+8)
 
-status: open · kind: fix · found: #1120 reviews 2026-11-13 · priority: P4
+status: [parked: diminishing returns] 2026-11-28 (open members are lows, minor or theoretical; owner rule 2026-11-14; resume on a user report, a measured failure or a related change); was: open · kind: fix · found: #1120 reviews 2026-11-13 · priority: P4
 Worker `sandbox/login-container-reaper.ts` and shared `cli-login-lease.ts` unless named. Low.
 
 1. The reaper removes the Docker container, then marks the `containers` row destroyed; if that update throws it logs "will retry" but the container is gone, so the row stays `running` (~:69-79).
@@ -2427,7 +2427,7 @@ Worker `sandbox/login-container-reaper.ts` and shared `cli-login-lease.ts` unles
 
 ### T637 · FNF[undo-resync-lows] · Undo re-sync Retry lows (+7)
 
-status: open · kind: fix · found: #1121 reviews 2026-11-13 · priority: P4
+status: [parked: diminishing returns] 2026-11-28 (open members are lows, minor or theoretical; owner rule 2026-11-14; resume on a user report, a measured failure or a related change); was: open · kind: fix · found: #1121 reviews 2026-11-13 · priority: P4
 Worker `step-engine/undo-left-merge.ts`, web `task-left-merge-banner.tsx` unless named.
 
 1. MEDIUM, PRE-EXISTING: a settled retry finds the checkout to hand back from the report's directory only (~:556-566), while the first run may have moved the repository root (`holders[0]`, ~:592); when they differ, a retry skips the hand-back and still records completion, leaving root-owned files. Fix: derive the settled checkout from the repository's worktree holders.
@@ -2440,7 +2440,7 @@ Worker `step-engine/undo-left-merge.ts`, web `task-left-merge-banner.tsx` unless
 
 ### T638 · FNF[runner-ownership-lows] · runtime runner ownership lows (+5)
 
-status: open · kind: fix · found: #1124 reviews 2026-11-13 · priority: P4
+status: [parked: diminishing returns] 2026-11-28 (open members are lows, minor or theoretical; owner rule 2026-11-14; resume on a user report, a measured failure or a related change); was: open · kind: fix · found: #1124 reviews 2026-11-13 · priority: P4
 Worker `sandbox/runtime-runner-ownership.ts`, `queues/task-queue.ts` unless named. Low.
 
 1. An unlabeled pre-label runner whose task id exists in two installs' databases (one restored from the other's dump) is owned by both (~:42-54). Finite: pre-upgrade runners only.
@@ -2528,7 +2528,7 @@ status: parked: diminishing returns (2026-11-14, owner rule: trivial lows park; 
 
 ### T647 · FNF[runtime-wait-outcome] · runtime waits read a finished or missing job as pending or failed (+3)
 
-status: open · kind: fix · found: #1132 reviews 2026-11-13 · priority: P4
+status: [parked: diminishing returns] 2026-11-28 (open members are lows, minor or theoretical; owner rule 2026-11-14; resume on a user report, a measured failure or a related change); was: open · kind: fix · found: #1132 reviews 2026-11-13 · priority: P4
 
 1. PRE-EXISTING, low. `waitUntilFinished` with `removeOnComplete`/`removeOnFail: true` rejects for a job that already finished and was removed before the wait attached, and the access-urls, ensure-ide and runtime-ensure handlers (api `routes/tasks/browser-access.ts` ~:69, ~:99, ~:131, ~:219; `lib/ide-target.ts` ~:57) answer that as pending or unavailable. Return the outcome through a structural channel (a short-lived result key, or keep the job briefly) rather than reading a rejection.
 2. Low. A job result from an older worker lacks `removed`; the rebuild dialog reads undefined as "already absent". Only a mixed-version deploy hits it.
@@ -2568,7 +2568,7 @@ status: parked: diminishing returns (2026-11-14, owner rule: trivial lows park; 
 
 ### T572 · FNF[boot-failure-dead-watcher] · a Postgres outage past 30 s at boot still exits
 
-status: open · kind: fix · found: T544 run 2026-11-08 · priority: P4
+status: [parked: diminishing returns] 2026-11-28 (open members are lows, minor or theoretical; owner rule 2026-11-14; resume on a user report, a measured failure or a related change); was: open · kind: fix · found: T544 run 2026-11-08 · priority: P4
 PRE-EXISTING. database wait-for-ready.ts ~:75-76 (called from api and worker bootstrap.ts) throws a plain error after its 30 s budget and `main().catch` exits 1 (api index.ts ~:167-169, worker index.ts ~:385-387): a dead `tsx watch` app in dev, a crash loop in production. T544 retries only `ConfigUnavailableError`. The worker's post-bootstrap awaits on its offline-queue Redis and BullMQ connections (worker index.ts ~:88-246) also wait silently during an outage; worker half beside T566.
 
 ### T573 · FNF[redis-client-error-listeners] · Redis clients without an 'error' listener spam stderr
@@ -2588,7 +2588,7 @@ PRE-EXISTING, unmeasured. `recordFailedStepHint` awaits `enqueueUsagePollTick()`
 
 ### T576 · FNF[agent-reserve-stale-held-marker] · the reserve's held marker survives a fail-open defer
 
-status: open · kind: fix · found: T546 run 2026-11-08 · priority: P4
+status: [parked: diminishing returns] 2026-11-28 (open members are lows, minor or theoretical; owner rule 2026-11-14; resume on a user report, a measured failure or a related change); was: open · kind: fix · found: T546 run 2026-11-08 · priority: P4
 PRE-EXISTING. `markHeld` (worker queues/cli-exec/agent-reserve.ts ~:133, set ~:414) is not cleared when "agent reserve defer failed; allowing job" falls open (~:346, ~:431); only its TTL prunes it. Also trivial while there: the header comment ~:35 still says "fail-open on everything", and handlers.ts ~:1317-1341 holds an orphaned pause-gate doc block above the `LIGHT_JOB_LANE` doc.
 
 ### T342 · FNF[mcp-token-file] · rag/ddev task tokens in the server env defeat the cli-merge skip (measure first) (+4)
@@ -2614,7 +2614,7 @@ Resume the isolated member when a current required validation gate fails, when t
 
 ### T345 · FNF[admin-stop-surfaces] · best-effort kills, kill-after-stop error paths, stop error text, left-task kill, urgent loop deadline, created sandboxes, 50-stop cap, statistics links, duplicate title components
 
-status: fenced scope done 2026-11-27, merged #1383 (7096ae23a): items 3 (structured `killConfirmed` and coded `killError` on every Stop/kill surface, one shared amber notice), 7 + 12 (urgent stops at bounded concurrency 4, parallel settlements under one 2 s wait) and 8 (`ps -a` lists created and exited sandboxes; a removal failure re-lists structured states) reproduced and fixed. Parked: item 4 (did not reproduce: a Docker failure returned 200 from both Stop routes with the event and audit kept) and 13 (joined only if 4 reproduces). Untouched: 5, 6, 9, 10, 11 · was modular #158 · gate: bounded verification · priority: P2
+status: [parked: diminishing returns] 2026-11-28 (open members are lows, minor or theoretical; owner rule 2026-11-14; resume on a user report, a measured failure or a related change); was: fenced scope done 2026-11-27, merged #1383 (7096ae23a): items 3 (structured `killConfirmed` and coded `killError` on every Stop/kill surface, one shared amber notice), 7 + 12 (urgent stops at bounded concurrency 4, parallel settlements under one 2 s wait) and 8 (`ps -a` lists created and exited sandboxes; a removal failure re-lists structured states) reproduced and fixed. Parked: item 4 (did not reproduce: a Docker failure returned 200 from both Stop routes with the event and audit kept) and 13 (joined only if 4 reproduces). Untouched: 5, 6, 9, 10, 11 · was modular #158 · gate: bounded verification · priority: P2
 Items 1-2 merged (#816). All PRE-EXISTING. 3. killTaskSandboxes (api lib/sandbox-kill.ts) is best-effort. Stop (lib/task-control.ts ~:40) and the retry, resume, skip and CLI-switch paths in steps.ts report a clean count when docker is unreachable. 4. maintenance.ts `stop` and POST /:id/cancel-active-cli commit the stop and then kill. A kill that throws answers 500 and skips the event and the audit row. 5. activation.ts errorText shows drizzle's "Failed query ..." text; err.cause is dropped. 6. activation.ts kills sandboxes for a `left` dependent and drops that kill's error. 7. The urgent loop awaits one stopTask per dependent, each with up to 13 s of deadlines, up to the 200 cap. 8. The api lists sandboxes with `docker ps -q` (running only), so a sandbox that was created but not started is missed. 9. STOP_EVENTS_READ = 50 (lib/task-stop.ts ~:20) loses a task's reason after 50 or more stops. Fix: pick it in SQL by failedAt = completedAt. 10. The statistics pages link /tasks/<id> without an owner check (latent). 11. The owner-only title rule lives in two components; share one TaskTitleLink.
 
 Execution fence 2026-11-01: Prioritize current Stop/kill correctness in3/4/7/8 only when reproduced. Error wording, statistics links and duplicate title components do not automatically join that fix.
@@ -2731,7 +2731,7 @@ Sites:
 
 ### T373 · FNF[audit-strict-admin-actions] · strict-audit leftovers after #1058/#1059 (+9)
 
-status: open · was modular #246 · priority: P3 · sites + items 1-4 shipped in PR #1058 (1f1064268); items 5-7 shipped in PR #1059 (8a56956d9), 2026-11-10
+status: [parked: diminishing returns] 2026-11-28 (open members are lows, minor or theoretical; owner rule 2026-11-14; resume on a user report, a measured failure or a related change); was: open · was modular #246 · priority: P3 · sites + items 1-4 shipped in PR #1058 (1f1064268); items 5-7 shipped in PR #1059 (8a56956d9), 2026-11-10
 
 8. `PATCH /cli-providers/:id` leaves `enabled` and `model` unaudited (api cli-providers.ts ~:548). PRE-EXISTING, minor. From the #1058 review.
 9. A PATCH on a draining module writes two `module.deactivate` rows for one request: `setModuleActive` (activation.ts ~:120-126) and the loader (loader.ts ~:354). PRE-EXISTING, minor.
@@ -2765,7 +2765,7 @@ Measure growth, then find a safe repack/prune under hardened args.
 
 ### T392 · FNF[start-check-provider] · the persona start check names only the first dispatch candidate (+2)
 
-status: open · kind: fix · found: T392 driver 2026-11-06 · priority: P4
+status: [parked: diminishing returns] 2026-11-28 (open members are lows, minor or theoretical; owner rule 2026-11-14; resume on a user report, a measured failure or a related change); was: open · kind: fix · found: T392 driver 2026-11-06 · priority: P4
 
 1. `providerNameFor` in the persona start check (packages/worker/src/queues/task-queue.ts ~:2737) takes the first `dispatchCandidates(...)` entry. It ignores subagent and MCP eligibility, and since PR #1025 also a first implicit candidate that fails to build while dispatch lands on the next one. Advisory only (records an unresolved-persona event). PRE-EXISTING. Fix direction: resolve the provider through `resolveDispatch` or share its candidate filter.
 2. `resolveTaskDispatch` calls `resolveDispatch` a second time with the codex extras (packages/worker/src/orchestrator/dispatcher.ts ~:436), so the new "provider could not build a command" warning logs twice per dispatch for the same implicit candidate. REGRESSION (log volume only). Fix direction: warn only on the outer call, or dedupe by provider id.
@@ -2910,7 +2910,7 @@ Note (T480 review, 2026-10-31): the KB walkers still list a git-data-named page 
 
 ### T482 · FNF[lock-order-leftovers-2] · second sweeps wait holding step rows; the late sweep refuses a benign hold; planner-dependent id lists (+6)
 
-status: open for items 1, 3, 5, 6, 7 (1 and 7 not attempted; 3, 5, 6 not reproduced: no reachable peer named); items 2 and 4 DONE 2026-11-27 in #1378 (362347d70, deployed with `pnpm docker libs`: the api and worker late reset sweeps wait a bounded LATE_LOCK_WAIT_MS of 250 ms instead of NOWAIT, 55P03 maps to 503 in the api and a RevivalBusy hold in the worker; a failed login-hint write is logged and keeps the CLI error, park and resume) · gate: bounded verification · user decision: recheck risk-bearing members, 2026-11-01 · priority: P2
+status: [parked: diminishing returns] 2026-11-28 (open members are lows, minor or theoretical; owner rule 2026-11-14; resume on a user report, a measured failure or a related change); was: (items 1 and 7: no 40P01 in task_steps, cli_invocations or task_events on the dev install 2026-11-28) open for items 1, 3, 5, 6, 7 (1 and 7 not attempted; 3, 5, 6 not reproduced: no reachable peer named); items 2 and 4 DONE 2026-11-27 in #1378 (362347d70, deployed with `pnpm docker libs`: the api and worker late reset sweeps wait a bounded LATE_LOCK_WAIT_MS of 250 ms instead of NOWAIT, 55P03 maps to 503 in the api and a RevivalBusy hold in the worker; a failed login-hint write is logged and keeps the CLI error, park and resume) · gate: bounded verification · user decision: recheck risk-bearing members, 2026-11-01 · priority: P2
 From the T459 review (2026-10-31). Minor; items 1 and 4-7 PRE-EXISTING, item 2 an accepted trade-off of T459.
 
 1. The second sweeps still wait while holding step rows (and the task row, for a Stop): api routes/tasks/steps.ts ~:252, worker `_step-reset.ts` ~:171, api lib/task-control.ts ~:66. A young live agent run held by `releaseStepAgents` can close a cycle with them; a Stop must not fail, so NOWAIT is no answer there.
@@ -2950,7 +2950,7 @@ From the T341 review (2026-10-31). Minor; PRE-EXISTING unless stated.
 
 ### T486 · FNF[aside-trees] · a kept-aside repository tree is never swept, reported or named on failure (+7)
 
-status: open for items 1, 3, 5, 7, 8, 9, 10 (fenced run 2026-11-27: items 4, 2 and 6 DONE, merged #1391 (39b800efc) and live, migrations 0255 and 0256 applied: remote rebuilds stage into a sibling and verify before publishing, every aside is recorded in `repositories.checkout_aside_paths` and named in failure copy, the notice is scoped to the rebuild's own job by `checkout_aside_job_id` so its retries keep it and a later ordinary refresh clears it) · priority: P2
+status: [parked: diminishing returns] 2026-11-28 (open members are lows, minor or theoretical; owner rule 2026-11-14; resume on a user report, a measured failure or a related change); was: (the consequential members 2, 4, 6 shipped in #1391; the rest need a crash between two renames or two failures in a row) open for items 1, 3, 5, 7, 8, 9, 10 (fenced run 2026-11-27: items 4, 2 and 6 DONE, merged #1391 (39b800efc) and live, migrations 0255 and 0256 applied: remote rebuilds stage into a sibling and verify before publishing, every aside is recorded in `repositories.checkout_aside_paths` and named in failure copy, the notice is scoped to the rebuild's own job by `checkout_aside_job_id` so its retries keep it and a later ordinary refresh clears it) · priority: P2
 From the T479 review (2026-10-31). PRE-EXISTING, minor (needs a crash between two renames or two consecutive failures).
 
 1. `.haive-extract-*` stages (worker repo/clone.ts ~:543) are never swept, reported or documented: upload-reaper.ts (~:408-452) sweeps `_uploads` only and scratch-workspace.ts (~:167-196) `_scratch` only. Since T479 a stage kept after a failed restore holds the only copy of the previous tree, and a crash between the swap's two renames leaves one too. Decide whether a sweep reports or removes them (removal must never take the only copy).
@@ -3128,7 +3128,7 @@ Execution fence 2026-11-01: Start with a named current caller that mistakes a re
 
 ### T511 · FNF[bounded-vendor-bodies] · vendor and user-supplied endpoint bodies are read whole before they are cut or parsed (+4)
 
-status: fenced scope done 2026-11-27, merged #1382 (febfbcc4c, libs; user-supplied endpoint bodies: Ollama tags/show 8 MiB, embed 32 MiB, error bodies 64 KiB with a 200-char excerpt, unread streams cancelled; 21 loopback controls red on main). Deferred by the fence: fixed-vendor hosts, helper dedup, wording; parked: OpenRouter mid-body 400 read (reproduced only below the bound); not reproduced: `ollama-provision.ts` (fixed in-stack URL only) · gate: bounded verification · user decision: recheck risk-bearing members, 2026-11-01 · priority: P2
+status: [parked: diminishing returns] 2026-11-28 (open members are lows, minor or theoretical; owner rule 2026-11-14; resume on a user report, a measured failure or a related change); was: fenced scope done 2026-11-27, merged #1382 (febfbcc4c, libs; user-supplied endpoint bodies: Ollama tags/show 8 MiB, embed 32 MiB, error bodies 64 KiB with a 200-char excerpt, unread streams cancelled; 21 loopback controls red on main). Deferred by the fence: fixed-vendor hosts, helper dedup, wording; parked: OpenRouter mid-body 400 read (reproduced only below the bound); not reproduced: `ollama-provision.ts` (fixed in-stack URL only) · gate: bounded verification · user decision: recheck risk-bearing members, 2026-11-01 · priority: P2
 From the T365 fix round 1 (2026-10-31), verified against cx-365. PRE-EXISTING, memory only (no secret path). See also T496 (vendor-call deadlines).
 
 1. User-supplied Ollama URLs: api routes/tooling.ts ~:89 and ~:191 (`resp.json()` of `/api/tags`, `/api/show`, bounded in time only); shared rag/embed.ts ~:108 (`resp.text()` then a cut), ~:111, ~:179, ~:210 (`resp.json()`); worker cli-adapters/ollama-probe.ts ~:107 (`resp.text()` of the error body).
@@ -3210,7 +3210,7 @@ From the T365 sixth review (2026-10-31). PRE-EXISTING, minor (development only).
 
 ### T518 · FNF[composer-poll-races] · the bundle composer's poll can write back a stale answer, overlap itself, and miss a reload after a click
 
-status: open for item 3 only (theoretical render-lane click edge, outside the execution fence); items 1 and 2 DONE 2026-11-27 in #1376 (9069fb6b7: a poll started before an accepted Resync or Replace ZIP is discarded; single-flight polling with the handled transition remembered before render, so one reload; one bounded abort deadline over request and body) · gate: bounded verification · priority: P2
+status: [parked: diminishing returns] 2026-11-28 (open members are lows, minor or theoretical; owner rule 2026-11-14; resume on a user report, a measured failure or a related change); was: open for item 3 only (theoretical render-lane click edge, outside the execution fence); items 1 and 2 DONE 2026-11-27 in #1376 (9069fb6b7: a poll started before an accepted Resync or Replace ZIP is discarded; single-flight polling with the handled transition remembered before render, so one reload; one bounded abort deadline over request and body) · gate: bounded verification · priority: P2
 From the T365 close-out (PR #974, 2026-11-01). PRE-EXISTING, minor, found by reading: web components/bundle-composer.tsx, lines as on main after #974.
 
 1. `fetchOnce` (~:256-318) compares a poll answer computed at request time with the value it reads after its awaits, so a poll in flight when the person accepts a Resync or Replace ZIP writes the older server status over the newer local `syncing` and starts the listing reload early (T365 review 6). A Codex round that fixed it was cut off by a crash; its partial patch is `.claude/tmp/codex-run/T365/codex-7/interrupted-uncommitted.patch` on the machine that ran it. Fix direction: drop an answer whose request started before the last local status change (a counter bumped on Resync and Replace).
@@ -3308,7 +3308,7 @@ Resume for an explicit owner priority change, a real mobile task-creation usabil
 
 ### T588 · FNF[worker-audit-writer] · worker audit writer follow-ups (+12)
 
-status: open · kind: fix · found: #1057 reviews 2026-11-10 · priority: P4
+status: [parked: diminishing returns] 2026-11-28 (open members are lows, minor or theoretical; owner rule 2026-11-14; resume on a user report, a measured failure or a related change); was: open · kind: fix · found: #1057 reviews 2026-11-10 · priority: P4
 Owner decision 2026-11-12: item 4: gate 4 refuses when the repository already has a saved remote or credential and points to the repository settings; typed values only fill an empty slot.
 
 1. DONE #1092. No worker mapping for a lock timeout: gate 4's bounded lock take and 02-upgrade-apply.ts ~:834-840 end the step with the raw PostgreSQL message; `isLockNotAvailable` exists in @haive/database (used by attachments/expand-archives.ts ~:687). PRE-EXISTING pattern, minor.
@@ -3326,7 +3326,7 @@ Owner decision 2026-11-12: item 4: gate 4 refuses when the repository already ha
 
 ### T589 · FNF[encryption-key-and-seed-store] · boot key and seed store leftovers (+36)
 
-status: open (item 5 part B1 done 2026-11-13 #1131 (57bfecc51): safe decrypt of user email/phone, recover-admin CLI and installer helper; B2 SMTP mail done 2026-11-13 #1133 (ddb3d785f): `config:mail:*`, write-only `mail_smtp_password`, admin Mail card with test send, api `lib/mailer.ts`; B3 forgot-password and key-loss claim done 2026-11-13 #1134 (78f056b63): migration 0232 `password_resets`, public `/auth/forgot-password` and `/auth/reset-password`, own `recover`/`reset` throttle scopes, 2-min cooldown, git_email claim gated on the discard audit row, live-checked through Mailpit; B4 admin relink done 2026-11-13 #1135 (e5a6fa1ec): `POST /admin/users/:id/relink` on orphaned active rows only, self-relink refused on the locked row's id, reset mailed or the one-time link shown to the admin, live-checked in the admin UI through Mailpit; item 5 complete; items 19-31 done 2026-11-13: #1141 (21f3391f7) api items 20-24, 26-30 (19 was already fixed), no-store also on create-user and reset_password replies; #1142 (4a0d8dade) web items 25 and 31; item 32 moved to T653; items 33-36 open; item 1 done 2026-11-12 #1113 (2daca69a7): boot refuses to mint a key over existing ciphertext, `HAIVE_DISCARD_UNREADABLE_SECRETS=1` override audited; env-key seeding serialized against a pending discard, stale pending fails boot with the way out) · kind: design · found: #1060 reviews 2026-11-10 · priority: P3
+status: in progress 2026-11-28 for items 7 and 8 (a present but wrong key outside production regenerates and overwrites the master KEK; the env key is never checked against existing rows), brief `.claude/tmp/codex-run/T589-S/wrong-key/brief.md`; the other open items are lows; was: open (item 5 part B1 done 2026-11-13 #1131 (57bfecc51): safe decrypt of user email/phone, recover-admin CLI and installer helper; B2 SMTP mail done 2026-11-13 #1133 (ddb3d785f): `config:mail:*`, write-only `mail_smtp_password`, admin Mail card with test send, api `lib/mailer.ts`; B3 forgot-password and key-loss claim done 2026-11-13 #1134 (78f056b63): migration 0232 `password_resets`, public `/auth/forgot-password` and `/auth/reset-password`, own `recover`/`reset` throttle scopes, 2-min cooldown, git_email claim gated on the discard audit row, live-checked through Mailpit; B4 admin relink done 2026-11-13 #1135 (e5a6fa1ec): `POST /admin/users/:id/relink` on orphaned active rows only, self-relink refused on the locked row's id, reset mailed or the one-time link shown to the admin, live-checked in the admin UI through Mailpit; item 5 complete; items 19-31 done 2026-11-13: #1141 (21f3391f7) api items 20-24, 26-30 (19 was already fixed), no-store also on create-user and reset_password replies; #1142 (4a0d8dade) web items 25 and 31; item 32 moved to T653; items 33-36 open; item 1 done 2026-11-12 #1113 (2daca69a7): boot refuses to mint a key over existing ciphertext, `HAIVE_DISCARD_UNREADABLE_SECRETS=1` override audited; env-key seeding serialized against a pending discard, stale pending fails boot with the way out) · kind: design · found: #1060 reviews 2026-11-10 · priority: P3
 Owner decision 2026-11-12: item 1: boot refuses to generate a new key when encrypted secrets exist and no key is found; an explicit startup override (env setting naming the consequence) lets an operator start anyway, discarding the old secrets, and that choice is logged and audited.
 
 1. With no `CONFIG_ENCRYPTION_KEY` and an empty Redis (flush, new volume) `ensureEncryptionKey` (shared config.service.ts ~:939-967) generates a fresh key with only a warn, which orphans every secret encrypted under the lost key; it cannot tell a first install from a lost store. PRE-EXISTING, consequential, by design today; decide whether a non-empty secrets table should refuse to generate.
@@ -3368,7 +3368,7 @@ Owner decision 2026-11-12: item 1: boot refuses to generate a new key when encry
 
 ### T590 · FNF[cli-auth-lock-followups] · CLI auth lock and sign-out follow-ups (+38)
 
-status: open (lows 20, 22, 24, 25, 26, 29, 30-38; item 2 accepted) · kind: fix · found: #1061 reviews 2026-11-10 · priority: P3
+status: [parked: diminishing returns] 2026-11-28 (open members are lows, minor or theoretical; owner rule 2026-11-14; resume on a user report, a measured failure or a related change); was: open (lows 20, 22, 24, 25, 26, 29, 30-38; item 2 accepted) · kind: fix · found: #1061 reviews 2026-11-10 · priority: P3
 DECIDED by the owner 2026-11-11: all remaining groups approved (lock correctness 4, 6, 7, 15; sign-out flow 8, 9, 10, 14, 18; web UI 16, 17; tests and minor 11, 12, 13). Item 2 stays accepted and documented. Overnight run authorized.
 
 1. DONE #1062. `DELETE /:providerId/usage-auth` and `DELETE /:providerId/secrets/:secretName` (api cli-providers.ts ~:1165-1230) take no auth lock, so a usage refresh that read the secret before the delete can write it back. PRE-EXISTING, moderate. Fix: take the lock (`withCliAuthLock`) like the writers.
@@ -3412,7 +3412,7 @@ DECIDED by the owner 2026-11-11: all remaining groups approved (lock correctness
 
 ### T592 · FNF[fs-park-recovery] · park recovery runs only where fs-safe writes; legacy truncated parks (+1)
 
-status: open · kind: fix · found: D1 (#1063) Codex and review 2026-11-10 · priority: P4
+status: [parked: diminishing returns] 2026-11-28 (open members are lows, minor or theoretical; owner rule 2026-11-14; resume on a user report, a measured failure or a related change); was: open · kind: fix · found: D1 (#1063) Codex and review 2026-11-10 · priority: P4
 PRE-EXISTING, minor.
 
 1. Park recovery (worker `fs-recovery.ts`, driven by the write-path temp sweep) visits only directories fs-safe writes into; a park left in a directory nothing writes again stays under its park name. Fix: also visit the dirs that parked a file (record them) or accept and document.
@@ -3420,7 +3420,7 @@ PRE-EXISTING, minor.
 
 ### T596 · FNF[plan-patch-lock-followups] · plan-patch lock and failed-merge notice follow-ups (+9)
 
-status: open · kind: fix · found: G (#270, #497) reviews 2026-11-10/11 · priority: P4
+status: [parked: diminishing returns] 2026-11-28 (open members are lows, minor or theoretical; owner rule 2026-11-14; resume on a user report, a measured failure or a related change); was: open · kind: fix · found: G (#270, #497) reviews 2026-11-10/11 · priority: P4
 All low unless marked.
 
 1. Update-only patches write `version = readVersion + 1` with no version predicate in the update `where` (`shared/src/plan/apply-patch.ts` ~:856): two concurrent update-only patches, or one beside a move, can both write the same version. PRE-EXISTING. Fix: add the read version to the `where` and retry or refuse on a miss.
