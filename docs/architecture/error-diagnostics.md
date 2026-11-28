@@ -181,6 +181,18 @@ then fail as they already did in production). `recover-admin` reports the refusa
 the stored system secrets" and never offers the override, which it cannot receive: the helper
 forwards only `DATABASE_URL`, `REDIS_URL` and `CONFIG_ENCRYPTION_KEY`.
 
+**An environment key is checked before it seeds Redis.** `ConfigService.ensureEncryptionKey` seeded
+`CONFIG_ENCRYPTION_KEY` into an empty Redis without asking whether it reads what the database holds,
+so a wiped Redis plus a different key reached the generators above as a first install. It now runs
+the same `assertKeyReadsSystemSecrets` before the seed whenever the caller passed a database (api,
+worker and its scripts, the updater and `recover-admin` all do; a caller without one has nothing to
+check against and is unchanged). The override works the same way there: the audited discard first,
+then the seed. MEASURED on throwaway PostgreSQL 18 and Redis 8 through the real api `bootstrap()`
+(one fresh process per phase, evidence by SHA-256 of each stored row): with Redis wiped and a
+different `CONFIG_ENCRYPTION_KEY`, the base commit booted and rewrote every stored system secret;
+now boot refuses with every row unchanged and no key seeded, the original key then boots unchanged,
+and the override writes one audit row.
+
 **Recover an administrator after key loss.** First let boot finish with the discard override, then
 remove the override. New installations created with this release have the recovery subcommand.
 The installer writes the helper once; upgrades do not refresh it, so an older installation's

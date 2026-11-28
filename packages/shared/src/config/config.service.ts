@@ -1,6 +1,7 @@
 import { Redis, ReplyError } from 'ioredis';
 import { mailSeedDefaults } from './mail.js';
 import {
+  assertKeyReadsSystemSecrets,
   ENCRYPTION_KEY_REDIS_KEY,
   generateBootEncryptionKey,
   PENDING_ENCRYPTION_KEY,
@@ -984,6 +985,10 @@ export class ConfigService {
 
     if (!exists) {
       if (envKey) {
+        // Seeding makes this key the install's. Without a database (callers that never held
+        // ciphertext) there is nothing to check it against.
+        const bootDb = typeof db === 'function' ? db() : db;
+        if (bootDb) await assertKeyReadsSystemSecrets(bootDb, envKey, 'CONFIG_ENCRYPTION_KEY');
         const seeded = await this.seedEnvEncryptionKey(envKey, 'ensureEncryptionKey');
         logger.info(
           seeded
