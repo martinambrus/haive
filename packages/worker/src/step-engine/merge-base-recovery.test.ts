@@ -16,7 +16,29 @@ import type { AdvanceStepParams, TaskStepRow } from './step-runner.js';
 
 const h = vi.hoisted(() => ({
   crashAfterMerge: false,
+  crashBeforeMerge: false,
   pushes: [] as Array<{ branch: string; sha?: string }>,
+}));
+// The set-aside seams a task with a repository row goes through; a task without one never calls them.
+const aside = vi.hoisted(() => ({ setAside: vi.fn(), restore: vi.fn() }));
+vi.mock('@haive/database', async (original) => ({
+  ...(await original<typeof import('@haive/database')>()),
+  lockRepositoryTasksKey: async () => {},
+}));
+vi.mock('../plan/mirror.js', async (original) => ({
+  ...(await original<typeof import('../plan/mirror.js')>()),
+  seedPlanBaseFromCheckout: async () => {},
+}));
+vi.mock('../repo/refresh.js', async (original) => ({
+  ...(await original<typeof import('../repo/refresh.js')>()),
+  checkoutHoldingTasks: async () => 0,
+}));
+vi.mock('../project-state/set-aside.js', async (original) => ({
+  ...(await original<typeof import('../project-state/set-aside.js')>()),
+  setAsideHaiveProjections: aside.setAside,
+  restoreProjectionsInTx: aside.restore,
+  putBackProjections: async () => {},
+  resyncHaiveProjections: async () => true,
 }));
 vi.mock('./merge-dir-claim.js', async (original) => ({
   ...(await original<typeof import('./merge-dir-claim.js')>()),
@@ -31,6 +53,10 @@ vi.mock('../repo/git-push.js', async (original) => {
       return { pushed: true as const, remote: 'origin' as const, branch: args.branch };
     },
     gitRun: async (...args: Parameters<typeof actual.gitRun>) => {
+      if (h.crashBeforeMerge && args[1][0] === 'merge' && args[1].includes('--no-ff')) {
+        h.crashBeforeMerge = false;
+        throw new Error('worker died before the merge');
+      }
       const result = await actual.gitRun(...args);
       if (h.crashAfterMerge && args[1][0] === 'merge' && result.code === 0) {
         h.crashAfterMerge = false;
@@ -74,17 +100,23 @@ interface Config {
   cross?: boolean;
   /** A merge step other than 12: it never squashes and records no landing. */
   otherStep?: boolean;
+  /** The task has a repository row, so the merge sets Haive's project files aside first. */
+  repository?: boolean;
 }
 type Fixture = Awaited<ReturnType<typeof setup>>;
 
 async function setup(cfg: Config) {
   claimFake.reset();
   h.pushes = [];
+  h.crashBeforeMerge = false;
+  aside.setAside.mockReset().mockResolvedValue({ outcome: 'clean' });
+  aside.restore.mockReset().mockResolvedValue({ outcome: 'clean' });
   const { dir, data } = await template.copy();
   const fake = createFakeDb({
     taskSteps: schema.taskSteps,
     tasks: schema.tasks,
     users: schema.users,
+    repositories: schema.repositories,
     taskDagIssues: schema.taskDagIssues,
     taskEvents: schema.taskEvents,
   });
@@ -111,7 +143,12 @@ async function setup(cfg: Config) {
     mergeStage: 'feature',
     baseSyncRounds: 0,
   };
-  fake.insert(schema.tasks, { id: taskId, userId, status: 'running', repositoryId: null });
+  fake.insert(schema.tasks, {
+    id: taskId,
+    userId,
+    status: 'running',
+    repositoryId: cfg.repository ? randomUUID() : null,
+  });
   fake.insert(schema.taskSteps, {
     id: stepId,
     taskId,
@@ -427,5 +464,48 @@ describe('T785 replay after a clean merge landed before its state was saved', ()
     expect(
       f.landedEvents().map((e) => (e.payload as { baseShaBefore: string }).baseShaBefore),
     ).toEqual([tip, tip]);
+  });
+
+  it('a halt in the set-aside loop that merged nothing leaves a later hand merge on the tip alone', async () => {
+    const f = await setup({ squash: true, push: false, repository: true });
+    // A file Haive rewrote sends the open round again, and the second set-aside refuses.
+    aside.restore.mockResolvedValueOnce({ outcome: 'retry' });
+    aside.setAside.mockResolvedValueOnce({ outcome: 'clean' }).mockResolvedValueOnce({
+      outcome: 'refused',
+      file: 'x',
+      reason: 'a local change',
+      code: 'git_operation',
+    });
+    await f.run();
+    expect(aside.setAside).toHaveBeenCalledTimes(2);
+    expect(f.fake.rows(schema.taskSteps)[0]?.status).toBe('failed');
+    expect(f.stored().phase).toBe('pending');
+    expect(f.stored().baseShaBefore).toBeUndefined();
+    await git(f.dir, 'merge', '--no-ff', 'feature', '-m', 'by hand');
+    const head = await git(f.dir, 'rev-parse', 'main');
+    const reflog = await git(f.dir, 'reflog', '--format=%H %gs');
+    await retry(f);
+    expect((await f.run()).resolved).toBe(true);
+    expect(await git(f.dir, 'rev-parse', 'main')).toBe(head);
+    expect(await git(f.dir, 'reflog', '--format=%H %gs')).toBe(reflog);
+    expect(f.stored().phase).toBe('done');
+    expect(f.stored().squashCommitSha ?? null).toBeNull();
+    expect(f.landedEvents()).toEqual([]);
+  });
+
+  // Pins a limitation the docs name: by parents alone a merge of the feature on exactly the saved tip
+  // is this step's merge, whoever made it and whatever stopped this step before its own merge landed.
+  it("LIMITATION: a hand merge of the feature on exactly the saved tip after a thrown exit is squashed as this step's", async () => {
+    const f = await setup({ squash: true, push: false });
+    h.crashBeforeMerge = true;
+    await expect(f.run()).rejects.toThrow('worker died before the merge');
+    expect(f.stored().preMergeBaseSha).toBe(f.data.before);
+    expect(await git(f.dir, 'rev-parse', 'main')).toBe(f.data.before);
+    await git(f.dir, 'merge', '--no-ff', 'feature', '-m', 'by hand');
+    expect((await f.run()).resolved).toBe(true);
+    const parents = (await git(f.dir, 'rev-list', '--parents', '-n', '1', 'main')).split(' ');
+    expect(parents.slice(1)).toEqual([f.data.before]);
+    expect(f.stored().squashCommitSha).toBe(parents[0]);
+    expect(f.landedEvents()).toHaveLength(2);
   });
 });

@@ -1507,6 +1507,21 @@ async function resolveMergePhaseInMove(
         return recorded;
       });
     }
+    // A halt that merged nothing, with the base still at the recorded tip, leaves no merge of this step for
+    // that tip to describe: a merge a person makes on it before the retry must not read as this step's.
+    const forgetUnmergedTip = async (): Promise<void> => {
+      if (
+        !pending.preMergeBaseSha ||
+        (await revParse(pending.mergeDir, 'HEAD')) !== pending.preMergeBaseSha
+      ) {
+        return;
+      }
+      const forgotten = { ...pending, preMergeBaseSha: undefined };
+      pending = forgotten;
+      await mergeSection(repositoryId, forgotten.mergeDir, (tx) =>
+        saveMergeState(tx, current.id, forgotten),
+      );
+    };
     let attempt = await mergeSection(repositoryId, pending.mergeDir, openPending);
     pending = adoptKept(pending, attempt.adopted);
     // A file Haive rewrote since the set-aside sends it round again.
@@ -1529,6 +1544,7 @@ async function resolveMergePhaseInMove(
       }
       const stopped = await setAside(repositoryId, pending.mergeDir);
       if (stopped !== null) {
+        await forgetUnmergedTip();
         await putBack(repositoryId, pending.mergeDir);
         await settleGivenUp(db, current, params, pending);
         return haltFailed(db, current, params, state, asideHalt(stopped), 'haive files changed');
@@ -1537,19 +1553,7 @@ async function resolveMergePhaseInMove(
       pending = adoptKept(pending, attempt.adopted);
     }
     state = attempt.armed;
-    // A halt that merged nothing, with the base still at the recorded tip, leaves no merge of this step for
-    // that tip to describe: a merge a person makes on it before the retry must not read as this step's.
-    if (
-      pending.preMergeBaseSha &&
-      (attempt.kind !== 'opened' || attempt.opened.kind === 'refused') &&
-      (await revParse(pending.mergeDir, 'HEAD')) === pending.preMergeBaseSha
-    ) {
-      const forgotten = { ...pending, preMergeBaseSha: undefined };
-      pending = forgotten;
-      await mergeSection(repositoryId, forgotten.mergeDir, (tx) =>
-        saveMergeState(tx, current.id, forgotten),
-      );
-    }
+    if (attempt.kind !== 'opened' || attempt.opened.kind === 'refused') await forgetUnmergedTip();
     if (attempt.kind === 'unaborted') {
       await putBack(repositoryId, state.mergeDir);
       await settleGivenUp(db, current, params, pending);

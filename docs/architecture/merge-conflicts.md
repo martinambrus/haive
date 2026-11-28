@@ -130,9 +130,12 @@ left. The following rules keep it that way, each MEASURED on git 2.43 and 2.54:
   a tip that moved before it is judged as it always was). A halt that merged nothing (refused, set
   aside, held, unaborted) while HEAD is still the recorded tip drops the record, so a merge a person
   makes on that tip before the retry is never read as this step's. One case cannot be told apart: a
-  merge of the feature that a person made on exactly the recorded tip during a stop looks like this
-  step's and is squashed as asked. The other merge steps record nothing. Controls:
-  `merge-base-recovery.test.ts`.
+  merge of the feature on exactly the recorded tip that this step did not make looks like its own and
+  is squashed as asked. It arises from a person's hand merge after a thrown exit between the record
+  and the merge (an error in the merge section, a section refused as superseded, Stop, cancel), and
+  from a merge made on the forge and fast-forwarded in. No content is lost and the push is not
+  forced. The other merge steps record nothing. Controls: `merge-base-recovery.test.ts`, the
+  limitation included.
   After a squash, cleanup deletes a feature or DAG issue branch only when its current tip is
   contained in the recorded merge's second parent, using compare-and-delete against that tip.
   A moved or unreadable branch, missing recorded evidence, a symbolic ref, a checkout holder or a
