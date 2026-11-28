@@ -178,13 +178,16 @@ recovery claim gates read it as they read the no-key discard. A table with only 
 which the old behaviour could already have left behind, does not refuse boot, and the override does
 not apply to it: it fires only when the key reads none of the rows, so it can never delete a readable
 `master_kek`. Each unreadable row throws `SecretUnreadableError` at its reader instead of being
-replaced; the optional ones (`GET /admin/mail`, the global KB connection string) then fail as they
-already did in production. When the unreadable row is one boot reads (`master_kek`, `jwt_secret`,
+replaced. The optional rows (`mail_smtp_password` behind `GET /admin/mail`,
+`global_kb_connection_string` behind every global KB reader and its config route, a
+`module_source:<id>:token`) then fail at their readers, as they already did in production, and now
+outside it too. When the unreadable row is one boot reads (`master_kek`, `jwt_secret`,
 `email_blind_index_pepper`), the service that reads it exits at boot with the row's name, and the log
 line before it points here. Restore the key that wrote that row. If that key is lost, delete that one
-row (`DELETE FROM system_secrets WHERE key = '<name>'`) and restart so boot generates it again,
-accepting what depended on it: a new `master_kek` orphans every envelope the old one wrapped, a new
-`email_blind_index_pepper` breaks every email login lookup, a new `jwt_secret` signs everyone out.
+row (`DELETE FROM system_secrets WHERE key = '<name>'`). A boot row is then generated again by a
+restart, accepting what depended on it: a new `master_kek` orphans every envelope the old one
+wrapped, a new `email_blind_index_pepper` breaks every email login lookup, a new `jwt_secret` signs
+everyone out. An optional row is entered again in its admin page.
 `recover-admin` reports a refusal as "does not decrypt the stored system secrets" and never offers the
 override. The `./haive` helper and its PowerShell fallback forward only `DATABASE_URL`, `REDIS_URL`
 and `CONFIG_ENCRYPTION_KEY`, so they cannot discard; the `docker exec` form below runs inside the api
