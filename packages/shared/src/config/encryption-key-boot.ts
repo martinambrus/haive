@@ -162,11 +162,17 @@ const KEY_SOURCES = {
 /** A key that is present must read what the database holds before it is seeded or used. One
  * readable row proves the key is this database's; only a table it reads none of means the wrong
  * key. That refuses, and `HAIVE_DISCARD_UNREADABLE_SECRETS=1` is the same audited discard as a boot
- * with no key. */
+ * with no key.
+ *
+ * A key Redis does not hold yet (the environment key about to seed an empty Redis) passes `settle`:
+ * a discard rewrites the install, so that key must be the install's before the first write. It runs
+ * after the refusal is ruled out and resolves false when another key holds Redis, which skips the
+ * discard: a process whose key lost the race deletes nothing. A key already in Redis needs none. */
 export async function assertKeyReadsSystemSecrets(
   db: EncryptionKeyBootDatabase,
   key: string,
   source: keyof typeof KEY_SOURCES,
+  settle?: () => Promise<boolean>,
 ): Promise<void> {
   const unreadable = unreadableTable(await systemSecretRows(db), key);
   if (!unreadable) return;
@@ -177,6 +183,7 @@ export async function assertKeyReadsSystemSecrets(
       unreadable,
     );
   }
+  if (settle && !(await settle())) return;
   await discardUnreadableSystemSecrets(db, key);
 }
 

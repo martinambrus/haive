@@ -1,4 +1,7 @@
+import { fork, type ChildProcess } from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';
+import { createRequire } from 'node:module';
+import { Redis } from 'ioredis';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createDatabase, schema, type Database } from '@haive/database';
 import { sql } from 'drizzle-orm';
@@ -13,8 +16,9 @@ import {
 import {
   encryptionKeyBootDatabase,
   generateBootEncryptionKey,
+  PENDING_ENCRYPTION_KEY,
 } from '../src/config/encryption-key-boot.js';
-import { configService } from '../src/config/config.service.js';
+import { CONFIG_KEYS, configService } from '../src/config/config.service.js';
 import { SecretUnreadableError } from '../src/config/secret-unreadable.js';
 import { SecretsService } from '../src/config/secrets.service.js';
 
@@ -405,4 +409,188 @@ describe.skipIf(!url)('a present key that cannot read the stored system secrets'
     expect(await second.getMasterKek()).toBe(generated);
     expect(await auditRows()).toHaveLength(0);
   });
+});
+
+const raceRedisUrl = process.env.ENCRYPTION_KEY_BOOT_RACE_REDIS_URL;
+if (raceRedisUrl && !/^redis:\/\/(127\.0\.0\.1|localhost):\d+\/14$/.test(raceRedisUrl)) {
+  throw new Error('Use a throwaway loopback Redis database 14');
+}
+
+describe.skipIf(!url || !raceRedisUrl)('two processes racing for the encryption key', () => {
+  const NAMES = ['master_kek', 'jwt_secret', 'email_blind_index_pepper'];
+  const spawned: ChildProcess[] = [];
+  let db: Database;
+  let redis: Redis;
+  let original: string;
+  let other: string;
+
+  /** One boot process with its own environment: it keeps it through the whole interleaving. */
+  function bootProcess(env: Record<string, string>) {
+    const child = fork(
+      new URL('./fixtures/encryption-key-boot-race-process.ts', import.meta.url),
+      [],
+      {
+        execArgv: ['--import', createRequire(import.meta.url).resolve('tsx')],
+        env: {
+          ...process.env,
+          REDIS_URL: raceRedisUrl,
+          DATABASE_URL: url,
+          NODE_ENV: 'production',
+          HAIVE_DISCARD_UNREADABLE_SECRETS: '',
+          ...env,
+        },
+        stdio: ['ignore', 'ignore', 'pipe', 'ipc'],
+      },
+    );
+    spawned.push(child);
+    const events: Record<string, unknown>[] = [];
+    let stderr = '';
+    let exited: number | null | undefined;
+    let wake: (() => void) | undefined;
+    child.stderr!.on('data', (chunk: Buffer) => (stderr += chunk.toString()));
+    child.on('message', (message) => {
+      events.push(message as Record<string, unknown>);
+      wake?.();
+    });
+    child.on('exit', (code) => {
+      exited = code;
+      wake?.();
+    });
+    const next = async () => {
+      while (events.length === 0) {
+        if (exited !== undefined) throw new Error(`boot process exited ${exited}: ${stderr}`);
+        await new Promise<void>((resolve) => (wake = resolve));
+      }
+      return events.shift()!;
+    };
+    return {
+      send: (command: string) => child.send(command),
+      next,
+      /** Every event up to and including the first outcome. */
+      finish: async () => {
+        const seen: Record<string, unknown>[] = [];
+        for (;;) {
+          const event = await next();
+          seen.push(event);
+          if (event.event === 'done' || event.event === 'error') return seen;
+        }
+      },
+    };
+  }
+
+  /** SHA-256 per stored value, so a failure prints hashes and never a ciphertext. */
+  async function storedHashes(): Promise<Record<string, string>> {
+    const rows = await db.$client<
+      { key: string; encrypted_value: string }[]
+    >`select key, encrypted_value from system_secrets order by key`;
+    return Object.fromEntries(
+      rows.map((row) => [row.key, createHash('sha256').update(row.encrypted_value).digest('hex')]),
+    );
+  }
+  async function discardAudits() {
+    const [row] = await db.$client<
+      { count: number }[]
+    >`select count(*)::int as count from audit_events where action = 'config.discard_unreadable_secrets'`;
+    return row!.count;
+  }
+
+  beforeAll(async () => {
+    if (!new URL(url!).pathname.endsWith('/encryption_key_boot_test')) {
+      throw new Error('Use a dedicated encryption_key_boot_test database');
+    }
+    db = createDatabase(url!);
+    redis = new Redis(raceRedisUrl!);
+    await redis.ping();
+  });
+  beforeEach(async () => {
+    original = randomBytes(32).toString('hex');
+    other = randomBytes(32).toString('hex');
+    await redis.del(CONFIG_KEYS.ENCRYPTION_KEY, PENDING_ENCRYPTION_KEY);
+    await db.$client`truncate system_secrets, users, audit_events cascade`;
+    await db.insert(schema.systemSecrets).values(
+      NAMES.map((key) => ({
+        key,
+        encryptedValue: encrypt(randomBytes(16).toString('hex'), original),
+      })),
+    );
+  });
+  afterEach(async () => {
+    for (const child of spawned.splice(0)) child.kill('SIGKILL');
+    await redis.del(CONFIG_KEYS.ENCRYPTION_KEY, PENDING_ENCRYPTION_KEY);
+  });
+  afterAll(async () => {
+    await redis?.quit();
+    await db?.$client.end({ timeout: 5 });
+  });
+
+  it('R1 a process whose key lost the race to the original key discards nothing', async () => {
+    const before = await storedHashes();
+    const loser = bootProcess({
+      CONFIG_ENCRYPTION_KEY: other,
+      HAIVE_DISCARD_UNREADABLE_SECRETS: '1',
+      RACE_PAUSE: '1',
+    });
+    const winner = bootProcess({ CONFIG_ENCRYPTION_KEY: original });
+    loser.send('boot');
+    // The loser has read an empty Redis and holds there; the original key then seeds it.
+    expect(await loser.next()).toMatchObject({ event: 'paused' });
+    winner.send('boot');
+    expect(await winner.next()).toMatchObject({ event: 'done', key: original });
+    loser.send('resume');
+    const events = await loser.finish();
+    expect(await storedHashes()).toEqual(before);
+    expect(await discardAudits()).toBe(0);
+    expect(await redis.get(CONFIG_KEYS.ENCRYPTION_KEY)).toBe(original);
+    expect(events.map((event) => event.event)).toEqual(['error']);
+    expect(events[0]).toMatchObject({ message: expect.stringContaining('does not match') });
+  }, 60_000);
+
+  it('R2 a process whose key won holds it in Redis before the discard opens, and audits once', async () => {
+    const solo = bootProcess({
+      CONFIG_ENCRYPTION_KEY: other,
+      HAIVE_DISCARD_UNREADABLE_SECRETS: '1',
+    });
+    solo.send('boot');
+    const events = await solo.finish();
+    expect(events).toEqual([
+      { event: 'discarding', redisKey: other },
+      { event: 'done', key: other },
+    ]);
+    expect(await redis.get(CONFIG_KEYS.ENCRYPTION_KEY)).toBe(other);
+    expect(await storedHashes()).toEqual({});
+    expect(await discardAudits()).toBe(1);
+  }, 60_000);
+
+  it('R4 a process with no key at all that lost the race to the original key discards nothing', async () => {
+    const before = await storedHashes();
+    // The no-key path reserves Redis before it deletes, so it was already ordered this way.
+    const loser = bootProcess({
+      CONFIG_ENCRYPTION_KEY: '',
+      HAIVE_DISCARD_UNREADABLE_SECRETS: '1',
+      RACE_PAUSE: '1',
+    });
+    const winner = bootProcess({ CONFIG_ENCRYPTION_KEY: original });
+    loser.send('boot');
+    expect(await loser.next()).toMatchObject({ event: 'paused' });
+    winner.send('boot');
+    expect(await winner.next()).toMatchObject({ event: 'done', key: original });
+    loser.send('resume');
+    expect(await loser.finish()).toEqual([{ event: 'done', key: original }]);
+    expect(await redis.get(CONFIG_KEYS.ENCRYPTION_KEY)).toBe(original);
+    expect(await storedHashes()).toEqual(before);
+    expect(await discardAudits()).toBe(0);
+  }, 60_000);
+
+  it('R3 a wrong key without the override refuses, seeds no key and deletes nothing', async () => {
+    const before = await storedHashes();
+    const wrong = bootProcess({ CONFIG_ENCRYPTION_KEY: other });
+    wrong.send('boot');
+    const events = await wrong.finish();
+    expect(events).toEqual([
+      expect.objectContaining({ event: 'error', name: 'SecretUnreadableError' }),
+    ]);
+    expect(await redis.get(CONFIG_KEYS.ENCRYPTION_KEY)).toBeNull();
+    expect(await storedHashes()).toEqual(before);
+    expect(await discardAudits()).toBe(0);
+  }, 60_000);
 });

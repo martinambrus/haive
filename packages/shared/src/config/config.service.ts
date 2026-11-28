@@ -988,8 +988,21 @@ export class ConfigService {
         // Seeding makes this key the install's. Without a database (callers that never held
         // ciphertext) there is nothing to check it against.
         const bootDb = typeof db === 'function' ? db() : db;
-        if (bootDb) await assertKeyReadsSystemSecrets(bootDb, envKey, 'env');
-        const seeded = await this.seedEnvEncryptionKey(envKey, 'ensureEncryptionKey');
+        let seeded: boolean | undefined;
+        if (bootDb) {
+          // Redis decides which key is the install's, and another process may have seeded it
+          // since the read above. A discard seeds first and runs only if Redis then holds this
+          // key; otherwise it deletes nothing and the mismatch check below applies.
+          await assertKeyReadsSystemSecrets(bootDb, envKey, 'env', async () => {
+            seeded = await this.seedEnvEncryptionKey(envKey, 'ensureEncryptionKey');
+            if (seeded) return true;
+            const held = await this.redisCall('ensureEncryptionKey', (redis) =>
+              redis.get(CONFIG_KEYS.ENCRYPTION_KEY),
+            );
+            return held === envKey;
+          });
+        }
+        seeded ??= await this.seedEnvEncryptionKey(envKey, 'ensureEncryptionKey');
         logger.info(
           seeded
             ? 'Seeded encryption key from CONFIG_ENCRYPTION_KEY'

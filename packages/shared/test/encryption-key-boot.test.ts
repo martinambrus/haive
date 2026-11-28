@@ -37,12 +37,16 @@ class RedisFake extends EventEmitter {
   disconnect = vi.fn();
   failPublish = false;
   beforeReserve: (() => void) | null = null;
+  /** Runs right after a read found the key absent: another process may seed before the caller acts. */
+  afterEmptyRead: (() => void) | null = null;
   async quit() {}
   async get(key: string) {
     return this.store.get(key) ?? null;
   }
   async exists(key: string) {
-    return Number(this.store.has(key));
+    const present = this.store.has(key);
+    if (!present) this.afterEmptyRead?.();
+    return Number(present);
   }
   async set(key: string, value: string, mode?: string) {
     if (mode === 'NX' && this.store.has(key)) return null;
@@ -563,7 +567,7 @@ describe('an environment key that cannot read the stored system secrets', () => 
     expect(fixture.audit.size).toBe(0);
   });
 
-  it('B3 with the override audits and discards first, then seeds the key', async () => {
+  it('B3 with the override settles the key first, then audits and discards', async () => {
     const key = randomKey();
     vi.stubEnv('CONFIG_ENCRYPTION_KEY', key);
     vi.stubEnv('HAIVE_DISCARD_UNREADABLE_SECRETS', '1');
@@ -582,10 +586,35 @@ describe('an environment key that cannot read the stored system secrets', () => 
       metadata: { discardedSystemSecretCount: 3, keyPresent: true },
     });
     expect(fixture.remove).toHaveBeenCalledTimes(1);
-    expect(seededAtAudit).toBe(false);
+    // A discard rewrites the install, so this key is the install's before the first write.
+    expect(seededAtAudit).toBe(true);
     expect(redis.store.get(CONFIG_KEYS.ENCRYPTION_KEY)).toBe(key);
     expect(await svc.getEncryptionKey()).toBe(key);
   });
+
+  it.each(['production', 'development'])(
+    'B7 with the override, a key that lost the Redis race discards nothing under NODE_ENV=%s',
+    async (env) => {
+      const original = randomKey();
+      vi.stubEnv('NODE_ENV', env);
+      vi.stubEnv('CONFIG_ENCRYPTION_KEY', randomKey());
+      vi.stubEnv('HAIVE_DISCARD_UNREADABLE_SECRETS', '1');
+      const fixture = database({ system_secrets: 3 }, storedRows(original));
+      // The process holding the original key seeds Redis right after this one read it empty.
+      redis.afterEmptyRead = () => redis.store.set(CONFIG_KEYS.ENCRYPTION_KEY, original);
+      const outcome = await settleBoot(boot(service(), fixture.db));
+      if (env === 'production') {
+        expect(outcome.kind).toBe('rejected');
+        expect((outcome as { error: Error }).error.message).toContain('does not match');
+      } else {
+        expect(outcome.kind).toBe('resolved');
+      }
+      expect(redis.store.get(CONFIG_KEYS.ENCRYPTION_KEY)).toBe(original);
+      expect(fixture.audit.size).toBe(0);
+      expect(fixture.remove).not.toHaveBeenCalled();
+      expect(fixture.state.systemSecrets).toHaveLength(3);
+    },
+  );
 
   it('B4 seeds the key without a database argument and without a query', async () => {
     const key = randomKey();

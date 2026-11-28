@@ -198,12 +198,25 @@ container and inherits its `HAIVE_DISCARD_UNREADABLE_SECRETS`, so keep that at 0
 so a wiped Redis plus a different key reached the generators above as a first install. It now runs
 the same `assertKeyReadsSystemSecrets` before the seed whenever the caller passed a database (api,
 worker and its scripts, the updater and `recover-admin` all do; a caller without one has nothing to
-check against and is unchanged). The override works the same way there: the audited discard first,
-then the seed. MEASURED on throwaway PostgreSQL 18 and Redis 8 through the real api `bootstrap()`
-(one fresh process per phase, evidence by SHA-256 of each stored row): with Redis wiped and a
-different `CONFIG_ENCRYPTION_KEY`, the base commit booted and changed the stored system secrets (the
-row hashes differ); now boot refuses with every row unchanged and no key seeded, the original key then
-boots unchanged, and the override writes one audit row.
+check against and is unchanged). A key that reads none of the rows is refused with Redis untouched,
+so a refusal never leaves a wrong key behind. The override is ordered the other way round from the
+no-key discard: Redis decides which key is the install's, and another process may have seeded it
+since this one read Redis empty, so a discard first seeds set-if-absent, reads Redis again and
+deletes only if Redis holds this key. A process whose key lost that race deletes nothing and meets the
+existing mismatch check (production refuses boot, other environments warn and use the stored key). A
+crash between that seed and the commit leaves this key in Redis and every row in place: the next boot
+reaches the same discard through `SecretsService.initialize` while the override is set, and refuses
+once it is removed. No row is deleted without its audit row in the same transaction. The no-key
+discard needs no such step, since its pending reservation is atomic with the key's absence and
+precedes the delete. MEASURED on throwaway PostgreSQL 18 and Redis 8 through the real api
+`bootstrap()` (one fresh process per phase, evidence by SHA-256 of each stored row): with Redis wiped
+and a different `CONFIG_ENCRYPTION_KEY`, the base commit booted and changed the stored system secrets
+(the row hashes differ); now boot refuses with every row unchanged and no key seeded, the original
+key then boots unchanged, and the override writes one audit row. MEASURED with two forked boots on the
+same stores (`encryption-key-boot-db.test.ts`, R1 to R4): a process holding a different key and the
+override, held right after its empty Redis read while the original key seeded Redis, deleted all
+three system secrets under the previous order; now it deletes nothing, and a process that wins the
+race has its key in Redis before the delete opens.
 
 **Recover an administrator after key loss.** First let boot finish with the discard override, then
 remove the override. New installations created with this release have the recovery subcommand.
