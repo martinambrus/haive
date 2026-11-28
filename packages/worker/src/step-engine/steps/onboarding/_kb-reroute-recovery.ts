@@ -15,18 +15,21 @@ import { sanitizeKbRelPath } from './_kb-write.js';
 
 const recoverySchema = z.object({
   version: z.literal(1),
-  files: z.array(z.object({ path: z.string(), body: z.string() })),
+  files: z.array(z.object({ path: z.string(), body: z.string(), entryId: z.string().optional() })),
 });
 export const KB_REROUTE_JOURNAL_MAX_BYTES = 16 * 1024 * 1024;
 const recoveryDir = '.haive/kb-reroute-recovery';
 
 /** Original bytes survive Retry outside the KB/RAG tree. The retained journal is agent-readable.
- * An unreadable journal keeps drafts; an unwritable one also forbids local deletions this run. */
+ * An unreadable journal keeps drafts; an unwritable one also forbids local deletions this run.
+ * An entry whose promotion is consumed (activated or archived) is not restored and is pruned;
+ * `finish` drops entries whose file exists again and removes an emptied journal. */
 export async function restoreKbReroutes(
   repoPath: string,
   taskId: string,
   log: Pick<typeof logger, 'warn'> = logger,
   maxJournalBytes = KB_REROUTE_JOURNAL_MAX_BYTES,
+  isConsumed?: (ids: string[]) => Promise<ReadonlySet<string>>,
 ) {
   const journal = `${recoveryDir}/${createHash('sha256').update(taskId).digest('hex')}.json`;
   let state: z.infer<typeof recoverySchema> = { version: 1, files: [] };
@@ -41,6 +44,7 @@ export async function restoreKbReroutes(
       'kb: recovery incomplete; keeping promoted drafts and any unjournaled local sources',
     );
   };
+  const consumed: string[] = [];
   try {
     const saved = await readFileNoFollow(repoPath, journal, {
       strict: true,
@@ -57,7 +61,23 @@ export async function restoreKbReroutes(
     }
     state = parsed;
     journalUsable = true;
-    for (const file of state.files) {
+  } catch (err) {
+    canPurgeDrafts = false;
+    warn(err);
+  }
+  if (journalUsable && isConsumed) {
+    const ids = state.files.flatMap((file) => (file.entryId ? [file.entryId] : []));
+    if (ids.length > 0) {
+      const gone = await isConsumed(ids);
+      state.files = state.files.filter((file) => {
+        if (!file.entryId || !gone.has(file.entryId)) return true;
+        consumed.push(file.path);
+        return false;
+      });
+    }
+  }
+  try {
+    for (const file of journalUsable ? state.files : []) {
       const rel = `${KB_DIR}/${file.path}`;
       const parent = path.posix.dirname(rel);
       const temp = `${parent}/.${path.posix.basename(rel)}.haive-tmp-${process.pid}-${randomUUID()}`;
@@ -128,8 +148,10 @@ export async function restoreKbReroutes(
       if (!safe.ok || safe.normalized !== sourcePath)
         throw new Error('Invalid KB re-route source path');
       const prior = state.files.find((file) => file.path === sourcePath);
-      if (prior) prior.body = body;
-      else state.files.push({ path: sourcePath, body });
+      if (prior) {
+        prior.body = body;
+        delete prior.entryId;
+      } else state.files.push({ path: sourcePath, body });
       try {
         await save();
         return true;
@@ -137,6 +159,34 @@ export async function restoreKbReroutes(
         canDeleteLocal = false;
         warn(err);
         return false;
+      }
+    },
+    consumed,
+    async confirmReroute(sourcePath: string, entryId: string): Promise<void> {
+      const entry = state.files.find((file) => file.path === sourcePath);
+      if (!entry) return;
+      entry.entryId = entryId;
+      try {
+        await save();
+      } catch (err) {
+        warn(err);
+      }
+    },
+    async finish(): Promise<void> {
+      if (!journalUsable || !canDeleteLocal) return;
+      try {
+        const keep: typeof state.files = [];
+        for (const file of state.files) {
+          const here = await lstatNoFollow(repoPath, `${KB_DIR}/${file.path}`, { strict: true });
+          if (here?.kind !== 'file') keep.push(file);
+        }
+        if (keep.length === state.files.length && keep.length > 0) return;
+        if (keep.length > 0) {
+          state.files = keep;
+          await save();
+        } else await removeNoFollow(repoPath, journal);
+      } catch (err) {
+        warn(err);
       }
     },
   };

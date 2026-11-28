@@ -765,6 +765,49 @@ export async function clearTaskPromotedDrafts(
   }
 }
 
+/** Which of `ids` are this task's promotions that `clearTaskPromotedDrafts` can no longer
+ *  remove: the row exists and is not a `status='draft' source='promoted'` row of this task (it
+ *  was activated or archived). A Retry must not put the local original of such an entry back.
+ *  An unknown id, another task's row and a person's own entry are never counted. Empty when the
+ *  global KB is disabled; an ordinary outage is logged and also yields empty, so the caller
+ *  restores as before. Timeouts and owner cancellation propagate. */
+export async function findConsumedTaskPromotions(
+  db: Database,
+  taskId: string,
+  ids: string[],
+  log: PromoteLogger,
+  opts: GlobalKbCallOptions = {},
+): Promise<Set<string>> {
+  if (ids.length === 0) return new Set();
+  try {
+    const settings = await resolveGlobalKbSettings();
+    if (!settings.enabled) return new Set();
+    return await withGlobalKb(
+      db,
+      async ({ db: gdb }) => {
+        const rows = await gdb
+          .select({ id: globalKbEntries.id })
+          .from(globalKbEntries)
+          .where(
+            and(
+              inArray(globalKbEntries.id, ids),
+              eq(globalKbEntries.sourceTaskId, taskId),
+              eq(globalKbEntries.source, 'promoted'),
+              ne(globalKbEntries.status, 'draft'),
+            ),
+          );
+        return new Set(rows.map((row) => row.id));
+      },
+      globalKbCallOptions(opts, GLOBAL_KB_STEP_DEADLINE_MS),
+    );
+  } catch (err) {
+    opts.signal?.throwIfAborted();
+    rethrowIfGlobalKbTimeout(err);
+    log.warn({ err, taskId }, 'global KB consumed-promotion lookup failed (skipped)');
+    return new Set();
+  }
+}
+
 // No embedding runs here: 3 s allows remote startup, 10 s covers connect/ensure/write while
 // letting Retry acquire the task row well before the 60 s settlement backstop.
 const KB_TASK_END_STORE_DEADLINE_MS = 10_000;
