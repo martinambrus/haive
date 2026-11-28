@@ -189,6 +189,7 @@ describe.skipIf(!url)('GET /m/statistics/files-read on migrated PostgreSQL', () 
   const r3 = randomUUID();
   const r4 = randomUUID();
   const r5 = randomUUID();
+  const r6 = randomUUID();
   const providers = {
     cc: randomUUID(),
     cx: randomUUID(),
@@ -203,6 +204,7 @@ describe.skipIf(!url)('GET /m/statistics/files-read on migrated PostgreSQL', () 
     t5: randomUUID(),
     t6: randomUUID(),
     t7: randomUUID(),
+    t8: randomUUID(),
   };
   const stepIds = new Map<string, string>();
   let mainRequest: Promise<Body> | undefined;
@@ -233,7 +235,7 @@ describe.skipIf(!url)('GET /m/statistics/files-read on migrated PostgreSQL', () 
     });
     await db.insert(schema.users).values([user(u1, 'files-read-u1'), user(u2, 'files-read-u2')]);
     await db.insert(schema.repositories).values(
-      [r1, r2, r3, r4, r5].map((id) => ({
+      [r1, r2, r3, r4, r5, r6].map((id) => ({
         id,
         userId: u1,
         name: `files-read-${id}`,
@@ -264,6 +266,7 @@ describe.skipIf(!url)('GET /m/statistics/files-read on migrated PostgreSQL', () 
       ['t5', u1, r2, ['04-implement']],
       ['t6', u2, r1, ['04-implement']],
       ['t7', u1, r5, ['04-implement']],
+      ['t8', u1, r6, ['04-implement']],
     ];
     await db.insert(schema.tasks).values(
       taskDefs.map(([key, userId, repositoryId]) => ({
@@ -284,6 +287,21 @@ describe.skipIf(!url)('GET /m/statistics/files-read on migrated PostgreSQL', () 
     await db.insert(schema.taskSteps).values(steps);
 
     const stepFor = (task: keyof typeof taskIds, step: string) => stepIds.get(stepKey(task, step))!;
+    // A run of the malformed-record repository (R6): the same step, provider and token usage.
+    const bad = (toolUsage: unknown): Run => ({
+      task: 't8',
+      step: '04-implement',
+      provider: 'cc',
+      tokenUsage: tok(100, 10),
+      toolUsage,
+    });
+    // A well-formed record whose file-read totals are 3 reads, 30 characters, 90 weighted, then
+    // overridden with one malformed part.
+    const shaped = (extra: Record<string, unknown>) => ({
+      ...reads({ resultSeen: true, weighted: true, files: [] }),
+      fileReads: { reads: 3, chars: 30, weightedChars: 90 },
+      ...extra,
+    });
     const runs: Run[] = [
       // r1: weighted share run, claude-code. prompt side = 20000 + 30000 + 4000 = 54000.
       {
@@ -599,6 +617,56 @@ describe.skipIf(!url)('GET /m/statistics/files-read on migrated PostgreSQL', () 
           reads: reads({ coverage: 'none', resultSeen: false, weighted: false, files: [] }),
         },
       },
+      // R6: records no recorder writes, twelve runs in one repository. None may fail the route or
+      // add a path; a number that is a string or a boolean counts as 0 and a weight that is not a
+      // number stays unknown. Only the runs holding an object record are recorded.
+      bad({ reads: shaped({ files: { a: 1 } }) }),
+      bad({ reads: shaped({ files: 'x' }) }),
+      bad({ reads: shaped({ files: null }) }),
+      bad({
+        reads: shaped({
+          files: [
+            7,
+            null,
+            'str',
+            [],
+            {},
+            { path: 7 },
+            { path: null },
+            { path: { a: 1 } },
+            { path: 'ok.ts', reads: '3', chars: true, weightedChars: '12' },
+            { path: 'num.ts', reads: 2, chars: 100, weightedChars: null },
+            { path: 'good.ts', reads: 1, chars: 10, weightedChars: 20 },
+          ],
+        }),
+      }),
+      bad({
+        reads: shaped({
+          files: [
+            { path: 'good.ts', reads: 4, chars: 40, weightedChars: 80 },
+            { path: 'num.ts', reads: 1, chars: 5, weightedChars: 7 },
+          ],
+        }),
+      }),
+      bad({ reads: null }),
+      bad([]),
+      bad({ reads: 'text' }),
+      bad({ reads: [1, 2] }),
+      bad({
+        reads: shaped({
+          fileReads: null,
+          overflow: { omitted: '4', reads: 'x', chars: null, weightedChars: false },
+          multiFile: 'm',
+        }),
+      }),
+      bad({ reads: shaped({ coverage: 'FULL' }) }),
+      bad({
+        reads: shaped({
+          coverage: 'partial',
+          fileReads: { reads: 1, chars: 10, weightedChars: null },
+          files: [{ path: 'good.ts', reads: 1, chars: 10, weightedChars: null }],
+        }),
+      }),
     ];
     await db.insert(schema.cliInvocations).values(
       runs.map((r) => {
@@ -1113,7 +1181,11 @@ describe.skipIf(!url)('GET /m/statistics/files-read on migrated PostgreSQL', () 
     });
   });
 
-  it('breaks a tie at the 50-path cut by code point, whatever the database collation', async () => {
+  // The rollup orders the cut under COLLATE "C". Dropping that clause fails this test only on a
+  // database whose default collation is not byte order: MEASURED on postgres:18-bookworm
+  // (en_US.utf8) it returns 'cut/a.ts'. CI's postgres:18-alpine (musl) orders by bytes already,
+  // so there the clause cannot be proven; an explicit "und-x-icu" fails it on alpine (MEASURED).
+  it('breaks a tie at the 50-path cut by code point, not by the database locale', async () => {
     const body = await ok({ repositoryId: r5 });
     // 49 paths of weight 1001..1049 and the tied pair (500 each): 51 paths, the cut falls between them.
     // T = 49 * 1025 + 500 + 500 = 51225 over one weighted run.
@@ -1126,6 +1198,72 @@ describe.skipIf(!url)('GET /m/statistics/files-read on migrated PostgreSQL', () 
     expect(body.files.rows[49]!.path).toBe('cut/B.ts');
     expect(body.otherPaths.paths).toBe(1);
     expectBucket(body.otherPaths, 1, 20, 500, 51225, 1);
+  });
+
+  it('reads past records no recorder writes and counts only what is a string or a number', async () => {
+    const body = await ok({ repositoryId: r6 });
+    // 12 runs: 8 hold an object record (7 observable, one of them partial, one of a coverage the
+    // report does not know), 4 do not (a JSON null, an array column, a string, an array); 5 have a
+    // known weight, 90 each.
+    expectCoverage(body.coverage, {
+      total: 12,
+      recorded: 8,
+      observable: 7,
+      partial: 1,
+      unobservable: 1,
+      unrecorded: 4,
+      inFlight: 0,
+      weighted: 5,
+    });
+    // Only a string path is a path: three, ranked by weight with the unknown one last.
+    expect(body.files.count).toBe(3);
+    expect(body.files.truncated).toBe(false);
+    expect(body.files.rows).toHaveLength(3);
+    // good.ts: runs d, e, and the partial one (weight unknown there).
+    expectRow(
+      body.files.rows[0]!,
+      { path: 'good.ts', reads: 6, chars: 60, w: 100, wRuns: 2, runs: 3, tasks: 1 },
+      450,
+      5,
+    );
+    expectRow(
+      body.files.rows[1]!,
+      { path: 'num.ts', reads: 3, chars: 105, w: 7, wRuns: 1, runs: 2, tasks: 1 },
+      450,
+      5,
+    );
+    // ok.ts: its reads, characters and weight are a string, a boolean and a string, so 0, 0 and unknown.
+    expectRow(
+      body.files.rows[2]!,
+      { path: 'ok.ts', reads: 0, chars: 0, w: null, wRuns: 0, runs: 1, tasks: 1 },
+      450,
+      5,
+    );
+    // Totals over the observable runs: 5 x 3 reads and the partial run's 1; 5 x 30 and its 10.
+    expect(body.totals).toMatchObject({ fileReads: 16, fileChars: 160 });
+    near(body.totals.estimatedTokens, 450 / 4);
+    expectStep(body.steps.rows[0]!, {
+      stepId: '04-implement',
+      runs: 12,
+      est: 112.5,
+      prompt: 500,
+      n: 5,
+      ratio: 0.225,
+      exceeds: false,
+    });
+  });
+
+  it('narrows to a task class', async () => {
+    const main = await getMain();
+    // Every fixture task is a workflow task, which is class work.
+    const work = await ok({ repositoryId: r1, taskClass: 'work' });
+    expect(work.coverage.total).toBe(15);
+    expect(work.files.count).toBe(main.files.count);
+    for (const taskClass of ['plan', 'setup', 'run', 'other']) {
+      const none = await ok({ repositoryId: r1, taskClass });
+      expect(none.coverage.total, taskClass).toBe(0);
+      expect(none.files.rows, taskClass).toEqual([]);
+    }
   });
 
   it('counts a running run that already carries a record as recorded, never in flight', async () => {
