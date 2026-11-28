@@ -431,12 +431,12 @@ Execution fence 2026-11-01: Reconcile closed and overlapping members first. Focu
 
 ### T144 · RAG F6 · the lexical half rarely co-supports a hit
 
-status: RESUME approved 2026-11-28 (owner: if not Codex-bound; the committed rag-eval fixture, 180 queries, runs on the local GPU, no Codex, no spend; ship only on a held-out win); was: parked · reason: no retrieval evaluation exists (owner triage 2026-11-10); resume when one does · kind: ranking change (gated on the retrieval eval) · priority: P3
+status: done 2026-11-28, measured with no win, docs only (#1416, 393c2182d): plan P2(b), an IDF prose ranker, nine arms on the committed rag-eval fixture; the tuning-selected arm (cap 5, df ratio 0.02) loses on held-out (recall@8 -0.028 [-0.097, +0.042], MRR@8 -0.049, overview 0.278 to 0.250) and MRR drops in all nine arms; French "rare" terms are function words. Verdict scoped to a pure-IDF ranker; a text-score order is untried. Evidence `.claude/tmp/codex-run/T144-S/`; found-not-fixed went to T800; owner resume terms were: if not Codex-bound, local GPU, no spend, ship only on a held-out win; was: parked · reason: no retrieval evaluation exists (owner triage 2026-11-10); resume when one does · kind: ranking change (gated on the retrieval eval) · priority: P3
 shared/src/rag/search.ts:449/:560 plainto_tsquery ANDs every term; 67.6% of logged searches with code hits had no two-ranker hit. TRAP: plain OR and coverage ranking measured WORSE (AGENTS.md "Identifier search"). Plan P2(b): a capped IDF ranker.
 
 ### T147 · RAG F5 · identical chunk bodies across files are never collapsed
 
-status: RESUME approved 2026-11-28 (same terms as T144); was: parked · reason: no retrieval evaluation exists (owner triage 2026-11-10); resume when one does · kind: ranking change (gated on the eval) · priority: P3
+status: done 2026-11-28, measured with no win, docs only (#1416, 393c2182d): plan P2(c) collapse of identical bodies changes nothing on the fixture (7 of 2,141 chunks duplicated, 0.33% against 8.3% in the real repository; no page at k <= 12 holds a copy; every delta exactly 0) and the dev query log shows 1 redundant hit in 268; revive only with a fixture that carries real duplication (T800); resume terms were the same as T144; was: parked · reason: no retrieval evaluation exists (owner triage 2026-11-10); resume when one does · kind: ranking change (gated on the eval) · priority: P3
 8.3% of chunks share a body with another file's chunk. A query-time collapse needs the SQL LIMIT widened past top_k. Plan P2(c).
 
 ### T149 · RAG F15 · deleted vectors keep their HNSW space
@@ -1252,6 +1252,15 @@ status: open · kind: fix · found: T665 driver and its xhigh review 2026-11-28 
 7. The statistics module's SQL wiring is tested only against a mocked db (the fragments are DB-tested through the api); no render test of the task page's `StepTokens` and `TaskTotalTime` null branches (checked live 2026-11-28 with a client-side fixture on a test-repo task: 10 of 10 step badges `≥`, total `≥ 1.1M`, provider row `out —`, no crash or console error; the statistics page marks too).
 8. `sum(numeric)::int` aggregates overflow past about 2.1B tokens. PRE-EXISTING, not worsened.
 9. Dead: `files-read-rollup.ts` ~:131 `share_output_tokens` is carried and never used; `tiered-cost.ts` ~:41's guard is unreachable from the top level.
+
+### T800 · FNF[T144] · RAG ranking ties order nondeterministically; the eval fixture cannot measure duplication
+
+status: open · kind: fix · found: T144/T147 driver 2026-11-28 · priority: P4
+
+1. `packages/shared/src/rag/search.ts` ~:438 numbers identifier rows with `, id` as a tie-break, but the cutting `ORDER BY ... LIMIT` (~:451) has none, so among tied scores at the cap the kept set may not match the assigned rank. PRE-EXISTING.
+2. `search.ts` ~:660 (hybrid, `LIMIT $8`), ~:750 and ~:782 (lexical branches): `ORDER BY rrf DESC` has no tie-break, so equal-rrf rows order nondeterministically between runs. PRE-EXISTING.
+3. The committed rag-eval fixture holds 0.33% duplicated chunks (the real repository 8.3%), so identical-body changes cannot be evaluated on it; its 72-query held-out split needs about 4 net rescued golds to clear the CI rule; the harness stores no per-hit ranks; the negatives diagnostic (`rag-eval-report.ts` ~:179) reads only the page's top dense similarity, so lexical changes barely register there.
+4. If collapse is revived: knowledge-reserve extras that duplicate each other are not deduplicated.
 
 ### T797 · FNF[T794] · Log in on an idle-image row, and raw image text in the login modal
 
