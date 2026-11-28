@@ -14,7 +14,7 @@ vi.mock('../src/lib/relink-git.js', () => ({
   verifyRelinkCheckout: h.verify,
   gitFailureText: () => 'git operation failed',
 }));
-import { logger } from '@haive/shared';
+import { configService, logger } from '@haive/shared';
 import { acquireRootClaim, type Database, schema } from '@haive/database';
 import { createFakeDb } from '@haive/database/testing';
 import {
@@ -73,6 +73,7 @@ beforeEach(() => {
   }));
   info = vi.spyOn(logger, 'info').mockImplementation(() => {});
   vi.spyOn(logger, 'warn').mockImplementation(() => {});
+  vi.spyOn(configService, 'getFresh').mockResolvedValue('normal');
 });
 afterEach(() => {
   vi.useRealTimers();
@@ -384,3 +385,32 @@ it('sweep logs a held mutation once, retains intent and reconciles after release
     await owner.release();
   }
 });
+
+it.each(['draining', 'maintenance'])(
+  'skips a locked-out reconcile while %s without a claim or Git, and the sweep logs it at info',
+  async (state) => {
+    vi.spyOn(configService, 'getFresh').mockResolvedValue(state);
+    let repositoryWrites = 0;
+    fake.hooks.beforeUpdate = (table) => {
+      if (table === schema.repositories) repositoryWrites += 1;
+    };
+    await expect(reconcileRemote(id, userId, { skipLocked: true })).resolves.toBe('maintenance');
+    expect(repositoryWrites).toBe(0);
+    expect(h.git).not.toHaveBeenCalled();
+    expect(pending()).toBeTruthy();
+
+    vi.useFakeTimers();
+    vi.spyOn(fake.db.query.repositories!, 'findMany').mockResolvedValue([repo] as never);
+    const stop = startRemoteReconcileSweep({ intervalMs: 10 });
+    try {
+      await vi.advanceTimersByTimeAsync(0);
+      expect(logger.warn).not.toHaveBeenCalled();
+      expect(info).toHaveBeenCalledWith(
+        { repositoryId: id, reason: 'maintenance' },
+        'remote reconciliation skipped',
+      );
+    } finally {
+      stop();
+    }
+  },
+);

@@ -88,6 +88,7 @@ describe('an upload that fails after it claimed its name', () => {
     vi.spyOn(configService, 'getNumber').mockImplementation(async (key, fallback = 0) =>
       key === CONFIG_KEYS.TASK_ATTACHMENT_MAX_BYTES ? 1024 * 1024 : fallback,
     );
+    vi.spyOn(configService, 'getFresh').mockResolvedValue('normal');
   });
 
   afterEach(async () => {
@@ -131,7 +132,13 @@ describe('an upload that fails after it claimed its name', () => {
   // fails, which is when a driver gives up on work that already ran.
   it('D3 keeps a different file put at the claimed name when the claim’s transaction fails', async () => {
     const { other, before } = await otherFile('saved by someone else');
+    let admitted = false;
     fake.hooks.beforeCommit = async () => {
+      // The first commit is the new-work fence's admission, not the claim's transaction.
+      if (!admitted) {
+        admitted = true;
+        return;
+      }
       fake.hooks.beforeCommit = null;
       await rename(other, up('a.md'));
       throw new Error('connection lost');
@@ -145,7 +152,13 @@ describe('an upload that fails after it claimed its name', () => {
   });
 
   it('D3 pin: takes back the name it claimed when the claim’s transaction fails', async () => {
+    let admitted = false;
     fake.hooks.beforeCommit = async () => {
+      // The first commit is the new-work fence's admission, not the claim's transaction.
+      if (!admitted) {
+        admitted = true;
+        return;
+      }
       fake.hooks.beforeCommit = null;
       throw new Error('connection lost');
     };

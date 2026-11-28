@@ -2,7 +2,6 @@ import {
   CheckoutUnavailableError,
   assertCheckoutMutationOwner,
   requireCheckoutAccess,
-  withCheckoutMutation,
   withCheckoutRead,
 } from '@haive/shared/checkout-access';
 import type { RootClaimHandle } from '@haive/database';
@@ -46,6 +45,7 @@ import {
   settleExpansionAttempts,
   settleExpansionIntents,
 } from '@haive/shared/attachments-fs';
+import { withAdmittedCheckoutMutation } from '../../lib/admitted-checkout-mutation.js';
 import { attachmentRemovalPlan } from '../../lib/attachment-removal.js';
 import { containmentHttpError } from '../../lib/fs-http.js';
 import { writeBodyToHeld } from '../../lib/held-write.js';
@@ -89,7 +89,7 @@ const checkoutAccess: MiddlewareHandler<AttachmentEnv> = async (c, next) => {
     await requireCheckoutAccess(db, repositoryId, { mode: 'read', availability: 'repair' });
     return next();
   }
-  await withCheckoutMutation(
+  await withAdmittedCheckoutMutation(
     db,
     repositoryId,
     c.get('userId'),

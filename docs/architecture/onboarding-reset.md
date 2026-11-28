@@ -347,7 +347,8 @@ hold is one file write long, and a per-file lock would not exclude the reset, wh
 by nature. A task with no repository takes nothing, since there is no root to protect.
 
 Uploads, attachment removals, remote relinks/reconciliation and whole-plan removal hold a separate
-`mutation` claim (`withCheckoutMutation`), often for minutes across a streamed body or Git.
+`mutation` claim (`withCheckoutMutation`, reached through `withAdmittedCheckoutMutation`, which
+answers 503 while the system drains), often for minutes across a streamed body or Git.
 Their refusal says the repository is being changed by another file or configuration operation,
 never that a knowledge file is being saved; the HTTP code remains `checkout_unavailable`.
 New independent mutations refuse while `refresh_pending` is set or the checkout is not ready

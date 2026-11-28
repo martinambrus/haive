@@ -1,7 +1,6 @@
 import {
   assertCheckoutMutationOwner,
   CheckoutUnavailableError,
-  withCheckoutMutation,
 } from '@haive/shared/checkout-access';
 import type { RootClaimHandle, DbTx } from '@haive/database';
 import { DerivedRunPlanError, pinnedTaskStepIds } from '@haive/shared/modularity';
@@ -53,6 +52,7 @@ import {
   writeFileNoFollow,
   type ReadResult,
 } from '@haive/shared/fs-safe';
+import { withAdmittedCheckoutMutation } from '../lib/admitted-checkout-mutation.js';
 import { containmentHttpError } from '../lib/fs-http.js';
 import { writeBodyToHeld } from '../lib/held-write.js';
 import { withUploadChunkLock } from '../lib/upload-chunk-lock.js';
@@ -2772,7 +2772,7 @@ const remoteCheckoutAccess: MiddlewareHandler<AppEnv> = async (c, next) => {
     columns: { id: true },
   });
   if (!repo) throw new HttpError(404, 'Repository not found');
-  await withCheckoutMutation(
+  await withAdmittedCheckoutMutation(
     db,
     id,
     userId,

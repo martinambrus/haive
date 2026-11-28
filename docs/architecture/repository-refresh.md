@@ -281,7 +281,10 @@ restore's nested import or writer. Legacy preparation imports retain their exist
 and remain follow-up work.
 
 `withCheckoutMutation` acquires a distinct `mutation` root claim **before** attachment/domain/row locks,
-checks availability again after acquisition and releases in `finally`. It retains no connection
+checks availability again after acquisition and releases in `finally`. The API reaches it through
+`withAdmittedCheckoutMutation` (`lib/admitted-checkout-mutation.ts`): a fresh maintenance-state check,
+the claim, the shared new-work fence in its own short transaction, then the caller's locks; a refusal
+releases the claim, and the worker's plan mirror calls `withCheckoutMutation` directly. It retains no connection
 across an upload body or subprocess. A claim collision answers 409 `checkout_unavailable`;
 concurrent independent mutations in the same repository must retry, with copy naming the held
 kind. A preparation queued after an admitted mutation waits: `withRootClaim` raises

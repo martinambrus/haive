@@ -133,3 +133,49 @@ describe('the new-work fence and the locks an admission takes', () => {
     expect(notFirst.map((call) => where(sf, call))).toEqual([]);
   }, 30_000);
 });
+
+describe('checkout mutations that start new work', () => {
+  const WRAPPER = 'lib/admitted-checkout-mutation.ts';
+
+  /** Every file under src other than the wrapper that calls withCheckoutMutation directly. */
+  const directCallers = (extra?: ts.SourceFile): string[] => {
+    const found: string[] = [];
+    const scan = (file: string, sf: ts.SourceFile) => {
+      if (file !== WRAPPER && callsOf(sf, 'withCheckoutMutation').length > 0) found.push(file);
+    };
+    for (const file of files()) scan(file, parse(file));
+    if (extra) scan(extra.fileName, extra);
+    return found;
+  };
+
+  it('no file but the wrapper calls withCheckoutMutation', () => {
+    expect(directCallers()).toEqual([]);
+  }, 30_000);
+
+  it('the scan reports a synthetic direct call', () => {
+    const synthetic = ts.createSourceFile(
+      'routes/synthetic.ts',
+      'await withCheckoutMutation(db, id, userId, async () => {});',
+      ts.ScriptTarget.Latest,
+      true,
+    );
+    expect(directCallers(synthetic)).toContain('routes/synthetic.ts');
+  }, 30_000);
+
+  it('the wrapper checks the state first and takes the fence inside the callback, before the work', () => {
+    const sf = parse(WRAPPER);
+    const precheck = callsOf(sf, 'assertNewWorkAllowed')[0];
+    const claim = callsOf(sf, 'withCheckoutMutation')[0];
+    expect(precheck, 'the wrapper must call assertNewWorkAllowed').toBeDefined();
+    expect(claim, 'the wrapper must call withCheckoutMutation').toBeDefined();
+    expect(precheck!.getStart()).toBeLessThan(claim!.getStart());
+
+    const callback = claim!.arguments[3];
+    expect(callback).toBeDefined();
+    const fence = callsOf(callback!, FENCE)[0];
+    const work = callsOf(callback!, 'run')[0];
+    expect(fence, 'the callback must call admitNewWork').toBeDefined();
+    expect(work, 'the callback must call run').toBeDefined();
+    expect(fence!.getStart()).toBeLessThan(work!.getStart());
+  }, 30_000);
+});

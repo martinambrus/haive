@@ -218,7 +218,8 @@ filters out the handled ones, so the remainder is the next round's list. The on-
 reader for the names it could not fit.
 
 API attachment mutations also hold `withCheckoutMutation`'s renewing repository root claim
-before any attachment lock, from directory/name creation through streamed body, row finalization,
+(taken through `withAdmittedCheckoutMutation`: while the system drains or is in maintenance they
+answer 503 before claiming) before any attachment lock, from directory/name creation through streamed body, row finalization,
 manifest and cleanup, as kind `mutation`. No pooled connection spans the body. Every physical
 step checks the owner for lease loss; a failed post-stream access recheck takes back the upload
 by identity while its descriptor is open, as a failed stream/insert does. A moved aside retains

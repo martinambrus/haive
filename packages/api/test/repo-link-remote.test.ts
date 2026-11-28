@@ -29,6 +29,20 @@ vi.mock('../src/lib/remote-reconcile.js', async (original) => {
     beginRelinkWriter: vi.fn((id: string) => vi.fn(real.beginRelinkWriter(id))),
   };
 });
+// The fence's own transaction is covered by admitted-checkout-mutation.test.ts; here it would
+// be taken for the route's transaction by these tests' spies on `db.transaction`.
+vi.mock('../src/lib/admitted-checkout-mutation.js', async () => {
+  const { withCheckoutMutation } = await import('@haive/shared/checkout-access');
+  const { assertNewWorkAllowed } = await import('../src/middleware/maintenance.js');
+  return {
+    withAdmittedCheckoutMutation: async (
+      ...args: Parameters<typeof withCheckoutMutation>
+    ): Promise<unknown> => {
+      await assertNewWorkAllowed();
+      return withCheckoutMutation(...args);
+    },
+  };
+});
 vi.mock('../src/db.js', () => ({
   getDb: () => h.db,
   withFreshDatabase: (run: (db: unknown) => Promise<unknown>) => run(h.db),
@@ -46,7 +60,7 @@ vi.mock('node:child_process', async (original) => {
 });
 import { Hono } from 'hono';
 import { eq } from 'drizzle-orm';
-import { logger } from '@haive/shared';
+import { configService, logger } from '@haive/shared';
 import { serializeError } from '@haive/shared/logger';
 import { schema } from '@haive/database';
 import { createFakeDb } from '@haive/database/testing';
@@ -84,7 +98,23 @@ beforeEach(() => {
     return intent;
   });
   h.clear.mockReset().mockResolvedValue(undefined);
+  vi.spyOn(configService, 'getFresh').mockResolvedValue('normal');
 });
+it.each(['draining', 'maintenance'])(
+  'answers 503 to a relink while %s, with no claim and no git',
+  async (state) => {
+    vi.spyOn(configService, 'getFresh').mockResolvedValue(state);
+    let repositoryWrites = 0;
+    fake.hooks.beforeUpdate = (table) => {
+      if (table === schema.repositories) repositoryWrites += 1;
+    };
+    expect((await link()).status).toBe(503);
+    expect(repositoryWrites).toBe(0);
+    expect(h.git).not.toHaveBeenCalled();
+    expect(h.mark).not.toHaveBeenCalled();
+    expect(h.reconcile).not.toHaveBeenCalled();
+  },
+);
 const link = (remoteUrl = 'https://example.test/r') =>
   app.request(`/${REPO}/remote`, {
     method: 'POST',
