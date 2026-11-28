@@ -1228,6 +1228,12 @@ In `martinambrus/haive-module-translator`. The owner's English-to-Slovak run fai
 
 1. Accept a declined form (same stem, up to 2 trailing letters changed on words of 5+ letters) at every keep-term check; a translated name still fails; codes and short words stay exact. Then the owner Retries the step.
 
+### T794 · CLI provider list shows no sandbox image rebuild, so Test and Log in run into it
+
+status: open · kind: bug (UX) · found: owner report 2026-11-28 while upgrading CLIs · priority: P2
+
+Owner: upgrading CLIs rebuilds their sandbox images with no indicator anywhere; clicking Test then errors that the image is still being built. Verified in code: the list page `packages/web/src/app/(app)/cli-providers/page.tsx` Upgrade (`handleUpgrade` ~:211, and Upgrade All) PATCHes `cliVersion`, the api flags image inputs changed and sets `cli_providers.sandbox_image_build_status = 'building'`, the page reloads once and never reads that status (no `sandboxImageBuildStatus` in the page) nor polls while a build runs; the row's Test (~:574) stays offered and Log in fails in the worker with `sandbox image not ready (status=building)` (`worker/src/sandbox/login-container.ts:53`). The edit form already gates its probe on the column (`components/cli-provider-form.tsx` `TEST_BLOCK_BUILDING` ~:70, status at ~:223). Fix: (1) each list row shows the build state from the structural column (building: a "Rebuilding sandbox image" badge with spinner; failed: the stored build error with the existing rebuild action `POST /cli-providers/:id/sandbox-image/build`), never from message copy (AGENTS.md message-column rule); (2) the list polls, bounded, while any row is building and stops when none is; (3) Test and Log in on a building row are disabled with the reason (one shared constant with the form's text), and Upgrade / Upgrade All say a rebuild started; (4) cross-check every other surface that offers a CLI action against a building image (login dialog, task step CLI picker, usage reconnect) and gate or explain it the same way. Controls: web tests for each state and the poll stop; browser check at 360/768/1280.
+
 ### T793 · Desktop bridge: Windows-only failures from the first native test run
 
 status: open · kind: bug · found: T758 live Windows check 2026-11-28 · priority: P3
