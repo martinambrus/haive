@@ -1228,9 +1228,21 @@ In `martinambrus/haive-module-translator`. The owner's English-to-Slovak run fai
 
 1. Accept a declined form (same stem, up to 2 trailing letters changed on words of 5+ letters) at every keep-term check; a translated name still fails; codes and short words stay exact. Then the owner Retries the step.
 
+### T802 · FNF[T798] · auth admission window: resets that write no press event
+
+status: open · kind: fix · found: T798 driver and its reviews 2026-11-28 · priority: P3
+
+All fail closed: a row keeps counting earlier waves and can fail with `cli_auth_probe_exhausted` one wave early; one more Retry on that row reopens it.
+
+1. Worker in-place resets write no press event, so the rows they reset keep their counted waves: insight continuation (`insight-continuation.ts` ~:119), learning self-revise (`task-queue.ts` ~:3119, ~:3148), a recheck, fork or Continue into a round whose rows already exist (~:2621, ~:2991, ~:3317). Boot recovery (~:5044) keeps counting by design. A row at the cap is a failed row, which these paths reach only after a press. Read from code, not exercised. PRE-EXISTING.
+2. Rows a CLI switch also resets elsewhere (`leftActive`, `api/src/routes/tasks/steps.ts` ~:2563-2598) get no event and keep counting; active rows, so not at the cap in practice.
+3. Step 01b's direct counter is not cleared by a CLI switch or Retry with AI (`step-runner.ts` ~:5276; the switch reset ~:2645 sets no `output: null`). Documented. PRE-EXISTING.
+4. Pending rows skip the 30 s pacing because the gate runs only at `waiting_cli`; every attempt is still counted. PRE-EXISTING (info).
+5. Untested: the grok site-2 fence-refusal binding and the second-`adopt()` warn-once pin (`grok-refresh-adoption.test.ts`, `task-auth-volume.ts` ~:859). PRE-EXISTING.
+
 ### T798 · FNF[T543] · leftovers of the task auth volume lifecycle fix
 
-status: open · kind: fix · found: T543 fix 10 and its review 2026-11-28 · priority: P3
+status: done 2026-11-28 items 2-5, #1418 (3665e8110, worker and api hot reload, 0 errors): the auth admission window opens at the task's newest `step.retry`, `task.retried`, `step.resume` or `step.retry_ai` press with a step id, or the row's own CLI-switch event, never at `started_at`, so a park no longer reopens the allowance; the switch event is written inside the re-run transaction; the exhaustion copy names Resume; 01b's own counter needs no change (same limit, class and pacing, cleared by Retry); items 1 and 6 stay out as briefed; found-not-fixed went to T802 · kind: fix · found: T543 fix 10 and its review 2026-11-28 · priority: P3
 
 1. After a successful rotation that keeps the refresh token, a failed fence clear leaves the old fingerprint, and the poller retries the clear; but after a rotation to a NEW token the fence still names the old token, so option b's admission of an unreadable `auth.json` stays refused on that volume until a fresh login (`packages/worker/src/usage-window/credential-refresh.ts` ~:218-262, `sandbox/task-auth-volume.ts` fence readers). Fail-closed; recommendation: leave it unless a user hits it.
 2. Step `01b` applies its auth result directly and keeps its own retry counter, outside the wave-based cap.
