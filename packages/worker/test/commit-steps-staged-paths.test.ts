@@ -631,6 +631,7 @@ describe('commit steps stage only the paths their step outputs record', () => {
       userId: '00000000-0000-4000-8000-0000000000a1',
       name: 'acme',
       source: 'upload',
+      status: 'ready',
       rtkEnabled: false,
     });
     fake.insert(schema.tasks, {

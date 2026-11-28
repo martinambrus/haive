@@ -131,7 +131,13 @@ describe('02 and a rules file that is not UTF-8', () => {
       cliProviders: schema.cliProviders,
       ...RECORD_WRITE_TABLES,
     });
-    fake.insert(schema.repositories, { id: REPO, userId: USER, name: 'acme', source: 'blank' });
+    fake.insert(schema.repositories, {
+      id: REPO,
+      userId: USER,
+      name: 'acme',
+      source: 'blank',
+      status: 'ready',
+    });
     const plan = {
       repositoryId: REPO,
       ranBackfill: false,
@@ -152,7 +158,13 @@ describe('02 and a rules file that is not UTF-8', () => {
       backfilledRows: 0,
     } as UpgradePlanOutput;
     if (!fake.rows(schema.repositories).length)
-      fake.insert(schema.repositories, { id: REPO, userId: USER, name: 'acme', source: 'blank' });
+      fake.insert(schema.repositories, {
+        id: REPO,
+        userId: USER,
+        name: 'acme',
+        source: 'blank',
+        status: 'ready',
+      });
     fake.insert(schema.tasks, {
       id: TASK,
       userId: USER,
@@ -310,7 +322,13 @@ describe('04 and a rules file that is not UTF-8', () => {
           source: 'upgrade',
         });
     if (!fake.rows(schema.repositories).length)
-      fake.insert(schema.repositories, { id: REPO, userId: USER, name: 'acme', source: 'blank' });
+      fake.insert(schema.repositories, {
+        id: REPO,
+        userId: USER,
+        name: 'acme',
+        source: 'blank',
+        status: 'ready',
+      });
     fake.insert(schema.tasks, {
       id: TASK,
       userId: USER,

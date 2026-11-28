@@ -83,6 +83,7 @@ async function setup(
     userId: USER,
     name: 'acme',
     source: 'upload',
+    status: 'ready',
     agentRulesOverride: rules.liveOverride ?? null,
   });
   fake.insert(schema.tasks, {
