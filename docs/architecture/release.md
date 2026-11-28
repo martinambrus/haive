@@ -1053,11 +1053,11 @@ load requires Docker's containerd image store; the script never changes Desktop
 settings. It never starts Haive, installs the extension or pushes any image.
 
 Both builder stages retain their tags and pin the multi-platform index digest resolved
-on 2026-11-17 by `docker buildx imagetools inspect node:26-alpine` and
-`docker buildx imagetools inspect golang:1.25-alpine`:
+by `docker buildx imagetools inspect node:26-alpine` (2026-11-17) and
+`docker buildx imagetools inspect golang:1.27-alpine` (2026-11-28):
 
 - Node: `sha256:6bd9ab43c0ec0190ca7b2d193906cb8b7edf6e7f4afa43ddeccd6452710bffb5`.
-- Go: `sha256:1ae0735f00daffa3aaf1363a5184c0d2dc55c78e3db4ec70241cdac97bf84b59`.
+- Go: `sha256:70bd7ddea8b6cbe5d6943cde279d6b67feb10cc924fb9100d1d8757c1575b280`.
 
 Dependabot covers the Dockerfile and the UI's independent npm lockfile in separate
 Docker/npm update entries, with the existing minor/patch grouping policy.
