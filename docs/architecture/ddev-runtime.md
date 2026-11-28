@@ -110,11 +110,15 @@ followed by any output, never an empty success; `ok: true` and a body without `o
 `ddev_restart` runs `ddev restart` in place. After a non-zero exit and the checkout re-check it
 asks `probeDdevRecovery`, the probe `ensureDdevStarted` itself decides on (container presence,
 workspace label, the project's structured status and the nested dockerd, never ddev's wording),
-and cold boots (`ensureDdevStarted`) only when it says `cold-boot`: the runner is gone, stopped
-or labelled for another workspace, or its dockerd is down. Any other failed restart (the runner
-up and its Docker alive, the project serving or not) answers `ok: false` with `ddev restart
-failed (exit N); the runner is up, so it was not rebuilt.` and the last 8000 characters of
-ddev's output, and runs no warm start; a probe with no answer returns its own error.
+and acts on the answer. `reuse` (the project is serving despite the exit) recovers nothing and
+answers `ok: false` with `ddev restart failed (exit N); the project is still serving, so nothing
+was recovered.` and the last 8000 characters of ddev's output. `warm-start` (runner and nested
+dockerd alive, project down) and `cold-boot` (runner gone, stopped or labelled for another
+workspace, or dockerd down) run `ensureDdevStarted`, with its snapshot restore, and answer
+`ok: true` with the restart output and a closing note that names the answer: `[ddev restart
+failed (exit N); the project was down: started in place]` or `[...; the runner or its dockerd was
+not usable: rebuilt by a cold boot]`. A probe with no answer, or a throw from `ensureDdevStarted`,
+answers `ok: false` with its own error.
 
 **An HTTP 4xx from the mandatory runtime smoke is UNSURE, not PASS.** The unauthenticated
 probe cannot distinguish a login/access wall from a broken route. `08-phase-5-verify`

@@ -420,7 +420,8 @@ the project-state races above.
 T780 PR2b-6 rollback: revert its code commits; there is no migration and nothing to settle. The shim is
 written into each invocation from the worker's constant, so a revert reaches new runs only; the added
 `checkout-unavailable` reason is a type and vanishes at runtime. Reverting returns an empty success for an
-`ok: false` relay answer, a cold boot after any failed restart and a pending answer for a refused rebuild.
+`ok: false` relay answer, the note "recovered via cold boot" after every failed restart whatever was done (and
+`ok: true` when the project was in fact serving) and a pending answer for a refused rebuild.
 
 ## Remote relink reconciliation
 
