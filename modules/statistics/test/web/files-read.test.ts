@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import type { ReactElement, ReactNode } from 'react';
 import {
   FilesReadSection,
@@ -122,11 +122,15 @@ function report(over: Partial<Report> = {}): Report {
   };
 }
 
-const render = (r: StatsFilesRead | null, over: { failed?: boolean; repo?: string } = {}) =>
+const render = (
+  r: StatsFilesRead | null,
+  over: { failed?: boolean; repo?: string; onRetry?: () => void } = {},
+) =>
   FilesReadSection({
     repositoryId: over.repo ?? 'r1',
     report: r,
     failed: over.failed ?? false,
+    onRetry: over.onRetry ?? (() => undefined),
     MarkdownView,
   });
 
@@ -166,6 +170,26 @@ describe('Files read: messages', () => {
     expect(msg).toContain('4');
     expect(msg).toContain('3');
     expect(msg).toContain('2');
+  });
+});
+
+describe('Files read: retry', () => {
+  const retryButtons = (node: ReactNode) =>
+    find(node, (e) => e.type === 'button' && text(e) === 'Retry');
+
+  it('offers Retry on a failed request only, and Retry calls back', () => {
+    const onRetry = vi.fn();
+    const buttons = retryButtons(render(null, { failed: true, onRetry }));
+    expect(buttons).toHaveLength(1);
+    expect(buttons[0]!.props).toMatchObject({ type: 'button' });
+    (buttons[0]!.props as unknown as { onClick: () => void }).onClick();
+    expect(onRetry).toHaveBeenCalledTimes(1);
+  });
+
+  it('offers none while loading, without a repository, or on a report', () => {
+    expect(retryButtons(render(null))).toEqual([]);
+    expect(retryButtons(render(null, { repo: '', failed: true }))).toEqual([]);
+    expect(retryButtons(render(report()))).toEqual([]);
   });
 });
 

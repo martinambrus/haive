@@ -372,10 +372,14 @@ there the clause cannot be proven; an explicit `und-x-icu` in its place fails th
 and helpers are tested by direct call (`test/web/files-read.test.ts`; `react-dom/server` does not resolve
 in this module). The page requests it in its own effect and renders it whether or not `/tool-usage` has
 loaded: inside the shared lazy effect, each of two finished loads would cancel the other's callback and
-send the heavier request again. A path is text an agent's transcript chose, so it is a text child of a
-span, never `MarkdownView`, a link, a `title` or `dangerouslySetInnerHTML`; control and format characters
-(a newline, a right-to-left override, a zero-width character) show as `\u{...}` escapes (`displayPath`), the
-key and the stored path staying as recorded; only the fixed note goes through the host `MarkdownView`. The
+send the heavier request again. A failed request shows its message and a Retry button; a failure stands
+until the filters change or Retry clears it, which sends the same request again, and an answer that
+arrives for an old window is dropped. The page's retry and stale-answer rules run against the real page in
+`packages/web/test/statistics-files-read-tab.test.tsx` (jsdom), since this module has no renderer. A path
+is text an agent's transcript chose, so it is a text child of a span, never `MarkdownView`, a link, a
+`title` or `dangerouslySetInnerHTML`; control and format characters (a newline, a right-to-left override,
+a zero-width character) show as `\u{...}` escapes (`displayPath`), the key and the stored path staying
+as recorded; only the fixed note goes through the host `MarkdownView`. The
 card draws no bar where an estimate is unknown, so a dash never looks like a known zero. It reads no value
 from `@haive/shared`: web must not pull that barrel in, so the note says "too few runs" and names no
 threshold. The card does not use `StatTile` or `RankedBars`: their hint and rank text

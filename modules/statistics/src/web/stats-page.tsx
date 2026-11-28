@@ -535,7 +535,9 @@ function StatsPageInner({ moduleId, api, MarkdownView }: Omit<ModulePageProps, '
   }, [tab, params, reliability, quality, estimates, plan, taskTime, steps, toolUsage]);
 
   // Files read is its own request, so it has its own effect: inside the one above, each of two
-  // finished loads would cancel the other's callback and send that request again.
+  // finished loads would cancel the other's callback and send that request again. A failure
+  // stands until the filters change or the card's Retry clears `filesReadFailed`, which runs
+  // this effect again.
   useEffect(() => {
     if (!params || tab !== 'tools' || !repositoryId || filesRead || filesReadFailed) return;
     let cancelled = false;
@@ -1739,6 +1741,7 @@ function StatsPageInner({ moduleId, api, MarkdownView }: Omit<ModulePageProps, '
             repositoryId={repositoryId}
             report={filesRead}
             failed={filesReadFailed}
+            onRetry={() => setFilesReadFailed(false)}
             MarkdownView={MarkdownView}
           />
         </>

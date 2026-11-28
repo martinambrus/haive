@@ -149,11 +149,14 @@ export function FilesReadSection({
   repositoryId,
   report,
   failed,
+  onRetry,
   MarkdownView,
 }: {
   repositoryId: string;
   report: StatsFilesRead | null;
   failed: boolean;
+  /** Clears a failed request, which makes the page send it again. */
+  onRetry: () => void;
   MarkdownView: HostMarkdownView;
 }) {
   const message = filesReadMessage({ repositoryId, report, failed });
@@ -170,7 +173,14 @@ export function FilesReadSection({
     return (
       <Card>
         {header}
-        <p className="text-sm text-neutral-400">{message}</p>
+        <div className="text-sm text-neutral-400">
+          <p>{message}</p>
+          {failed && repositoryId !== '' && (
+            <button type="button" className="mt-2 underline" onClick={onRetry}>
+              Retry
+            </button>
+          )}
+        </div>
       </Card>
     );
   }
