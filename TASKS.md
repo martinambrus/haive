@@ -1244,9 +1244,9 @@ Step 12 merge replay leftovers after #1399, all in `merge-resolver.ts` / `git-me
 
 Evidence: `.claude/tmp/codex-run/T785-S/ledger.md`, `review-x.md`.
 
-### T791 · FNF[uuid-route-spelling] · non-advisory keys built from a route's uuid spelling (+5)
+### T791 · FNF[uuid-route-spelling] · non-advisory keys built from a route's uuid spelling (+8)
 
-status: open · kind: fix · found: T790 item 3 driver (#1397) 2026-11-28 · priority: P3
+status: in progress 2026-11-28: PR1 (members 1-3: RAG sync lock key canonicalized in `ragSyncLockKey`; uploads directory and stored paths from the task row's id; BullMQ job ids and payloads in browser-access, merges, plan-mirror and module sources from the row's id or `canonicalUuid`) DONE merged #1401 5bc567733, live (libs); PR2 next: members 4, 5 and 6 · kind: fix · found: T790 item 3 driver (#1397) 2026-11-28 · priority: P3
 
 PostgreSQL accepts a uuid in any case, braced, unhyphenated or regrouped, and finds the same row; a key, path or job id built from the spelling a client sent then differs from the one built from the database's id. Only a hand-written request sends a non-canonical spelling (the web app uses the ids the api returns), and every route below is owner-scoped. Fix direction: build from the row the route already read, or `canonicalUuid` (`@haive/database`, #1397). All PRE-EXISTING.
 
@@ -1255,6 +1255,9 @@ PostgreSQL accepts a uuid in any case, braced, unhyphenated or regrouped, and fi
 3. BullMQ job ids built from a route spelling lose their dedupe: `tasks/browser-access.ts` ~:64, ~:95, ~:182; `lib/plan-mirror.ts` ~:74, ~:97 with `worker/src/queues/plan-mirror-queue.ts` ~:91; `modules/sources.ts` ~:168 against `worker/src/modules/source-jobs.ts` ~:110; `tasks/merges.ts` ~:74, ~:156. The database lock behind each is canonical since #1397.
 4. `api/src/routes/browser-vnc.ts` ~:241-243, ~:254-260 builds runner names and `ensure-<taskId>` from the WebSocket URL's task id; its origin is not traced.
 5. (related) `tooling-upgrades.ts` ~:1134-1150 takes both advisory keys before its owner-scoped select at ~:1150, so a non-owner who knows a repository id queues on them (bounded wait).
+6. (connected, from PR1) `api/src/modules/sources.ts` ~:294: DELETE builds `secretKey(id)` from the request spelling while the token is stored under `secretKey(row.id)` (~:250, ~:253), and `SecretsService.delete` matches the key text exactly (`shared/src/config/secrets.service.ts` ~:101-104), so a delete through an upper-case id leaves `module_source:<id>:token` behind; the audit `targetId: id` (~:122, ~:276) keeps the spelling too. Fix: `secretKey(row.id)` and `targetId = row.id`, with a secrets-aware control.
+7. (data, from PR1) attachment rows stored under a non-canonical directory before #1401 now answer 404 on raw download and 409 on delete through the same odd-spelling URL (`attachments.ts` ~:599-601, ~:657-658, ~:728-729); they were already unreachable for canonical requests and the worker. Count affected rows (structural query, names only) before deciding on a repair script.
+8. (design, from PR1) `api/src/lib/ide-target.ts` ~:21-27, ~:52: the `ensure-ide-<id>` job id, its payload and the `/ide/<id>` prefix come from the route spelling (callers in `browser-access.ts`, `routes/ide.ts`, `browser-vnc.ts`, `editor-grants.ts`, `editor-session.ts`); canonicalizing at the sink also moves the editor cookie path and the session-id comparison, so it needs its own design.
 
 ### T790 · FNF[relink-hold-leftovers] · leftovers of the T516 relink row hold
 
