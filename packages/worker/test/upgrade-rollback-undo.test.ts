@@ -87,7 +87,13 @@ async function setup() {
     writtenHash: sha256Hex(normalizeContent('HAIVE\n')),
     source: 'upgrade',
   });
-  fake.insert(schema.repositories, { id: REPO, userId: USER, name: 'acme', source: 'blank' });
+  fake.insert(schema.repositories, {
+    id: REPO,
+    userId: USER,
+    name: 'acme',
+    source: 'blank',
+    status: 'ready',
+  });
   seedRollbackSnapshot(fake, {
     userId: USER,
     repositoryId: REPO,
@@ -95,7 +101,13 @@ async function setup() {
   });
   const noop = () => undefined;
   if (!fake.rows(schema.repositories).length)
-    fake.insert(schema.repositories, { id: REPO, userId: USER, name: 'acme', source: 'blank' });
+    fake.insert(schema.repositories, {
+      id: REPO,
+      userId: USER,
+      name: 'acme',
+      source: 'blank',
+      status: 'ready',
+    });
   fake.insert(schema.tasks, {
     id: TASK,
     userId: USER,
@@ -300,7 +312,13 @@ describe('rolling back a file an upgrade rewrote', () => {
     });
     const noop = () => undefined;
     if (!fake.rows(schema.repositories).length)
-      fake.insert(schema.repositories, { id: REPO, userId: USER, name: 'acme', source: 'blank' });
+      fake.insert(schema.repositories, {
+        id: REPO,
+        userId: USER,
+        name: 'acme',
+        source: 'blank',
+        status: 'ready',
+      });
     fake.insert(schema.tasks, {
       id: TASK,
       userId: USER,
@@ -478,7 +496,13 @@ describe('rolling back what an upgrade removed', () => {
     });
     const noop = () => undefined;
     if (!fake.rows(schema.repositories).length)
-      fake.insert(schema.repositories, { id: REPO, userId: USER, name: 'acme', source: 'blank' });
+      fake.insert(schema.repositories, {
+        id: REPO,
+        userId: USER,
+        name: 'acme',
+        source: 'blank',
+        status: 'ready',
+      });
     fake.insert(schema.tasks, {
       id: TASK,
       userId: USER,

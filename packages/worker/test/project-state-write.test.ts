@@ -151,8 +151,20 @@ async function setup() {
     customBundleItems: schema.customBundleItems,
     tasks: schema.tasks,
   });
-  fake.insert(repositories, { id: REPO, userId: USER, name: 'acme', source: 'blank' });
-  fake.insert(repositories, { id: OTHER, userId: USER, name: 'other', source: 'blank' });
+  fake.insert(repositories, {
+    id: REPO,
+    userId: USER,
+    name: 'acme',
+    source: 'blank',
+    status: 'ready',
+  });
+  fake.insert(repositories, {
+    id: OTHER,
+    userId: USER,
+    name: 'other',
+    source: 'blank',
+    status: 'ready',
+  });
 
   const col = {
     renderContext: keyOf(repositories, 'render_context'),

@@ -8,6 +8,7 @@ import { gitOperationInProgress } from '../repo/git-operation.js';
 import { syncProjectStateFromCheckout } from './sync.js';
 import {
   ProjectStateCheckoutHeldError,
+  ProjectStateCheckoutUnavailableError,
   ProjectStateMovedError,
   ProjectStateRecoveryHeldError,
   recoverProjectStateWrite,
@@ -17,6 +18,8 @@ import {
 const SWEEP_BATCH = 25;
 
 const NOT_WRITTEN = {
+  unavailable:
+    'the repository checkout is preparing or in use by another operation; nothing was written. The record is written again once it is ready.',
   deferred: 'an onboarding, an upgrade or a reset holds the checkout',
   superseded: 'the repository changed while its record was being read',
   missing:
@@ -118,7 +121,14 @@ export async function refreshProjectStateOutcome(
     }
     if (err instanceof ProjectStateCheckoutHeldError) {
       // Operational metadata only: a refused writer must not change revisions, intent or state.
-      await setOutboxError(db, repositoryId, NOT_WRITTEN.deferred, true);
+      await setOutboxError(
+        db,
+        repositoryId,
+        err instanceof ProjectStateCheckoutUnavailableError
+          ? NOT_WRITTEN.unavailable
+          : NOT_WRITTEN.deferred,
+        true,
+      );
       return { outcome: 'held', reason: 'checkout' };
     }
     if (err instanceof ProjectStateMovedError) return { outcome: 'superseded' };
@@ -130,11 +140,15 @@ export async function refreshProjectStateOutcome(
     refuseDuringGitOperation: true,
     expectedCheckout,
   });
+  if (synced.outcome === 'held' && synced.code === 'checkout_unavailable') {
+    await setOutboxError(db, repositoryId, NOT_WRITTEN.unavailable, true);
+    return { outcome: 'held', reason: 'checkout' };
+  }
   if (synced.outcome === 'held')
     return {
       outcome: 'held',
       reason: 'sync',
-      ...(synced.code ? { code: synced.code } : {}),
+      ...(synced.code && synced.code !== 'checkout_unavailable' ? { code: synced.code } : {}),
       ...(synced.reason ? { detail: synced.reason.slice(0, 500) } : {}),
     };
   if (synced.outcome === 'refused') {
@@ -183,7 +197,14 @@ export async function refreshProjectStateOutcome(
   } catch (err) {
     if (err instanceof ProjectStateCheckoutHeldError) {
       // Operational metadata only: a refused writer must not change revisions, intent or state.
-      await setOutboxError(db, repositoryId, NOT_WRITTEN.deferred, true);
+      await setOutboxError(
+        db,
+        repositoryId,
+        err instanceof ProjectStateCheckoutUnavailableError
+          ? NOT_WRITTEN.unavailable
+          : NOT_WRITTEN.deferred,
+        true,
+      );
       return { outcome: 'held', reason: 'checkout' };
     }
     if (err instanceof ProjectStateMovedError) return { outcome: 'superseded' };

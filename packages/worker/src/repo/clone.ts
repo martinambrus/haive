@@ -374,6 +374,7 @@ export async function completePreparationImports(
   // onboarding-derived columns from the committed .haive-data/ mirror. Never
   // fail the scan/clone over a missing or malformed mirror.
   let legacyDeferred = false;
+  let syncUnavailable = false;
   try {
     legacyDeferred = await importHaiveDataMirror(db, repositoryId, storagePath);
   } catch (err) {
@@ -385,6 +386,7 @@ export async function completePreparationImports(
       repositoryId,
       repoPath: storagePath,
     });
+    syncUnavailable = synced.outcome === 'held' && synced.code === 'checkout_unavailable';
     logger.info(
       { repositoryId, outcome: synced.outcome, reason: synced.reason },
       'project state record synced from the checkout',
@@ -393,7 +395,8 @@ export async function completePreparationImports(
     logger.warn({ err, repositoryId }, 'project state sync failed (non-fatal)');
   }
 
-  if (legacyDeferred) {
+  // A record the sync never read must not lose to the legacy files it set aside.
+  if (legacyDeferred && !syncUnavailable) {
     try {
       await importHaiveDataMirror(db, repositoryId, storagePath, true);
     } catch (err) {

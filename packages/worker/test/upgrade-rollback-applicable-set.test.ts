@@ -70,6 +70,7 @@ describe('R1: a rollback and the applicable set', () => {
       ...ROLLBACK_RECORD_WRITE_TABLES,
     });
     fake.insert(schema.repositories, {
+      status: 'ready',
       id: REPO,
       userId: USER,
       name: 'acme',

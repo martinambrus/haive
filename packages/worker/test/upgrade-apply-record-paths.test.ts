@@ -69,7 +69,13 @@ async function setup(installJson?: string) {
     projectStateConflicts: schema.projectStateConflicts,
     taskEvents: schema.taskEvents,
   });
-  fake.insert(schema.repositories, { id: REPO, userId: USER, name: 'acme', source: 'blank' });
+  fake.insert(schema.repositories, {
+    id: REPO,
+    userId: USER,
+    name: 'acme',
+    source: 'blank',
+    status: 'ready',
+  });
   const plan = {
     repositoryId: REPO,
     ranBackfill: false,
@@ -94,6 +100,7 @@ async function setup(installJson?: string) {
   // A real apply owns a live task and an existing repository; these fixtures exercise the same fence.
   if (!fake.rows(schema.repositories).length)
     fake.insert(schema.repositories, {
+      status: 'ready',
       id: REPO,
       userId: USER,
       name: 'acme',

@@ -82,6 +82,7 @@ async function rollback(
     cliProviders: schema.cliProviders,
   });
   fake.insert(schema.repositories, {
+    status: 'ready',
     id: REPO,
     userId: USER,
     name: 'acme',

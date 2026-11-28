@@ -90,7 +90,13 @@ describe('04 apply restoring a retired import marker', () => {
       cliProviders: schema.cliProviders,
       ...ROLLBACK_RECORD_WRITE_TABLES,
     });
-    fake.insert(schema.repositories, { id: REPO, userId: USER, name: 'acme', source: 'blank' });
+    fake.insert(schema.repositories, {
+      id: REPO,
+      userId: USER,
+      name: 'acme',
+      source: 'blank',
+      status: 'ready',
+    });
     const importedAt = new Date('2026-09-20T00:00:00Z');
     const upgradeRow = fake.insert(schema.onboardingArtifacts, {
       userId: USER,

@@ -87,6 +87,7 @@ async function setup(stamp: string | null | undefined, live: string | null) {
     ...RECORD_WRITE_TABLES,
   });
   fake.insert(schema.repositories, {
+    status: 'ready',
     id: REPO,
     userId: USER,
     name: 'acme',
