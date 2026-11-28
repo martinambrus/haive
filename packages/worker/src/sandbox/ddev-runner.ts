@@ -2131,8 +2131,8 @@ async function runnerDockerdUp(name: string): Promise<boolean> {
 
 /** How to bring the task's runner up, from definite answers only: container presence, workspace
  *  label, the project's structured status and the nested dockerd, never ddev's wording. Exported
- *  for the ddev-control restart, which cold boots only when this says `cold-boot`. A probe with no
- *  answer throws RunnerProbeError. */
+ *  for the ddev-control restart, which recovers a failed restart unless this says `reuse`. A probe
+ *  with no answer throws RunnerProbeError. */
 export async function probeDdevRecovery(
   existing: DdevRunnerHandle,
   repoSubpath: string,

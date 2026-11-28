@@ -130,34 +130,65 @@ describe('ddev restart gate', () => {
     expect(h.ensure).not.toHaveBeenCalled();
   });
 
-  it('cold boots a ready repository whose in-place restart failed and whose recovery probe says cold-boot', async () => {
+  it('cold boots a failed restart when the recovery probe says cold-boot, and says so', async () => {
     h.exec.mockResolvedValue({ exitCode: 1, output: 'gone' });
     h.recovery.mockResolvedValue('cold-boot');
     const result = await restart();
-    expect(result.ok).toBe(true);
-    expect(result.output).toContain('recovered via cold boot');
+    expect(result).toEqual({
+      ok: true,
+      output: expect.stringMatching(
+        /^gone\n\[ddev restart failed \(exit 1\); .*rebuilt by a cold boot\]$/,
+      ),
+    });
+    expect(result.output).not.toContain('started in place');
     expect(h.recovery).toHaveBeenCalledExactlyOnceWith(handle, repoSubpath);
-    expect(h.ensure).toHaveBeenCalledOnce();
-    expect(h.ensure).toHaveBeenCalledWith(taskId, repoSubpath, {
+    expect(h.ensure).toHaveBeenCalledExactlyOnceWith(taskId, repoSubpath, {
       onProgress: expect.any(Function),
     });
   });
 
-  it.each([
-    [1, 'warm-start'],
-    [75, 'reuse'],
-    [124, 'warm-start'],
-  ])(
-    'reports the real failure of a usable runner (exit %i, recovery %s) without a cold boot',
-    async (exitCode, recovery) => {
+  it('starts a failed restart in place when the recovery probe says warm-start, and says so', async () => {
+    h.exec.mockResolvedValue({ exitCode: 75, output: 'port busy' });
+    h.recovery.mockResolvedValue('warm-start');
+    const result = await restart();
+    expect(result).toEqual({
+      ok: true,
+      output: expect.stringMatching(
+        /^port busy\n\[ddev restart failed \(exit 75\); .*started in place\]$/,
+      ),
+    });
+    expect(result.output).not.toContain('cold boot');
+    expect(h.recovery).toHaveBeenCalledExactlyOnceWith(handle, repoSubpath);
+    expect(h.ensure).toHaveBeenCalledExactlyOnceWith(taskId, repoSubpath, {
+      onProgress: expect.any(Function),
+    });
+  });
+
+  it.each(['cold-boot', 'warm-start'])(
+    'keeps the note of a %s recovery when the restart output is long',
+    async (recovery) => {
+      h.exec.mockResolvedValue({ exitCode: 1, output: 'x'.repeat(9000) });
+      h.recovery.mockResolvedValue(recovery);
+      const result = await restart();
+      expect(result.ok).toBe(true);
+      expect(result.output).toHaveLength(8000);
+      expect(result.output).toMatch(/\[ddev restart failed \(exit 1\); .*\]$/);
+    },
+  );
+
+  it.each([1, 75, 124])(
+    'reports a failed restart whose project is still serving (exit %i) and recovers nothing',
+    async (exitCode) => {
       const output = 'x'.repeat(9000) + 'tail-marker';
       h.exec.mockResolvedValue({ exitCode, output });
-      h.recovery.mockResolvedValue(recovery);
+      h.recovery.mockResolvedValue('reuse');
       const result = await restart();
       expect(result).toEqual({
         ok: false,
         output: output.slice(-8000),
-        error: expect.stringMatching(new RegExp(`^ddev restart failed \\(exit ${exitCode}\\)`)),
+        error: expect.stringMatching(
+          new RegExp(`^ddev restart failed \\(exit ${exitCode}\\); the project is still serving`),
+        ),
       });
       expect(h.recovery).toHaveBeenCalledExactlyOnceWith(handle, repoSubpath);
       expect(h.ensure).not.toHaveBeenCalled();
@@ -168,22 +199,36 @@ describe('ddev restart gate', () => {
     'does not key the decision on wording (%s)',
     async (output) => {
       h.exec.mockResolvedValue({ exitCode: 1, output });
-      h.recovery.mockResolvedValue('warm-start');
+      h.recovery.mockResolvedValue('reuse');
       await expect(restart()).resolves.toMatchObject({ ok: false, output });
       expect(h.ensure).not.toHaveBeenCalled();
-      h.recovery.mockResolvedValue('cold-boot');
+      h.recovery.mockResolvedValue('warm-start');
       await expect(restart()).resolves.toMatchObject({ ok: true });
       expect(h.ensure).toHaveBeenCalledOnce();
     },
   );
 
-  it('does not cold boot when the recovery probe has no answer', async () => {
+  it('does not recover when the recovery probe has no answer', async () => {
     const error = new RunnerProbeError(handle.container, new Error('docker down'));
     h.exec.mockResolvedValue({ exitCode: 1, output: 'down' });
     h.recovery.mockRejectedValue(error);
     await expect(restart()).resolves.toEqual({ ok: false, output: '', error: error.message });
     expect(h.ensure).not.toHaveBeenCalled();
   });
+
+  it.each(['cold-boot', 'warm-start'])(
+    'answers the failure, not a success, when the %s recovery throws',
+    async (recovery) => {
+      h.exec.mockResolvedValue({ exitCode: 1, output: 'down' });
+      h.recovery.mockResolvedValue(recovery);
+      h.ensure.mockRejectedValue(new Error('ddev start failed: boom'));
+      await expect(restart()).resolves.toEqual({
+        ok: false,
+        output: '',
+        error: 'ddev start failed: boom',
+      });
+    },
+  );
 
   it.each(['cold-boot', 'warm-start', 'reuse'])(
     'the refusal wins over the probe answer %s, and nothing is probed',

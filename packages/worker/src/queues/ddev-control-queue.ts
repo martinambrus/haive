@@ -49,9 +49,10 @@ async function resolveTaskRepo(
 
 /** Run one ddev-control action against the task's runner. Read actions (status/logs)
  *  use a handle to the already-running runner (no boot); restart runs `ddev restart` in
- *  place and cold-boots (ensureDdevStarted) only when the recovery probe says the runner
- *  or its nested dockerd is gone, any other failed restart is reported as it is. Never
- *  throws — a failure is returned as { ok:false, error } so the api relays it to the agent. */
+ *  place and, when that fails, recovers with ensureDdevStarted (a warm start or a cold boot,
+ *  as the recovery probe says) unless the project is still serving, which is reported as a
+ *  failure. Never throws — a failure is returned as { ok:false, error } so the api relays
+ *  it to the agent. */
 export async function runDdevControl(payload: DdevControlPayload): Promise<DdevControlResult> {
   const db = getDb();
   const repo = await resolveTaskRepo(db, payload.taskId);
@@ -86,15 +87,15 @@ export async function runDdevControl(payload: DdevControlPayload): Promise<DdevC
       };
     }
     if (payload.action === 'restart') {
-      // The only action that opens the checkout (the exec, and the cold boot below), so it is
+      // The only action that opens the checkout (the exec, and the recovery below), so it is
       // admitted like every other root-backed open. A rebuild commits `cloning` before it drains
       // and the process fence is lost with the worker, so the row is what has to be read.
       // status/logs only exec into a runner that already exists and stay ungated.
       return await withInteractiveCheckout(db, repo.repositoryId, async (check) => {
         // Fast path: restart in place (works whether the project is serving, wedged, or
-        // stopped). If the runner CONTAINER is gone or stopped, or its nested dockerd died,
-        // `ddev restart` fails fast — recover that one with a full cold boot.
-        // Avoids the redundant cold-boot-then-restart of doing ensureDdevStarted first.
+        // stopped). If it fails (a down project, a gone or stopped runner, a dead nested
+        // dockerd) ensureDdevStarted recovers it. Avoids the redundant cold-boot-then-restart
+        // of doing ensureDdevStarted first.
         const r = await ddevExec(handle, 'restart', {
           timeoutMs: 900_000,
           onLine: (line) => log.debug({ taskId: payload.taskId }, line),
@@ -102,29 +103,37 @@ export async function runDdevControl(payload: DdevControlPayload): Promise<DdevC
         if (r.exitCode === 0) return { ok: true, output: r.output };
         // The failure may be the rebuild having removed the runner: do not boot a new one onto it.
         await check();
-        // Ask the probe ensureDdevStarted itself decides on, never ddev's wording: only `cold-boot`
-        // (runner or nested dockerd gone) is healed by a cold boot, and an unknown answer throws,
-        // since a rebuild is not guessed at. Any other failure is the restart's own: report it with
-        // its output rather than a recovery that did not happen.
+        // Ask the probe ensureDdevStarted itself decides on, never ddev's wording, and act on its
+        // answer. `reuse`: the project is serving, there is nothing to recover, so report the
+        // failure. `warm-start` (project down, runner and dockerd alive) and `cold-boot` (runner or
+        // dockerd not usable): recover with ensureDdevStarted and say which. An unknown answer
+        // throws, since a rebuild is not guessed at.
         const recovery = await probeDdevRecovery(handle, ws.repoSubpath);
-        if (recovery !== 'cold-boot') {
+        if (recovery === 'reuse') {
           log.info(
-            { taskId: payload.taskId, exitCode: r.exitCode, recovery },
-            'ddev restart failed in a usable runner; not cold booting',
+            { taskId: payload.taskId, exitCode: r.exitCode },
+            'ddev restart failed but the project is serving; nothing to recover',
           );
           return {
             ok: false,
             output: r.output.slice(-8000),
-            error: `ddev restart failed (exit ${r.exitCode}); the runner is up, so it was not rebuilt.`,
+            error: `ddev restart failed (exit ${r.exitCode}); the project is still serving, so nothing was recovered.`,
           };
         }
-        log.info({ taskId: payload.taskId }, 'ddev restart failed; recovering via cold boot');
+        log.info(
+          { taskId: payload.taskId, exitCode: r.exitCode, recovery },
+          'ddev restart failed; recovering',
+        );
         await ensureDdevStarted(payload.taskId, ws.repoSubpath, {
           onProgress: (line) => log.debug({ taskId: payload.taskId }, line),
         });
+        const done =
+          recovery === 'warm-start'
+            ? 'the project was down: started in place'
+            : 'the runner or its dockerd was not usable: rebuilt by a cold boot';
         return {
           ok: true,
-          output: `${r.output}\n[runner was down; recovered via cold boot]`.slice(-8000),
+          output: `${r.output}\n[ddev restart failed (exit ${r.exitCode}); ${done}]`.slice(-8000),
         };
       });
     }
