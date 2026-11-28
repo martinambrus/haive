@@ -92,10 +92,13 @@ runner is kept. An absent runner needs no removal.
 The request waits at most 30 s (`DDEV_REBUILD_WAIT_MS`) for the job. A refusal answers 409 with
 a typed `reason` and `retryable`, and the worker logs it at info. `checkout-unavailable` is the
 refusal of a checkout that is not `ready` (preparing, in error or gone) or whose interactive
-sessions are suspended: the worker completes it as a typed result instead of failing the job,
+sessions are suspended. The job's admission and the rebuild's own first reads (task context and
+runtime classification) raise it before the runner is touched, and the worker completes it as a
+typed result instead of failing the job,
 because BullMQ hands the api a
 failed job or an expired wait as a message string and never an error class, and the api never keys
-on message text. The dialog shows the refusal's `error`. A finished failure answers 500.
+on message text. The dialog shows the refusal's `error`. A finished failure answers 500, a checkout
+refusal once the removal path has started included, since a removal may have happened.
 Success answers 202 with `removed`, false when the runner was already absent. When the wait runs
 out or the outcome is unknown it answers 202 `pending`: the job keeps running, a repeat click
 joins it, and the task's Activity tab shows the request event.

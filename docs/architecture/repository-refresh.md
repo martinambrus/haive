@@ -389,6 +389,8 @@ Terminal read it again after their long awaits; `NAVIGATE_MAILPIT` and `REBUILD_
 A refusal of `REBUILD_DDEV` completes as a typed `rebuildRefusal` (`checkout-unavailable`, retryable) because a
 failed BullMQ job reaches the api as a message string, never a class, so a thrown refusal could only read as an
 unknown outcome (202 `pending`); the other two jobs still reject and their clients poll on `pending`.
+The rebuild's own first reads (task context, runtime classification) answer the same refusal, but only before
+its removal path starts; from there on a failure stays the generic 500, since a removal may have happened.
 The row, not the process fence, covers a worker restart or a deferred suspend retry, when the row
 is `cloning` with no claim and an empty fence. DDEV control `restart` takes the same wrapper and checks
 again after a failed in-place exec, before it decides anything, because the failing exec may be a checkout rebuild having removed the runner.

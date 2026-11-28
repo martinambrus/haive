@@ -227,6 +227,35 @@ it('rebuild-ddev resolves a typed refusal while the process barrier is suspended
     release();
   }
 });
+it('rebuildDdevForTask refuses, not fails, when its own first read finds the checkout unavailable', async () => {
+  h.repoStatus.value = 'cloning';
+  await expect(rebuildDdevForTask(payload)).resolves.toEqual(refusedRebuild);
+  expect(h.classify).not.toHaveBeenCalled();
+  expect(h.rebuild).not.toHaveBeenCalled();
+  expect(h.info).toHaveBeenCalledExactlyOnceWith(
+    { taskId: 'task', reason: 'checkout-unavailable' },
+    'DDEV rebuild refused',
+  );
+  expect(h.error).not.toHaveBeenCalled();
+});
+it('rebuildDdevForTask refuses the same when classifying the runtime finds it unavailable', async () => {
+  h.classify.mockRejectedValueOnce(new CheckoutUnavailableError());
+  await expect(rebuildDdevForTask(payload)).resolves.toEqual(refusedRebuild);
+  expect(h.rebuild).not.toHaveBeenCalled();
+  expect(h.add).not.toHaveBeenCalled();
+  expect(h.error).not.toHaveBeenCalled();
+});
+it('rebuildDdevForTask keeps the generic failure once the rebuild has started', async () => {
+  h.rebuild.mockRejectedValueOnce(new CheckoutUnavailableError());
+  await expect(rebuildDdevForTask(payload)).resolves.toMatchObject({
+    ok: false,
+    mode: 'ddev',
+    rebuildFailure: { message: 'DDEV rebuild failed. Try again; recovery may still be needed.' },
+  });
+  expect(h.rebuild).toHaveBeenCalledOnce();
+  expect(h.error).toHaveBeenCalledOnce();
+  expect(h.info).not.toHaveBeenCalled();
+});
 it('rebuild-ddev still rejects when the durable read fails for an unknown reason', async () => {
   h.repoFail.value = new Error('boom');
   await expect(runner()({ name: 'rebuild-ddev', data: payload })).rejects.toThrow('boom');
