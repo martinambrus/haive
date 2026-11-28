@@ -109,7 +109,8 @@ export interface StatsTaskClassCount {
  *  inclusive of the cached prefix, so a raw column cannot be compared across providers. */
 export interface StatsNormalizedTokens {
   freshInputTokens: number;
-  outputTokens: number;
+  outputTokens: number | null;
+  outputUnknownRuns: number;
   cacheReadTokens: number;
   cacheCreationTokens: number;
   totalTokens: number;
@@ -125,7 +126,8 @@ export interface StatsProviderUsage {
   costBasis: string;
   invocations: number;
   inputTokens: number;
-  outputTokens: number;
+  outputTokens: number | null;
+  outputUnknownRuns: number;
   cacheReadTokens: number;
   cacheCreationTokens: number;
   /** The four raw columns above, normalised. Attached by /m/statistics/summary only — the task page's
@@ -215,7 +217,8 @@ export interface StatsTimelineDay {
   tasksStarted: number;
   tasksCompleted: number;
   freshInputTokens: number;
-  outputTokens: number;
+  outputTokens: number | null;
+  outputUnknownRuns: number;
   cacheReadTokens: number;
   cacheCreationTokens: number;
   totalTokens: number;

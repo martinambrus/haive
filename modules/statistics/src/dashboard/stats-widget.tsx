@@ -7,7 +7,7 @@ import type { ModuleDashboardWidgetProps } from '@haive/web-kit/host';
 import { Card, CardDescription, CardHeader, CardTitle, LinkButton } from '@haive/web-kit/ui';
 import { formatDuration } from '@haive/web-kit/format-duration';
 import { formatCost } from '@haive/web-kit/format-cost';
-import { formatTokens } from '@haive/web-kit/format-tokens';
+import { formatTokensAtLeast } from '@haive/web-kit/format-tokens';
 import {
   getStatsSummary,
   getStatsTimeline,
@@ -222,7 +222,10 @@ export function StatsWidget({ moduleId, api }: ModuleDashboardWidgetProps) {
                 />
                 <StatTile
                   label="Tokens"
-                  value={formatTokens(summary.tokens.totalTokens)}
+                  value={formatTokensAtLeast(
+                    summary.tokens.totalTokens,
+                    summary.tokens.outputUnknownRuns,
+                  )}
                   hint={`${formatPercent(summary.tokens.cacheHitRatio)} of the prompt side from cache`}
                   tone="text-sky-300"
                 />

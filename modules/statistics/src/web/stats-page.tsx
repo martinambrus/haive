@@ -10,7 +10,7 @@ import { TabNav } from '@haive/web-kit/tabs';
 import { usePageTitle } from '@haive/web-kit/use-page-title';
 import { formatDuration } from '@haive/web-kit/format-duration';
 import { formatCost } from '@haive/web-kit/format-cost';
-import { formatTokens } from '@haive/web-kit/format-tokens';
+import { formatTokens, formatTokensAtLeast } from '@haive/web-kit/format-tokens';
 import { formatSampledTps } from '@haive/web-kit/format-throughput';
 import {
   getStatsEstimates,
@@ -273,7 +273,7 @@ const SEVERITY_COLOR: Record<string, string> = {
  *  One definition for the window total and for every per-provider row: the rows are read
  *  against the total directly above them, so a segment that changed colour or position between
  *  the two would make that comparison wrong rather than merely inconsistent. */
-function tokenSegments(t: StatsNormalizedTokens) {
+export function tokenSegments(t: StatsNormalizedTokens) {
   return [
     {
       key: 'cacheRead',
@@ -293,7 +293,12 @@ function tokenSegments(t: StatsNormalizedTokens) {
       value: t.cacheCreationTokens,
       color: TOKEN_COLORS.cacheCreation,
     },
-    { key: 'output', label: 'Output', value: t.outputTokens, color: TOKEN_COLORS.output },
+    {
+      key: 'output',
+      label: t.outputUnknownRuns > 0 ? 'Output (at least)' : 'Output',
+      value: t.outputTokens ?? 0,
+      color: TOKEN_COLORS.output,
+    },
   ];
 }
 
@@ -774,7 +779,10 @@ function StatsPageInner({ moduleId, api, MarkdownView }: Omit<ModulePageProps, '
               />
               <StatTile
                 label="Tokens"
-                value={formatTokens(summary.tokens.totalTokens)}
+                value={formatTokensAtLeast(
+                  summary.tokens.totalTokens,
+                  summary.tokens.outputUnknownRuns,
+                )}
                 hint={`${formatPercent(summary.tokens.cacheHitRatio)} cached`}
                 tone="text-sky-300"
               />
@@ -805,7 +813,10 @@ function StatsPageInner({ moduleId, api, MarkdownView }: Omit<ModulePageProps, '
                 <div className="min-w-0">
                   <div className="truncate text-xs font-medium text-neutral-200">All providers</div>
                   <div className="font-mono text-[10px] text-neutral-500">
-                    {formatTokens(summary.tokens.totalTokens)}
+                    {formatTokensAtLeast(
+                      summary.tokens.totalTokens,
+                      summary.tokens.outputUnknownRuns,
+                    )}
                   </div>
                 </div>
                 <StackedShareBar
@@ -820,6 +831,13 @@ function StatsPageInner({ moduleId, api, MarkdownView }: Omit<ModulePageProps, '
                   <span className="ml-1 text-[10px] text-neutral-500">cached</span>
                 </div>
               </div>
+              {summary.tokens.outputUnknownRuns > 0 && (
+                <p className="text-[11px] text-neutral-500">
+                  Output was never reported by {summary.tokens.outputUnknownRuns}{' '}
+                  {summary.tokens.outputUnknownRuns === 1 ? 'run' : 'runs'} (killed before their
+                  result), so the token figures above leave it out.
+                </p>
+              )}
 
               {summary.spend.byProvider.length > 0 && (
                 <>
@@ -834,7 +852,7 @@ function StatsPageInner({ moduleId, api, MarkdownView }: Omit<ModulePageProps, '
                       <div className="min-w-0">
                         <div className="truncate text-xs text-neutral-300">{p.provider}</div>
                         <div className="font-mono text-[10px] text-neutral-500">
-                          {formatTokens(p.tokens.totalTokens)}
+                          {formatTokensAtLeast(p.tokens.totalTokens, p.tokens.outputUnknownRuns)}
                         </div>
                       </div>
                       {/* No legend per row: the four labels are stated once on the total above,
@@ -1244,7 +1262,10 @@ function StatsPageInner({ moduleId, api, MarkdownView }: Omit<ModulePageProps, '
                                 {formatCount(r.invocations)}
                               </td>
                               <td className="py-2 text-right font-mono text-neutral-400">
-                                {formatTokens(r.tokens.totalTokens)}
+                                {formatTokensAtLeast(
+                                  r.tokens.totalTokens,
+                                  r.tokens.outputUnknownRuns,
+                                )}
                               </td>
                               <td
                                 className="py-2 text-right font-mono"

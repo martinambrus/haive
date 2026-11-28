@@ -111,7 +111,13 @@ import {
   RETRY_TIMEOUT_MAX_MINUTES,
   RETRY_TIMEOUT_MIN_MINUTES,
 } from '@/lib/retry-timeout';
-import { formatTokens } from '@/lib/format-tokens';
+import {
+  formatOutputTokens,
+  formatTokens,
+  formatTokensAtLeast,
+  fullTokens,
+} from '@/lib/format-tokens';
+import { sumStepOutputTokens } from '@/lib/step-output-tokens';
 import { formatTps } from '@/lib/format-throughput';
 import { CLI_USAGE_LABEL } from '@/lib/usage-format';
 import {
@@ -590,7 +596,8 @@ interface TaskProviderUsage {
   costBasis: string;
   invocations: number;
   inputTokens: number;
-  outputTokens: number;
+  outputTokens: number | null;
+  outputUnknownRuns: number;
   cacheReadTokens: number;
   cacheCreationTokens: number;
   costUsd: number;
@@ -3078,10 +3085,20 @@ function StepTokens({
   throughput: TaskStep['throughput'];
 }) {
   if (!tokenUsage || tokenUsage.totalTokens <= 0) return null;
-  const { inputTokens, outputTokens, totalTokens, cacheReadTokens, cacheCreationTokens, costUsd } =
-    tokenUsage;
+  const {
+    inputTokens,
+    outputTokens,
+    outputUnknownRuns,
+    totalTokens,
+    cacheReadTokens,
+    cacheCreationTokens,
+    costUsd,
+  } = tokenUsage;
   const title =
-    `CLI tokens (provider-native, incl. any summary pass): in ${inputTokens.toLocaleString()} / out ${outputTokens.toLocaleString()} / total ${totalTokens.toLocaleString()}` +
+    `CLI tokens (provider-native, incl. any summary pass): in ${inputTokens.toLocaleString()} / out ${outputTokens === null ? 'unknown' : fullTokens(outputTokens, outputUnknownRuns ?? 0)} / total ${totalTokens.toLocaleString()}` +
+    (outputTokens === null
+      ? ' (output unknown: the run was killed before it reported it, so the total leaves it out)'
+      : '') +
     (cacheReadTokens ? `, cache read ${cacheReadTokens.toLocaleString()}` : '') +
     (cacheCreationTokens ? `, cache write ${cacheCreationTokens.toLocaleString()}` : '') +
     (costUsd ? `, ~$${costUsd.toFixed(2)}` : '') +
@@ -3095,7 +3112,7 @@ function StepTokens({
         : null;
   return (
     <span className="font-mono text-xs text-sky-300" title={title}>
-      {formatTokens(totalTokens)} tok{rate ? ` · ${rate}` : ''}
+      {formatTokensAtLeast(totalTokens, outputUnknownRuns ?? 0)} tok{rate ? ` · ${rate}` : ''}
     </span>
   );
 }
@@ -3455,7 +3472,9 @@ function TaskTotalTime({
   // figures shown on the cards.
   const totalTokens = steps.reduce((sum, s) => sum + (s.tokenUsage?.totalTokens ?? 0), 0);
   const inputTokens = steps.reduce((sum, s) => sum + (s.tokenUsage?.inputTokens ?? 0), 0);
-  const outputTokens = steps.reduce((sum, s) => sum + (s.tokenUsage?.outputTokens ?? 0), 0);
+  const { output: outputTokens, unknownRuns: outputUnknownRuns } = sumStepOutputTokens(
+    steps.map((s) => s.tokenUsage),
+  );
   // Split the total: cached (cache read + write, re-used context) vs fresh in+out
   // (the genuinely new tokens). cached + fresh === total.
   const cachedTokens = steps.reduce(
@@ -3463,7 +3482,7 @@ function TaskTotalTime({
       sum + (s.tokenUsage?.cacheReadTokens ?? 0) + (s.tokenUsage?.cacheCreationTokens ?? 0),
     0,
   );
-  const freshTokens = inputTokens + outputTokens;
+  const freshTokens = inputTokens + (outputTokens ?? 0);
   // While running, show seconds even past 1h so the live values visibly tick:
   // the 1s interval advances them, but the compact h/m format hides sub-minute
   // changes (a multi-hour task looks frozen). Completed tasks stay compact.
@@ -3536,9 +3555,9 @@ function TaskTotalTime({
               <div className="flex flex-col items-end">
                 <span
                   className="font-mono text-lg text-sky-300"
-                  title={`CLI tokens (provider-native): in ${inputTokens.toLocaleString()} / out ${outputTokens.toLocaleString()} / cache ${cachedTokens.toLocaleString()} / total ${totalTokens.toLocaleString()}`}
+                  title={`CLI tokens (provider-native): in ${inputTokens.toLocaleString()} / out ${fullTokens(outputTokens, outputUnknownRuns)} / cache ${cachedTokens.toLocaleString()} / total ${fullTokens(totalTokens, outputUnknownRuns)}`}
                 >
-                  {formatTokens(totalTokens)}
+                  {formatTokensAtLeast(totalTokens, outputUnknownRuns)}
                 </span>
                 <span className="text-[10px] uppercase tracking-wider text-neutral-500">
                   tokens
@@ -3558,9 +3577,9 @@ function TaskTotalTime({
               <div className="flex flex-col items-end">
                 <span
                   className="font-mono text-lg text-teal-300"
-                  title={`Fresh tokens (input + output — genuinely new): ${freshTokens.toLocaleString()}`}
+                  title={`Fresh tokens (input + output — genuinely new): ${fullTokens(freshTokens, outputUnknownRuns)}`}
                 >
-                  {formatTokens(freshTokens)}
+                  {formatTokensAtLeast(freshTokens, outputUnknownRuns)}
                 </span>
                 <span className="text-[10px] uppercase tracking-wider text-neutral-500">
                   in+out
@@ -3595,7 +3614,7 @@ function TaskTotalTime({
                 <div
                   key={`${p.provider}-${p.costBasis}`}
                   className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1 text-xs"
-                  title={`${p.invocations} invocation(s) — input ${p.inputTokens.toLocaleString()} / output ${p.outputTokens.toLocaleString()} / cache ${cache.toLocaleString()}`}
+                  title={`${p.invocations} invocation(s) — input ${p.inputTokens.toLocaleString()} / output ${fullTokens(p.outputTokens, p.outputUnknownRuns)} / cache ${cache.toLocaleString()}`}
                 >
                   <span className="flex items-center gap-2">
                     <span className="font-mono text-neutral-200">{p.provider}</span>
@@ -3605,7 +3624,7 @@ function TaskTotalTime({
                     {p.unpricedInvocations > 0 && (
                       <span
                         className="rounded bg-amber-950/60 px-1.5 py-0.5 text-[10px] uppercase tracking-wider text-amber-300"
-                        title={`${p.unpricedInvocations} invocation(s) could not be priced, so their cost is not included. Check prompt-tier coverage and rates on the admin pricing page.`}
+                        title={`${p.unpricedInvocations} invocation(s) could not be priced, so their cost is not included. A run killed before it reported its output is one reason. Check prompt-tier coverage and rates on the admin pricing page.`}
                       >
                         {p.unpricedInvocations} unpriced
                       </span>
@@ -3618,7 +3637,7 @@ function TaskTotalTime({
                       display={costDisplay}
                     />
                     <span>in {formatTokens(p.inputTokens)}</span>
-                    <span>out {formatTokens(p.outputTokens)}</span>
+                    <span>out {formatOutputTokens(p.outputTokens, p.outputUnknownRuns)}</span>
                     <span className="text-cyan-400/80">cache {formatTokens(cache)}</span>
                     <span
                       className={priced ? 'text-emerald-300' : 'text-neutral-600'}

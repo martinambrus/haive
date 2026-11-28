@@ -19,7 +19,7 @@ import { activeTaskIdFromPath } from '@/lib/active-task';
 import { api, type Task } from '@/lib/api-client';
 import { cn } from '@/lib/cn';
 import { formatDuration } from '@/lib/format-duration';
-import { formatTokens } from '@/lib/format-tokens';
+import { formatTokensAtLeast } from '@/lib/format-tokens';
 import { rememberTaskOrigin } from '@/lib/task-origin';
 import {
   TASK_TONE_BUTTON_CLASS,
@@ -239,7 +239,7 @@ export function SidebarTasks({
       const phase = task.currentStepLabel ?? task.currentStepId;
       const meta = [
         effort > 0 ? formatDuration(effort) : null,
-        tokens > 0 ? formatTokens(tokens) : null,
+        tokens > 0 ? formatTokensAtLeast(tokens, task.tokenUsage?.outputUnknownRuns ?? 0) : null,
         phase,
       ]
         .filter(Boolean)
