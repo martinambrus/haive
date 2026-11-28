@@ -381,8 +381,14 @@ last confirmed lease stamp; the set-aside and put-back file moves are not checke
 Projection helper
 transactions called by these plan operations drain their callbacks before releasing the lease,
 including when the driver rejects while filesystem/Git work is outstanding. Existing task-holder,
-merge-conversation and open-Git-operation refusals remain. The independent Haive-data Save has
-not gained this admission in this change.
+merge-conversation and open-Git-operation refusals remain. The Save and Pull routes are admitted as
+new work before they enqueue the job: `requireNewWorkAllowed`, then, after the merge-conversation
+refusal and outside the handler's `catch`, the shared new-work fence in its own short transaction
+(`admitUnderFence`), so a system that drains or is in maintenance answers 503 (a fence wait past its
+bound, 409 busy) rather than `plan_snapshot_*_failed`, and nothing is queued. The worker is not
+admitted: it holds the claim, and a job an admitted request queued must run. The lease therefore
+starts after the route's fence commit, and for that span the maintenance drain counts nothing for
+the request. The independent Haive-data Save has not gained this admission in this change.
 
 Save and Pull answer 409 while a refresh is owed (`refresh_pending`), while the status is not
 `ready`, and while another root claim is live; the api returns the worker's refusal text under

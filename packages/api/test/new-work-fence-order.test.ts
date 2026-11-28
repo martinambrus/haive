@@ -134,6 +134,47 @@ describe('the new-work fence and the locks an admission takes', () => {
   }, 30_000);
 });
 
+describe('the plan snapshot routes', () => {
+  it.each(['savePlanMirror', 'pullPlanMirror'])(
+    'every call of %s sits in a route behind requireNewWorkAllowed, after an admitUnderFence outside any try',
+    (name) => {
+      const sf = parse('routes/plan.ts');
+      const calls = callsOf(sf, name);
+      expect(calls.length, `routes/plan.ts must call ${name}`).toBeGreaterThan(0);
+      const bad: string[] = [];
+      for (const call of calls) {
+        let handler: ts.Node | undefined;
+        for (let up = call.parent; up; up = up.parent) {
+          if (
+            (ts.isArrowFunction(up) || ts.isFunctionExpression(up)) &&
+            ts.isCallExpression(up.parent) &&
+            ts.isPropertyAccessExpression(up.parent.expression) &&
+            up.parent.expression.name.text === 'post'
+          ) {
+            handler = up;
+            break;
+          }
+        }
+        const route = handler?.parent as ts.CallExpression | undefined;
+        const gated =
+          route !== undefined &&
+          route.arguments.some((a) => ts.isIdentifier(a) && a.text === 'requireNewWorkAllowed');
+        const fences = handler === undefined ? [] : callsOf(handler, 'admitUnderFence');
+        const early = fences.filter((f) => {
+          if (f.getStart() >= call.getStart()) return false;
+          for (let up = f.parent; up && up !== handler; up = up.parent) {
+            if (ts.isTryStatement(up)) return false;
+          }
+          return true;
+        });
+        if (!gated || early.length === 0) bad.push(where(sf, call));
+      }
+      expect(bad).toEqual([]);
+    },
+    30_000,
+  );
+});
+
 describe('checkout mutations that start new work', () => {
   const WRAPPER = 'lib/admitted-checkout-mutation.ts';
 
