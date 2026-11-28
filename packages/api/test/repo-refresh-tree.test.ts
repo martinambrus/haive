@@ -635,14 +635,21 @@ describe('a refresh whose add never settles', () => {
       remoteUrl: 'https://example.com/r.git',
       ...(recovery ? { status: 'error', errorCode: 'checkout_repair_needed' } : {}),
     });
-    h.add.mockReturnValue(new Promise(() => undefined));
+    let reached!: () => void;
+    const called = new Promise<void>((resolve) => {
+      reached = resolve;
+    });
+    h.add.mockImplementation(() => {
+      reached();
+      return new Promise(() => undefined);
+    });
     let res: Response | undefined;
-    void Promise.resolve(app.request(url, { method: 'POST' })).then((r) => (res = r));
-    for (let i = 0; i < 500 && h.add.mock.calls.length === 0; i++)
-      await new Promise((resolve) => setImmediate(resolve));
-    expect(h.add).toHaveBeenCalledTimes(1);
+    const settled = Promise.resolve(app.request(url, { method: 'POST' })).then((r) => (res = r));
+    await Promise.race([called, settled]);
+    expect(h.add, 'the route never reached the add').toHaveBeenCalledTimes(1);
     await vi.advanceTimersByTimeAsync(QUEUE_ADD_WAIT_MS);
-    for (let i = 0; i < 50 && !res; i++) await new Promise((resolve) => setImmediate(resolve));
+    for (const start = Date.now(); !res && Date.now() - start < 2_000;)
+      await new Promise((resolve) => setImmediate(resolve));
     expect(res, 'the request is still waiting for the add').toBeDefined();
     expect(res!.status).toBe(503);
     expect(((await res!.json()) as { code: string }).code).toBe('queue_outcome_unknown');

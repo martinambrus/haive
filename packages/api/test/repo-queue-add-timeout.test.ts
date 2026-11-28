@@ -78,20 +78,33 @@ const send = (url: string, body: unknown) =>
     body: JSON.stringify(body),
   });
 
-const untilAddCalled = async () => {
-  for (let i = 0; i < 500 && h.add.mock.calls.length === 0; i++)
-    await new Promise((resolve) => setImmediate(resolve));
-  expect(h.add).toHaveBeenCalledTimes(1);
+/** Makes the add hang. The returned promise settles when the route reaches it, however long the
+ *  route's own I/O takes first, so no iteration count can run out on a loaded host. */
+const hangingAdd = () => {
+  let reached!: () => void;
+  const called = new Promise<void>((resolve) => {
+    reached = resolve;
+  });
+  h.add.mockImplementation(() => {
+    reached();
+    return new Promise(() => undefined);
+  });
+  return called;
 };
 
 /** Runs the request until the add has been called, then past the add deadline. A request that is
  *  still unanswered then fails the assertion instead of hanging the run. */
-async function answeredAfterDeadline(request: Response | Promise<Response>): Promise<Response> {
+async function answeredAfterDeadline(
+  request: Response | Promise<Response>,
+  called: Promise<void>,
+): Promise<Response> {
   let res: Response | undefined;
-  void Promise.resolve(request).then((r) => (res = r));
-  await untilAddCalled();
+  const settled = Promise.resolve(request).then((r) => (res = r));
+  await Promise.race([called, settled]);
+  expect(h.add, 'the route never reached the add').toHaveBeenCalledTimes(1);
   await vi.advanceTimersByTimeAsync(QUEUE_ADD_WAIT_MS);
-  for (let i = 0; i < 50 && !res; i++) await new Promise((resolve) => setImmediate(resolve));
+  for (const start = Date.now(); !res && Date.now() - start < 2_000;)
+    await new Promise((resolve) => setImmediate(resolve));
   expect(res, 'the request is still waiting for the add').toBeDefined();
   return res!;
 }
@@ -114,9 +127,10 @@ async function expectOutcomeUnknownWithAdmittedRow(res: Response) {
 
 describe('POST /repos', () => {
   it('keeps the admitted row and answers 503 when the add never settles', async () => {
-    h.add.mockReturnValue(new Promise(() => undefined));
+    const called = hangingAdd();
     const res = await answeredAfterDeadline(
       send('/repos', { source: 'git_https', remoteUrl: 'https://example.test/new.git' }),
+      called,
     );
     await expectOutcomeUnknownWithAdmittedRow(res);
   });
@@ -152,9 +166,10 @@ describe('POST /repos/upload/:id/complete', () => {
       body: bytes,
     });
     expect(chunk.status).toBe(200);
-    h.add.mockReturnValue(new Promise(() => undefined));
+    const called = hangingAdd();
     const res = await answeredAfterDeadline(
       app.request(`/repos/upload/${session.id}/complete`, { method: 'POST' }),
+      called,
     );
     await expectOutcomeUnknownWithAdmittedRow(res);
   });
