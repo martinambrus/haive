@@ -12,6 +12,15 @@ import type { FilesReadGroupRow, FilesReadPathRow, FilesReadRollup } from '../st
  * `jsonb_array_elements` throws on a JSON null, so every path is read through a `jsonb_typeof`
  * guard. Characters and tokens exceed 2^31 on a busy install: sums are double precision, never
  * `::int`.
+ *
+ * Cost is the shape of the SQL. MEASURED on synthetic rows (8,333 runs of 50 listed paths,
+ * postgres:18-bookworm): the record is read once per run by the `rr` lateral, because every
+ * `tool_usage -> 'reads'` detoasts and copies the whole record (86 of them per row made the group
+ * query 3.5 s, now 0.32 s); the per-path query reads each element's numbers once, before it
+ * groups, groups under `COLLATE "C"` (the locale's strcoll doubled the sort) and counts entries,
+ * not `count(distinct)`, which forces a sort per aggregate (2.5 s, now 0.5 s). Counting entries is
+ * exact because a run's `files` holds each path once: the recorder keys it by path
+ * (`read-exposure.ts`, the `files` Map).
  */
 
 export interface FilesReadRollupOptions {
@@ -21,7 +30,8 @@ export interface FilesReadRollupOptions {
 }
 
 const inv = schema.cliInvocations;
-const reads = sql`(${inv.toolUsage} -> 'reads')`;
+/** The run's record, as the `rr` lateral in `from` extracted it once. */
+const reads = sql`rr.r`;
 
 const arr = (path: SQL): SQL =>
   sql`(case when jsonb_typeof(${path}) = 'array' then ${path} else '[]'::jsonb end)`;
@@ -54,8 +64,10 @@ export async function rollupFilesRead(
   db: Database,
   opts: FilesReadRollupOptions,
 ): Promise<FilesReadRollup> {
+  // `offset 0` keeps the planner from inlining `rr`, which would repeat the extraction per use.
   const from = sql`from ${inv}
-    inner join ${schema.tasks} on ${schema.tasks.id} = ${inv.taskId}`;
+    inner join ${schema.tasks} on ${schema.tasks.id} = ${inv.taskId}
+    cross join lateral (select ${inv.toolUsage} -> 'reads' as r offset 0) rr`;
 
   /** Sum of `part` over the runs of `population`. */
   const sumOver = (population: SQL, part: SQL): SQL =>
@@ -63,22 +75,30 @@ export async function rollupFilesRead(
   const fileReadsPart = (bucket: string, key: string): SQL =>
     numOr0(sql`(${reads} -> ${bucket}::text -> ${key}::text)`);
 
+  // Per (path, task) first, then per path: `tasks` is the number of those groups. A path that is
+  // not a string is dropped (`e.p` null); a weight that is not a number stays null, never 0.
   const pathsQuery = sql`
     select p, reads, chars, weighted_chars, weighted_runs, runs, tasks, count(*) over () as total
     from (
-      select f.file ->> 'path' as p,
-        sum(${numOr0(sql`(f.file -> 'reads')`)})::double precision as reads,
-        sum(${numOr0(sql`(f.file -> 'chars')`)})::double precision as chars,
-        sum(${numOrNull(sql`(f.file -> 'weightedChars')`)})::double precision as weighted_chars,
-        count(distinct ${inv.id}) filter (
-          where jsonb_typeof(f.file -> 'weightedChars') = 'number')::int as weighted_runs,
-        count(distinct ${inv.id})::int as runs,
-        count(distinct ${inv.taskId})::int as tasks
-      ${from}
-      cross join lateral jsonb_array_elements(${arr(sql`(${reads} -> 'files')`)}) as f(file)
-      where ${opts.where} and ${observable}
-        and jsonb_typeof(f.file -> 'path') = 'string'
-      group by 1
+      select p, sum(reads)::double precision as reads, sum(chars)::double precision as chars,
+        sum(weighted_chars)::double precision as weighted_chars,
+        sum(weighted_runs)::int as weighted_runs, sum(runs)::int as runs, count(*)::int as tasks
+      from (
+        select e.p, ${inv.taskId} as task_id, sum(e.reads) as reads, sum(e.chars) as chars,
+          sum(e.weighted) as weighted_chars, count(e.weighted) as weighted_runs, count(*) as runs
+        ${from}
+        cross join lateral jsonb_array_elements(${arr(sql`(${reads} -> 'files')`)}) as f(file)
+        cross join lateral (select
+            case when jsonb_typeof(f.file -> 'path') = 'string'
+              then (f.file ->> 'path') collate "C" end as p,
+            ${numOr0(sql`(f.file -> 'reads')`)} as reads,
+            ${numOr0(sql`(f.file -> 'chars')`)} as chars,
+            ${numOrNull(sql`(f.file -> 'weightedChars')`)} as weighted
+          offset 0) e
+        where ${opts.where} and ${observable} and e.p is not null
+        group by 1, 2
+      ) t
+      group by p
     ) g
     order by weighted_chars desc nulls last, chars desc, p collate "C" asc
     limit ${opts.rowLimit}`;
@@ -118,6 +138,10 @@ export async function rollupFilesRead(
     where ${opts.where}
     group by ${schema.taskSteps.stepId}, ${schema.cliProviders.name}`;
 
+  // Two statements on two connections, so two READ COMMITTED snapshots a few milliseconds apart: a
+  // run whose record is written between them enters one side only. The skew is at most that run;
+  // `buildFilesRead` floors every remainder at zero rather than show a negative bucket. One
+  // REPEATABLE READ transaction would close it, but then the page waits for the sum of the two scans.
   const [pathRows, groupRows] = await Promise.all([run(db, pathsQuery), run(db, groupsQuery)]);
 
   const paths: FilesReadPathRow[] = pathRows.map((r) => ({
