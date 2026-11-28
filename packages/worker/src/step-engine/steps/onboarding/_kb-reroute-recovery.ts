@@ -100,7 +100,11 @@ export async function restoreKbReroutes(
     }
   }
   if (journalUsable && isConsumed) {
-    const ids = state.files.flatMap((file) => (file.entryId ? [file.entryId] : []));
+    // Journal text is untrusted: only a uuid-shaped id may reach the query, or one planted string
+    // would fail the whole lookup. Any other entry restores as before.
+    const ids = state.files.flatMap((file) =>
+      file.entryId && z.uuid().safeParse(file.entryId).success ? [file.entryId] : [],
+    );
     if (ids.length > 0) {
       const gone = await isConsumed(ids);
       state.files = state.files.filter((file) => {
@@ -211,8 +215,13 @@ export async function restoreKbReroutes(
       try {
         const keep: typeof state.files = [];
         for (const file of state.files) {
-          const here = await lstatNoFollow(repoPath, `${KB_DIR}/${file.path}`, { strict: true });
-          if (here?.kind !== 'file') keep.push(file);
+          // The body is redundant only while the very same article is on disk.
+          const here = await readFileNoFollow(repoPath, `${KB_DIR}/${file.path}`, {
+            strict: true,
+            maxBytes: Buffer.byteLength(file.body) + 1,
+          });
+          if (here === null || here.truncated || here.data.toString('utf8') !== file.body)
+            keep.push(file);
         }
         if (keep.length === state.files.length && keep.length > 0) return;
         if (keep.length > 0) {

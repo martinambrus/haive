@@ -545,20 +545,22 @@ The directory entry in `.haive` is fsynced before publishing a journal; the jour
 containing directory are synced before permitting a local delete.
 The journal stays outside the KB/RAG tree. Each entry also records `entryId`, the promotion's
 global entry id, written once the local deletion is committed. Before restoring,
-`findConsumedTaskPromotions` names the entries this task's purge can no longer remove (a
-`source = 'promoted'` row of the task that is not a draft: activated or archived). Such an entry
-is not restored and is pruned, and its path joins `removedPaths` when the file is absent, since
-step 12 stages deletions from that list. A PENDING draft is still restored first, because the
-Retry's purge would otherwise delete the only copy of the original. An entry without an id (a
-journal from before this lookup), a disabled KB and an ordinary lookup failure restore as before;
-a lookup timeout or owner cancellation fails the step before anything is restored or purged.
+`findConsumedTaskPromotions` names the entries whose knowledge a live entry holds: a
+`source = 'promoted'` row of the task that is `active`, or `archived` with `superseded_at` set (an
+active successor replaced it). Such an entry is not restored and is pruned, and its path joins
+`removedPaths` when the file is absent, since step 12 stages deletions from that list. A PENDING
+draft is still restored first, because the Retry's purge would otherwise delete the only copy of
+the original, and so is a draft archived by hand (a rejection: nothing live holds it). Only
+uuid-shaped ids reach the lookup, since the journal is untrusted text. An entry without a usable
+id (a journal from before this lookup), a disabled KB and an ordinary lookup failure restore as
+before; a lookup timeout or owner cancellation fails the step before anything is restored or
+purged.
 
 A body is never pruned merely because the promotion and the local deletion succeeded: a Retry
 purges a pending draft, and the body is then the only copy. It is pruned when provably unneeded:
-at the next run for a consumed entry; at the end of a successful apply for an entry whose file is
-a regular local file again (a deduped or failed promotion kept it, or a Retry restored it and
-nothing re-routed it; a restore never overwrites an existing file); and the journal file is
-removed once no entry is left. Onboarding reset does not prune it: inside `.haive/` reset owns
+at the next run for a consumed entry; at the end of a successful apply for an entry whose file
+holds the very same article again (a deduped or failed promotion kept it, or a Retry restored it
+and nothing re-routed it); and the journal file is removed once no entry is left. Onboarding reset does not prune it: inside `.haive/` reset owns
 only `.haive/install.json`. The cost is one original-body copy per re-routed file whose draft is
 still pending, agent-readable under writable `.haive`; it is never staged as an agent body.
 Existing failures that predate the journal cannot be reconstructed from it. Rollback must retain

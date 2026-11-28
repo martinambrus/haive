@@ -20,12 +20,13 @@ const TASK = randomUUID();
 const OTHER_TASK = randomUUID();
 const log = { warn: vi.fn(), info: vi.fn() };
 
-type Over = Partial<{ sourceTaskId: string; source: string; status: string }>;
+type Over = Partial<{ sourceTaskId: string; source: string; status: string; supersededAt: Date }>;
 const row = (over: Over = {}) => ({
   id: randomUUID(),
   sourceTaskId: TASK,
   source: 'promoted',
   status: 'draft',
+  supersededAt: null,
   ...over,
 });
 
@@ -44,16 +45,24 @@ function store(rows: ReturnType<typeof row>[]) {
   for (const r of rows) fake.insert(globalKbEntries, r);
 }
 
-it('names only this task promotions that a Retry purge cannot remove', async () => {
+it('names only this task promotions whose knowledge a live entry holds', async () => {
   const pending = row();
   const active = row({ status: 'active' });
-  const archived = row({ status: 'archived' });
+  // Replaced by an active successor: its knowledge is live there.
+  const superseded = row({ status: 'archived', supersededAt: new Date() });
+  // Archived by hand is a rejection: no live entry holds it, so a Retry restores the file.
+  const rejected = row({ status: 'archived' });
   const otherTask = row({ sourceTaskId: OTHER_TASK, status: 'active' });
   const written = row({ source: 'user', status: 'active' });
-  store([pending, active, archived, otherTask, written]);
-  const ids = [pending, active, archived, otherTask, written].map((r) => r.id);
-  const got = await findConsumedTaskPromotions({} as never, TASK, [...ids, randomUUID()], log);
-  expect([...got].sort()).toEqual([active.id, archived.id].sort());
+  const all = [pending, active, superseded, rejected, otherTask, written];
+  store(all);
+  const got = await findConsumedTaskPromotions(
+    {} as never,
+    TASK,
+    [...all.map((r) => r.id), randomUUID()],
+    log,
+  );
+  expect([...got].sort()).toEqual([active.id, superseded.id].sort());
 });
 
 it('does not open the store when no id is given or the global KB is off', async () => {

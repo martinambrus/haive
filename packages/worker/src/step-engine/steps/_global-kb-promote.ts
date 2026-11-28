@@ -1,5 +1,5 @@
 import { globalKbCallOptions } from '@haive/shared/global-kb';
-import { and, desc, eq, inArray, isNull, ne, sql } from 'drizzle-orm';
+import { and, desc, eq, inArray, isNotNull, isNull, ne, or, sql } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
 import {
   setTaskSettlementTimeout,
@@ -765,12 +765,13 @@ export async function clearTaskPromotedDrafts(
   }
 }
 
-/** Which of `ids` are this task's promotions that `clearTaskPromotedDrafts` can no longer
- *  remove: the row exists and is not a `status='draft' source='promoted'` row of this task (it
- *  was activated or archived). A Retry must not put the local original of such an entry back.
- *  An unknown id, another task's row and a person's own entry are never counted. Empty when the
- *  global KB is disabled; an ordinary outage is logged and also yields empty, so the caller
- *  restores as before. Timeouts and owner cancellation propagate. */
+/** Which of `ids` are this task's promotions whose knowledge a live entry now holds, so a Retry
+ *  must not put the local original back: the row is active, or archived because an active
+ *  successor replaced it (`superseded_at` set; the digest serves `status = 'active'` only). A
+ *  draft (`clearTaskPromotedDrafts` removes it), a draft archived by hand (a rejection: nothing
+ *  live holds it), an unknown id, another task's row and a person's own entry are never counted.
+ *  Empty when the global KB is disabled; an ordinary outage is logged and also yields empty, so
+ *  the caller restores as before. Timeouts and owner cancellation propagate. */
 export async function findConsumedTaskPromotions(
   db: Database,
   taskId: string,
@@ -793,7 +794,13 @@ export async function findConsumedTaskPromotions(
               inArray(globalKbEntries.id, ids),
               eq(globalKbEntries.sourceTaskId, taskId),
               eq(globalKbEntries.source, 'promoted'),
-              ne(globalKbEntries.status, 'draft'),
+              or(
+                eq(globalKbEntries.status, 'active'),
+                and(
+                  eq(globalKbEntries.status, 'archived'),
+                  isNotNull(globalKbEntries.supersededAt),
+                ),
+              ),
             ),
           );
         return new Set(rows.map((row) => row.id));
