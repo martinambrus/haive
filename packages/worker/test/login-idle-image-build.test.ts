@@ -27,8 +27,9 @@ vi.mock('dockerode', () => ({
 }));
 
 import type { CliProviderName } from '@haive/shared';
+import { CLI_LOGIN_LEASE_LABEL, cliLoginLeaseKey } from '@haive/shared/cli-login-lease';
 import { cliAdapterRegistry } from '../src/cli-adapters/registry.js';
-import { handleLoginCreateJob } from '../src/queues/cli-exec/handlers.js';
+import { handleLoginCreateJob, loginLeaseHeld } from '../src/queues/cli-exec/handlers.js';
 import { probeCliPath } from '../src/queues/cli-exec/images.js';
 import { resolveImageTag } from '../src/sandbox/image-cache.js';
 
@@ -95,7 +96,6 @@ const imageOfProbe = () =>
   docker.run.mock.calls.find(([o]) => String(o.cmd).includes('--version'))?.[0]?.image;
 const builtTag = () => docker.build.mock.calls[0]?.[0]?.tag as string;
 const settleBuild = () => vi.waitFor(() => expect(docker.build).toHaveBeenCalled());
-const pause = (ms = 20) => new Promise((resolve) => setTimeout(resolve, ms));
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -202,12 +202,11 @@ describe('concurrent builders of one tag', () => {
     expect(docker.build).toHaveBeenCalledTimes(1);
   });
 
-  it('Login and Test started together build the tag once and leave the row ready', async () => {
+  it('Login and Test started together build the tag once; the login joins it or is told it builds', async () => {
     hold();
     const { db, row } = setup(provider(A));
     const both = Promise.all([login(db), test(db, row(A))]);
     await settleBuild();
-    await pause();
     release();
     const [loggedIn] = await both;
     expect(docker.build).toHaveBeenCalledTimes(1);
@@ -224,7 +223,6 @@ describe('concurrent builders of one tag', () => {
     const { db, row } = setup(...rows);
     const both = Promise.all([login(db, A), login(db, B)]);
     await settleBuild();
-    await pause();
     release();
     const results = await both;
     expect(results.map((r) => r.ok)).toEqual([true, true]);
@@ -294,5 +292,71 @@ describe('Log in on a row whose image cannot be used', () => {
     const { db } = setup(provider(A));
     const result = await handleLoginCreateJob(db, { providerId: B, userId: USER });
     expect(result).toEqual({ ok: false, error: 'provider not found' });
+  });
+});
+
+describe('Log in after the api session that asked for it has ended', () => {
+  const LEASE = 'attempt-lease';
+  const withLease = (db: Database, leaseHeld: (leaseId: string) => Promise<boolean>) =>
+    handleLoginCreateJob(db, { providerId: A, userId: USER, leaseId: LEASE }, leaseHeld);
+
+  it('does nothing when its lease is already gone: no build, no volume change, no container', async () => {
+    const { db, row } = setup(provider(A));
+    const leaseHeld = vi.fn(async () => false);
+    const result = await withLease(db, leaseHeld);
+    expect(result.ok).toBe(false);
+    expect(result.code).toBeUndefined();
+    expect(leaseHeld).toHaveBeenCalledWith(LEASE);
+    expect(docker.inspect).not.toHaveBeenCalled();
+    expect(docker.build).not.toHaveBeenCalled();
+    expect(chowns()).toHaveLength(0);
+    expect(engine.createContainer).not.toHaveBeenCalled();
+    expect(row(A).sandboxImageBuildStatus).toBe('idle');
+  });
+
+  it('finishes the build it started when the lease ends during it, then stops before the volume and the container', async () => {
+    const { db, row } = setup(provider(A));
+    // Held until a build has started, gone once it has ended.
+    const result = await withLease(db, async () => docker.build.mock.calls.length === 0);
+    expect(result.ok).toBe(false);
+    expect(result.code).toBeUndefined();
+    expect(docker.build).toHaveBeenCalledTimes(1);
+    expect(row(A)).toMatchObject({ sandboxImageBuildStatus: 'ready', sandboxImageTag: builtTag() });
+    expect(chowns()).toHaveLength(0);
+    expect(engine.createContainer).not.toHaveBeenCalled();
+  });
+
+  it('goes on while the lease is held and puts it on the container', async () => {
+    const { db } = setup(provider(A));
+    const leaseHeld = vi.fn(async () => true);
+    await expect(withLease(db, leaseHeld)).resolves.toMatchObject({ ok: true });
+    expect(leaseHeld).toHaveBeenCalledWith(LEASE);
+    expect(engine.createContainer.mock.calls[0]?.[0]?.Labels).toMatchObject({
+      [CLI_LOGIN_LEASE_LABEL]: LEASE,
+    });
+  });
+
+  it('asks for no lease when the job was queued without one', async () => {
+    const { db } = setup(provider(A));
+    const leaseHeld = vi.fn(async () => false);
+    await expect(
+      handleLoginCreateJob(db, { providerId: A, userId: USER }, leaseHeld),
+    ).resolves.toMatchObject({ ok: true });
+    expect(leaseHeld).not.toHaveBeenCalled();
+  });
+});
+
+describe('the lease read', () => {
+  it('holds while the key is set, ends when it is gone, and holds when it cannot be read', async () => {
+    const exists = vi.fn();
+    exists.mockResolvedValueOnce(1);
+    await expect(loginLeaseHeld('a', { exists })).resolves.toBe(true);
+    expect(exists).toHaveBeenCalledWith(cliLoginLeaseKey('a'));
+    exists.mockResolvedValueOnce(0);
+    await expect(loginLeaseHeld('a', { exists })).resolves.toBe(false);
+    exists.mockRejectedValueOnce(new Error('read timed out'));
+    await expect(loginLeaseHeld('a', { exists })).resolves.toBe(true);
+    // No client yet (Redis not initialised) is as unreadable as a client that times out.
+    await expect(loginLeaseHeld('a')).resolves.toBe(true);
   });
 });

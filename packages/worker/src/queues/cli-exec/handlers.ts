@@ -9,9 +9,11 @@ import { mkdir, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { DelayedError, UnrecoverableError, Worker, type Job, type Queue } from 'bullmq';
+import type { Redis } from 'ioredis';
 import { and, eq, inArray, isNotNull, isNull, lte, notInArray, sql } from 'drizzle-orm';
 import { schema, tryCliAuthLock, type Database } from '@haive/database';
 import { cliAuthScope } from '@haive/shared/cli-auth-state';
+import { cliLoginLeaseKey } from '@haive/shared/cli-login-lease';
 import { CLAUDE_USAGE_OAUTH_SECRET } from '@haive/shared/claude-oauth';
 import { safeErrorMessage, safeErrorForTransport } from '@haive/shared/logger';
 import { scrubWorkerErrorPaths } from '../../repo/stored-error.js';
@@ -93,7 +95,7 @@ import {
   withAssignedAgents,
 } from '../../cli-executor/tool-usage.js';
 import { getDb } from '../../db.js';
-import { getBullRedis } from '../../redis.js';
+import { getBullRedis, getRedis } from '../../redis.js';
 import { publishCliExit } from '../cli-stream-publisher.js';
 import {
   CliLoginRequiredError,
@@ -1232,9 +1234,24 @@ export async function handleRefreshCliVersionsJob(
   return result;
 }
 
+/** Whether the api session that queued a login still holds its lease, the key the login container
+ *  reaper reads. Only a read that says the key is gone ends the login: one that fails counts as held,
+ *  and the reaper still removes whatever such a job creates. */
+export async function loginLeaseHeld(
+  leaseId: string,
+  redis?: Pick<Redis, 'exists'>,
+): Promise<boolean> {
+  try {
+    return (await (redis ?? getRedis()).exists(cliLoginLeaseKey(leaseId))) === 1;
+  } catch {
+    return true;
+  }
+}
+
 export async function handleLoginCreateJob(
   db: Database,
   payload: CliLoginCreateJobPayload,
+  leaseHeld: (leaseId: string) => Promise<boolean> = loginLeaseHeld,
 ): Promise<CliLoginCreateResult> {
   const provider = await db.query.cliProviders.findFirst({
     where: eq(schema.cliProviders.id, payload.providerId),
@@ -1260,11 +1277,24 @@ export async function handleLoginCreateJob(
     return { ok: false, error: safeErrorMessage(err) };
   }
 
+  // The api session that queued this job may be gone by the time it runs or has built an image: it
+  // closed, hit its startup limit, or this is a redelivery after a worker crash. Its lease is gone
+  // too, and nothing is left to log in to, so no build is started for it and the auth volume and
+  // Docker are left alone. A build that is already running goes on: the next Log in uses it.
+  const { leaseId } = payload;
+  const sessionEnded = async (): Promise<boolean> =>
+    leaseId ? !(await leaseHeld(leaseId)) : false;
+  const ended = (): CliLoginCreateResult => {
+    log.info({ providerId: provider.id }, 'login abandoned: its api session has ended');
+    return { ok: false, error: 'login attempt ended before the login container was created' };
+  };
+  if (await sessionEnded()) return ended();
+
   // The login runs in the image the provider Test uses, through the same call: one on the host is
-  // used as it is, a missing one is built here (joining a build of its tag already running in this
-  // worker), and one being built elsewhere or whose build failed ends the login with a code the
-  // dialog maps to the providers list's reason. The row's status is not read: the build decides it.
-  // Before the auth volume is touched, so a refused login leaves the volume alone.
+  // used as it is whatever the row says, a missing one is built here (joining a build of its tag
+  // already running in this worker), and one being built elsewhere or whose build failed ends the
+  // login with a code the dialog maps to the providers list's reason. Before the auth volume is
+  // touched, so a refused login leaves the volume alone.
   let imageTag: string | null;
   try {
     imageTag = await ensureProviderSandboxImage(db, provider);
@@ -1284,6 +1314,7 @@ export async function handleLoginCreateJob(
     return { ok: false, error: safeErrorMessage(err) };
   }
   if (!imageTag) return { ok: false, error: 'no sandbox image is configured for this provider' };
+  if (await sessionEnded()) return ended();
 
   // Ensure the per-user auth volume(s) are owned by the sandbox user (uid 1000)
   // before the login container (which runs as `node`) mounts them. Docker

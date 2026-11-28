@@ -565,26 +565,34 @@ terminals resolve their image through `resolveSandboxImageTag`, whose plain path
 task with a composed image takes the composition path first), so their CLI pickers stay open; Sign
 out removes volumes and never needs the image.
 
-**Log in builds a missing image the way Test does.** The row's status is not what lets a login
-start. `handleLoginCreateJob` calls `ensureProviderSandboxImage`, the call Test makes with no
-wait budget, before it touches the auth volume: an image on the host is used whatever the row
-says (an `idle` row stays `idle`), a missing one is built inline through the same single-flight
-(`handleBuildSandboxImageJob`, `inFlightBuilds`, so a Login beside a Test, an Upgrade or a login
-of a provider sharing the tag starts no second build), a row already `building` is refused at
-once, and a failed build leaves the row `failed` with its error. `createSandboxLoginContainer`
-runs in the tag it is handed (`imageTag`) and reads no row state. A refusal that comes from the
-image state carries `CliLoginCreateResult.code` (`CLI_LOGIN_REFUSAL_CODES`: `sandbox_image_building`,
-`sandbox_image_failed`), chosen from `SandboxImageUnavailableError.reason`, never from the
-message; the api forwards it on the websocket `error` frame, and the modal words it with
+**Log in builds a missing image the way Test does.** The image on the host, not the row's status,
+lets a login start. `handleLoginCreateJob` calls `ensureProviderSandboxImage`, the call Test makes
+with no wait budget, before it touches the auth volume. An image on the host is used whatever the
+row says (an `idle` row stays `idle`). A missing one is built inline through the same single-flight
+(`handleBuildSandboxImageJob`: `inFlightBuilds`, the tag turn, the row claim), so a Log in beside a
+Test, an Upgrade or a login of a provider sharing the tag starts no second build; a row already
+`building` whose image is still missing is refused at once; a failed build leaves the row `failed`
+with its error. The tag is the one the configuration resolves to, not the row's: a `ready` row whose
+configuration now names a tag the host does not hold (CLI version bumped, rebuild not yet done)
+builds that tag inline instead of logging in on the old image. `createSandboxLoginContainer` runs in
+the tag it is handed (`imageTag`) and reads no row state. A refusal that comes from the image state
+carries `CliLoginCreateResult.code` (`CLI_LOGIN_REFUSAL_CODES`: `sandbox_image_building`,
+`sandbox_image_failed`), chosen from `SandboxImageUnavailableError.reason`, never from the message;
+the api forwards it on the websocket `error` frame, and the modal words it with
 `IMAGE_BUILDING_REASON` or `IMAGE_FAILED_REASON` (`loginRefusalReason`). Every Log in entry (the
-list, the edit page, the usage chips, a task's login hint) ends in that modal, so the entries
-that hold no provider row show the list's wording instead of the worker's text; a refusal
-without a code still shows its message. While a login dialog is open the list re-reads on the
-build interval, and once more when it closes, so the build a login starts shows. The api's login
-startup limit (`PRE_CONTAINER_TIMEOUT_MS`, 2 minutes) still bounds the wait: a longer inline
-build ends the attempt with "Login took too long to start", the build goes on in the worker, a
-retry is refused as `building` until it ends, and the container the abandoned job creates
-afterwards carries a lease the api no longer holds, which the login container reaper removes.
+list, the edit page, the usage chips, a task's login hint) ends in that modal, so the entries that
+hold no provider row show the list's wording instead of the worker's text; a refusal without a code
+still shows its message. While a login dialog is open the list re-reads on the build interval for as
+long as it stays open, and once more when it closes, so the build a login starts shows.
+
+The api's login startup limit (`PRE_CONTAINER_TIMEOUT_MS`, 2 minutes) still bounds the wait: a longer
+inline build ends the attempt with "Login took too long to start", the build goes on in the worker,
+and a retry is refused as `building` until it ends. The job checks the attempt's lease
+(`loginLeaseHeld`, the key the login container reaper reads) before the image call and again after
+it. A login whose api session has ended starts no build, a redelivery after a worker crash included,
+and one that outlived its session finishes the build and stops before it touches the auth volume or
+creates a container. A lease read that fails counts as held; the reaper still removes what such a
+job creates.
 
 **Repository editors open the checkout directly.** The Repositories Actions menu links to
 `/repos/<id>/editor` for ready, writable repositories, alongside Terminal. The page uses the

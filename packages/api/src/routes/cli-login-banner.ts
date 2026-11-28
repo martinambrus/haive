@@ -70,7 +70,8 @@ const SESSION_TIMEOUT_MS = 10 * 60 * 1000;
 // finishing, not of a spinner.
 const QUEUE_REPORT_MS = 2_000;
 // Bound on the post-cancel drain only. Reached only when the worker had already picked the job
-// up, so it is waiting on a container create that is seconds away, not on a queue.
+// up, so it is waiting on its image check and a container create, not on a queue. A first build
+// of the image can outlast the drain: the job then stops on its own once it finds the lease gone.
 const CONTAINER_TEARDOWN_TIMEOUT_MS = 30_000;
 const CANCEL_DRAIN_MS = 2 * 60 * 1000;
 
