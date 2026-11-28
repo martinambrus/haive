@@ -1130,6 +1130,17 @@ toolingUpgradeRoutes.post('/:id/cli-targets/remove', async (c) => {
   const db = getDb();
   const repositoryId = c.req.param('id');
   const cliTargets = await db.transaction(async (tx) => {
+    // Read before the keys are taken, so a caller who does not own the repository never queues on them.
+    const [owned] = await tx
+      .select({ id: schema.repositories.id })
+      .from(schema.repositories)
+      .where(
+        and(
+          eq(schema.repositories.id, repositoryId),
+          eq(schema.repositories.userId, c.get('userId')),
+        ),
+      );
+    if (!owned) throw new HttpError(404, 'Repository not found');
     const [repo] = await boundedLockWait(tx, async () => {
       await lockRepositoryTasksKey(tx, repositoryId);
       await tx.execute(

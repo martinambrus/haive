@@ -88,15 +88,12 @@ const routes: Array<{
   /** The database holds a row spelled as the URL spells it (the fake compares ids as text, and
    *  rejects a non-hyphenated spelling outright), so only these spellings reach the lock. */
   rowSpellings: readonly string[];
-  /** The locks run before any row is read, so no row is needed. */
-  seedRow: boolean;
   expected: (spelled: string) => string[];
   run: (spelled: string) => unknown;
 }> = [
   {
     name: 'PUT /repositories/:id/integrations',
     rowSpellings: ['uppercase'],
-    seedRow: true,
     expected: (spelled) => [`integration-allow-list:${spelled}`],
     run: (spelled) =>
       send(`/repositories/${spelled}/integrations`, 'PUT', {
@@ -106,8 +103,7 @@ const routes: Array<{
   },
   {
     name: 'POST /repositories/:id/cli-targets/remove',
-    rowSpellings: ['uppercase', 'unhyphenated', 'braced'],
-    seedRow: false,
+    rowSpellings: ['uppercase'],
     expected: (spelled) => [`onboarding-upgrade:${spelled}`, `project-state:${spelled}`],
     run: (spelled) =>
       send(`/repositories/${spelled}/cli-targets/remove`, 'POST', {
@@ -121,7 +117,7 @@ describe('lock key spelling', () => {
   for (const route of routes) {
     const keysFor = async (spelled: string) => {
       keys = [];
-      useDb(route.seedRow ? spelled : undefined);
+      useDb(spelled);
       await route.run(spelled);
       return keys.join(' ');
     };
