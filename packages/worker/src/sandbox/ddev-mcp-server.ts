@@ -74,7 +74,13 @@ async function callApi(action, body) {
     return { isError: true, text: 'ddev_' + action + ' HTTP ' + resp.status + ': ' + t.slice(0, 400) };
   }
   const data = await resp.json().catch(() => ({}));
-  return { isError: false, text: typeof data?.output === 'string' ? data.output : JSON.stringify(data) };
+  const output = typeof data?.output === 'string' ? data.output : null;
+  // The relay answers HTTP 200 even for a failed command: ok:false is the failure, however little it printed.
+  if (data?.ok === false) {
+    const why = typeof data.error === 'string' && data.error ? data.error : 'ddev_' + action + ' failed';
+    return { isError: true, text: output && output !== why ? why + '\n' + output : why };
+  }
+  return { isError: false, text: output ?? JSON.stringify(data) };
 }
 
 async function callTool(name, args) {
