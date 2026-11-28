@@ -988,7 +988,7 @@ export class ConfigService {
         // Seeding makes this key the install's. Without a database (callers that never held
         // ciphertext) there is nothing to check it against.
         const bootDb = typeof db === 'function' ? db() : db;
-        if (bootDb) await assertKeyReadsSystemSecrets(bootDb, envKey, 'CONFIG_ENCRYPTION_KEY');
+        if (bootDb) await assertKeyReadsSystemSecrets(bootDb, envKey, 'env');
         const seeded = await this.seedEnvEncryptionKey(envKey, 'ensureEncryptionKey');
         logger.info(
           seeded

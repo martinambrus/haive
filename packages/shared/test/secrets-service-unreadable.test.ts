@@ -9,7 +9,7 @@ vi.mock('../src/logger/index.js', () => ({
   logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
 }));
 import { logger } from '../src/logger/index.js';
-import { configService } from '../src/config/config.service.js';
+import { CONFIG_KEYS, configService } from '../src/config/config.service.js';
 import { SecretUnreadableError } from '../src/config/secret-unreadable.js';
 import { SECRET_KEYS, SecretsService } from '../src/config/secrets.service.js';
 import { decrypt, encrypt } from '../src/crypto/index.js';
@@ -350,7 +350,9 @@ describe('an unreadable stored secret is never an absent one', () => {
     fixture.set(unreadableRows());
     const before = snapshot(fixture.rows);
     const svc = new SecretsService();
-    await expectRefusal(svc.initialize(fixture.db), NAMES);
+    const error = await expectRefusal(svc.initialize(fixture.db), NAMES);
+    // The key came from Redis, so the way back names the Redis key to remove.
+    expect(error.message).toContain(CONFIG_KEYS.ENCRYPTION_KEY);
     expect(fixture.writes()).toBe(0);
     expect(snapshot(fixture.rows)).toEqual(before);
     await expect(svc.get(SECRET_KEYS.MASTER_KEK)).rejects.toThrow('not initialized');
@@ -468,6 +470,25 @@ describe('the probe', () => {
     expect(error === failure || error.cause === failure).toBe(true);
     expect(fixture.writes()).toBe(0);
     expect(snapshot(fixture.rows)).toEqual(before);
+  });
+
+  it('A9 initialize resolves without reading rows when the system_secrets table does not exist', async () => {
+    const fixture = fakeDb();
+    const inner = fixture.db.execute.bind(fixture.db);
+    const rowReads = vi.fn();
+    Object.assign(fixture.db, {
+      execute: async (query: SQL) => {
+        const text = new PgDialect().sqlToQuery(query).sql.toLowerCase();
+        if (text.includes('to_regclass')) return [{ present: false }];
+        if (text.includes('encrypted_value')) {
+          rowReads();
+          throw new Error('relation "system_secrets" does not exist');
+        }
+        return inner(query);
+      },
+    });
+    await new SecretsService().initialize(fixture.db);
+    expect(rowReads).not.toHaveBeenCalled();
   });
 });
 

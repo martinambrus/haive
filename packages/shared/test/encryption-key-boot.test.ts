@@ -517,6 +517,8 @@ describe('an environment key that cannot read the stored system secrets', () => 
     expect([...error.secretKeys].sort()).toEqual([...NAMES].sort());
     expect(error.message).toContain('CONFIG_ENCRYPTION_KEY');
     expect(error.message).toContain('HAIVE_DISCARD_UNREADABLE_SECRETS=1');
+    // Redis is empty on this path, so there is no stored key to tell the operator to remove.
+    expect(error.message).not.toContain(CONFIG_KEYS.ENCRYPTION_KEY);
     expect(redis.store.has(CONFIG_KEYS.ENCRYPTION_KEY)).toBe(false);
     expect(redis.store.has(PENDING)).toBe(false);
     expect(fixture.audit.size).toBe(0);

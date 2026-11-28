@@ -175,11 +175,20 @@ that already discarded and regenerated is left alone, and api and worker booting
 audit row), then writes the same `config.discard_unreadable_secrets` audit row (random id,
 `keyPresent: true`, the same counts) and deletes the system secrets in that one transaction, so the
 recovery claim gates read it as they read the no-key discard. A table with only some unreadable rows,
-which the old behaviour could already have left behind, does not refuse boot: each unreadable row
-throws at its reader instead of being replaced (`GET /admin/mail` and the global KB connection string
-then fail as they already did in production). `recover-admin` reports the refusal as "does not decrypt
-the stored system secrets" and never offers the override, which it cannot receive: the helper
-forwards only `DATABASE_URL`, `REDIS_URL` and `CONFIG_ENCRYPTION_KEY`.
+which the old behaviour could already have left behind, does not refuse boot, and the override does
+not apply to it: it fires only when the key reads none of the rows, so it can never delete a readable
+`master_kek`. Each unreadable row throws `SecretUnreadableError` at its reader instead of being
+replaced; the optional ones (`GET /admin/mail`, the global KB connection string) then fail as they
+already did in production. When the unreadable row is one boot reads (`master_kek`, `jwt_secret`,
+`email_blind_index_pepper`), the service that reads it exits at boot with the row's name, and the log
+line before it points here. Restore the key that wrote that row. If that key is lost, delete that one
+row (`DELETE FROM system_secrets WHERE key = '<name>'`) and restart so boot generates it again,
+accepting what depended on it: a new `master_kek` orphans every envelope the old one wrapped, a new
+`email_blind_index_pepper` breaks every email login lookup, a new `jwt_secret` signs everyone out.
+`recover-admin` reports a refusal as "does not decrypt the stored system secrets" and never offers the
+override. The `./haive` helper and its PowerShell fallback forward only `DATABASE_URL`, `REDIS_URL`
+and `CONFIG_ENCRYPTION_KEY`, so they cannot discard; the `docker exec` form below runs inside the api
+container and inherits its `HAIVE_DISCARD_UNREADABLE_SECRETS`, so keep that at 0 when running it.
 
 **An environment key is checked before it seeds Redis.** `ConfigService.ensureEncryptionKey` seeded
 `CONFIG_ENCRYPTION_KEY` into an empty Redis without asking whether it reads what the database holds,
@@ -189,9 +198,9 @@ worker and its scripts, the updater and `recover-admin` all do; a caller without
 check against and is unchanged). The override works the same way there: the audited discard first,
 then the seed. MEASURED on throwaway PostgreSQL 18 and Redis 8 through the real api `bootstrap()`
 (one fresh process per phase, evidence by SHA-256 of each stored row): with Redis wiped and a
-different `CONFIG_ENCRYPTION_KEY`, the base commit booted and rewrote every stored system secret;
-now boot refuses with every row unchanged and no key seeded, the original key then boots unchanged,
-and the override writes one audit row.
+different `CONFIG_ENCRYPTION_KEY`, the base commit booted and changed the stored system secrets (the
+row hashes differ); now boot refuses with every row unchanged and no key seeded, the original key then
+boots unchanged, and the override writes one audit row.
 
 **Recover an administrator after key loss.** First let boot finish with the discard override, then
 remove the override. New installations created with this release have the recovery subcommand.

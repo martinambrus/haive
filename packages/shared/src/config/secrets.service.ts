@@ -31,7 +31,7 @@ export class SecretsService {
     this.db = db;
     this.encryptionKey = await configService.getEncryptionKey();
     // Before any write: a key that reads none of the stored secrets refuses boot untouched.
-    await assertKeyReadsSystemSecrets(db, this.encryptionKey, 'The encryption key in Redis');
+    await assertKeyReadsSystemSecrets(db, this.encryptionKey, 'redis');
     await this.removeRetiredKeys();
     this.initialized = true;
     logger.info('SecretsService initialized');
@@ -61,7 +61,14 @@ export class SecretsService {
     const plaintext = tryDecrypt(row.encryptedValue, this.encryptionKey!);
     if (plaintext === null) {
       // Never null: the generators below read null as "absent" and would overwrite this row.
-      logger.error({ key }, 'Failed to decrypt secret');
+      logger.error(
+        {
+          key,
+          rule: 'docs/architecture/error-diagnostics.md',
+          section: 'Configuration store outage',
+        },
+        'Failed to decrypt secret',
+      );
       throw new SecretUnreadableError(
         `Failed to decrypt secret '${key}': encryption key may have changed`,
         [key],

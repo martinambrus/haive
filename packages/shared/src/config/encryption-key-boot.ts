@@ -147,6 +147,18 @@ async function discardUnreadableSystemSecrets(
   if (discarded) logDiscard(discarded);
 }
 
+/** Where the key under test came from; only the refusal text differs. */
+const KEY_SOURCES = {
+  env: {
+    origin: 'CONFIG_ENCRYPTION_KEY',
+    restore: 'Restore the original CONFIG_ENCRYPTION_KEY.',
+  },
+  redis: {
+    origin: `The encryption key in Redis (${ENCRYPTION_KEY_REDIS_KEY})`,
+    restore: `Restore the original key: CONFIG_ENCRYPTION_KEY only seeds an empty Redis, so remove the different key stored in Redis (${ENCRYPTION_KEY_REDIS_KEY}) first.`,
+  },
+} as const;
+
 /** A key that is present must read what the database holds before it is seeded or used. One
  * readable row proves the key is this database's; only a table it reads none of means the wrong
  * key. That refuses, and `HAIVE_DISCARD_UNREADABLE_SECRETS=1` is the same audited discard as a boot
@@ -154,13 +166,14 @@ async function discardUnreadableSystemSecrets(
 export async function assertKeyReadsSystemSecrets(
   db: EncryptionKeyBootDatabase,
   key: string,
-  origin: string,
+  source: keyof typeof KEY_SOURCES,
 ): Promise<void> {
   const unreadable = unreadableTable(await systemSecretRows(db), key);
   if (!unreadable) return;
   if (process.env[DISCARD_SETTING] !== '1') {
+    const { origin, restore } = KEY_SOURCES[source];
     throw new SecretUnreadableError(
-      `${origin} cannot decrypt any of the ${unreadable.length} stored system secrets (${unreadable.join(', ')}), so it is not the key this database was written with. Nothing was changed. Restore the original key: CONFIG_ENCRYPTION_KEY only seeds an empty Redis, so remove a different key stored in Redis (${ENCRYPTION_KEY_REDIS_KEY}) first. Or set ${DISCARD_SETTING}=1 to discard the unreadable system secrets in one audited transaction; every user field and credential that depends on them stays unreadable.`,
+      `${origin} cannot decrypt any of the ${unreadable.length} stored system secrets (${unreadable.join(', ')}), so it is not the key this database was written with. Nothing was changed. ${restore} Or set ${DISCARD_SETTING}=1 to discard the unreadable system secrets in one audited transaction; every user field and credential that depends on them stays unreadable.`,
       unreadable,
     );
   }
