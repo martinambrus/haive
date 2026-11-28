@@ -34,6 +34,7 @@ import { runCatalogVersionRefresh, type QueuedJobPhase } from '@/lib/cli-jobs';
 import { OllamaModelDownload } from '@/components/ollama-model-download';
 import { OpenRouterModelPicker } from '@/components/openrouter-model-picker';
 import { Dialog } from '@/components/dialog';
+import { IMAGE_BUILDING_REASON, IMAGE_FAILED_REASON } from '@/lib/cli-image-build';
 import { MarkdownView } from '@/components/markdown/markdown-view';
 
 interface ProviderDisableImpact {
@@ -58,6 +59,7 @@ interface CliProviderFormProps {
   // the matching notice and gate the sibling test component without knowing
   // anything about the form's internal state.
   onTestBlockChange?: (blockMessage: string | null) => void;
+  onImageBlockChange?: (blockMessage: string | null) => void;
   // Bumped by the parent after an external event wrote a new secret (e.g. a
   // successful interactive CLI login). Triggers the secrets-load effect so the
   // textarea + existingSecrets reflect the server state without a page reload.
@@ -67,11 +69,6 @@ interface CliProviderFormProps {
 const TEST_BLOCK_DIRTY =
   'Unsaved form changes detected. Save the form first so the probe runs against the updated ' +
   'configuration instead of the values last written to the database.';
-const TEST_BLOCK_BUILDING =
-  'Sandbox image is currently rebuilding. Wait for the build to finish so the probe runs ' +
-  'against the new image instead of the previous one.';
-const TEST_BLOCK_FAILED =
-  'The last sandbox image build failed. Fix the Dockerfile and rebuild before running the probe.';
 
 interface FormState {
   name: CliProviderName;
@@ -181,6 +178,7 @@ export function CliProviderForm({
   metadata,
   onProviderSaved,
   onTestBlockChange,
+  onImageBlockChange,
   secretsReloadNonce = 0,
 }: CliProviderFormProps) {
   const router = useRouter();
@@ -392,17 +390,21 @@ export function CliProviderForm({
   // overrides an in-flight build so the user is told to save first; after
   // save/rebuild the building state takes over so the probe is held back
   // until the new image is ready.
-  const testBlockMessage: string | null = formDirty
-    ? TEST_BLOCK_DIRTY
-    : buildState.status === 'building'
-      ? TEST_BLOCK_BUILDING
+  const imageBlockMessage: string | null =
+    buildState.status === 'building'
+      ? IMAGE_BUILDING_REASON
       : buildState.status === 'failed'
-        ? TEST_BLOCK_FAILED
+        ? IMAGE_FAILED_REASON
         : null;
+  const testBlockMessage: string | null = formDirty ? TEST_BLOCK_DIRTY : imageBlockMessage;
 
   useEffect(() => {
     onTestBlockChange?.(testBlockMessage);
   }, [testBlockMessage, onTestBlockChange]);
+
+  useEffect(() => {
+    onImageBlockChange?.(imageBlockMessage);
+  }, [imageBlockMessage, onImageBlockChange]);
 
   useEffect(() => {
     if (mode !== 'edit' || !provider?.id) return;

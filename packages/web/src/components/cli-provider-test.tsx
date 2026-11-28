@@ -18,6 +18,9 @@ interface CliProviderTestProps {
   providerName: CliProviderName;
   providerLabel: string;
   blockMessage?: string | null;
+  /** Why Log in cannot start now (its sandbox image is not usable). Unlike `blockMessage`, unsaved
+   *  form edits never set it: a login does not read the saved configuration. */
+  loginBlockMessage?: string | null;
   /** The poller found this provider's usage token dead. Reveals Log in on its own, because a
    *  rejected token is already the evidence a Test would go and fetch — and this is where the
    *  reconnect prompts deep-link to, so the button has to be here when they arrive. */
@@ -61,6 +64,7 @@ export function CliProviderTest({
   providerName,
   providerLabel,
   blockMessage,
+  loginBlockMessage,
   needsUsageReconnect,
   rowAuthStatus,
   rowAuthMode,
@@ -139,7 +143,12 @@ export function CliProviderTest({
           {testing ? (phase === 'queued' ? 'Queued...' : 'Testing...') : 'Test connection'}
         </Button>
         {showLogin && (
-          <Button variant="secondary" onClick={handleLogin} disabled={testing}>
+          <Button
+            variant="secondary"
+            onClick={handleLogin}
+            disabled={testing || Boolean(loginBlockMessage)}
+            title={loginBlockMessage ?? undefined}
+          >
             Log in
           </Button>
         )}
@@ -159,6 +168,7 @@ export function CliProviderTest({
               res={result.cli}
               providerName={providerName}
               onLogin={handleLogin}
+              loginBlockMessage={loginBlockMessage}
             />
           )}
         </div>
@@ -172,11 +182,13 @@ function PathResultRow({
   res,
   providerName,
   onLogin,
+  loginBlockMessage,
 }: {
   label: string;
   res: CliProbePathResult;
   providerName: CliProviderName;
   onLogin: () => void;
+  loginBlockMessage?: string | null;
 }) {
   const loginPrompt =
     !res.ok &&
@@ -203,7 +215,9 @@ function PathResultRow({
           <button
             type="button"
             onClick={onLogin}
-            className="font-semibold text-amber-200 underline underline-offset-2 hover:text-amber-100"
+            disabled={Boolean(loginBlockMessage)}
+            title={loginBlockMessage ?? undefined}
+            className="font-semibold text-amber-200 underline underline-offset-2 hover:text-amber-100 disabled:cursor-not-allowed disabled:opacity-50 disabled:no-underline"
           >
             Log in
           </button>{' '}
