@@ -444,4 +444,25 @@ describe('image build state on the providers list', () => {
     view.draw();
     expect(notices()).toEqual([]);
   });
+
+  it('P15 no notice when the build already finished before the list reloads', async () => {
+    fakeDocument();
+    // The PATCH answer says building, but a cached build is ready by the time load() reads the
+    // list, so no poll starts that could clear the notice later.
+    h.patch.mockImplementation(async () => ({
+      provider: { ...provider(), sandboxImageBuildStatus: 'building' },
+    }));
+    state.status = 'ready';
+    const view = await mount();
+    fire.click(menuButton(view.tree(), /^upgrade$/i));
+    await vi.advanceTimersByTimeAsync(0);
+    view.draw();
+    const notices = () =>
+      findAll(view.tree(), (n) => n.props.role === 'status').map((n) => textOf(n));
+    expect(notices()).toEqual([]);
+    fire.click(buttons(view.tree(), /^upgrade everything$/i)[0]!);
+    await vi.advanceTimersByTimeAsync(0);
+    view.draw();
+    expect(notices()).toEqual([]);
+  });
 });

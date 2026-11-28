@@ -189,6 +189,11 @@ export default function CliProvidersPage() {
   }, []);
 
   const anyBuilding = providers ? anyImageBuilding(providers) : false;
+  // A rebuild notice describes a build the list still shows. A cached or quick build can finish
+  // before the reload after an Upgrade, and then no poll starts that would clear it.
+  useEffect(() => {
+    if (notice && !anyBuilding) setNotice(null);
+  }, [notice, anyBuilding]);
   useEffect(() => {
     if (!anyBuilding) return;
     const controller = new AbortController();
@@ -563,7 +568,7 @@ export default function CliProvidersPage() {
       </div>
 
       <FormError message={error} />
-      {notice && (
+      {notice && anyBuilding && (
         <div
           role="status"
           className="rounded-md border border-neutral-800 px-3 py-2 text-sm text-neutral-300"
