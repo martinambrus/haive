@@ -1248,7 +1248,7 @@ status: open · kind: fix (UX) · found: T794 review 2026-11-28 · priority: P3
 
 ### T796 · CLI provider cards overflow a 360 px screen, Actions half off-screen
 
-status: in progress 2026-11-28 (session, web-only PR) · kind: fix (UX) · found: T794 live check 2026-11-28 · priority: P3
+status: done 2026-11-28, #1414 (ac4e96202, web hot reload): the card header stacks below `sm`, badges and the build line wrap. Live check with a client-side fixture (building + failed rows, long error): no horizontal overflow at 360 (iframe), 768 and 1280 px; desktop row layout unchanged · kind: fix (UX) · found: T794 live check 2026-11-28 · priority: P3
 
 Measured at 360 px (`/cli-providers`, 289 px main column): every card's narrowest layout is about 322 px (title column, 16 px gap, a 99 px Actions button and padding side by side), so main scrolls sideways and Actions sits half off-screen. T794's badges widen it: the nowrap "Rebuilding sandbox image · <version>" badge took the card to 400 px (`truncate` does not lower a flex item's min-content), and "Image build failed" to 291 px. Fix: stack Actions under the title below `sm`, and let both image badges wrap. Simulated with inline styles: main scroll width 482 px to 289 px (none). Control: browser check at 360/768/1280 after merge.
 
