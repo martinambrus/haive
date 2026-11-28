@@ -188,6 +188,7 @@ describe.skipIf(!url)('GET /m/statistics/files-read on migrated PostgreSQL', () 
   const r2 = randomUUID();
   const r3 = randomUUID();
   const r4 = randomUUID();
+  const r5 = randomUUID();
   const providers = {
     cc: randomUUID(),
     cx: randomUUID(),
@@ -201,6 +202,7 @@ describe.skipIf(!url)('GET /m/statistics/files-read on migrated PostgreSQL', () 
     t4: randomUUID(),
     t5: randomUUID(),
     t6: randomUUID(),
+    t7: randomUUID(),
   };
   const stepIds = new Map<string, string>();
   let mainRequest: Promise<Body> | undefined;
@@ -231,7 +233,7 @@ describe.skipIf(!url)('GET /m/statistics/files-read on migrated PostgreSQL', () 
     });
     await db.insert(schema.users).values([user(u1, 'files-read-u1'), user(u2, 'files-read-u2')]);
     await db.insert(schema.repositories).values(
-      [r1, r2, r3, r4].map((id) => ({
+      [r1, r2, r3, r4, r5].map((id) => ({
         id,
         userId: u1,
         name: `files-read-${id}`,
@@ -261,6 +263,7 @@ describe.skipIf(!url)('GET /m/statistics/files-read on migrated PostgreSQL', () 
       ['t4', u1, r4, ['06-huge']],
       ['t5', u1, r2, ['04-implement']],
       ['t6', u2, r1, ['04-implement']],
+      ['t7', u1, r5, ['04-implement']],
     ];
     await db.insert(schema.tasks).values(
       taskDefs.map(([key, userId, repositoryId]) => ({
@@ -559,6 +562,41 @@ describe.skipIf(!url)('GET /m/statistics/files-read on migrated PostgreSQL', () 
             weighted: true,
             files: [['huge.ts', 2_500_000_000, 5_000_000_000, 9_000_000_000]],
           }),
+        },
+      },
+      // R5: a tie at the 50-path cut. 49 heavier paths (weights 1001..1049), then cut/B.ts and
+      // cut/a.ts tied on weight and characters: code point order keeps B, a is the remainder.
+      {
+        task: 't7',
+        step: '04-implement',
+        provider: 'cc',
+        tokenUsage: tok(1000, 10),
+        toolUsage: {
+          reads: reads({
+            resultSeen: true,
+            weighted: true,
+            files: [
+              ...Array.from({ length: 49 }, (_, k): FileTuple => [
+                `cut/p${String(k + 1).padStart(2, '0')}.ts`,
+                1,
+                10,
+                1001 + k,
+              ]),
+              ['cut/B.ts', 1, 20, 500],
+              ['cut/a.ts', 1, 20, 500],
+            ],
+          }),
+        },
+      },
+      // R5 also holds a run that is still running yet already carries a record (coverage none):
+      // recorded wins, it is never counted as in flight.
+      {
+        task: 't7',
+        step: '04-implement',
+        provider: 'cc',
+        ended: false,
+        toolUsage: {
+          reads: reads({ coverage: 'none', resultSeen: false, weighted: false, files: [] }),
         },
       },
     ];
@@ -1072,6 +1110,35 @@ describe.skipIf(!url)('GET /m/statistics/files-read on migrated PostgreSQL', () 
       n: 1,
       ratio: 0.5625,
       exceeds: false,
+    });
+  });
+
+  it('breaks a tie at the 50-path cut by code point, whatever the database collation', async () => {
+    const body = await ok({ repositoryId: r5 });
+    // 49 paths of weight 1001..1049 and the tied pair (500 each): 51 paths, the cut falls between them.
+    // T = 49 * 1025 + 500 + 500 = 51225 over one weighted run.
+    expect(body.files.count).toBe(51);
+    expect(body.files.truncated).toBe(true);
+    expect(body.files.rows).toHaveLength(50);
+    expect(body.files.rows[0]!.path).toBe('cut/p49.ts');
+    expect(body.files.rows[48]!.path).toBe('cut/p01.ts');
+    // B (0x42) sorts before a (0x61) by code point; a locale collation would keep a instead.
+    expect(body.files.rows[49]!.path).toBe('cut/B.ts');
+    expect(body.otherPaths.paths).toBe(1);
+    expectBucket(body.otherPaths, 1, 20, 500, 51225, 1);
+  });
+
+  it('counts a running run that already carries a record as recorded, never in flight', async () => {
+    const body = await ok({ repositoryId: r5 });
+    expectCoverage(body.coverage, {
+      total: 2,
+      recorded: 2,
+      observable: 1,
+      partial: 0,
+      unobservable: 1,
+      unrecorded: 0,
+      inFlight: 0,
+      weighted: 1,
     });
   });
 
