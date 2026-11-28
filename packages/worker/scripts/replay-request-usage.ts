@@ -125,7 +125,7 @@ export async function replayRequestUsage(
     outputOnlyContradictoryRuns: 0,
     killedFallbackRuns: 0,
     noResultFallbackRuns: 0,
-    fallbackOutputZeroRuns: 0,
+    fallbackOutputUnknownRuns: 0,
   };
   for await (const row of source) {
     const collector = createStreamJsonCollector();
@@ -263,8 +263,8 @@ export async function replayRequestUsage(
           row.exitCode === 143 ||
           (row.exitCode === null && row.ended === true)),
     );
-    counters.fallbackOutputZeroRuns += Number(
-      fallback && collector.getTokenUsage()?.outputTokens === 0,
+    counters.fallbackOutputUnknownRuns += Number(
+      fallback && collector.getTokenUsage()?.outputTokens === null,
     );
   }
   return {

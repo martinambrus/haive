@@ -974,7 +974,8 @@ export interface Task {
    *  CLI. Absent on the create response. */
   tokenUsage?: {
     inputTokens: number;
-    outputTokens: number;
+    outputTokens: number | null;
+    outputUnknownRuns?: number;
     totalTokens: number;
     cacheReadTokens?: number;
     cacheCreationTokens?: number;
@@ -1162,7 +1163,8 @@ export interface TaskStep {
    *  ran no token-bearing CLI (deterministic-only / pending steps). */
   tokenUsage: {
     inputTokens: number;
-    outputTokens: number;
+    outputTokens: number | null;
+    outputUnknownRuns?: number;
     totalTokens: number;
     cacheReadTokens?: number;
     cacheCreationTokens?: number;
@@ -1498,7 +1500,7 @@ export interface CliInvocationSummary {
    *  existed. Semantics are provider-native. */
   tokenUsage: {
     inputTokens: number;
-    outputTokens: number;
+    outputTokens: number | null;
     totalTokens: number;
     cacheReadTokens?: number;
     cacheCreationTokens?: number;

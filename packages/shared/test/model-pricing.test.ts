@@ -603,3 +603,20 @@ describe('convertFromUsd', () => {
     expect(convertFromUsd(5, { currency: 'EUR', usdPerUnit: Number.NaN })).toBeNull();
   });
 });
+
+describe('computeInvocationCost with unknown output', () => {
+  const usage = { inputTokens: 1000, outputTokens: null, cacheReadTokens: 10 };
+  const tiered: ModelPriceRates = {
+    ...RATES,
+    tiers: [{ ...RATES, aboveTokens: 100_000, inclusive: false, inputRate: 1e-5 }],
+  };
+  it.each([
+    ['flat', RATES],
+    ['tiered', tiered],
+  ])('leaves the output bucket unpriced and carries no tier for %s rates', (_name, rates) => {
+    const out = computeInvocationCost(usage, rates);
+    expect(out.unpricedBuckets).toEqual(['output']);
+    expect(out.costUsd).toBe(0);
+    expect(out).not.toHaveProperty('tier');
+  });
+});

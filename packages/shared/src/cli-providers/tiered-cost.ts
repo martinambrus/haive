@@ -38,8 +38,10 @@ export function computeTieredCost(
   const capture = opts.requestUsage;
   const convention = opts.inputIncludesCache ? 'inclusive' : 'exclusive';
   const model = canonicalModelKey(opts.modelKey);
+  if (usage.outputTokens === null) return result();
   const raw = {
     ...usage,
+    outputTokens: usage.outputTokens,
     cacheReadTokens: usage.cacheReadTokens ?? 0,
     cacheCreationTokens: usage.cacheCreationTokens ?? 0,
   };

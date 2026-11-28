@@ -41,6 +41,9 @@ import {
   type ModuleRouteContext,
 } from '@haive/shared/module-host';
 import {
+  outputTokensSumSql,
+  outputUnknownRowSql,
+  outputUnknownRunsSql,
   realCostRowSql,
   realCostUsdSql,
   notionalCostRowSql,
@@ -315,12 +318,13 @@ function toRawTotals(
   p: Pick<
     TaskProviderUsage,
     'provider' | 'inputTokens' | 'outputTokens' | 'cacheReadTokens' | 'cacheCreationTokens'
-  >,
+  > & { outputUnknownRuns?: number },
 ) {
   return {
     provider: p.provider,
     inputTokens: p.inputTokens,
     outputTokens: p.outputTokens,
+    outputUnknownRuns: p.outputUnknownRuns,
     cacheReadTokens: p.cacheReadTokens,
     cacheCreationTokens: p.cacheCreationTokens,
   };
@@ -355,7 +359,8 @@ interface DayAccumulator {
     string,
     {
       inputTokens: number;
-      outputTokens: number;
+      outputTokens: number | null;
+      outputUnknownRuns: number;
       cacheReadTokens: number;
       cacheCreationTokens: number;
     }
@@ -803,10 +808,10 @@ export default function createStatsRoutes(ctx: ModuleRouteContext): Hono<AppEnv>
         realUsd: realCostRowSql(),
         notionalUsd: notionalCostRowSql(),
         inputTokens: sql<number>`coalesce((${tu} ->> 'inputTokens')::numeric, 0)::bigint`,
-        outputTokens: sql<number>`coalesce((${tu} ->> 'outputTokens')::numeric, 0)::bigint`,
         cacheReadTokens: sql<number>`coalesce((${tu} ->> 'cacheReadTokens')::numeric, 0)::bigint`,
         cacheCreationTokens: sql<number>`coalesce((${tu} ->> 'cacheCreationTokens')::numeric, 0)::bigint`,
         reportedOutputTokens: sql<number | null>`(${tu} ->> 'outputTokens')::double precision`,
+        outputUnknown: outputUnknownRowSql(tu),
         apiMs: schema.cliInvocations.apiDurationMs,
       })
       .from(schema.cliInvocations)
@@ -851,12 +856,15 @@ export default function createStatsRoutes(ctx: ModuleRouteContext): Hono<AppEnv>
       const provider = row.provider ?? 'unknown';
       const t = d.tokensByProvider.get(provider) ?? {
         inputTokens: 0,
-        outputTokens: 0,
+        outputTokens: null as number | null,
+        outputUnknownRuns: 0,
         cacheReadTokens: 0,
         cacheCreationTokens: 0,
       };
       t.inputTokens += Number(row.inputTokens) || 0;
-      t.outputTokens += Number(row.outputTokens) || 0;
+      if (row.reportedOutputTokens !== null)
+        t.outputTokens = (t.outputTokens ?? 0) + Number(row.reportedOutputTokens);
+      if (row.outputUnknown) t.outputUnknownRuns += 1;
       t.cacheReadTokens += Number(row.cacheReadTokens) || 0;
       t.cacheCreationTokens += Number(row.cacheCreationTokens) || 0;
       d.tokensByProvider.set(provider, t);
@@ -914,6 +922,7 @@ export default function createStatsRoutes(ctx: ModuleRouteContext): Hono<AppEnv>
           tasksCompleted: d.tasksCompleted,
           freshInputTokens: tokens.freshInputTokens,
           outputTokens: tokens.outputTokens,
+          outputUnknownRuns: tokens.outputUnknownRuns,
           cacheReadTokens: tokens.cacheReadTokens,
           cacheCreationTokens: tokens.cacheCreationTokens,
           totalTokens: tokens.totalTokens,
@@ -972,7 +981,12 @@ export default function createStatsRoutes(ctx: ModuleRouteContext): Hono<AppEnv>
       ctx.db,
       invocationWindowFilter(q, c.get('userId'), new Date(q.fromMs), new Date(q.toMs)),
     );
-    return c.json({ value: normalizeBreakdown(breakdown).totalTokens });
+    const tokens = normalizeBreakdown(breakdown);
+    return c.json(
+      tokens.outputUnknownRuns > 0
+        ? { value: tokens.totalTokens, unit: 'at least' }
+        : { value: tokens.totalTokens },
+    );
   });
 
   statsRoutes.get('/overview/activity', async (c) => {
@@ -1190,7 +1204,8 @@ export default function createStatsRoutes(ctx: ModuleRouteContext): Hono<AppEnv>
           stepId: schema.taskSteps.stepId,
           provider: schema.cliProviders.name,
           inputTokens: sql<number>`coalesce(sum((${tu} ->> 'inputTokens')::numeric), 0)::int`,
-          outputTokens: sql<number>`coalesce(sum((${tu} ->> 'outputTokens')::numeric), 0)::int`,
+          outputTokens: outputTokensSumSql(tu),
+          outputUnknownRuns: outputUnknownRunsSql(tu),
           cacheReadTokens: sql<number>`coalesce(sum((${tu} ->> 'cacheReadTokens')::numeric), 0)::int`,
           cacheCreationTokens: sql<number>`coalesce(sum((${tu} ->> 'cacheCreationTokens')::numeric), 0)::int`,
         })
@@ -1254,7 +1269,8 @@ export default function createStatsRoutes(ctx: ModuleRouteContext): Hono<AppEnv>
       const raw = toRawTotals({
         provider: r.provider,
         inputTokens: Number(r.inputTokens) || 0,
-        outputTokens: Number(r.outputTokens) || 0,
+        outputTokens: r.outputTokens === null ? null : Number(r.outputTokens),
+        outputUnknownRuns: Number(r.outputUnknownRuns) || 0,
         cacheReadTokens: Number(r.cacheReadTokens) || 0,
         cacheCreationTokens: Number(r.cacheCreationTokens) || 0,
       });

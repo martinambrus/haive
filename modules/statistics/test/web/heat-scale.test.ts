@@ -24,6 +24,7 @@ const day = (bucket: string, over: Partial<StatsTimelineDay> = {}): StatsTimelin
   tasksCompleted: 0,
   freshInputTokens: 0,
   outputTokens: 0,
+  outputUnknownRuns: 0,
   cacheReadTokens: 0,
   cacheCreationTokens: 0,
   totalTokens: 0,

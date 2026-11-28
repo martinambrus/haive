@@ -83,7 +83,6 @@ describe('fallback authority', () => {
 
   it.each([
     { input_tokens: 1, output_tokens: 0 },
-    { input_tokens: 0, output_tokens: 1 },
     { input_tokens: 0, output_tokens: 0, cache_read_input_tokens: 1 },
     { input_tokens: 0, output_tokens: 0, cache_creation_input_tokens: 1 },
   ])('keeps a nonzero assistant fallback: %j', (usage) => {
@@ -92,5 +91,13 @@ describe('fallback authority', () => {
     event.message.usage = usage;
     collector.onChunk(JSON.stringify(event) + '\n');
     expect(collector.getTokenUsage()?.totalTokens).toBe(1);
+  });
+
+  it('treats a placeholder-only output as unknown usage, not a measured one', () => {
+    const collector = createStreamJsonCollector();
+    const event = assistant('message', 'model', 0, 0);
+    event.message.usage = { input_tokens: 0, output_tokens: 1 };
+    collector.onChunk(JSON.stringify(event) + '\n');
+    expect(collector.getTokenUsage()).toBeNull();
   });
 });

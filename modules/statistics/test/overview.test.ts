@@ -1,6 +1,14 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-const h = vi.hoisted(() => ({ defaultWindow: null as string | null }));
+const h = vi.hoisted(() => ({
+  defaultWindow: null as string | null,
+  providerOutput: { outputTokens: 200 as number | null, outputUnknownRuns: 0 },
+  timelineOutput: null as Array<{
+    reportedOutputTokens: number | null;
+    outputUnknown: boolean;
+  }> | null,
+  stepTokenRows: null as Array<Record<string, unknown>> | null,
+}));
 
 vi.mock('@haive/shared', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@haive/shared')>()),
@@ -23,6 +31,22 @@ function fakeDb(): Database {
   const day = (n: number) => new Date(Date.now() - n * DAY_MS);
   const rowsFor = (keys: string[]): unknown[] => {
     const has = (...k: string[]) => k.every((key) => keys.includes(key));
+    if (has('stepId', 'taskCount')) {
+      return h.stepTokenRows
+        ? [
+            {
+              stepId: 's1',
+              invocations: 3,
+              agentMs: 1000,
+              realUsd: 0,
+              notionalUsd: 0,
+              unpricedInvocations: 2,
+              taskCount: 1,
+            },
+          ]
+        : [];
+    }
+    if (has('stepId', 'provider', 'inputTokens')) return h.stepTokenRows ?? [];
     if (has('realUsd', 'unpricedInvocations')) {
       return [{ realUsd: 3.5, notionalUsd: 40.25, invocations: 7, unpricedInvocations: 1 }];
     }
@@ -33,7 +57,8 @@ function fakeDb(): Database {
           authMode: 'subscription',
           invocations: 7,
           inputTokens: 1000,
-          outputTokens: 200,
+          outputTokens: h.providerOutput.outputTokens,
+          outputUnknownRuns: h.providerOutput.outputUnknownRuns,
           cacheReadTokens: 5000,
           cacheCreationTokens: 300,
           costUsd: 3.5,
@@ -53,18 +78,21 @@ function fakeDb(): Database {
     }
     if (has('id', 'completedAt')) return [{ id: 'p1', completedAt: day(40) }];
     if (has('startedAt', 'provider', 'realUsd')) {
-      return [1, 2].map((n) => ({
-        startedAt: day(n),
-        endedAt: new Date(day(n).getTime() + 60_000),
+      const outputs = h.timelineOutput ?? [
+        { reportedOutputTokens: 5, outputUnknown: false },
+        { reportedOutputTokens: 5, outputUnknown: false },
+      ];
+      return outputs.map((o, i) => ({
+        startedAt: day(h.timelineOutput ? 1 : i + 1),
+        endedAt: new Date(day(h.timelineOutput ? 1 : i + 1).getTime() + 60_000),
         provider: 'claude-code',
         realUsd: 1,
         notionalUsd: 2,
         inputTokens: 10,
-        outputTokens: 5,
         cacheReadTokens: 0,
         cacheCreationTokens: 0,
-        reportedOutputTokens: 5,
         apiMs: 30_000,
+        ...o,
       }));
     }
     if (has('start', 'end')) return [{ start: day(1), end: new Date(day(1).getTime() + 60_000) }];
@@ -119,6 +147,9 @@ const KPI = {
 describe('statistics overview page', () => {
   beforeEach(() => {
     h.defaultWindow = null;
+    h.providerOutput = { outputTokens: 200, outputUnknownRuns: 0 };
+    h.timelineOutput = null;
+    h.stepTokenRows = null;
   });
 
   const page = () => moduleManifestSchema.parse(manifest).pages?.overview;
@@ -170,5 +201,84 @@ describe('statistics overview page', () => {
     const { data } = await get(buildApp(), '/m/statistics/overview/activity');
     expect(data.length).toBeGreaterThanOrEqual(days);
     expect(data.length).toBeLessThanOrEqual(days + 2);
+  });
+
+  describe('an output the CLI never reported', () => {
+    it('keeps a day with one unknown and one known run at the known sum and counts the unknown', async () => {
+      h.timelineOutput = [
+        { reportedOutputTokens: null, outputUnknown: true },
+        { reportedOutputTokens: 7, outputUnknown: false },
+      ];
+      const { days } = await get(buildApp(), '/m/statistics/timeline');
+      const busy = days.find((d: any) => d.invocations === 2);
+      expect(busy.outputTokens).toBe(7);
+      expect(busy.outputUnknownRuns).toBe(1);
+      const quiet = days.find((d: any) => d.invocations === 0);
+      expect(quiet.outputTokens).toBe(0);
+      expect(quiet.outputUnknownRuns).toBe(0);
+    });
+
+    it('reports a day whose only run is unknown as null output', async () => {
+      h.timelineOutput = [{ reportedOutputTokens: null, outputUnknown: true }];
+      const { days } = await get(buildApp(), '/m/statistics/timeline');
+      const day = days.find((d: any) => d.invocations === 1);
+      expect(day.outputTokens).toBeNull();
+      expect(day.outputUnknownRuns).toBe(1);
+      expect(day.totalTokens).toBe(10);
+    });
+
+    it('carries the provider counts through /summary', async () => {
+      h.providerOutput = { outputTokens: null, outputUnknownRuns: 2 };
+      const summary = await get(buildApp(), '/m/statistics/summary');
+      expect(summary.tokens.outputTokens).toBeNull();
+      expect(summary.tokens.outputUnknownRuns).toBe(2);
+      expect(summary.spend.byProvider[0].outputTokens).toBeNull();
+      expect(summary.spend.byProvider[0].outputUnknownRuns).toBe(2);
+    });
+
+    it('marks the tokens KPI as a lower bound only when runs are unknown', async () => {
+      h.providerOutput = { outputTokens: null, outputUnknownRuns: 2 };
+      const app = buildApp();
+      const summary = await get(app, '/m/statistics/summary');
+      const unknownBody = await get(app, KPI.tokens);
+      expect(unknownBody.unit).toBe('at least');
+      expect(unknownBody.value).toBe(summary.tokens.totalTokens);
+      expect(() => widgetResponseSchema('kpi').parse(unknownBody)).not.toThrow();
+
+      h.providerOutput = { outputTokens: 200, outputUnknownRuns: 0 };
+      const knownBody = await get(app, KPI.tokens);
+      expect('unit' in knownBody).toBe(false);
+      expect(() => widgetResponseSchema('kpi').parse(knownBody)).not.toThrow();
+    });
+
+    it('carries the counts through /steps', async () => {
+      h.stepTokenRows = [
+        {
+          stepId: 's1',
+          provider: 'claude-code',
+          inputTokens: 10,
+          outputTokens: null,
+          outputUnknownRuns: 2,
+          cacheReadTokens: 0,
+          cacheCreationTokens: 0,
+        },
+        {
+          stepId: 's1',
+          provider: 'codex',
+          inputTokens: 10,
+          outputTokens: 30,
+          outputUnknownRuns: 1,
+          cacheReadTokens: 0,
+          cacheCreationTokens: 0,
+        },
+      ];
+      const { rows } = await get(buildApp(), '/m/statistics/steps');
+      expect(rows[0].tokens.outputTokens).toBe(30);
+      expect(rows[0].tokens.outputUnknownRuns).toBe(3);
+      h.stepTokenRows = [{ ...h.stepTokenRows[0] }];
+      const only = await get(buildApp(), '/m/statistics/steps');
+      expect(only.rows[0].tokens.outputTokens).toBeNull();
+      expect(only.rows[0].tokens.outputUnknownRuns).toBe(2);
+    });
   });
 });

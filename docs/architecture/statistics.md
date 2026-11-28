@@ -139,6 +139,23 @@ COMPOSITION and never size (size is the figure beside the name), and a segment t
 colour or position between the total and a provider row would make that reading wrong rather
 than merely inconsistent. The legend is rendered once, on the total.
 
+**Unknown output is never zero.** A run killed before its `result` event stores `outputTokens: null` (see [Model pricing and
+spend](model-pricing.md)) and its `totalTokens` counts the other buckets only; so does every live running claude-family
+invocation until its result arrives. Every aggregate keeps that. The SQL sums (`outputTokensSumSql`, `outputUnknownRunsSql`,
+`outputUnknownRowSql` in `shared/src/stats-server/output-tokens.ts`) carry no outer coalesce, so a group where no run
+reported output has `outputTokens: null`, and `outputUnknownRuns` counts beside it the runs whose usage is recorded without
+an output (a run with no usage at all is not one). `sumNormalizedTokens` returns null when no row reported an output
+(usage-less rows included; an empty window stays 0: a quiet day is a real zero) and adds the counts. `TaskProviderUsage`,
+the per-step and tasks-list `tokenUsage` DTOs (`outputUnknownRuns?`, present above 0), the `tokens` objects on `/summary`
+and `/steps`, and each timeline day carry both fields. The client shows null as a dash and a figure with unknown runs as
+`≥ n` (`formatOutputTokens`, `formatTokensAtLeast` in web-kit); totals count the known buckets, so they are lower bounds. The
+share bar drops a zero segment, so an unknown output would vanish from it: the statistics page prints one line with the
+count of runs that have not reported their output (still running, or killed before their result) and labels the Output
+legend entry "at least". Throughput already excluded a null output, and the Files read share needs `resultSeen`, so a killed
+run never enters it. The `/overview/kpi/tokens` dashboard tile keeps its numeric known-buckets total and adds the host KPI
+response's `unit: 'at least'` when any run's output is unknown. Rows stored before this keep their fabricated output 0 and
+sum into the known figure.
+
 ## Per-step spend and model identity
 
 `GET /m/statistics/steps` (lazy, behind its own tab) answers the question nothing else could: which

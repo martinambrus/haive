@@ -91,8 +91,12 @@ statistics presentation is a separate change.
 
 An all-zero assistant-event fallback is unknown (token_usage = NULL), including a zai or
 muse run killed before its result arrives. A result event remains authoritative even when it
-reports a real zero. Nonzero input, output or cache tokens still preserve the fallback.
-Persistence keeps NULL, cost resolution returns NULL, and throughput excludes unmeasured runs.
+reports a real zero. Nonzero input or cache tokens still preserve the fallback, but its output is unknown: with no `result` event the
+assistant events' `output_tokens` are placeholders, so the stored `outputTokens` is null (never 0) and `totalTokens`
+counts the other buckets only; a fallback whose only non-zero field is output is NULL. A `result` event without usage
+(amp) keeps its per-message sum, since amp's assistant usage is real. Persistence keeps NULL, cost resolution returns
+NULL for no usage and an unpriced row (`unpricedBuckets: ['output']`) for unknown output, and throughput excludes
+unmeasured runs.
 
 ## Repairing historical context badges (T402)
 

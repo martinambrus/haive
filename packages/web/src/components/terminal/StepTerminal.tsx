@@ -28,7 +28,7 @@ import {
 } from '@/lib/terminal-autoscroll';
 import { useAutoCloseSuccessfulTerminals } from '@/lib/terminal-autoclose';
 import { formatDuration, formatTimeoutBudget } from '@/lib/format-duration';
-import { formatTokens } from '@/lib/format-tokens';
+import { formatOutputTokens, formatTokens, fullTokens } from '@/lib/format-tokens';
 import { formatTps, ratePerSecond } from '@/lib/format-throughput';
 import { invocationBanner } from '@/lib/step-banners';
 import { useGlobalPause } from '@/lib/use-global-pause';
@@ -526,7 +526,7 @@ function InvocationPanel({
                 className="rounded border border-neutral-700 bg-neutral-800/40 px-1.5 py-0.5 text-sky-300"
                 title={
                   `Token usage (provider-native): in ${tu.inputTokens.toLocaleString()}` +
-                  ` / out ${tu.outputTokens.toLocaleString()}` +
+                  ` / out ${fullTokens(tu.outputTokens)}` +
                   (tu.cacheReadTokens
                     ? ` / cache read ${tu.cacheReadTokens.toLocaleString()}`
                     : '') +
@@ -536,7 +536,7 @@ function InvocationPanel({
                   ` = total ${tu.totalTokens.toLocaleString()}`
                 }
               >
-                in {formatTokens(tu.inputTokens)} / out {formatTokens(tu.outputTokens)}
+                in {formatTokens(tu.inputTokens)} / out {formatOutputTokens(tu.outputTokens)}
                 {cache > 0 ? ` / cache ${formatTokens(cache)}` : ''} tok
               </span>
             );

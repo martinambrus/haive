@@ -861,11 +861,20 @@ export function createStreamJsonCollector(
           (resultUsage.cacheCreationTokens ?? 0);
       }
       const base = resultUsage ?? assistantUsage;
+      if (!base) return null;
+      // Assistant-event output_tokens is a streaming placeholder: only a result event reports
+      // it. A run that never produced one (killed, or a live snapshot) has unknown output.
+      // amp's result event carries no usage but its assistant usage is real, hence resultCount.
+      const outputUnknown = resultUsage === null && resultCount === 0;
+      const totalTokens = outputUnknown
+        ? base.inputTokens + (base.cacheReadTokens ?? 0) + (base.cacheCreationTokens ?? 0)
+        : base.totalTokens;
       // zai/muse emit zero-valued assistant usage even after a paid reply. Without
       // authoritative result usage, that placeholder means unknown, not measured zero.
-      if (!base || (!resultUsage && base.totalTokens === 0)) return null;
+      if (!resultUsage && totalTokens === 0) return null;
       return {
         ...base,
+        ...(outputUnknown ? { outputTokens: null, totalTokens } : {}),
         ...(costUsd !== null ? { costUsd } : {}),
         ...(peakPrompt > 0 ? { peakPromptTokens: peakPrompt } : {}),
         ...(reportedWindow !== null ? { contextWindow: reportedWindow } : {}),

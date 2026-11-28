@@ -22,7 +22,8 @@ export function sumTokenUsage(
   if (!b) return a;
   const out: CliTokenUsage = {
     inputTokens: a.inputTokens + b.inputTokens,
-    outputTokens: a.outputTokens + b.outputTokens,
+    outputTokens:
+      a.outputTokens === null || b.outputTokens === null ? null : a.outputTokens + b.outputTokens,
     totalTokens: a.totalTokens + b.totalTokens,
   };
   const cacheRead = (a.cacheReadTokens ?? 0) + (b.cacheReadTokens ?? 0);

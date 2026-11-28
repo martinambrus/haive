@@ -197,3 +197,28 @@ describe('collapsed step terminal live count', () => {
     await expectNoPolling();
   });
 });
+
+describe('step terminal token chip', () => {
+  async function showUsage(tokenUsage: CliInvocationSummary['tokenUsage']) {
+    h.get.mockResolvedValue({
+      invocations: [makeInvocation({ tokenUsage })],
+      totalCount: 1,
+      historyTotal: 1,
+    });
+    await act(async () => {
+      render(<StepTerminal taskId="task" stepRowId="step" autoExpand statusMessage={null} />);
+    });
+  }
+
+  it('shows an unknown output as a dash and never as null', async () => {
+    await showUsage({ inputTokens: 1490, outputTokens: null, totalTokens: 1490 });
+    const chip = screen.getByText(/out —/);
+    expect(chip.textContent).not.toContain('null');
+    expect(chip.getAttribute('title')).toContain('out unknown');
+  });
+
+  it('keeps a known zero output as 0', async () => {
+    await showUsage({ inputTokens: 10, outputTokens: 0, totalTokens: 10 });
+    expect(screen.getByText(/out 0/)).toBeTruthy();
+  });
+});

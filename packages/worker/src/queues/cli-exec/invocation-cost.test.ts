@@ -167,3 +167,49 @@ describe('unsupported feed rates', () => {
     expect(cost!.rates!.tiers![0]!.inputRate).toBe(5);
   });
 });
+
+describe('unknown output tokens', () => {
+  afterEach(() => vi.restoreAllMocks());
+  const flat = {
+    inputRate: 1,
+    outputRate: 2,
+    cacheReadRate: null,
+    cacheWriteRate: null,
+    cacheWrite1hRate: null,
+  };
+  const tiered = {
+    ...flat,
+    tiers: [{ ...flat, aboveTokens: 100, inclusive: false, inputRate: 5, outputRate: 10 }],
+  };
+  it.each([
+    ['flat', flat],
+    ['tiered', tiered],
+  ])('records %s rates as unpriced output, never an unknown prompt tier', async (_name, rates) => {
+    vi.spyOn(configService, 'getBoolean').mockResolvedValue(false);
+    const rows = [
+      {
+        id: 'manual',
+        provider: 'codex',
+        modelKey: 'x',
+        source: 'manual',
+        rates,
+        effectiveFrom: new Date(),
+      },
+    ];
+    const db = {
+      query: {
+        cliProviders: { findFirst: async () => ({ authMode: 'api_key', model: 'x' }) },
+        cliPricingSync: { findFirst: async () => undefined },
+      },
+      select: () => ({ from: () => ({ where: async () => rows }) }),
+    } as unknown as Database;
+    const cost = await resolveInvocationCost(db, {
+      cliProviderId: 'prov-1',
+      providerName: 'codex',
+      tokenUsage: { inputTokens: 1, outputTokens: null, totalTokens: 1 },
+      modelIdentity: null,
+    });
+    expect(cost).toMatchObject({ source: 'none', unpricedBuckets: ['output'] });
+    expect(cost).not.toHaveProperty('tier');
+  });
+});

@@ -982,7 +982,7 @@ export const cliInvocations = pgTable(
      *  cannot import shared (circular; see the StepErrorHint note above). */
     tokenUsage: jsonb('token_usage').$type<{
       inputTokens: number;
-      outputTokens: number;
+      outputTokens: number | null;
       totalTokens: number;
       cacheReadTokens?: number;
       cacheCreationTokens?: number;

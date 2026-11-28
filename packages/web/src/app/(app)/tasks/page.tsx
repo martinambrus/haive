@@ -13,7 +13,7 @@ import { pausedByLabel } from '@/lib/task-state';
 import { TaskVote } from '@/components/task-vote';
 import { UsageStrip } from '@/components/usage-strip';
 import { formatDuration } from '@/lib/format-duration';
-import { formatTokens } from '@/lib/format-tokens';
+import { formatTokensAtLeast, fullTokens } from '@/lib/format-tokens';
 import { mergeSpan } from '@/lib/merge-task-span';
 import { usePageTitle } from '@/lib/use-page-title';
 import { rememberTaskOrigin } from '@/lib/task-origin';
@@ -195,9 +195,13 @@ const TaskRow = memo(function TaskRow({ task }: { task: Task }) {
             {task.tokenUsage && task.tokenUsage.totalTokens > 0 && (
               <span
                 className="text-sky-300"
-                title={`CLI tokens (provider-native): in ${task.tokenUsage.inputTokens.toLocaleString()} / out ${task.tokenUsage.outputTokens.toLocaleString()} / total ${task.tokenUsage.totalTokens.toLocaleString()}`}
+                title={`CLI tokens (provider-native): in ${task.tokenUsage.inputTokens.toLocaleString()} / out ${fullTokens(task.tokenUsage.outputTokens, task.tokenUsage.outputUnknownRuns ?? 0)} / total ${task.tokenUsage.totalTokens.toLocaleString()}`}
               >
-                {formatTokens(task.tokenUsage.totalTokens)} tok
+                {formatTokensAtLeast(
+                  task.tokenUsage.totalTokens,
+                  task.tokenUsage.outputUnknownRuns ?? 0,
+                )}{' '}
+                tok
               </span>
             )}
           </div>

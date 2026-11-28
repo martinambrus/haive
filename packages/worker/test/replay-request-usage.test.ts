@@ -345,7 +345,7 @@ describe('read-only request replay', () => {
     expect(report.counters).toMatchObject({
       killedFallbackRuns: 1,
       noResultFallbackRuns: 1,
-      fallbackOutputZeroRuns: 1,
+      fallbackOutputUnknownRuns: 1,
     });
     expect(report.total).toMatchObject({ complete: 0, incomplete: 1 });
   });

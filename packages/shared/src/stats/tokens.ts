@@ -25,7 +25,10 @@ export interface RawTokenTotals {
    *  than inventing cache hits that were never reported. */
   provider?: string | null;
   inputTokens: number;
-  outputTokens: number;
+  /** null: no run in the group reported an output (unknown is never 0). */
+  outputTokens: number | null;
+  /** Runs in the group whose output was never reported. Absent counts as 0. */
+  outputUnknownRuns?: number;
   cacheReadTokens: number;
   cacheCreationTokens: number;
 }
@@ -33,11 +36,14 @@ export interface RawTokenTotals {
 export interface NormalizedTokens {
   /** Prompt tokens that were genuinely new — `input` with any cached prefix removed. */
   freshInputTokens: number;
-  outputTokens: number;
+  /** null when every run behind it never reported an output; a reader shows a dash, not 0. */
+  outputTokens: number | null;
+  /** Runs whose output was never reported; above 0 the figures are "at least". */
+  outputUnknownRuns: number;
   cacheReadTokens: number;
   cacheCreationTokens: number;
-  /** freshInput + output + cacheRead + cacheCreation. Comparable across providers, which
-   *  a raw sum of the reported fields is not. */
+  /** freshInput + output + cacheRead + cacheCreation, over the known buckets only. Comparable
+   *  across providers, which a raw sum of the reported fields is not. */
   totalTokens: number;
   /** cacheRead / (freshInput + cacheRead): the share of the PROMPT side served from cache.
    *  null when there was no prompt side at all — 0% and "nothing to measure" are different
@@ -66,7 +72,7 @@ function nonNegative(n: number | null | undefined): number {
 /** Normalise one provider's totals. */
 export function normalizeTokens(raw: RawTokenTotals): NormalizedTokens {
   const input = nonNegative(raw.inputTokens);
-  const outputTokens = nonNegative(raw.outputTokens);
+  const outputTokens = raw.outputTokens === null ? null : nonNegative(raw.outputTokens);
   const cacheReadTokens = nonNegative(raw.cacheReadTokens);
   const cacheCreationTokens = nonNegative(raw.cacheCreationTokens);
 
@@ -82,9 +88,10 @@ export function normalizeTokens(raw: RawTokenTotals): NormalizedTokens {
   return {
     freshInputTokens,
     outputTokens,
+    outputUnknownRuns: nonNegative(raw.outputUnknownRuns),
     cacheReadTokens,
     cacheCreationTokens,
-    totalTokens: freshInputTokens + outputTokens + cacheReadTokens + cacheCreationTokens,
+    totalTokens: freshInputTokens + (outputTokens ?? 0) + cacheReadTokens + cacheCreationTokens,
     cacheHitRatio: promptSide > 0 ? cacheReadTokens / promptSide : null,
     cacheWriteShare: cachedSide > 0 ? cacheCreationTokens / cachedSide : null,
   };
@@ -97,12 +104,18 @@ export function normalizeTokens(raw: RawTokenTotals): NormalizedTokens {
 export function sumNormalizedTokens(rows: RawTokenTotals[]): NormalizedTokens {
   let freshInputTokens = 0;
   let outputTokens = 0;
+  let outputKnown = rows.length === 0;
+  let outputUnknownRuns = 0;
   let cacheReadTokens = 0;
   let cacheCreationTokens = 0;
   for (const row of rows) {
     const n = normalizeTokens(row);
     freshInputTokens += n.freshInputTokens;
-    outputTokens += n.outputTokens;
+    if (n.outputTokens !== null) {
+      outputTokens += n.outputTokens;
+      outputKnown = true;
+    }
+    outputUnknownRuns += n.outputUnknownRuns;
     cacheReadTokens += n.cacheReadTokens;
     cacheCreationTokens += n.cacheCreationTokens;
   }
@@ -110,7 +123,8 @@ export function sumNormalizedTokens(rows: RawTokenTotals[]): NormalizedTokens {
   const cachedSide = cacheCreationTokens + cacheReadTokens;
   return {
     freshInputTokens,
-    outputTokens,
+    outputTokens: outputKnown ? outputTokens : null,
+    outputUnknownRuns,
     cacheReadTokens,
     cacheCreationTokens,
     totalTokens: freshInputTokens + outputTokens + cacheReadTokens + cacheCreationTokens,
