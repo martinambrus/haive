@@ -186,16 +186,22 @@ Before any of those dispatch paths re-enters, the shared step runner enforces th
 30-second delay from the last admission failure. Busy stays uncapped. Unknown failures have a
 separate fixed cap, `MAX_AUTH_PROBE_UNKNOWNS = 20` (injectable through advance parameters),
 counted in waves: distinct 30-second buckets of `created_at` among the step's ended invocation
-rows with the unknown code, including superseded rows, from the later of the step's current
-`started_at` and its newest `step.resume` or `step.retry_ai` event. One wide fan-out that fails
-admission together counts once, since the delay above keeps two waves at least a bucket apart.
-Successful siblings and busy waits cannot erase that attempt's count.
-At the cap the step fails for user action with `cli_auth_probe_exhausted` and Retry guidance;
-no further automatic dispatch or code fix loop occurs. Retry resets the step start/output and
-therefore its allowance. Resume (loop and fan-out arms) and Retry with AI keep `started_at` and
-the old rows but write their event in the transaction that reopens the step, so each starts a
-fresh allowance of invocation-row failures and its first dispatch is not paced by earlier rows.
-No new table, queue or fence is used.
+rows with the unknown code, including superseded rows, from the step's newest reopening event:
+`step.retry` (Retry), `task.retried` (the task-level Retry at its stopped step), `step.resume`
+(loop and fan-out arms), `step.retry_ai` or `step.cli_provider_preference_changed` (a switch that
+re-runs the step); with none, from its first row. `started_at` is no bound: a runtime-slot or
+integration park, a pause re-offer and an orphan requeue clear it and the next claim stamps it, so
+a bound on it would let a park reopen the allowance with no one pressing anything. Recovery
+writes none of those events (`task.auto_resumed`, `task.revived`) and keeps counting. One wide
+fan-out that fails admission together counts once, since the delay above keeps two waves at least
+a bucket apart. Successful siblings and busy waits cannot erase that attempt's count.
+At the cap the step fails for user action with `cli_auth_probe_exhausted`; its text names Retry
+and, where the step offers it, Resume, and nothing decides on that text. No further automatic
+dispatch or code fix loop occurs. Each of those presses writes its event in the transaction that
+reopens the step (the switch's follows its commit), so each starts a fresh allowance of
+invocation-row failures and its first dispatch is not paced by earlier rows. A rerun that writes
+none of them (the cascade of a Retry at an upstream step, a worker loop reset) keeps the old rows
+in the count. No new table, queue or fence is used.
 The direct plugin-install apply has no invocation ledger row: its existing deferred catch
 keeps just its unknown count and retry timestamp in temporary step output, replaced on success
 and cleared by Retry only, not by Resume or Retry with AI. It uses the same cap and delay, parking `waiting_cli` with the idle marker
@@ -241,6 +247,11 @@ refusal of an unreadable Grok `auth.json` even when no fence is set. The
 `grok_refresh_untracked` warning is a log field and nothing persisted depends on it. A recovery
 copy kept for an unreadable moved source (reason `unreadable_source_replaced`) stays until
 recovery, sign-out or removal, like any retired copy; reverting code does not remove it.
+
+Rollback of the admission window and exhaustion text is code only, with no schema, data or event
+change: it restores counting from the later of `started_at` and the newest `step.resume` or
+`step.retry_ai` event (a park or requeue reopens the allowance again; Retry still does, by
+clearing `started_at`) and the Retry-only text. The events it reads are written either way.
 
 Rollback: revert fix 8 to restore fix 7's refusal behavior; its reader ignores the extra login-id
 label field. Retired user-owned volumes remain retained until explicit recovery/removal or user

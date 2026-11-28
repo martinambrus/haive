@@ -1655,16 +1655,20 @@ an explicit fs-safe mutation. Generic parks retain their age policy. Details and
 ## Bounded auth admission retries
 
 Before re-entering ordinary LLM, mining or any DAG dispatch, the step runner reads existing
-ended auth failures for this step created since the later of its current `started_at` and its
-newest `step.resume` or `step.retry_ai` event. Superseding an unknown failure does not erase
+ended auth failures for this step created since its newest reopening event: `step.retry`,
+`task.retried`, `step.resume`, `step.retry_ai` or `step.cli_provider_preference_changed`, each a
+user's recovery press (none: from its first row). `started_at` is no bound, since a park or a
+requeue clears it and the next claim stamps it; recovery (`task.auto_resumed`, `task.revived`)
+writes none of them and keeps counting. Superseding an unknown failure does not erase
 it. Every busy/unknown retry waits 30 seconds from the last ended auth failure in that window.
 Unknowns stop at `MAX_AUTH_PROBE_UNKNOWNS` (20, injectable) distinct waves, a wave being one
 30-second bucket of `created_at`, so one wide fan-out failing together counts once. The cap
-fails with named reason `cli_auth_probe_exhausted` and Retry guidance before any further
-dispatch. This is user action, never a code fix loop. Retry clears `started_at`; Resume and
-Retry with AI keep it and the old rows, but write their event in the transaction that reopens
-the step, so either starts a fresh allowance of invocation-row failures (a Resume after the cap
-no longer fails again after one paid run). Busy stays uncapped and free of crash-loop budgets. The two stored code
+fails with named reason `cli_auth_probe_exhausted` before any further dispatch; its text names
+Retry and, where the step offers it, Resume. This is user action, never a code fix loop. Each
+press writes its event in the transaction that reopens the step (the switch's follows its commit),
+so each starts a fresh allowance of invocation-row failures (a Resume after the cap
+no longer fails again after one paid run). A rerun that writes none of them (the cascade of a
+Retry at an upstream step, a worker loop reset) keeps the old rows in the count. Busy stays uncapped and free of crash-loop budgets. The two stored code
 prefixes are `CLI_AUTH_BUSY` and `CLI_AUTH_PROBE_UNKNOWN` in `sandbox/cli-auth-errors.ts`; the
 error class, `isCliAuthWaitFailure` and the gate query all derive from them, and their values
 are persisted in `cli_invocations.error_message`, so a rename must never be done there. Direct

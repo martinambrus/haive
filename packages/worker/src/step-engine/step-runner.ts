@@ -52,7 +52,6 @@ import {
   desc,
   eq,
   getTableColumns,
-  gte,
   inArray,
   isNotNull,
   isNull,
@@ -3792,10 +3791,20 @@ async function recordFinishedUsage(
     });
 }
 
-/** Events written in the transaction that reopens a step without clearing `started_at`: Resume
- *  (api `routes/tasks/steps.ts` fan-out and loop arms, `scripts/resume-plan-sequence-review.ts`)
- *  and `retry_ai`. The auth admission gate counts only invocations created after the newest one. */
-const AUTH_LEDGER_RESET_EVENTS = ['step.resume', 'step.retry_ai'] as const;
+/** The events a user's recovery press writes for a step: Retry (api action route) and the task-level
+ *  Retry at its stopped step, Retry with AI, Resume (api `routes/tasks/steps.ts` fan-out and loop
+ *  arms, `scripts/resume-plan-sequence-review.ts`) and a CLI switch that re-runs it. The auth
+ *  admission gate counts only invocations created after the newest one of this step. `started_at`
+ *  is no bound: a park or requeue clears it and the next claim stamps it, which would reopen the
+ *  allowance with no one pressing anything. Recovery writes none of these (`task.auto_resumed`,
+ *  `task.revived`), so it keeps counting. */
+const AUTH_LEDGER_RESET_EVENTS = [
+  'step.retry',
+  'task.retried',
+  'step.resume',
+  'step.retry_ai',
+  'step.cli_provider_preference_changed',
+] as const;
 
 export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceStepResult> {
   const { db, stepDef, taskId } = params;
@@ -3915,9 +3924,8 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
     let current = row;
     // One gate before every dispatch family (LLM, mining and all DAG roles).
     // The existing invocation ledger bounds unknown WAVES even after superseding runs.
-    // Retry clears started_at/output, so earlier attempts cannot spend its allowance;
-    // Resume and retry_ai keep started_at, so the newest step.resume/step.retry_ai event
-    // of this step is a second lower bound (AUTH_LEDGER_RESET_EVENTS).
+    // The newest reopening event of this step is the lower bound (AUTH_LEDGER_RESET_EVENTS),
+    // so earlier attempts cannot spend a fresh allowance and a park cannot give one.
     if (row.status === 'waiting_cli') {
       const direct = row.output as { _authProbeUnknowns?: number; _authRetryAt?: number } | null;
       const unknownPrefix = cliAuthStoredPrefix(CLI_AUTH_PROBE_UNKNOWN);
@@ -3945,7 +3953,6 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
           and(
             eq(schema.cliInvocations.taskStepId, row.id),
             isNotNull(schema.cliInvocations.endedAt),
-            row.startedAt ? gte(schema.cliInvocations.createdAt, row.startedAt) : undefined,
             sql`${schema.cliInvocations.createdAt} >= coalesce((select max(${schema.taskEvents.createdAt}) from ${schema.taskEvents} where ${schema.taskEvents.taskId} = ${row.taskId} and ${schema.taskEvents.taskStepId} = ${row.id} and ${schema.taskEvents.eventType} in (${resetEvents})), '-infinity'::timestamp)`,
             sql`(starts_with(${schema.cliInvocations.errorMessage}, ${unknownPrefix}) or starts_with(${schema.cliInvocations.errorMessage}, ${busyPrefix}))`,
           ),

@@ -134,9 +134,7 @@ function makeMockDb(state: MockState, opts: MockDbOptions = {}, inTransaction = 
                 ).filter(
                   (run) =>
                     run.endedAt instanceof Date &&
-                    /^(cli_auth_busy|cli_auth_probe_unknown):/.test(String(run.errorMessage)) &&
-                    (!(state.taskStepRow.startedAt instanceof Date) ||
-                      (run.createdAt as Date) >= state.taskStepRow.startedAt),
+                    /^(cli_auth_busy|cli_auth_probe_unknown):/.test(String(run.errorMessage)),
                 );
                 return [
                   {

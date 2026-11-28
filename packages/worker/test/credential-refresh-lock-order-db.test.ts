@@ -595,7 +595,8 @@ describe.skipIf(!url)(
       expect(capped.row.errorMessage).toContain('cli_auth_probe_exhausted:');
       expect(apply).not.toHaveBeenCalled();
       expect(enqueueCliInvocation).not.toHaveBeenCalled();
-      // Retry clears output/start and reopens the row. Old ended errors stay in the ledger.
+      // Retry clears output/start, reopens the row and writes step.retry in the same transaction.
+      // Old ended errors stay in the ledger; the event is what leaves them out of the window.
       const retriedAt = new Date();
       await db
         .update(schema.taskSteps)
@@ -607,6 +608,12 @@ describe.skipIf(!url)(
           errorMessage: null,
         })
         .where(eq(schema.taskSteps.id, step!.id));
+      await db.insert(schema.taskEvents).values({
+        taskId: task!.id,
+        taskStepId: step!.id,
+        eventType: 'step.retry',
+        createdAt: retriedAt,
+      });
       await addRun('cli_auth_probe_unknown', new Date(retriedAt.getTime() + 1));
       const paced = await advanceStep(params);
       expect(paced.status).toBe('deferred');
@@ -702,39 +709,61 @@ describe.skipIf(!url)(
         expect(f.apply).not.toHaveBeenCalled();
       };
 
-      it.each(['step.resume', 'step.retry_ai'])(
-        'a %s event reopens the allowance, which is then bounded again',
-        async (eventType) => {
-          const f = await mkStep(2);
-          await f.addRun('cli_auth_probe_unknown', at(1000));
-          await f.addRun('cli_auth_probe_unknown', at(1000 + WAVE_GAP));
-          await expectExhausted(f);
-          const eventAt = at(1000 + 2 * WAVE_GAP);
-          await f.addEvent(eventType, f.step.id, eventAt);
-          // A successful run after the event: nothing in the set is left to pace on,
-          // so the pass is not failed and not exhausted (it is dispatched, not deferred).
-          await f.addRun(null, new Date(eventAt.getTime() + 1000));
-          await f.reopen();
-          const res = await advanceStep(f.params);
-          expect(res.status).not.toBe('failed');
-          expect(res.row.errorMessage ?? '').not.toContain('cli_auth_probe_exhausted:');
-          f.apply.mockClear();
-          // Two NEW waves after the event spend the fresh allowance.
-          await f.addRun('cli_auth_probe_unknown', new Date(eventAt.getTime() + 2000));
-          await f.addRun('cli_auth_probe_unknown', new Date(eventAt.getTime() + 2000 + WAVE_GAP));
-          await f.reopen();
-          await expectExhausted(f);
-        },
-      );
+      // Each is written by a user's recovery press in the transaction that reopens the step.
+      it.each([
+        'step.resume',
+        'step.retry_ai',
+        'step.retry',
+        'task.retried',
+        'step.cli_provider_preference_changed',
+      ])('a %s event reopens the allowance, which is then bounded again', async (eventType) => {
+        const f = await mkStep(2);
+        await f.addRun('cli_auth_probe_unknown', at(1000));
+        await f.addRun('cli_auth_probe_unknown', at(1000 + WAVE_GAP));
+        await expectExhausted(f);
+        const eventAt = at(1000 + 2 * WAVE_GAP);
+        await f.addEvent(eventType, f.step.id, eventAt);
+        // A successful run after the event: nothing in the set is left to pace on,
+        // so the pass is not failed and not exhausted (it is dispatched, not deferred).
+        await f.addRun(null, new Date(eventAt.getTime() + 1000));
+        await f.reopen();
+        const res = await advanceStep(f.params);
+        expect(res.status).not.toBe('failed');
+        expect(res.row.errorMessage ?? '').not.toContain('cli_auth_probe_exhausted:');
+        f.apply.mockClear();
+        // Two NEW waves after the event spend the fresh allowance.
+        await f.addRun('cli_auth_probe_unknown', new Date(eventAt.getTime() + 2000));
+        await f.addRun('cli_auth_probe_unknown', new Date(eventAt.getTime() + 2000 + WAVE_GAP));
+        await f.reopen();
+        await expectExhausted(f);
+      });
 
       it.each([
         ['a step.resume of another step', 'step.resume', 'other'],
+        ['a step.retry of another step', 'step.retry', 'other'],
         ['a step.skip of this step', 'step.skip', 'step'],
+        // Recovery keeps counting: only a user's recovery press reopens the allowance.
+        ['a task.auto_resumed of this step', 'task.auto_resumed', 'step'],
+        ['a task.revived of this step', 'task.revived', 'step'],
       ] as const)('%s does not reset the count', async (_label, eventType, which) => {
         const f = await mkStep(2);
         await f.addRun('cli_auth_probe_unknown', at(1000));
         await f.addRun('cli_auth_probe_unknown', at(1000 + WAVE_GAP));
         await f.addEvent(eventType, f[which].id, at(1000 + 2 * WAVE_GAP));
+        await expectExhausted(f);
+      });
+
+      it('a park that stamps started_at again does not reopen the allowance', async () => {
+        const f = await mkStep(2);
+        await f.addRun('cli_auth_probe_unknown', at(1000));
+        await f.addRun('cli_auth_probe_unknown', at(1000 + WAVE_GAP));
+        await expectExhausted(f);
+        // A park or a requeue clears started_at and the next claim stamps it, after the waves.
+        await db
+          .update(schema.taskSteps)
+          .set({ startedAt: at(1000 + 2 * WAVE_GAP) })
+          .where(eq(schema.taskSteps.id, f.step.id));
+        await f.reopen();
         await expectExhausted(f);
       });
 
