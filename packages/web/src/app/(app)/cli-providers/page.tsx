@@ -7,6 +7,7 @@ import {
   CircleArrowUp,
   Copy,
   Gauge,
+  LoaderCircle,
   LogIn,
   LogOut,
   Pencil,
@@ -37,6 +38,7 @@ import { ActionMenu } from '@/components/action-menu';
 import { LOGIN_SET_NOTE } from '@/components/claude-usage-auth';
 import { CliUpgradeAll } from '@/components/cli-upgrade-all';
 import { cliUpgradeLatest, groupUpgradable } from '@/components/cli-upgrade-selection';
+import { IMAGE_BUILD_POLL_MS, cliImageBuild } from '@/lib/cli-image-build';
 import { runCliProbe, runCliSignOut, signOutSummary, type QueuedJobPhase } from '@/lib/cli-jobs';
 import { useCliLogin } from '@/lib/use-cli-login';
 import { usePageTitle } from '@/lib/use-page-title';
@@ -106,6 +108,8 @@ export default function CliProvidersPage() {
    *  above (the API reports one status), so the row never asks for a fix that is in flight. */
   const [usagePending, setUsagePending] = useState<Record<string, boolean>>({});
   const [cloningIds, setCloningIds] = useState<Record<string, boolean>>({});
+  const [rebuildingIds, setRebuildingIds] = useState<Record<string, boolean>>({});
+  const [notice, setNotice] = useState<string | null>(null);
   const [upgradingIds, setUpgradingIds] = useState<Record<string, boolean>>({});
   /** Bulk ("Upgrade All") run state — separate from upgradingIds, which drives
    *  the per-row buttons for both the single and the bulk path. */
@@ -181,6 +185,46 @@ export default function CliProvidersPage() {
     void load();
   }, []);
 
+  const anyBuilding = providers?.some((p) => cliImageBuild(p)?.state === 'building') ?? false;
+  useEffect(() => {
+    if (!anyBuilding) return;
+    const controller = new AbortController();
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let inFlight = false;
+    let hidden = document.hidden;
+    const read = async () => {
+      if (controller.signal.aborted || document.hidden || inFlight) return;
+      inFlight = true;
+      clearTimeout(timer);
+      try {
+        const res = await api.get<{ providers: CliProvider[] }>(
+          '/cli-providers',
+          controller.signal,
+        );
+        if (!controller.signal.aborted) setProviders(res.providers);
+      } catch {
+        // Keep polling: one failed read must not leave a stale "rebuilding" badge.
+      } finally {
+        inFlight = false;
+        if (!controller.signal.aborted && !document.hidden)
+          timer = setTimeout(() => void read(), IMAGE_BUILD_POLL_MS);
+      }
+    };
+    const onVisibility = () => {
+      if (hidden === document.hidden) return;
+      hidden = document.hidden;
+      clearTimeout(timer);
+      if (!hidden) void read();
+    };
+    document.addEventListener('visibilitychange', onVisibility);
+    if (!hidden) timer = setTimeout(() => void read(), IMAGE_BUILD_POLL_MS);
+    return () => {
+      controller.abort();
+      clearTimeout(timer);
+      document.removeEventListener('visibilitychange', onVisibility);
+    };
+  }, [anyBuilding]);
+
   async function handleDelete(id: string) {
     if (!confirm('Delete this CLI provider configuration?')) return;
     try {
@@ -208,14 +252,33 @@ export default function CliProvidersPage() {
     }
   }
 
+  async function handleRebuild(id: string) {
+    setRebuildingIds((s) => ({ ...s, [id]: true }));
+    setError(null);
+    try {
+      await api.post(`/cli-providers/${id}/sandbox-image/build`);
+      await load();
+    } catch (err) {
+      setError((err as Error).message ?? 'Failed to start the sandbox image build');
+    } finally {
+      setRebuildingIds((s) => {
+        const next = { ...s };
+        delete next[id];
+        return next;
+      });
+    }
+  }
+
   async function handleUpgrade(p: CliProvider, latest: string) {
     setUpgradingIds((s) => ({ ...s, [p.id]: true }));
     setError(null);
+    setNotice(null);
     try {
       // PATCH cliVersion → the API flags imageInputsChanged and rebuilds the
       // provider's sandbox image automatically.
       await api.patch(`/cli-providers/${p.id}`, { cliVersion: latest });
       await load();
+      setNotice(`${p.label} is pinned to ${latest}; its sandbox image rebuild has started.`);
     } catch (err) {
       setError((err as Error).message ?? 'Failed to upgrade CLI version');
     } finally {
@@ -248,6 +311,7 @@ export default function CliProvidersPage() {
 
     setBulkBusy(true);
     setError(null);
+    setNotice(null);
     setUpgradingIds((s) => {
       const next = { ...s };
       for (const t of targets) next[t.p.id] = true;
@@ -276,6 +340,10 @@ export default function CliProvidersPage() {
     });
     setBulkProgress(null);
     setBulkBusy(false);
+    if (upgraded > 0)
+      setNotice(
+        `${upgraded} sandbox image ${upgraded === 1 ? 'rebuild has' : 'rebuilds have'} started.`,
+      );
     if (failed.length > 0) {
       setError(
         `Upgraded ${upgraded} of ${targets.length}. Failed: ${failed
@@ -479,6 +547,14 @@ export default function CliProvidersPage() {
       </div>
 
       <FormError message={error} />
+      {notice && (
+        <div
+          role="status"
+          className="rounded-md border border-neutral-800 px-3 py-2 text-sm text-neutral-300"
+        >
+          {notice}
+        </div>
+      )}
 
       {providers === null || catalog === null ? (
         <p className="text-sm text-neutral-500">Loading...</p>
@@ -522,11 +598,12 @@ export default function CliProvidersPage() {
                   const showSignOut = CLI_LOGIN_PROVIDERS.includes(p.name) && p.authStatus === 'ok';
                   const signOutState = signOutStates[p.id];
                   const usageState = usageStates[p.id];
+                  const image = cliImageBuild(p);
                   return (
                     <Card key={p.id}>
                       <div className="flex items-start justify-between gap-4">
                         <div>
-                          <div className="flex items-center gap-2">
+                          <div className="flex flex-wrap items-center gap-2">
                             <h3 className="text-lg font-semibold text-neutral-50">{p.label}</h3>
                             <Badge>{p.name}</Badge>
                             {p.enabled ? (
@@ -543,6 +620,19 @@ export default function CliProvidersPage() {
                             {upgradeLatest && (
                               <Badge variant="warning">
                                 upgrade: {p.cliVersion} → {upgradeLatest}
+                              </Badge>
+                            )}
+                            {image?.state === 'building' && (
+                              <Badge variant="warning" title={image.reason} className="gap-1">
+                                <LoaderCircle className="h-3 w-3 animate-spin" aria-hidden="true" />
+                                {image.version
+                                  ? `Rebuilding sandbox image · ${image.version}`
+                                  : 'Rebuilding sandbox image'}
+                              </Badge>
+                            )}
+                            {image?.state === 'failed' && (
+                              <Badge variant="error" title={image.reason}>
+                                Image build failed
                               </Badge>
                             )}
                             {needsReconnect[p.id] && (
@@ -574,7 +664,8 @@ export default function CliProvidersPage() {
                                 : 'Test',
                               icon: Activity,
                               spin: testState?.testing === true,
-                              disabled: testState?.testing === true,
+                              disabled: testState?.testing === true || image !== null,
+                              title: image?.reason,
                               onClick: () => handleTest(p.id),
                             },
                             showLogin && {
@@ -582,13 +673,16 @@ export default function CliProvidersPage() {
                               label: 'Log in',
                               icon: LogIn,
                               onClick: () => handleLogin(p),
+                              disabled: image !== null,
                               // No separate Reconnect for these CLIs, and that is not an
                               // omission: their meter reads the very file the login writes, so
                               // logging in IS the reconnect. Only claude-code needs its own
                               // entry, because its meter runs on a different credential.
-                              title: loginRepairsUsage
-                                ? 'Logging in rewrites the credential its usage meter reads — this is the reconnect for this CLI'
-                                : undefined,
+                              title: image
+                                ? image.reason
+                                : loginRepairsUsage
+                                  ? 'Logging in rewrites the credential its usage meter reads — this is the reconnect for this CLI'
+                                  : undefined,
                             },
                             showSignOut && {
                               key: 'sign-out',
@@ -676,6 +770,21 @@ export default function CliProvidersPage() {
                           ]}
                         />
                       </div>
+                      {image?.state === 'failed' && (
+                        <div className="mt-3 flex flex-col items-start gap-2 border-t border-neutral-800 pt-3">
+                          <pre className="max-h-40 w-full overflow-auto whitespace-pre-wrap break-words font-mono text-[11px] text-red-300">
+                            {image.error ?? 'The build failed without recording a reason.'}
+                          </pre>
+                          <Button
+                            size="sm"
+                            variant="secondary"
+                            disabled={rebuildingIds[p.id] === true}
+                            onClick={() => void handleRebuild(p.id)}
+                          >
+                            {rebuildingIds[p.id] ? 'Starting...' : 'Rebuild image'}
+                          </Button>
+                        </div>
+                      )}
                       {(testState?.error || testState?.result) && (
                         <div className="mt-3 border-t border-neutral-800 pt-3">
                           {testState.error && (
@@ -687,6 +796,7 @@ export default function CliProvidersPage() {
                               res={testState.result.cli}
                               providerName={p.name}
                               onLogin={() => handleLogin(p)}
+                              loginBlockMessage={image?.reason}
                             />
                           )}
                           {testState.result?.api && (
@@ -695,6 +805,7 @@ export default function CliProvidersPage() {
                               res={testState.result.api}
                               providerName={p.name}
                               onLogin={() => handleLogin(p)}
+                              loginBlockMessage={image?.reason}
                             />
                           )}
                         </div>
@@ -815,11 +926,13 @@ function TestPathLine({
   res,
   providerName,
   onLogin,
+  loginBlockMessage,
 }: {
   label: string;
   res: CliProbePathResult;
   providerName: CliProviderName;
   onLogin: () => void;
+  loginBlockMessage?: string;
 }) {
   const loginPrompt =
     !res.ok &&
@@ -844,7 +957,9 @@ function TestPathLine({
           <button
             type="button"
             onClick={onLogin}
-            className="font-semibold text-amber-200 underline underline-offset-2 hover:text-amber-100"
+            disabled={loginBlockMessage !== undefined}
+            title={loginBlockMessage}
+            className="font-semibold text-amber-200 underline underline-offset-2 hover:text-amber-100 disabled:cursor-not-allowed disabled:opacity-50 disabled:no-underline"
           >
             Log in
           </button>{' '}

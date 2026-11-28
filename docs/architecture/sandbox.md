@@ -252,6 +252,28 @@ that is the only way out of it. Resetting `building` is safe there and only ther
 `runDataMigrations` runs before any queue starts and compose pins the worker to one
 instance.
 
+**The CLI providers list shows the build and refuses the two actions that cannot wait.** A row
+reads `sandbox_image_build_status` alone (`cliImageBuild`, `web/src/lib/cli-image-build.ts`; the
+error column is display copy, so a `ready` row holding old error text shows nothing): `building`
+shows a "Rebuilding sandbox image" badge, `failed` shows the stored error with a Rebuild image
+button, and while any row is `building` the page re-reads `GET /cli-providers` every
+`IMAGE_BUILD_POLL_MS` (paused in a hidden tab, stopped when none is). Test and Log in are disabled
+with `IMAGE_BUILDING_REASON` or `IMAGE_FAILED_REASON` as their title, the constants the edit form
+uses too; the edit page's Log in follows the form's live build state, not its dirty state, because
+a login reads no unsaved configuration. Only those two need a gate. The probe passes no wait
+budget to `ensureProviderSandboxImage`, so a build running for a tag docker does not hold yet (a
+new CLI version) is refused at once, while a forced rebuild of a tag docker already holds still
+answers from the old image; the list gates on the status either way, as the edit form does.
+`createSandboxLoginContainer` refuses unless the status is `ready`. Task steps, sub-agents and
+terminals resolve their image through `resolveSandboxImageTag`, whose plain path waits up to
+`IN_FLIGHT_BUILD_WAIT_MS` (5 minutes) for a build in flight and builds a missing image inline (a
+task with a composed image takes the composition path first), so their CLI pickers stay open; Sign
+out removes volumes and never needs the image. Every Log in
+entry (the list, the edit page, the usage chips, a task's login hint) ends in the login modal,
+which shows the worker's refusal text, so the entries that hold no provider row are explained
+there instead of gated. An `idle` row shows nothing, and its Log in is still refused because the
+status is not `ready`.
+
 **Repository editors open the checkout directly.** The Repositories Actions menu links to
 `/repos/<id>/editor` for ready, writable repositories, alongside Terminal. The page uses the
 same `EditorTab` and code-server launcher as a task, but `POST /repos/:id/ensure-ide` sends a

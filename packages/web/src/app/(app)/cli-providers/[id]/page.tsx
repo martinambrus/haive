@@ -23,6 +23,7 @@ export default function EditCliProviderPage() {
   const [meta, setMeta] = useState<CliProviderCatalogEntry | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [testBlockMessage, setTestBlockMessage] = useState<string | null>(null);
+  const [imageBlockMessage, setImageBlockMessage] = useState<string | null>(null);
   const [secretsReloadNonce, setSecretsReloadNonce] = useState(0);
   /** This provider's usage token is dead. Reveals the Log in button below without a Test
    *  first, so the `#cli-login` deep-link the reconnect prompts use lands on a live control. */
@@ -103,6 +104,7 @@ export default function EditCliProviderPage() {
           metadata={meta}
           onProviderSaved={setProvider}
           onTestBlockChange={setTestBlockMessage}
+          onImageBlockChange={setImageBlockMessage}
           secretsReloadNonce={secretsReloadNonce}
         />
       </Card>
@@ -121,6 +123,7 @@ export default function EditCliProviderPage() {
           providerName={provider.name}
           providerLabel={provider.label}
           blockMessage={testBlockMessage}
+          loginBlockMessage={imageBlockMessage}
           needsUsageReconnect={needsUsageReconnect}
           rowAuthStatus={storedAuthStatus}
           rowAuthMode={provider.authMode}
