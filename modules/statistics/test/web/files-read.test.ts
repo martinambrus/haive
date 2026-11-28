@@ -2,11 +2,13 @@ import { describe, expect, it } from 'vitest';
 import type { ReactElement, ReactNode } from 'react';
 import {
   FilesReadSection,
+  displayPath,
   estimateText,
   filesReadMessage,
   filesReadNotes,
   fileRowFigures,
 } from '../../src/web/components/files-read-section.js';
+import { InlineBar } from '../../src/web/components/ranked-bars.js';
 import type { StatsFilesRead } from '../../src/web/api.js';
 
 type Report = Extract<StatsFilesRead, { available: true }>;
@@ -178,7 +180,15 @@ describe('Files read: populated report', () => {
       render(report()),
       (e) => e.type === 'li' && text(e).includes('src/unknown.ts'),
     )[0];
+    expect(unknownRow).toBeDefined();
     expect(text(unknownRow)).not.toContain('≈0');
+    expect(find(unknownRow, (e) => e.type === InlineBar)).toEqual([]);
+    const knownRow = find(
+      render(report()),
+      (e) => e.type === 'li' && text(e).includes('src/a.ts'),
+    )[0];
+    expect(knownRow).toBeDefined();
+    expect(find(knownRow, (e) => e.type === InlineBar)).toHaveLength(1);
     expect(copy).toContain('≈1.0k');
     const figures = fileRowFigures(report().files.rows[1]!);
     expect(figures).toBe(
@@ -265,6 +275,11 @@ describe('Files read: populated report', () => {
     expect(copy).toContain('70');
     const flagged = find(tree, (e) => text(e).includes('unclamped')).pop();
     expect(flagged).toBeDefined();
+    const stepLi = (id: string) =>
+      find(tree, (e) => e.type === 'li' && text(e).includes(id) && !text(e).includes('src/'))[0];
+    expect(find(stepLi('08-implement'), (e) => e.type === InlineBar)).toHaveLength(1);
+    expect(stepLi('03-plan')).toBeDefined();
+    expect(find(stepLi('03-plan'), (e) => e.type === InlineBar)).toEqual([]);
   });
 
   it('builds the notes from the report', () => {
@@ -310,6 +325,27 @@ describe('Files read: hostile paths are inert text', () => {
     expect(find(tree, (e) => 'dangerouslySetInnerHTML' in (e.props ?? {}))).toEqual([]);
     const bodies = find(tree, (e) => e.type === MarkdownView).map((e) => e.props.body ?? '');
     for (const path of hostile) for (const b of bodies) expect(b).not.toContain(path);
+  });
+});
+
+describe('Files read: control and format characters in a path', () => {
+  it('shows them as escapes and leaves printable text alone', () => {
+    expect(displayPath('a\u202Egnp.exe')).toBe('a\\u{202e}gnp.exe');
+    expect(displayPath('x\ny\t.ts')).toBe('x\\u{a}y\\u{9}.ts');
+    expect(displayPath('z\u200Bw\uFEFF')).toBe('z\\u{200b}w\\u{feff}');
+    expect(displayPath('src/\u00FC/\u65E5\u672C.ts')).toBe('src/\u00FC/\u65E5\u672C.ts');
+  });
+
+  it('renders the escaped path, never the raw character', () => {
+    const r = report();
+    r.files.rows[0]!.path = 'src/a\u202Egnp.ts';
+    const tree = render(r);
+    const spans = find(
+      tree,
+      (e) => e.type === 'span' && [e.props.children].flat().includes('src/a\\u{202e}gnp.ts'),
+    );
+    expect(spans).toHaveLength(1);
+    expect(text(tree)).not.toContain('\u202E');
   });
 });
 

@@ -1,7 +1,6 @@
 import { formatTokens } from '@haive/web-kit/format-tokens';
 import type { HostMarkdownView } from '@haive/web-kit/host';
 import { Card, CardDescription, CardHeader, CardTitle } from '@haive/web-kit/ui';
-import { MIN_SAMPLES_FOR_TREND } from '@haive/shared/stats';
 import type { StatsFilesRead } from '../api.js';
 import { STATS_DASH, formatCount, formatSampledRatio } from '../lib/format-stats.js';
 import { CHART_COLORS } from './palette.js';
@@ -22,6 +21,13 @@ export const NO_REPOSITORY_MESSAGE =
 
 export function estimateText(tokens: number | null): string {
   return tokens === null ? STATS_DASH : `≈${formatTokens(Math.round(tokens))}`;
+}
+
+/** A path is agent-supplied text: a newline, a right-to-left override or a zero-width character
+ *  could make the line read as another file, so control and format characters show as `\u{...}`
+ *  escapes. Display only: the row key and the stored path stay as recorded. */
+export function displayPath(path: string): string {
+  return path.replace(/[\p{Cc}\p{Cf}]/gu, (ch) => `\\u{${ch.codePointAt(0)!.toString(16)}}`);
 }
 
 export function fileRowFigures(row: FileRow): string {
@@ -71,9 +77,9 @@ export function filesReadNotes(report: Available): string {
       (report.coverage.partial > 0
         ? ' Partial runs are floors: their reads and characters are exact floors and carry no estimate.'
         : ''),
-    `n= replaces a percentage below ${MIN_SAMPLES_FOR_TREND} runs.`,
+    'n= replaces a percentage when too few runs back it.',
     'Step shares count only runs with a seen result, a known context lifetime and recorded token usage.',
-    'Runs on CLIs without tool events (amp, gemini) and runs recorded before this existed are not in the lists.',
+    'Runs on CLIs without tool events and runs recorded before this existed are not in the lists.',
   ];
   return notes.join('\n\n');
 }
@@ -113,7 +119,9 @@ function stepRow(row: StepRow, max: number) {
           {measured ? formatSampledRatio(row.share, 1) : STATS_DASH}
         </span>
       </div>
-      <InlineBar value={row.estimatedTokens ?? 0} max={max} color={CHART_COLORS.tokens} />
+      {row.estimatedTokens !== null && (
+        <InlineBar value={row.estimatedTokens} max={max} color={CHART_COLORS.tokens} />
+      )}
       {!measured ? (
         <div className="text-xs text-neutral-400">
           No run was measurable: a share needs a seen result, a known context lifetime and recorded
@@ -234,17 +242,19 @@ export function FilesReadSection({
                 <li key={row.path} className="min-w-0">
                   <div className="flex items-baseline justify-between gap-3">
                     <span className="min-w-0 break-all font-mono text-sm text-neutral-200">
-                      {row.path}
+                      {displayPath(row.path)}
                     </span>
                     <span className="shrink-0 font-mono text-sm text-neutral-100">
                       {estimateText(row.estimatedTokens)}
                     </span>
                   </div>
-                  <InlineBar
-                    value={row.estimatedTokens ?? 0}
-                    max={fileMax}
-                    color={CHART_COLORS.tokens}
-                  />
+                  {row.estimatedTokens !== null && (
+                    <InlineBar
+                      value={row.estimatedTokens}
+                      max={fileMax}
+                      color={CHART_COLORS.tokens}
+                    />
+                  )}
                   <div className="text-xs text-neutral-400">{fileRowFigures(row)}</div>
                 </li>
               ))}
